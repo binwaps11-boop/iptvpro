@@ -1189,6 +1189,34 @@ const requestHandler = async (req, res) => {
   }
 };
 
+// استيراد تلقائي متكرّر: بمجرد توفّر اتصال (مثلاً بعد رفع VPN مكسيكي) تُجلب القنوات وحدها
+let _autoImportBusy = false;
+async function retryEmptyImports() {
+  if (_autoImportBusy) return;
+  _autoImportBusy = true;
+  try {
+    let changed = false;
+    for (const s of config.sources) {
+      if (s.type !== 'xtream') continue;
+      const total = (s.live || []).length + (s.movies || []).length + (s.series || []).length;
+      if (total > 0) continue; // مستورد بالفعل
+      try {
+        const r = await importXtream(s.server, s.username, s.password);
+        if (r.live.length + r.movies.length + r.series.length > 0) {
+          s.live = r.live; s.movies = r.movies; s.series = r.series;
+          changed = true;
+          console.log(`  ✓ استيراد تلقائي نجح: ${s.name} (${r.live.length}📡 ${r.movies.length}🎬 ${r.series.length}📺)`);
+        }
+      } catch {}
+    }
+    if (changed) saveConfig(config);
+  } finally {
+    _autoImportBusy = false;
+  }
+}
+setInterval(retryEmptyImports, 5 * 60 * 1000); // كل ٥ دقائق
+setTimeout(retryEmptyImports, 15000); // بعد ١٥ث من الإقلاع
+
 function startServer(port, label) {
   const srv = http.createServer(requestHandler);
   srv.keepAliveTimeout = 60_000;
