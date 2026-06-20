@@ -27,7 +27,9 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_PATH = process.env.CONFIG_DIR
   ? path.join(process.env.CONFIG_DIR, 'config.json')
   : path.join(__dirname, 'config.json');
-const PORT = process.env.PORT || 2222;
+// منفذان منفصلان: العملاء على USER_PORT (221) والإدارة على ADMIN_PORT (331)
+const USER_PORT = process.env.USER_PORT || process.env.PORT || 221;
+const ADMIN_PORT = process.env.ADMIN_PORT || 331;
 
 // حدود الذاكرة المؤقتة المشتركة (Shared Relay)
 const PLAYLIST_TTL = 1500; // ms — مدة صلاحية قائمة البث المشتركة
@@ -635,15 +637,27 @@ function lanAddresses() {
 }
 
 // ---------------------------------------------------------------------------
-// الخادم
+// الخادم — يستمع على منفذين: العملاء (USER_PORT) والإدارة (ADMIN_PORT)
 // ---------------------------------------------------------------------------
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
   const p = u.pathname;
   const session = getSession(req);
   const isAdmin = session && session.role === 'admin';
+  const onAdminPort = req.socket.localPort === Number(ADMIN_PORT);
 
   try {
+    // فصل المنافذ: لوحة الإدارة وأصولها متاحة فقط عبر منفذ الإدارة
+    const adminOnly = /^\/admin(\.html|\.js)?$/.test(p);
+    if (adminOnly && !onAdminPort) {
+      res.writeHead(302, { Location: '/' });
+      return res.end();
+    }
+    if (p === '/' && onAdminPort) {
+      // منفذ الإدارة: الجذر يوجّه إلى اللوحة
+      res.writeHead(302, { Location: '/admin' });
+      return res.end();
+    }
     // ----- البروكسي / Shared Relay (يتطلب جلسة مسجّلة) -----
     if (p === '/proxy') {
       if (!session) {
@@ -843,7 +857,7 @@ const server = http.createServer(async (req, res) => {
 
     // معلومات الشبكة
     if (p === '/api/netinfo' && req.method === 'GET') {
-      return sendJSON(res, 200, { addresses: lanAddresses(), port: PORT });
+      return sendJSON(res, 200, { addresses: lanAddresses(), port: USER_PORT, adminPort: ADMIN_PORT });
     }
 
     // إحصائيات المشاهدين (للمدير)
@@ -966,16 +980,27 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     sendJSON(res, 500, { error: err.message });
   }
-});
+};
 
-server.keepAliveTimeout = 60_000;
-server.requestTimeout = 0;
-server.listen(PORT, '0.0.0.0', () => {
-  const ips = lanAddresses();
-  const host = ips[0] ? `http://${ips[0]}:${PORT}` : `http://localhost:${PORT}`;
-  console.log(`\n  ▶  IPTV Pro Server يعمل الآن`);
-  console.log(`     بوابة العملاء:   ${host}/`);
-  console.log(`     لوحة الإدارة:    ${host}/admin`);
-  console.log(`     محلياً:          http://localhost:${PORT}/`);
-  console.log(`     Shared Relay مفعّل: نفس القناة تُسحب مرة واحدة وتُوزَّع على كل الأجهزة\n`);
-});
+function startServer(port, label) {
+  const srv = http.createServer(requestHandler);
+  srv.keepAliveTimeout = 60_000;
+  srv.requestTimeout = 0;
+  srv.on('error', (e) => {
+    if (e.code === 'EACCES')
+      console.error(`\n  ✗ المنفذ ${port} محجوز (<1024) ويتطلب صلاحية root أو CAP_NET_BIND_SERVICE — راجع deploy/install.sh\n`);
+    else console.error(`\n  ✗ تعذّر الاستماع على المنفذ ${port}: ${e.message}\n`);
+    process.exit(1);
+  });
+  srv.listen(port, '0.0.0.0', () => {
+    const ips = lanAddresses();
+    const host = ips[0] ? `http://${ips[0]}:${port}` : `http://localhost:${port}`;
+    console.log(`  ▶  ${label}:  ${host}`);
+  });
+  return srv;
+}
+
+console.log(`\n  IPTV Pro Server يعمل الآن`);
+startServer(USER_PORT, 'بوابة العملاء  ');
+if (Number(ADMIN_PORT) !== Number(USER_PORT)) startServer(ADMIN_PORT, 'لوحة الإدارة /admin');
+console.log(`  Shared Relay مفعّل: نفس القناة تُسحب مرة واحدة وتُوزَّع على كل الأجهزة\n`);

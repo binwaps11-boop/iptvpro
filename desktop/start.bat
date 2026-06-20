@@ -1,6 +1,7 @@
 @echo off
-REM مُشغّل ويندوز — يفتح المتصفح تلقائياً
+REM مُشغّل ويندوز — يفتح لوحة الإدارة تلقائياً
 cd /d "%~dp0"
-if "%PORT%"=="" set PORT=2222
-start "" http://localhost:%PORT%
+if "%USER_PORT%"=="" set USER_PORT=2221
+if "%ADMIN_PORT%"=="" set ADMIN_PORT=3331
+start "" http://localhost:%ADMIN_PORT%/admin
 node server.js

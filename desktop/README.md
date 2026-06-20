@@ -21,10 +21,17 @@ cd desktop
 ADMIN_PASSWORD='كلمة-مرور-قوية' node server.js
 ```
 
-ثم:
-- **لوحة الإدارة:** `http://localhost:2222/admin`  (المستخدم `admin` + كلمة المرور التي وضعتها)
-- **بوابة العملاء:** `http://localhost:2222/`
+النظام يعمل على **منفذين منفصلين**:
+- **بوابة العملاء:** `USER_PORT` (افتراضي **221**) — العملاء يشاهدون فقط.
+- **لوحة الإدارة:** `ADMIN_PORT` (افتراضي **331**) — `/admin` متاحة من هذا المنفذ فقط.
 
+> ⚠️ المنفذان 221/331 محجوزان (<1024) ويتطلبان root محلياً. للتجربة المحلية بدون root:
+> ```bash
+> USER_PORT=2221 ADMIN_PORT=3331 ADMIN_PASSWORD='قوية' node server.js
+> # العملاء: http://localhost:2221/    الإدارة: http://localhost:3331/admin
+> ```
+> (سكربت `deploy/install.sh` يمنح الخدمة صلاحية المنافذ المحجوزة تلقائياً على VPS.)
+>
 > إن لم تضع `ADMIN_PASSWORD`, ستكون كلمة المرور الافتراضية `admin` (سيُطلب منك تغييرها فوراً).
 
 ---
@@ -57,8 +64,9 @@ git clone <REPO_URL> /opt/iptvpro
 cd /opt/iptvpro/desktop
 sudo ADMIN_PASSWORD='كلمة-مرور-قوية' bash deploy/install.sh
 ```
-السكربت يثبّت Node ويُعدّ خدمة دائمة (systemd) ويفتح المنفذ ويطبع الروابط. النتيجة:
-`http://SERVER_IP:2222/` (العملاء) و `/admin` (الإدارة).
+السكربت يثبّت Node ويُعدّ خدمة دائمة (systemd) على منفذين ويفتحهما في الجدار الناري:
+- 👥 العملاء: `http://SERVER_IP:221/`
+- 🔐 الإدارة:  `http://SERVER_IP:331/admin`
 
 **مع دومين و HTTPS تلقائياً** (وجّه الدومين A-record إلى السيرفر أولاً):
 ```bash

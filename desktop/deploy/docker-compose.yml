@@ -7,9 +7,11 @@ services:
     container_name: iptvpro
     restart: always
     ports:
-      - "2222:2222"
+      - "221:221"   # بوابة العملاء
+      - "331:331"   # لوحة الإدارة
     environment:
-      - PORT=2222
+      - USER_PORT=221
+      - ADMIN_PORT=331
       - ADMIN_USER=admin
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
       - CONFIG_DIR=/app/data

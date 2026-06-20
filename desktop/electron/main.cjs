@@ -11,13 +11,15 @@ const { app, BrowserWindow, shell } = require('electron');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 
-const PORT = process.env.PORT || 2222;
+// منافذ عالية محلياً (تتجنّب صلاحيات المنافذ المحجوزة على سطح المكتب)
+const USER_PORT = process.env.USER_PORT || 2221;
+const ADMIN_PORT = process.env.ADMIN_PORT || 3331;
 let serverProc = null;
 
 function startServer() {
   // يشغّل ../server.js كعملية فرعية
   serverProc = fork(path.join(__dirname, '..', 'server.js'), [], {
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, USER_PORT: String(USER_PORT), ADMIN_PORT: String(ADMIN_PORT) },
     stdio: 'inherit',
   });
 }
@@ -36,7 +38,7 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
-  const load = () => win.loadURL(`http://localhost:${PORT}`).catch(() => setTimeout(load, 500));
+  const load = () => win.loadURL(`http://localhost:${ADMIN_PORT}/admin`).catch(() => setTimeout(load, 500));
   setTimeout(load, 800);
 }
 

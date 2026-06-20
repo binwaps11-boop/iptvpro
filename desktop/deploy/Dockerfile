@@ -2,12 +2,13 @@
 FROM node:20-alpine
 
 WORKDIR /app
-# انسخ ملفات التطبيق فقط
 COPY server.js ./
 COPY public ./public
 
-ENV PORT=2222
-EXPOSE 2222
+# منفذان: العملاء 221 / الإدارة 331
+ENV USER_PORT=221
+ENV ADMIN_PORT=331
+EXPOSE 221 331
 
 # بيانات النظام (config.json) تُحفظ في volume
 VOLUME ["/app/data"]
