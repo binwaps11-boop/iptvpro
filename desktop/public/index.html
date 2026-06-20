@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IPTV Pro — مشغّل البث المباشر</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◈</span> IPTV <b>Pro</b>
+      </div>
+      <input id="search" class="search" type="search" placeholder="ابحث عن قناة…" />
+      <div class="actions">
+        <button id="btnSources" class="btn">＋ المصادر</button>
+        <button id="btnSettings" class="btn ghost">⚙ الإعدادات</button>
+      </div>
+    </header>
+
+    <nav id="cats" class="cats"></nav>
+
+    <main id="grid" class="grid"></main>
+    <div id="empty" class="empty">
+      <h2>لا توجد قنوات بعد</h2>
+      <p>اضغط «＋ المصادر» لإضافة قائمة M3U أو Xtream Codes.</p>
+    </div>
+
+    <!-- مشغّل الفيديو -->
+    <div id="player" class="player hidden">
+      <div class="player-top">
+        <span id="nowPlaying"></span>
+        <button id="closePlayer" class="btn ghost">✕ إغلاق</button>
+      </div>
+      <video id="video" controls autoplay playsinline></video>
+      <div id="playerStatus" class="player-status"></div>
+    </div>
+
+    <!-- نافذة المصادر -->
+    <div id="sourcesModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head"><h3>إدارة المصادر</h3><button class="x" data-close>✕</button></div>
+        <div class="tabs">
+          <button class="tab active" data-tab="xtream">Xtream Codes</button>
+          <button class="tab" data-tab="m3u_url">رابط M3U</button>
+          <button class="tab" data-tab="m3u_content">لصق M3U</button>
+        </div>
+
+        <form id="formXtream" class="tabpane" data-pane="xtream">
+          <input name="name" placeholder="اسم المصدر (مثال: اشتراكي)" />
+          <input name="server" placeholder="رابط السيرفر  http://host:port" required />
+          <input name="username" placeholder="اسم المستخدم" required />
+          <input name="password" placeholder="كلمة المرور" required />
+          <button class="btn full">استيراد القنوات</button>
+        </form>
+
+        <form id="formUrl" class="tabpane hidden" data-pane="m3u_url">
+          <input name="name" placeholder="اسم المصدر" />
+          <input name="url" placeholder="رابط M3U/M3U8  https://…/playlist.m3u" required />
+          <button class="btn full">استيراد القنوات</button>
+        </form>
+
+        <form id="formContent" class="tabpane hidden" data-pane="m3u_content">
+          <input name="name" placeholder="اسم المصدر" />
+          <textarea name="content" rows="7" placeholder="#EXTM3U …" required></textarea>
+          <button class="btn full">تحليل القنوات</button>
+        </form>
+
+        <div class="sources-list" id="sourcesList"></div>
+      </div>
+    </div>
+
+    <!-- نافذة الإعدادات -->
+    <div id="settingsModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head"><h3>الإعدادات</h3><button class="x" data-close>✕</button></div>
+        <form id="formSettings">
+          <label class="row">
+            <input type="checkbox" name="useProxy" />
+            <span>تمرير البث عبر الخادم المحلي (يحل مشكلة CORS)</span>
+          </label>
+
+          <fieldset class="fs">
+            <legend>Headers مخصّصة</legend>
+            <input name="userAgent" placeholder="User-Agent" />
+            <input name="referer" placeholder="Referer (اختياري)" />
+          </fieldset>
+
+          <fieldset class="fs">
+            <legend>بروكسي / VPN خاص بك (مثال: سيرفر مكسيكي)</legend>
+            <label class="row">
+              <input type="checkbox" name="up_enabled" />
+              <span>تفعيل توجيه كل الطلبات عبر البروكسي/VPN</span>
+            </label>
+            <select name="up_type">
+              <option value="http">HTTP / HTTPS Proxy</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+            <div class="grid2">
+              <input name="up_host" placeholder="عنوان الخادم (host)" />
+              <input name="up_port" placeholder="المنفذ (port)" />
+            </div>
+            <div class="grid2">
+              <input name="up_username" placeholder="اسم المستخدم (اختياري)" />
+              <input name="up_password" placeholder="كلمة المرور (اختياري)" />
+            </div>
+            <button type="button" id="btnTest" class="btn ghost full">اختبار الاتصال وعرض IP</button>
+            <div id="testResult" class="test-result"></div>
+          </fieldset>
+
+          <button class="btn full">حفظ الإعدادات</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "iptv-pro-desktop",
+  "version": "1.0.0",
+  "description": "مشغّل IPTV لسطح المكتب (شبيه Jellyfin) — مكتفٍ ذاتياً بدون تبعيات",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "iptv-pro": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
