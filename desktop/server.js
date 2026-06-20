@@ -25,7 +25,6 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_PATH = path.join(__dirname, 'config.json');
-const PUBKEY_PATH = path.join(__dirname, 'license_pub.pem');
 const PORT = process.env.PORT || 8787;
 
 // حدود الذاكرة المؤقتة المشتركة (Shared Relay)
@@ -33,7 +32,6 @@ const PLAYLIST_TTL = 1500; // ms — مدة صلاحية قائمة البث ا�
 const MAX_CACHE_BYTES = 512 * 1024 * 1024; // سقف ذاكرة الأجزاء
 const MAX_SEG_BYTES = 24 * 1024 * 1024; // أكبر جزء يُخزَّن
 const VIEWER_TTL = 45000; // اعتبار الجهاز نشطاً خلال هذه المدة
-const TRIAL_DEVICES = 3; // حد الأجهزة قبل التفعيل (عند تفعيل نظام التراخيص)
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -52,6 +50,8 @@ function defaultConfig() {
       upstream: { enabled: false, type: 'http', host: '', port: 0, username: '', password: '' },
     },
     activation: null, // {serial, activatedAt}
+    auth: null, // {admin:{username,salt,hash}, sessionSecret}
+    clients: [], // حسابات العملاء (تُنشأ من لوحة الإدارة)
   };
 }
 
@@ -70,6 +70,83 @@ function saveConfig(cfg) {
 }
 
 let config = loadConfig();
+
+// ---------------------------------------------------------------------------
+// المصادقة والأدوار (Admin / عميل) — تهيئة أولية
+// ---------------------------------------------------------------------------
+function hashPassword(pw, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+  return { salt, hash };
+}
+function checkPassword(pw, salt, hash) {
+  try {
+    const h = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(hash));
+  } catch {
+    return false;
+  }
+}
+
+// تهيئة حساب المدير ومفتاح الجلسات عند أول تشغيل
+function ensureAuth() {
+  if (!config.auth) config.auth = {};
+  if (!config.auth.sessionSecret) config.auth.sessionSecret = crypto.randomBytes(32).toString('hex');
+  if (!config.auth.admin) {
+    const username = process.env.ADMIN_USER || 'admin';
+    const password = process.env.ADMIN_PASSWORD || 'admin';
+    config.auth.admin = { username, ...hashPassword(password) };
+    config.auth.mustChangePassword = !process.env.ADMIN_PASSWORD;
+    saveConfig(config);
+    if (config.auth.mustChangePassword)
+      console.log(
+        `\n  ⚠️  حساب المدير الافتراضي:  المستخدم="${username}"  كلمة المرور="${password}"\n` +
+          `      غيّرها فوراً من لوحة الإدارة، أو شغّل بمتغيّر ADMIN_PASSWORD.\n`
+      );
+    else console.log(`\n  ✅ حساب المدير "${username}" جاهز (كلمة المرور من ADMIN_PASSWORD).\n`);
+  } else {
+    saveConfig(config);
+  }
+}
+ensureAuth();
+
+// جلسات موقّعة (cookie) بلا حالة على الخادم
+function signSession(payload) {
+  const p = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', config.auth.sessionSecret).update(p).digest('base64url');
+  return p + '.' + sig;
+}
+function verifySession(token) {
+  if (!token || !token.includes('.')) return null;
+  const [p, sig] = token.split('.');
+  const expect = crypto.createHmac('sha256', config.auth.sessionSecret).update(p).digest('base64url');
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect))) return null;
+    const data = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    if (data.exp && Date.now() > data.exp) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+function parseCookies(req) {
+  const out = {};
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i > -1) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+// يعيد {role, uid, username, client?} أو null
+function getSession(req) {
+  const s = verifySession(parseCookies(req).sid);
+  if (!s) return null;
+  if (s.role === 'admin') return s;
+  const client = (config.clients || []).find((c) => c.id === s.uid);
+  if (!client || client.disabled) return null;
+  if (client.expiry && Date.now() > client.expiry) return null;
+  return { ...s, client };
+}
 
 // ---------------------------------------------------------------------------
 // الاتصال عبر البروكسي/VPN (HTTP CONNECT أو SOCKS5)
@@ -325,7 +402,7 @@ async function getSharedPlaylist(url) {
 // ---------------------------------------------------------------------------
 // تتبّع الأجهزة المشاهِدة (للحد الأقصى حسب الترخيص + عرض العدّاد)
 // ---------------------------------------------------------------------------
-const viewers = new Map(); // cid -> {ip, last, channel}
+const viewers = new Map(); // cid -> {uid, username, ip, last, channel}
 
 function pruneViewers() {
   const now = Date.now();
@@ -335,72 +412,16 @@ function activeViewerCount() {
   pruneViewers();
   return viewers.size;
 }
-function touchViewer(cid, ip, channel) {
-  viewers.set(cid, { ip, last: Date.now(), channel: channel || (viewers.get(cid) || {}).channel });
+// عدد الأجهزة النشطة لعميل واحد (للتحقق من حدّه الخاص)
+function activeForUser(uid) {
+  pruneViewers();
+  let n = 0;
+  for (const v of viewers.values()) if (v.uid === uid) n++;
+  return n;
 }
-
-// ---------------------------------------------------------------------------
-// نظام التراخيص (تفعيل بالسيريال موقّع رقمياً Ed25519)
-// المفتاح العام يُشحن مع التطبيق؛ المفتاح الخاص يبقى لدى صاحب الخدمة لتوليد السيريالات.
-// ---------------------------------------------------------------------------
-function loadPubKey() {
-  try {
-    return fs.readFileSync(PUBKEY_PATH, 'utf8');
-  } catch {
-    return null;
-  }
-}
-
-// يتحقق من سيريال؛ يعيد {ok, data?, error?, open?}
-function verifySerial(serial) {
-  const pub = loadPubKey();
-  if (!pub) return { ok: false, open: true }; // نظام التراخيص غير مُفعّل (وضع مفتوح)
-  if (!serial || typeof serial !== 'string' || !serial.includes('.'))
-    return { ok: false, error: 'صيغة السيريال غير صحيحة' };
-  try {
-    const [pB64, sB64] = serial.trim().split('.');
-    const payload = Buffer.from(pB64, 'base64url');
-    const sig = Buffer.from(sB64, 'base64url');
-    if (!crypto.verify(null, payload, pub, sig))
-      return { ok: false, error: 'توقيع غير صالح (سيريال مزيّف أو غير مطابق لمفتاحك)' };
-    const data = JSON.parse(payload.toString('utf8'));
-    if (data.exp && Date.now() > data.exp) return { ok: false, error: 'انتهت صلاحية الاشتراك', data };
-    return { ok: true, data };
-  } catch (e) {
-    return { ok: false, error: 'تعذّر قراءة السيريال: ' + e.message };
-  }
-}
-
-// حالة الترخيص الحالية بناءً على ما هو مُفعّل في config
-function licenseStatus() {
-  const pub = loadPubKey();
-  if (!pub) return { enabled: false, activated: true, maxDevices: 0 }; // مفتوح = بلا حد
-  const serial = config.activation && config.activation.serial;
-  const v = verifySerial(serial);
-  if (v.ok) {
-    const d = v.data;
-    return {
-      enabled: true,
-      activated: true,
-      customer: d.customer || '',
-      plan: d.plan || '',
-      maxDevices: d.maxDevices || 0,
-      exp: d.exp || 0,
-      daysLeft: d.exp ? Math.max(0, Math.ceil((d.exp - Date.now()) / 86400000)) : 0,
-    };
-  }
-  return {
-    enabled: true,
-    activated: false,
-    maxDevices: TRIAL_DEVICES,
-    error: serial ? v.error : '',
-  };
-}
-
-// السقف الفعّال لعدد الأجهزة (0 = بلا حد)
-function deviceCap() {
-  const s = licenseStatus();
-  return s.activated ? s.maxDevices || 0 : TRIAL_DEVICES;
+function touchViewer(cid, info) {
+  const prev = viewers.get(cid) || {};
+  viewers.set(cid, { ...prev, ...info, last: Date.now() });
 }
 
 // ---------------------------------------------------------------------------
@@ -616,10 +637,16 @@ function lanAddresses() {
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
   const p = u.pathname;
+  const session = getSession(req);
+  const isAdmin = session && session.role === 'admin';
 
   try {
-    // ----- البروكسي / Shared Relay -----
+    // ----- البروكسي / Shared Relay (يتطلب جلسة مسجّلة) -----
     if (p === '/proxy') {
+      if (!session) {
+        res.writeHead(401);
+        return res.end('unauthorized');
+      }
       const target = u.searchParams.get('u');
       if (!target) {
         res.writeHead(400);
@@ -630,20 +657,21 @@ const server = http.createServer(async (req, res) => {
       const isPlaylist = /\.m3u8(\?|$)/i.test(target);
       const clientIp = req.socket.remoteAddress;
 
-      // قائمة بث حيّة: ذاكرة مشتركة + فرض حد الأجهزة عند بدء قناة جديدة
+      // قائمة بث حيّة: ذاكرة مشتركة + فرض حدّ أجهزة العميل عند بدء قناة جديدة
       if (isPlaylist && !range) {
         const cid = u.searchParams.get('cid');
-        if (cid) {
-          const cap = deviceCap();
+        if (cid && session.role === 'client') {
+          const cap = session.client.maxDevices || 0;
           const isNew = !viewers.has(cid);
-          if (cap > 0 && isNew && activeViewerCount() >= cap) {
+          if (cap > 0 && isNew && activeForUser(session.uid) >= cap) {
             res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
             return res.end(
-              JSON.stringify({ error: `بلغت الحد الأقصى للأجهزة في ترخيصك (${cap}).` })
+              JSON.stringify({ error: `بلغت الحد الأقصى للأجهزة في اشتراكك (${cap}).` })
             );
           }
-          touchViewer(cid, clientIp, target);
         }
+        if (cid)
+          touchViewer(cid, { uid: session.uid, username: session.username, ip: clientIp, channel: target });
         const pl = await getSharedPlaylist(target);
         res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8' });
         return res.end(rewriteM3U8(pl.text, pl.finalUrl));
@@ -684,25 +712,74 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // ----- واجهة API -----
+    // ----- المصادقة -----
+    if (p === '/api/login' && req.method === 'POST') {
+      const body = await readBody(req);
+      const username = (body.username || '').trim();
+      const password = body.password || '';
+      // مدير؟
+      const a = config.auth.admin;
+      if (a && a.username === username && checkPassword(password, a.salt, a.hash)) {
+        const token = signSession({ role: 'admin', uid: 'admin', username, exp: Date.now() + 7 * 86400000 });
+        res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax`);
+        return sendJSON(res, 200, { ok: true, role: 'admin', mustChangePassword: !!config.auth.mustChangePassword });
+      }
+      // عميل؟
+      const c = (config.clients || []).find((x) => x.username === username);
+      if (c && !c.disabled && checkPassword(password, c.salt, c.hash)) {
+        if (c.expiry && Date.now() > c.expiry) return sendJSON(res, 403, { error: 'انتهى اشتراكك' });
+        const token = signSession({ role: 'client', uid: c.id, username, exp: Date.now() + 7 * 86400000 });
+        res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax`);
+        return sendJSON(res, 200, { ok: true, role: 'client' });
+      }
+      return sendJSON(res, 401, { error: 'بيانات الدخول غير صحيحة' });
+    }
+
+    if (p === '/api/logout' && req.method === 'POST') {
+      res.setHeader('Set-Cookie', 'sid=; HttpOnly; Path=/; Max-Age=0');
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    if (p === '/api/me' && req.method === 'GET') {
+      if (!session) return sendJSON(res, 200, { authenticated: false });
+      const me = { authenticated: true, role: session.role, username: session.username };
+      if (session.role === 'client') {
+        me.name = session.client.name || session.username;
+        me.maxDevices = session.client.maxDevices || 0;
+        me.expiry = session.client.expiry || 0;
+        me.daysLeft = session.client.expiry
+          ? Math.max(0, Math.ceil((session.client.expiry - Date.now()) / 86400000))
+          : 0;
+      } else {
+        me.mustChangePassword = !!config.auth.mustChangePassword;
+      }
+      return sendJSON(res, 200, me);
+    }
+
+    // ----- واجهة المحتوى (تتطلب جلسة) -----
     if (p === '/api/state' && req.method === 'GET') {
-      return sendJSON(res, 200, {
-        sources: config.sources.map((s) => ({
+      if (!session) return sendJSON(res, 401, { error: 'يجب تسجيل الدخول' });
+      const payload = {
+        live: collect('live'),
+        movies: collect('movies'),
+        series: collect('series'),
+      };
+      if (isAdmin) {
+        payload.sources = config.sources.map((s) => ({
           id: s.id,
           type: s.type,
           name: s.name,
           live: (s.live || []).length,
           movies: (s.movies || []).length,
           series: (s.series || []).length,
-        })),
-        live: collect('live'),
-        movies: collect('movies'),
-        series: collect('series'),
-        settings: config.settings,
-      });
+        }));
+        payload.settings = config.settings;
+      }
+      return sendJSON(res, 200, payload);
     }
 
     if (p === '/api/sources' && req.method === 'POST') {
+      if (!isAdmin) return sendJSON(res, 403, { error: 'للمدير فقط' });
       const body = await readBody(req);
       const id = 's' + Date.now().toString(36);
       const name = (body.name || '').trim() || 'مصدر';
@@ -721,52 +798,128 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { id, live: live.length, movies: movies.length, series: series.length });
     }
 
-    // مواسم/حلقات مسلسل (تُجلب عند الطلب)
+    // مواسم/حلقات مسلسل (تُجلب عند الطلب) — لأي مستخدم مسجّل
     if (p === '/api/series-info' && req.method === 'GET') {
+      if (!session) return sendJSON(res, 401, { error: 'يجب تسجيل الدخول' });
       const src = config.sources.find((s) => s.id === u.searchParams.get('sourceId'));
       if (!src) return sendJSON(res, 404, { error: 'المصدر غير موجود' });
       const info = await seriesInfo(src.server, src.username, src.password, u.searchParams.get('seriesId'));
       return sendJSON(res, 200, info);
     }
 
-    // معلومات الشبكة (للوصول من أجهزة أخرى مثل Jellyfin)
+    // نبضة إبقاء الجهاز نشطاً (heartbeat) — لأي مستخدم مسجّل
+    if (p === '/api/ping' && req.method === 'POST') {
+      if (!session) return sendJSON(res, 401, { ok: false, error: 'يجب تسجيل الدخول' });
+      const body = await readBody(req);
+      if (body.cid) {
+        if (session.role === 'client') {
+          const cap = session.client.maxDevices || 0;
+          if (cap > 0 && !viewers.has(body.cid) && activeForUser(session.uid) >= cap)
+            return sendJSON(res, 429, { ok: false, error: 'بلغت الحد الأقصى للأجهزة', cap });
+        }
+        touchViewer(body.cid, {
+          uid: session.uid,
+          username: session.username,
+          ip: req.socket.remoteAddress,
+          channel: body.channel,
+        });
+      }
+      const active =
+        session.role === 'client' ? activeForUser(session.uid) : activeViewerCount();
+      const cap = session.role === 'client' ? session.client.maxDevices || 0 : 0;
+      return sendJSON(res, 200, { ok: true, active, cap });
+    }
+
+    // ========== نقاط للمدير فقط ==========
+    if (p.startsWith('/api/admin/') || p === '/api/netinfo' || p === '/api/test-upstream' ||
+        (p === '/api/sources' && req.method === 'DELETE') ||
+        (p === '/api/settings' && req.method === 'POST') ||
+        (p === '/api/clients')) {
+      if (!isAdmin) return sendJSON(res, 403, { error: 'للمدير فقط' });
+    }
+
+    // معلومات الشبكة
     if (p === '/api/netinfo' && req.method === 'GET') {
       return sendJSON(res, 200, { addresses: lanAddresses(), port: PORT });
     }
 
-    // ----- نظام التراخيص / الاشتراكات -----
-    if (p === '/api/license' && req.method === 'GET') {
-      return sendJSON(res, 200, licenseStatus());
+    // إحصائيات المشاهدين (للمدير)
+    if (p === '/api/admin/viewers' && req.method === 'GET') {
+      pruneViewers();
+      const list = [...viewers.values()].map((v) => ({ username: v.username, ip: v.ip, channel: v.channel }));
+      return sendJSON(res, 200, { active: list.length, viewers: list });
     }
 
-    if (p === '/api/activate' && req.method === 'POST') {
-      const body = await readBody(req);
-      const v = verifySerial((body.serial || '').trim());
-      if (!v.ok) return sendJSON(res, 400, { ok: false, error: v.error || 'سيريال غير صالح' });
-      config.activation = { serial: body.serial.trim(), activatedAt: Date.now() };
-      saveConfig(config);
-      return sendJSON(res, 200, { ok: true, license: licenseStatus() });
-    }
-
-    // عدّاد الأجهزة المشاهِدة حالياً + السقف
-    if (p === '/api/viewers' && req.method === 'GET') {
+    // إدارة العملاء (Admin)
+    if (p === '/api/clients' && req.method === 'GET') {
+      const now = Date.now();
       return sendJSON(res, 200, {
-        active: activeViewerCount(),
-        cap: deviceCap(),
-        bySource: [...viewers.values()].length,
+        clients: (config.clients || []).map((c) => ({
+          id: c.id,
+          username: c.username,
+          name: c.name || '',
+          maxDevices: c.maxDevices || 0,
+          expiry: c.expiry || 0,
+          daysLeft: c.expiry ? Math.max(0, Math.ceil((c.expiry - now) / 86400000)) : 0,
+          disabled: !!c.disabled,
+          active: activeForUser(c.id),
+        })),
       });
     }
 
-    // نبضة إبقاء الجهاز نشطاً (heartbeat)
-    if (p === '/api/ping' && req.method === 'POST') {
+    if (p === '/api/clients' && req.method === 'POST') {
       const body = await readBody(req);
-      if (body.cid) {
-        const cap = deviceCap();
-        if (cap > 0 && !viewers.has(body.cid) && activeViewerCount() >= cap)
-          return sendJSON(res, 429, { ok: false, error: 'بلغت الحد الأقصى للأجهزة', cap });
-        touchViewer(body.cid, req.socket.remoteAddress, body.channel);
-      }
-      return sendJSON(res, 200, { ok: true, active: activeViewerCount(), cap: deviceCap() });
+      const username = (body.username || '').trim();
+      if (!username || !body.password) return sendJSON(res, 400, { error: 'اسم المستخدم وكلمة المرور مطلوبان' });
+      if ((config.clients || []).some((c) => c.username === username))
+        return sendJSON(res, 400, { error: 'اسم المستخدم موجود مسبقاً' });
+      const days = Number(body.days || 0);
+      const client = {
+        id: 'c' + Date.now().toString(36),
+        username,
+        name: body.name || username,
+        ...hashPassword(body.password),
+        maxDevices: Number(body.maxDevices || 0),
+        expiry: days > 0 ? Date.now() + days * 86400000 : 0,
+        disabled: false,
+        createdAt: Date.now(),
+      };
+      config.clients = config.clients || [];
+      config.clients.push(client);
+      saveConfig(config);
+      return sendJSON(res, 200, { ok: true, id: client.id });
+    }
+
+    if (p === '/api/clients' && req.method === 'DELETE') {
+      const id = u.searchParams.get('id');
+      config.clients = (config.clients || []).filter((c) => c.id !== id);
+      saveConfig(config);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // تعديل عميل (تعطيل/تفعيل، تجديد، حد الأجهزة، كلمة المرور)
+    if (p === '/api/clients/update' && req.method === 'POST') {
+      if (!isAdmin) return sendJSON(res, 403, { error: 'للمدير فقط' });
+      const body = await readBody(req);
+      const c = (config.clients || []).find((x) => x.id === body.id);
+      if (!c) return sendJSON(res, 404, { error: 'العميل غير موجود' });
+      if (body.disabled !== undefined) c.disabled = !!body.disabled;
+      if (body.maxDevices !== undefined) c.maxDevices = Number(body.maxDevices);
+      if (body.addDays) c.expiry = (c.expiry && c.expiry > Date.now() ? c.expiry : Date.now()) + Number(body.addDays) * 86400000;
+      if (body.password) Object.assign(c, hashPassword(body.password));
+      saveConfig(config);
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    // تغيير كلمة مرور المدير
+    if (p === '/api/admin/password' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (!body.password || String(body.password).length < 4)
+        return sendJSON(res, 400, { error: 'كلمة المرور قصيرة' });
+      config.auth.admin = { username: config.auth.admin.username, ...hashPassword(body.password) };
+      config.auth.mustChangePassword = false;
+      saveConfig(config);
+      return sendJSON(res, 200, { ok: true });
     }
 
     if (p === '/api/sources' && req.method === 'DELETE') {
@@ -787,7 +940,6 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true, settings: config.settings });
     }
 
-    // اختبار اتصال البروكسي/VPN
     if (p === '/api/test-upstream' && req.method === 'GET') {
       try {
         const txt = await fetchText('https://api.ipify.org?format=json');
@@ -797,7 +949,16 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ----- ملفات ثابتة -----
+    // ----- صفحات وملفات ثابتة -----
+    if (p === '/login') return serveStatic(res, '/login.html');
+    // حماية صفحة الإدارة: تتطلب جلسة مدير
+    if (p === '/admin' || p === '/admin.html') {
+      if (!isAdmin) {
+        res.writeHead(302, { Location: '/login?next=/admin' });
+        return res.end();
+      }
+      return serveStatic(res, '/admin.html');
+    }
     return serveStatic(res, p);
   } catch (err) {
     sendJSON(res, 500, { error: err.message });
@@ -807,15 +968,11 @@ const server = http.createServer(async (req, res) => {
 server.keepAliveTimeout = 60_000;
 server.requestTimeout = 0;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  ▶  IPTV Pro Desktop يعمل الآن`);
-  console.log(`     على هذا الجهاز:      http://localhost:${PORT}`);
-  for (const ip of lanAddresses()) {
-    console.log(`     من أجهزة الشبكة:     http://${ip}:${PORT}   ← افتحه على التلفزيون/الجوال (مثل Jellyfin)`);
-  }
-  const ls = licenseStatus();
-  if (!ls.enabled) console.log(`     الترخيص:             وضع مفتوح (بلا حد أجهزة)`);
-  else if (ls.activated)
-    console.log(`     الترخيص:             مُفعّل · ${ls.customer || ''} · حد ${ls.maxDevices || '∞'} جهاز · ${ls.daysLeft} يوم متبقٍّ`);
-  else console.log(`     الترخيص:             غير مُفعّل (تجريبي: ${TRIAL_DEVICES} أجهزة)`);
+  const ips = lanAddresses();
+  const host = ips[0] ? `http://${ips[0]}:${PORT}` : `http://localhost:${PORT}`;
+  console.log(`\n  ▶  IPTV Pro Server يعمل الآن`);
+  console.log(`     بوابة العملاء:   ${host}/`);
+  console.log(`     لوحة الإدارة:    ${host}/admin`);
+  console.log(`     محلياً:          http://localhost:${PORT}/`);
   console.log(`     Shared Relay مفعّل: نفس القناة تُسحب مرة واحدة وتُوزَّع على كل الأجهزة\n`);
 });

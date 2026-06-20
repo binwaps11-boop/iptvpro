@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>تسجيل الدخول — IPTV Pro</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="center-page">
+    <form id="loginForm" class="auth-card">
+      <div class="auth-brand"><span class="logo">◈</span> IPTV <b>Pro</b></div>
+      <p class="muted">سجّل الدخول للمتابعة</p>
+      <input name="username" placeholder="اسم المستخدم" autocomplete="username" required />
+      <input name="password" type="password" placeholder="كلمة المرور" autocomplete="current-password" required />
+      <button class="btn full">دخول</button>
+      <div id="err" class="auth-err"></div>
+    </form>
+    <script>
+      const params = new URLSearchParams(location.search);
+      document.getElementById('loginForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const f = e.target;
+        document.getElementById('err').textContent = '';
+        const r = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: f.username.value, password: f.password.value }),
+        }).then((x) => x.json());
+        if (r.ok) {
+          const next = params.get('next');
+          location.href = r.role === 'admin' ? next || '/admin' : '/';
+        } else {
+          document.getElementById('err').textContent = r.error || 'فشل الدخول';
+        }
+      };
+    </script>
+  </body>
+</html>

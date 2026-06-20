@@ -248,6 +248,42 @@ form input:focus, form textarea:focus, form select:focus { border-color: var(--a
 .ep:hover { border-color: var(--accent); }
 .ep .play { color: var(--accent2); }
 
+/* ===== صفحة الدخول ===== */
+.center-page { display: grid; place-items: center; min-height: 100vh; }
+.auth-card {
+  width: min(380px, 92vw);
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 28px;
+  text-align: center;
+}
+.auth-brand { font-size: 26px; margin-bottom: 4px; }
+.auth-brand .logo { color: var(--accent2); }
+.auth-brand b { color: var(--accent); }
+.auth-card .muted { color: var(--muted); margin-bottom: 18px; }
+.auth-err { color: #ff6b6b; font-size: 13px; margin-top: 10px; min-height: 16px; }
+
+/* ===== لوحة الإدارة ===== */
+.admin-wrap { padding: 18px 22px 60px; max-width: 1200px; margin: auto; }
+.pw-banner { background: #5a3b00; color: #ffd; padding: 12px 22px; display: flex; gap: 12px; align-items: center; justify-content: center; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; text-align: center; }
+.stat-v { font-size: 28px; font-weight: 800; color: var(--accent2); }
+.stat-l { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.admin-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 820px) { .admin-cols { grid-template-columns: 1fr; } }
+.panel { background: var(--bg2); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 18px; }
+.panel h3 { margin: 0 0 14px; }
+.list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.li { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+.li.off { opacity: 0.5; }
+.li .del { background: none; border: none; color: #ff6b6b; cursor: pointer; }
+.muted { color: var(--muted); }
+.cli-actions { display: flex; gap: 6px; }
+.mini { padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg2); color: var(--text); cursor: pointer; font-size: 12px; }
+.mini.danger { color: #ff6b6b; border-color: #5a2533; }
+
 .toast {
   position: fixed;
   bottom: 24px;

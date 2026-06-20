@@ -18,7 +18,7 @@
   "build": {
     "appId": "com.iptvpro.desktop",
     "productName": "IPTV Pro",
-    "files": ["main.cjs", "../server.js", "../public/**", "../license_pub.pem"],
+    "files": ["main.cjs", "../server.js", "../public/**"],
     "extraMetadata": { "main": "main.cjs" },
     "win": { "target": ["nsis"] },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true },
