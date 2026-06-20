@@ -11,7 +11,7 @@
 #
 set -euo pipefail
 
-PORT="${PORT:-8787}"
+PORT="${PORT:-2222}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 DOMAIN="${DOMAIN:-}"

@@ -6,8 +6,8 @@ WORKDIR /app
 COPY server.js ./
 COPY public ./public
 
-ENV PORT=8787
-EXPOSE 8787
+ENV PORT=2222
+EXPOSE 2222
 
 # بيانات النظام (config.json) تُحفظ في volume
 VOLUME ["/app/data"]

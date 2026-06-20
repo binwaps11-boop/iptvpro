@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # مُشغّل سريع — يفتح المتصفح تلقائياً بعد تشغيل الخادم
 cd "$(dirname "$0")"
-PORT="${PORT:-8787}"
+PORT="${PORT:-2222}"
 URL="http://localhost:$PORT"
 
 ( sleep 1.5

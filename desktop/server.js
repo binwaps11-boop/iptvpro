@@ -9,7 +9,7 @@
  *   4. توجيه كل الطلبات عبر بروكسي/VPN يملكه المستخدم
  *      (HTTP CONNECT أو SOCKS5) — لتجاوز الحظر الجغرافي بشكل شرعي.
  *
- * التشغيل:  node server.js   ثم افتح  http://localhost:8787
+ * التشغيل:  node server.js   ثم افتح  http://localhost:2222
  */
 
 import http from 'node:http';
@@ -27,7 +27,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_PATH = process.env.CONFIG_DIR
   ? path.join(process.env.CONFIG_DIR, 'config.json')
   : path.join(__dirname, 'config.json');
-const PORT = process.env.PORT || 8787;
+const PORT = process.env.PORT || 2222;
 
 // حدود الذاكرة المؤقتة المشتركة (Shared Relay)
 const PLAYLIST_TTL = 1500; // ms — مدة صلاحية قائمة البث المشتركة

@@ -7,9 +7,9 @@ services:
     container_name: iptvpro
     restart: always
     ports:
-      - "8787:8787"
+      - "2222:2222"
     environment:
-      - PORT=8787
+      - PORT=2222
       - ADMIN_USER=admin
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
       - CONFIG_DIR=/app/data

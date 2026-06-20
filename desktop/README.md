@@ -22,8 +22,8 @@ ADMIN_PASSWORD='كلمة-مرور-قوية' node server.js
 ```
 
 ثم:
-- **لوحة الإدارة:** `http://localhost:8787/admin`  (المستخدم `admin` + كلمة المرور التي وضعتها)
-- **بوابة العملاء:** `http://localhost:8787/`
+- **لوحة الإدارة:** `http://localhost:2222/admin`  (المستخدم `admin` + كلمة المرور التي وضعتها)
+- **بوابة العملاء:** `http://localhost:2222/`
 
 > إن لم تضع `ADMIN_PASSWORD`, ستكون كلمة المرور الافتراضية `admin` (سيُطلب منك تغييرها فوراً).
 
@@ -58,7 +58,7 @@ cd /opt/iptvpro/desktop
 sudo ADMIN_PASSWORD='كلمة-مرور-قوية' bash deploy/install.sh
 ```
 السكربت يثبّت Node ويُعدّ خدمة دائمة (systemd) ويفتح المنفذ ويطبع الروابط. النتيجة:
-`http://SERVER_IP:8787/` (العملاء) و `/admin` (الإدارة).
+`http://SERVER_IP:2222/` (العملاء) و `/admin` (الإدارة).
 
 **مع دومين و HTTPS تلقائياً** (وجّه الدومين A-record إلى السيرفر أولاً):
 ```bash

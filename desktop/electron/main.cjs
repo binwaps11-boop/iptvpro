@@ -11,7 +11,7 @@ const { app, BrowserWindow, shell } = require('electron');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 
-const PORT = process.env.PORT || 8787;
+const PORT = process.env.PORT || 2222;
 let serverProc = null;
 
 function startServer() {
