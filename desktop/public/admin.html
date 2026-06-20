@@ -99,7 +99,31 @@
         <div id="vpnStatus" class="vpn-status">…</div>
 
         <div class="auto-box">
-          <b>⚡ تلقائي (مجاني، بلا إعداد):</b>
+          <b>🆓 VPN مجاني مدمج (VPN Gate) — اختر الدولة:</b>
+          <p class="muted" style="font-size:13px;margin:6px 0">
+            يتصل بخادم VPN مجاني في الدولة المسموحة ويوجّه التطبيق عبره تلقائياً. خوادم تطوّعية
+            (قد تتغيّر/تبطئ) — إن لم تتوفّر المكسيك الآن جرّب دولة أخرى أو أعد المحاولة.
+          </p>
+          <div class="grid2">
+            <select id="freeVpnCountry">
+              <option value="MX">المكسيك (MX)</option>
+              <option value="US">الولايات المتحدة (US)</option>
+              <option value="CA">كندا (CA)</option>
+              <option value="BR">البرازيل (BR)</option>
+              <option value="ES">إسبانيا (ES)</option>
+              <option value="DE">ألمانيا (DE)</option>
+              <option value="GB">بريطانيا (GB)</option>
+              <option value="FR">فرنسا (FR)</option>
+              <option value="JP">اليابان (JP)</option>
+            </select>
+            <button id="btnFreeVpn" class="btn">🔌 اتصال VPN مجاني</button>
+          </div>
+          <button id="btnFreeVpnDown" class="btn ghost full" style="margin-top:8px">قطع الاتصال</button>
+          <div id="freeVpnResult" class="test-result"></div>
+        </div>
+
+        <div class="auto-box">
+          <b>⚡ تلقائي (بروكسي مجاني، بلا إعداد):</b>
           <p class="muted" style="font-size:13px;margin:6px 0">
             يبحث عن بروكسي مكسيكي مجاني ويختبره ضد مزوّدك ويفعّله تلقائياً. قد يستغرق دقيقة، وقد لا
             ينجح دائماً (البروكسيات المجانية غير ثابتة) — للثبات استخدم WireGuard أدناه.

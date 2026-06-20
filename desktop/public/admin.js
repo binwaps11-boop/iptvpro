@@ -16,22 +16,27 @@ async function init() {
   if (me.mustChangePassword) $('#pwBanner').classList.remove('hidden');
   await refresh();
   bind();
-  loadVpn();
+  loadVpnAll();
   setInterval(refreshStats, 10000);
 }
 
-// ===== توجيه المكسيك (VPN) =====
-async function loadVpn() {
+// ===== حالة توجيه المكسيك/VPN (WireGuard أو VPN Gate) =====
+async function loadVpnAll() {
+  let active = null;
   try {
-    const v = await fetch('/api/admin/vpn').then((r) => r.json());
-    renderVpn(v);
+    const wg = await fetch('/api/admin/vpn').then((r) => r.json());
+    if (wg && wg.active) active = wg;
   } catch {}
-}
-function renderVpn(v) {
+  if (!active) {
+    try {
+      const fv = await fetch('/api/admin/freevpn').then((r) => r.json());
+      if (fv && fv.active) active = fv;
+    } catch {}
+  }
   const el = document.getElementById('vpnStatus');
   if (!el) return;
-  if (v && v.active)
-    el.innerHTML = `🟢 مُفعّل — التطبيق يخرج من: <b>${esc(v.country || '?')}</b> (${esc(v.ip || '')})`;
+  if (active)
+    el.innerHTML = `🟢 مُفعّل — التطبيق يخرج من: <b>${esc(active.country || '?')}</b> (${esc(active.ip || '')})`;
   else el.innerHTML = '⚪ غير مُفعّل — التطبيق يخرج من IP السيرفر مباشرةً.';
 }
 
@@ -141,6 +146,32 @@ function bind() {
     $('#testResult').textContent = r.ok ? `✓ يعمل — IP الخارج: ${r.ip}` : '✗ فشل: ' + r.error;
   };
 
+  $('#btnFreeVpn').onclick = async () => {
+    const btn = $('#btnFreeVpn');
+    const cc = $('#freeVpnCountry').value;
+    btn.disabled = true;
+    $('#freeVpnResult').textContent = `🔌 جارٍ الاتصال بخادم مجاني في ${cc}… (حتى دقيقة)`;
+    try {
+      const r = await jpost('/api/admin/freevpn', { country: cc });
+      if (r.ok && r.active) {
+        $('#freeVpnResult').textContent = `✅ متصل — التطبيق يخرج من ${r.country || cc} (${r.ip || ''}). جرّب الاستيراد الآن.`;
+        toast('تم الاتصال بـ VPN مجاني ✓ — اذهب لمصادر IPTV واستورد', 6000);
+        loadVpnAll();
+      } else {
+        $('#freeVpnResult').textContent = '✗ ' + (r.error || 'تعذّر الاتصال');
+      }
+    } catch (e) {
+      $('#freeVpnResult').textContent = '✗ فشل: ' + e.message;
+    }
+    btn.disabled = false;
+  };
+  $('#btnFreeVpnDown').onclick = async () => {
+    $('#freeVpnResult').textContent = 'جارٍ قطع الاتصال…';
+    await fetch('/api/admin/freevpn/down', { method: 'POST' });
+    $('#freeVpnResult').textContent = 'تم قطع الاتصال.';
+    loadVpnAll();
+  };
+
   $('#btnAutoProxy').onclick = async () => {
     const btn = $('#btnAutoProxy');
     btn.disabled = true;
@@ -171,13 +202,13 @@ function bind() {
     } else {
       $('#vpnResult').textContent = '✗ ' + (r.error || 'فشل التفعيل');
     }
-    loadVpn();
+    loadVpnAll();
   };
   $('#btnVpnDown').onclick = async () => {
     $('#vpnResult').textContent = 'جارٍ الإيقاف…';
     await fetch('/api/admin/vpn/down', { method: 'POST' });
     $('#vpnResult').textContent = 'تم الإيقاف.';
-    loadVpn();
+    loadVpnAll();
   };
 
   $('#formPw').onsubmit = async (e) => {

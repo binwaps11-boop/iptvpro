@@ -40,14 +40,15 @@ const VIEWER_TTL = 45000; // اعتبار الجهاز نشطاً خلال هذ�
 
 // توجيه المكسيك (WireGuard) المُدار من اللوحة
 const VPN_SCRIPT = path.join(__dirname, 'deploy', 'vpn-apply.sh');
+const VPNGATE_SCRIPT = path.join(__dirname, 'deploy', 'vpngate-apply.sh');
 const VPN_CONF = process.env.CONFIG_DIR
   ? path.join(process.env.CONFIG_DIR, 'mx.conf')
   : path.join(__dirname, 'mx.conf');
 
-// يشغّل مساعد الـ VPN عبر sudo ويعيد JSON
-function runVpn(action) {
+// يشغّل سكربت مساعد عبر sudo ويعيد JSON
+function runHelper(script, args = [], timeout = 90000) {
   return new Promise((resolve) => {
-    execFile('sudo', ['-n', VPN_SCRIPT, action], { timeout: 35000 }, (err, stdout) => {
+    execFile('sudo', ['-n', script, ...args], { timeout }, (err, stdout) => {
       try {
         resolve(JSON.parse((stdout || '').trim() || '{}'));
       } catch {
@@ -55,6 +56,9 @@ function runVpn(action) {
       }
     });
   });
+}
+function runVpn(action) {
+  return runHelper(VPN_SCRIPT, [action], 40000);
 }
 
 const DEFAULT_UA =
@@ -987,6 +991,20 @@ const requestHandler = async (req, res) => {
         return sendJSON(res, 200, { ok: true, proxy: r.proxy, total: r.total });
       }
       return sendJSON(res, 200, { ok: false, error: r.error, total: r.total });
+    }
+
+    // VPN مجاني مدمج (VPN Gate) باختيار الدولة
+    if (p === '/api/admin/freevpn' && req.method === 'GET') {
+      return sendJSON(res, 200, await runHelper(VPNGATE_SCRIPT, ['status'], 30000));
+    }
+    if (p === '/api/admin/freevpn' && req.method === 'POST') {
+      const body = await readBody(req);
+      const cc = String(body.country || 'MX').toUpperCase();
+      if (!/^[A-Z]{2}$/.test(cc)) return sendJSON(res, 400, { ok: false, error: 'رمز دولة غير صالح' });
+      return sendJSON(res, 200, await runHelper(VPNGATE_SCRIPT, ['up', cc], 95000));
+    }
+    if (p === '/api/admin/freevpn/down' && req.method === 'POST') {
+      return sendJSON(res, 200, await runHelper(VPNGATE_SCRIPT, ['down'], 30000));
     }
 
     // إحصائيات المشاهدين (للمدير)
