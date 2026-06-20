@@ -95,8 +95,21 @@
 
       <!-- توجيه المكسيك (VPN) -->
       <section class="panel">
-        <h3>🇲🇽 توجيه المكسيك (VPN) — لتجاوز الحظر الجغرافي</h3>
+        <h3>🇲🇽 توجيه المكسيك — لتجاوز الحظر الجغرافي</h3>
         <div id="vpnStatus" class="vpn-status">…</div>
+
+        <div class="auto-box">
+          <b>⚡ تلقائي (مجاني، بلا إعداد):</b>
+          <p class="muted" style="font-size:13px;margin:6px 0">
+            يبحث عن بروكسي مكسيكي مجاني ويختبره ضد مزوّدك ويفعّله تلقائياً. قد يستغرق دقيقة، وقد لا
+            ينجح دائماً (البروكسيات المجانية غير ثابتة) — للثبات استخدم WireGuard أدناه.
+          </p>
+          <button id="btnAutoProxy" class="btn full">🔎 بحث تلقائي عن بروكسي مكسيكي مجاني وتفعيله</button>
+          <div id="autoProxyResult" class="test-result"></div>
+        </div>
+
+        <hr style="border-color:var(--line);margin:16px 0" />
+        <b>🔒 ثابت (WireGuard):</b>
         <p class="muted" style="font-size:13px">
           الصق محتوى ملف <b>WireGuard</b> لخادم مكسيكي (من مزوّد VPN مثل Mullvad/ProtonVPN) ثم اضغط «تفعيل».
           يخرج التطبيق من المكسيك تلقائياً، بينما يبقى وصولك للوحة كما هو.

@@ -263,11 +263,18 @@ function dialSocks5(proxy, host, port) {
   });
 }
 
-function dial(host, port) {
+// يحدّد البروكسي المستخدم: صريح (opts.proxy) أو بلا (opts.noProxy) أو العام من الإعدادات
+function resolveProxy(opts = {}) {
+  if (opts.proxy) return opts.proxy;
+  if (opts.noProxy) return null;
   const up = config.settings.upstream;
-  if (up && up.enabled && up.host && up.port) {
-    if (up.type === 'socks5') return dialSocks5(up, host, port);
-    return dialHttpProxy(up, host, port);
+  return up && up.enabled && up.host && up.port ? up : null;
+}
+
+function dial(host, port, proxy) {
+  if (proxy && proxy.host && proxy.port) {
+    if (proxy.type === 'socks5') return dialSocks5(proxy, host, port);
+    return dialHttpProxy(proxy, host, port);
   }
   return dialDirect(host, port);
 }
@@ -276,7 +283,8 @@ function dial(host, port) {
 // جلب الموارد البعيدة (يدعم البروكسي + HTTPS + التحويلات + Headers مخصّصة)
 // ---------------------------------------------------------------------------
 function upstreamFetch(targetUrl, opts = {}) {
-  const { extraHeaders = {}, redirects = 5, method = 'GET' } = opts;
+  const { extraHeaders = {}, redirects = 5, method = 'GET', timeout = 25000 } = opts;
+  const proxy = resolveProxy(opts);
   return new Promise((resolve, reject) => {
     let u;
     try {
@@ -295,7 +303,7 @@ function upstreamFetch(targetUrl, opts = {}) {
       Host: u.host,
     };
 
-    dial(u.hostname, port)
+    dial(u.hostname, port, proxy)
       .then((tunnel) => {
         const transport = isHttps ? https : http;
         const reqOptions = {
@@ -320,7 +328,7 @@ function upstreamFetch(targetUrl, opts = {}) {
           resolve({ status: res.statusCode, headers: res.headers, stream: res, finalUrl: targetUrl });
         });
         req.on('error', reject);
-        req.setTimeout(25000, () => req.destroy(new Error('انتهت مهلة الاتصال')));
+        req.setTimeout(timeout, () => req.destroy(new Error('انتهت مهلة الاتصال')));
         req.end();
       })
       .catch(reject);
@@ -635,6 +643,69 @@ function serveStatic(res, urlPath) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// بحث تلقائي عن بروكسي مكسيكي مجاني واختباره ضد المزوّد (بدون أي إعداد من المستخدم)
+// المصدر: ProxyScrape (قوائم مجانية محدّثة، تصفية حسب الدولة)
+// ---------------------------------------------------------------------------
+async function fetchFreeMexicanProxies() {
+  const urls = [
+    'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=mx&protocol=socks5',
+    'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=mx&protocol=http',
+  ];
+  const proxies = [];
+  const seen = new Set();
+  for (const url of urls) {
+    try {
+      const txt = await fetchText(url, { noProxy: true, timeout: 15000 });
+      for (const raw of txt.split(/\s+/)) {
+        const m = /^(socks5|http|https):\/\/([\d.]+):(\d+)$/i.exec(raw.trim());
+        if (!m) continue;
+        const proxy = { type: m[1].toLowerCase() === 'socks5' ? 'socks5' : 'http', host: m[2], port: Number(m[3]) };
+        const k = proxy.type + proxy.host + proxy.port;
+        if (!seen.has(k)) { seen.add(k); proxies.push(proxy); }
+      }
+    } catch {}
+  }
+  return proxies;
+}
+
+async function autoFindMexicanProxy() {
+  const proxies = await fetchFreeMexicanProxies();
+  if (!proxies.length) return { ok: false, error: 'تعذّر جلب قائمة البروكسيات المجانية', total: 0 };
+
+  // هدف الاختبار: مزوّد المستخدم إن وُجد (الأدق)، وإلا فحص أن الخروج من المكسيك
+  const src = config.sources.find((s) => s.type === 'xtream');
+  const testUrl = src
+    ? `${xtreamBase(src.server)}/player_api.php?username=${encodeURIComponent(src.username)}&password=${encodeURIComponent(src.password)}`
+    : 'https://ifconfig.co/country';
+
+  const isGood = async (proxy) => {
+    try {
+      const txt = await fetchText(testUrl, { proxy, timeout: 9000, redirects: 3 });
+      return src ? /"user_info"|"auth"\s*:/.test(txt) : /mexico/i.test(txt);
+    } catch {
+      return false;
+    }
+  };
+
+  // اختبار متوازٍ بميزانية وقت، يتوقّف عند أول بروكسي ناجح
+  const start = Date.now();
+  const budget = 48000;
+  const concurrency = 14;
+  let idx = 0;
+  let found = null;
+  const list = proxies.slice(0, 80);
+  async function worker() {
+    while (idx < list.length && !found && Date.now() - start < budget) {
+      const proxy = list[idx++];
+      if (await isGood(proxy)) found = proxy;
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  if (found) return { ok: true, proxy: found, total: proxies.length };
+  return { ok: false, error: 'لم يُعثر على بروكسي مكسيكي مجاني يعمل حالياً', total: proxies.length };
+}
+
 // يجمع محتوى نوع معيّن (live | movies | series) عبر كل المصادر
 function collect(kind) {
   const out = [];
@@ -898,6 +969,24 @@ const requestHandler = async (req, res) => {
     }
     if (p === '/api/admin/vpn/down' && req.method === 'POST') {
       return sendJSON(res, 200, await runVpn('down'));
+    }
+
+    // بحث تلقائي عن بروكسي مكسيكي مجاني وتفعيله (بدون أي إعداد من المستخدم)
+    if (p === '/api/admin/autoproxy' && req.method === 'POST') {
+      const r = await autoFindMexicanProxy();
+      if (r.ok) {
+        config.settings.upstream = {
+          enabled: true,
+          type: r.proxy.type,
+          host: r.proxy.host,
+          port: r.proxy.port,
+          username: '',
+          password: '',
+        };
+        saveConfig(config);
+        return sendJSON(res, 200, { ok: true, proxy: r.proxy, total: r.total });
+      }
+      return sendJSON(res, 200, { ok: false, error: r.error, total: r.total });
     }
 
     // إحصائيات المشاهدين (للمدير)

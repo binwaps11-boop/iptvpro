@@ -141,6 +141,25 @@ function bind() {
     $('#testResult').textContent = r.ok ? `✓ يعمل — IP الخارج: ${r.ip}` : '✗ فشل: ' + r.error;
   };
 
+  $('#btnAutoProxy').onclick = async () => {
+    const btn = $('#btnAutoProxy');
+    btn.disabled = true;
+    $('#autoProxyResult').textContent = '🔎 جارٍ البحث والاختبار… (قد يستغرق دقيقة)';
+    try {
+      const r = await fetch('/api/admin/autoproxy', { method: 'POST' }).then((x) => x.json());
+      if (r.ok) {
+        $('#autoProxyResult').textContent = `✅ تم العثور وتفعيل بروكسي مكسيكي: ${r.proxy.type} ${r.proxy.host}:${r.proxy.port} — جرّب الاستيراد الآن.`;
+        toast('تم تفعيل بروكسي مكسيكي مجاني ✓ — اذهب لمصادر IPTV واستورد', 6000);
+        refresh();
+      } else {
+        $('#autoProxyResult').textContent = `✗ ${r.error || 'لم يُعثر على بروكسي يعمل'} (فُحص ${r.total || 0}). جرّب مرة أخرى أو استخدم WireGuard.`;
+      }
+    } catch (e) {
+      $('#autoProxyResult').textContent = '✗ فشل البحث: ' + e.message;
+    }
+    btn.disabled = false;
+  };
+
   $('#btnVpnUp').onclick = async () => {
     const config = $('#vpnConfig').value.trim();
     if (!config) return toast('الصق إعداد WireGuard أولاً', 4000);
