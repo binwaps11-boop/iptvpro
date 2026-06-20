@@ -65,6 +65,13 @@ WantedBy=multi-user.target
 UNIT
 
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR" 2>/dev/null || true
+
+# السماح للتطبيق بإدارة توجيه المكسيك من اللوحة (sudo بلا كلمة مرور لسكربت واحد فقط)
+chmod +x "$APP_DIR/deploy/vpn-apply.sh" 2>/dev/null || true
+echo "$SERVICE_USER ALL=(root) NOPASSWD: $APP_DIR/deploy/vpn-apply.sh" > /etc/sudoers.d/iptvpro
+chmod 440 /etc/sudoers.d/iptvpro
+DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard >/dev/null 2>&1 || true
+
 systemctl daemon-reload
 systemctl enable iptvpro
 systemctl restart iptvpro

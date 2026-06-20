@@ -115,3 +115,7 @@ client/public/__manus__/version.json
 # IPTV Pro Desktop — بيانات المستخدم المحلية
 desktop/config.json
 
+
+# WireGuard config written at runtime (contains private key)
+desktop/mx.conf
+desktop/data/mx.conf

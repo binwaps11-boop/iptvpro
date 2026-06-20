@@ -93,6 +93,28 @@
         </form>
       </section>
 
+      <!-- توجيه المكسيك (VPN) -->
+      <section class="panel">
+        <h3>🇲🇽 توجيه المكسيك (VPN) — لتجاوز الحظر الجغرافي</h3>
+        <div id="vpnStatus" class="vpn-status">…</div>
+        <p class="muted" style="font-size:13px">
+          الصق محتوى ملف <b>WireGuard</b> لخادم مكسيكي (من مزوّد VPN مثل Mullvad/ProtonVPN) ثم اضغط «تفعيل».
+          يخرج التطبيق من المكسيك تلقائياً، بينما يبقى وصولك للوحة كما هو.
+        </p>
+        <textarea id="vpnConfig" rows="8" placeholder="[Interface]
+PrivateKey = ...
+Address = 10.x.x.x/32
+[Peer]
+PublicKey = ...
+Endpoint = <IP-مكسيكي>:51820
+AllowedIPs = 0.0.0.0/0"></textarea>
+        <div class="grid2">
+          <button id="btnVpnUp" class="btn">تفعيل توجيه المكسيك</button>
+          <button id="btnVpnDown" class="btn ghost">إيقاف</button>
+        </div>
+        <div id="vpnResult" class="test-result"></div>
+      </section>
+
       <!-- كلمة المرور -->
       <section class="panel">
         <h3>🔒 كلمة مرور المدير</h3>

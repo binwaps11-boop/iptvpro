@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,25 @@ const PLAYLIST_TTL = 1500; // ms — مدة صلاحية قائمة البث ا�
 const MAX_CACHE_BYTES = 512 * 1024 * 1024; // سقف ذاكرة الأجزاء
 const MAX_SEG_BYTES = 24 * 1024 * 1024; // أكبر جزء يُخزَّن
 const VIEWER_TTL = 45000; // اعتبار الجهاز نشطاً خلال هذه المدة
+
+// توجيه المكسيك (WireGuard) المُدار من اللوحة
+const VPN_SCRIPT = path.join(__dirname, 'deploy', 'vpn-apply.sh');
+const VPN_CONF = process.env.CONFIG_DIR
+  ? path.join(process.env.CONFIG_DIR, 'mx.conf')
+  : path.join(__dirname, 'mx.conf');
+
+// يشغّل مساعد الـ VPN عبر sudo ويعيد JSON
+function runVpn(action) {
+  return new Promise((resolve) => {
+    execFile('sudo', ['-n', VPN_SCRIPT, action], { timeout: 35000 }, (err, stdout) => {
+      try {
+        resolve(JSON.parse((stdout || '').trim() || '{}'));
+      } catch {
+        resolve({ ok: false, error: (stdout || (err && err.message) || 'فشل').toString().slice(0, 200) });
+      }
+    });
+  });
+}
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -858,6 +878,26 @@ const requestHandler = async (req, res) => {
     // معلومات الشبكة
     if (p === '/api/netinfo' && req.method === 'GET') {
       return sendJSON(res, 200, { addresses: lanAddresses(), port: USER_PORT, adminPort: ADMIN_PORT });
+    }
+
+    // ----- توجيه المكسيك (VPN) من اللوحة -----
+    if (p === '/api/admin/vpn' && req.method === 'GET') {
+      return sendJSON(res, 200, await runVpn('status'));
+    }
+    if (p === '/api/admin/vpn' && req.method === 'POST') {
+      const body = await readBody(req);
+      const cfg = (body.config || '').trim();
+      if (!/\[Interface\]/i.test(cfg) || !/\[Peer\]/i.test(cfg))
+        return sendJSON(res, 400, { ok: false, error: 'إعداد WireGuard غير صالح (يجب أن يحتوي [Interface] و[Peer]).' });
+      try {
+        fs.writeFileSync(VPN_CONF, cfg + '\n', { mode: 0o600 });
+      } catch (e) {
+        return sendJSON(res, 500, { ok: false, error: 'تعذّر حفظ الإعداد: ' + e.message });
+      }
+      return sendJSON(res, 200, await runVpn('up'));
+    }
+    if (p === '/api/admin/vpn/down' && req.method === 'POST') {
+      return sendJSON(res, 200, await runVpn('down'));
     }
 
     // إحصائيات المشاهدين (للمدير)

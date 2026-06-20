@@ -16,7 +16,23 @@ async function init() {
   if (me.mustChangePassword) $('#pwBanner').classList.remove('hidden');
   await refresh();
   bind();
+  loadVpn();
   setInterval(refreshStats, 10000);
+}
+
+// ===== توجيه المكسيك (VPN) =====
+async function loadVpn() {
+  try {
+    const v = await fetch('/api/admin/vpn').then((r) => r.json());
+    renderVpn(v);
+  } catch {}
+}
+function renderVpn(v) {
+  const el = document.getElementById('vpnStatus');
+  if (!el) return;
+  if (v && v.active)
+    el.innerHTML = `🟢 مُفعّل — التطبيق يخرج من: <b>${esc(v.country || '?')}</b> (${esc(v.ip || '')})`;
+  else el.innerHTML = '⚪ غير مُفعّل — التطبيق يخرج من IP السيرفر مباشرةً.';
 }
 
 async function refresh() {
@@ -123,6 +139,26 @@ function bind() {
     $('#testResult').textContent = 'جارٍ الاختبار…';
     const r = await fetch('/api/test-upstream').then((x) => x.json());
     $('#testResult').textContent = r.ok ? `✓ يعمل — IP الخارج: ${r.ip}` : '✗ فشل: ' + r.error;
+  };
+
+  $('#btnVpnUp').onclick = async () => {
+    const config = $('#vpnConfig').value.trim();
+    if (!config) return toast('الصق إعداد WireGuard أولاً', 4000);
+    $('#vpnResult').textContent = 'جارٍ التفعيل… (قد يستغرق دقيقة)';
+    const r = await jpost('/api/admin/vpn', { config });
+    if (r.ok && r.active) {
+      $('#vpnResult').textContent = `✅ تم — التطبيق يخرج من ${r.country || '?'} (${r.ip || ''})`;
+      toast('تم تفعيل توجيه المكسيك ✓ — جرّب استيراد القنوات الآن', 5000);
+    } else {
+      $('#vpnResult').textContent = '✗ ' + (r.error || 'فشل التفعيل');
+    }
+    loadVpn();
+  };
+  $('#btnVpnDown').onclick = async () => {
+    $('#vpnResult').textContent = 'جارٍ الإيقاف…';
+    await fetch('/api/admin/vpn/down', { method: 'POST' });
+    $('#vpnResult').textContent = 'تم الإيقاف.';
+    loadVpn();
   };
 
   $('#formPw').onsubmit = async (e) => {
