@@ -3,6 +3,17 @@ let STATE = { live: [], movies: [], series: [], sources: [], settings: {} };
 let view = 'live'; // live | movies | series
 let activeCat = '__all__';
 let hls = null;
+let currentChannel = null;
+
+// معرّف الجهاز (لتتبّع الأجهزة وحد الترخيص)
+const CID = (() => {
+  let c = localStorage.getItem('cid');
+  if (!c) {
+    c = 'd-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem('cid', c);
+  }
+  return c;
+})();
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -147,16 +158,38 @@ async function openSeries(item) {
 
 // ===== التشغيل =====
 function streamUrl(item) {
-  return STATE.settings.useProxy ? '/proxy?u=' + encodeURIComponent(item.url) : item.url;
+  const live = item.type === 'live' || /\.m3u8(\?|$)/i.test(item.url) || /\/live\//.test(item.url);
+  if (!STATE.settings.useProxy) return item.url;
+  const cidParam = live ? '&cid=' + encodeURIComponent(CID) : '';
+  return '/proxy?u=' + encodeURIComponent(item.url) + cidParam;
+}
+
+function buildQualityMenu() {
+  const sel = $('#quality');
+  sel.innerHTML = '<option value="-1">جودة: تلقائي</option>';
+  if (!hls || !hls.levels) return;
+  hls.levels.forEach((lvl, i) => {
+    const h = lvl.height ? lvl.height + 'p' : Math.round((lvl.bitrate || 0) / 1000) + 'k';
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = 'جودة: ' + h;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => {
+    if (hls) hls.currentLevel = Number(sel.value);
+  };
 }
 
 function play(item) {
   const video = $('#video');
+  currentChannel = item.name;
   const url = streamUrl(item);
   const live = item.type === 'live' || /\.m3u8(\?|$)/i.test(item.url) || /\/live\//.test(item.url);
   $('#nowPlaying').textContent = item.name;
   $('#playerStatus').textContent = 'جارٍ الاتصال…';
   $('#player').classList.remove('hidden');
+  $('#quality').innerHTML = '<option value="-1">جودة: تلقائي</option>';
+  sendPing(item.name);
 
   if (hls) { hls.destroy(); hls = null; }
 
@@ -172,11 +205,16 @@ function play(item) {
     hls.attachMedia(video);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       $('#playerStatus').textContent = '🔴 بث مباشر';
+      buildQualityMenu();
       video.play().catch(() => {});
     });
     hls.on(Hls.Events.ERROR, (e, data) => {
       if (data.fatal) {
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        if (data.response && data.response.code === 429) {
+          $('#playerStatus').textContent = '🚫 بلغت الحد الأقصى للأجهزة في الاشتراك. فعّل ترخيصاً أكبر.';
+          hls.destroy();
+          hls = null;
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           $('#playerStatus').textContent = 'خطأ شبكة — إعادة المحاولة…';
           hls.startLoad();
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
@@ -201,11 +239,56 @@ function play(item) {
 
 function closePlayer() {
   $('#player').classList.add('hidden');
+  currentChannel = null;
   const video = $('#video');
   video.pause();
   video.removeAttribute('src');
   video.load();
   if (hls) { hls.destroy(); hls = null; }
+}
+
+// ===== نبضة الجهاز + عدّاد المشاهدين =====
+async function sendPing(channel) {
+  try {
+    const r = await fetch('/api/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cid: CID, channel: channel || currentChannel }),
+    }).then((x) => x.json());
+    updateViewers(r.active, r.cap);
+  } catch {}
+}
+function updateViewers(active, cap) {
+  if (active == null) return;
+  $('#viewers').textContent = `👁 ${active}${cap ? ' / ' + cap : ''}`;
+}
+async function pollViewers() {
+  try {
+    const r = await fetch('/api/viewers').then((x) => x.json());
+    updateViewers(r.active, r.cap);
+  } catch {}
+}
+
+// ===== التراخيص / التفعيل =====
+async function loadLicense() {
+  const lic = await fetch('/api/license').then((r) => r.json());
+  const box = $('#licInfo');
+  if (!lic.enabled) {
+    box.innerHTML = '🔓 وضع مفتوح: نظام التراخيص غير مُفعّل (بلا حد أجهزة).';
+  } else if (lic.activated) {
+    box.innerHTML = `✅ مُفعّل<br>العميل: <b>${escapeHtml(lic.customer || '')}</b><br>الباقة: ${escapeHtml(
+      lic.plan || ''
+    )}<br>حد الأجهزة: ${lic.maxDevices || 'بلا حد'}<br>المتبقّي: ${lic.daysLeft} يوم`;
+  } else {
+    box.innerHTML = `⚠️ غير مُفعّل — وضع تجريبي (${lic.maxDevices} أجهزة فقط).<br><span style="color:#ff9">${escapeHtml(
+      lic.error || ''
+    )}</span><br>أدخل سيريالاً لرفع الحد.`;
+    // افتح نافذة التفعيل تلقائياً عند الإقلاع إن كان النظام مفعّلاً وغير منشّط
+    if (!sessionStorage.getItem('licShown')) {
+      sessionStorage.setItem('licShown', '1');
+      $('#licenseModal').classList.remove('hidden');
+    }
+  }
 }
 
 // ===== المصادر =====
@@ -275,6 +358,25 @@ function bind() {
   };
   $('#btnSources').onclick = () => $('#sourcesModal').classList.remove('hidden');
   $('#btnSettings').onclick = () => $('#settingsModal').classList.remove('hidden');
+  $('#btnLicense').onclick = () => {
+    loadLicense();
+    $('#licenseModal').classList.remove('hidden');
+  };
+  $('#btnActivate').onclick = async () => {
+    $('#actResult').textContent = 'جارٍ التفعيل…';
+    const r = await fetch('/api/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serial: $('#serialInput').value }),
+    }).then((x) => x.json());
+    if (r.ok) {
+      $('#actResult').textContent = '✅ تم التفعيل بنجاح';
+      loadLicense();
+      pollViewers();
+    } else {
+      $('#actResult').textContent = '✗ ' + (r.error || 'فشل التفعيل');
+    }
+  };
   $$('[data-close]').forEach((b) => (b.onclick = () => b.closest('.modal').classList.add('hidden')));
   $$('.modal').forEach((m) => (m.onclick = (e) => { if (e.target === m) m.classList.add('hidden'); }));
 
@@ -353,3 +455,11 @@ function bind() {
 bind();
 loadState();
 loadNetInfo();
+loadLicense();
+pollViewers();
+
+// نبضة دورية أثناء التشغيل + تحديث عدّاد المشاهدين
+setInterval(() => {
+  if (currentChannel) sendPing();
+  else pollViewers();
+}, 12000);

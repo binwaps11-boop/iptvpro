@@ -18,13 +18,22 @@ import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+const PUBKEY_PATH = path.join(__dirname, 'license_pub.pem');
 const PORT = process.env.PORT || 8787;
+
+// حدود الذاكرة المؤقتة المشتركة (Shared Relay)
+const PLAYLIST_TTL = 1500; // ms — مدة صلاحية قائمة البث المشتركة
+const MAX_CACHE_BYTES = 512 * 1024 * 1024; // سقف ذاكرة الأجزاء
+const MAX_SEG_BYTES = 24 * 1024 * 1024; // أكبر جزء يُخزَّن
+const VIEWER_TTL = 45000; // اعتبار الجهاز نشطاً خلال هذه المدة
+const TRIAL_DEVICES = 3; // حد الأجهزة قبل التفعيل (عند تفعيل نظام التراخيص)
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -42,6 +51,7 @@ function defaultConfig() {
       // بروكسي/VPN خاص بالمستخدم (يُطبّق على كل الطلبات الصادرة)
       upstream: { enabled: false, type: 'http', host: '', port: 0, username: '', password: '' },
     },
+    activation: null, // {serial, activatedAt}
   };
 }
 
@@ -226,6 +236,171 @@ function fetchText(url, opts = {}) {
         r.stream.on('error', reject);
       })
   );
+}
+
+function fetchBuffer(url, opts = {}) {
+  return upstreamFetch(url, opts).then(
+    (r) =>
+      new Promise((resolve, reject) => {
+        const chunks = [];
+        r.stream.on('data', (c) => chunks.push(c));
+        r.stream.on('end', () =>
+          resolve({
+            buf: Buffer.concat(chunks),
+            ct: r.headers['content-type'] || 'application/octet-stream',
+            status: r.status,
+            finalUrl: r.finalUrl,
+          })
+        );
+        r.stream.on('error', reject);
+      })
+  );
+}
+
+// ---------------------------------------------------------------------------
+// محرّك Relay المشترك — يخدم آلاف الأجهزة على نفس القناة من سحبة واحدة
+// (تخزين مؤقت للأجزاء + دمج الطلبات المتزامنة Coalescing) — مثل Jellyfin
+// ---------------------------------------------------------------------------
+const segCache = new Map(); // url -> {buf, ct, size, last}
+const segInflight = new Map(); // url -> Promise (دمج الطلبات المتطابقة)
+const plCache = new Map(); // url -> {text, finalUrl, ts}
+const plInflight = new Map();
+let cacheBytes = 0;
+
+function evictIfNeeded() {
+  if (cacheBytes <= MAX_CACHE_BYTES) return;
+  const entries = [...segCache.entries()].sort((a, b) => a[1].last - b[1].last);
+  for (const [k, v] of entries) {
+    segCache.delete(k);
+    cacheBytes -= v.size;
+    if (cacheBytes <= MAX_CACHE_BYTES * 0.8) break;
+  }
+}
+
+// جزء بثّ مشترك: يُسحب مرة واحدة مهما كثُر الطالبون له في نفس اللحظة
+async function getSharedSegment(url) {
+  const hit = segCache.get(url);
+  if (hit) {
+    hit.last = Date.now();
+    return hit;
+  }
+  if (segInflight.has(url)) return segInflight.get(url);
+  const promise = (async () => {
+    const { buf, ct } = await fetchBuffer(url);
+    const entry = { buf, ct, size: buf.length, last: Date.now() };
+    if (buf.length <= MAX_SEG_BYTES) {
+      segCache.set(url, entry);
+      cacheBytes += buf.length;
+      evictIfNeeded();
+    }
+    return entry;
+  })();
+  segInflight.set(url, promise);
+  try {
+    return await promise;
+  } finally {
+    segInflight.delete(url);
+  }
+}
+
+// قائمة بث حيّة مشتركة بمهلة قصيرة: 2000 جهاز = طلب واحد للمزوّد كل ~1.5ث
+async function getSharedPlaylist(url) {
+  const hit = plCache.get(url);
+  if (hit && Date.now() - hit.ts < PLAYLIST_TTL) return hit;
+  if (plInflight.has(url)) return plInflight.get(url);
+  const promise = (async () => {
+    const { buf, finalUrl } = await fetchBuffer(url);
+    const entry = { text: buf.toString('utf8'), finalUrl: finalUrl || url, ts: Date.now() };
+    plCache.set(url, entry);
+    return entry;
+  })();
+  plInflight.set(url, promise);
+  try {
+    return await promise;
+  } finally {
+    plInflight.delete(url);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// تتبّع الأجهزة المشاهِدة (للحد الأقصى حسب الترخيص + عرض العدّاد)
+// ---------------------------------------------------------------------------
+const viewers = new Map(); // cid -> {ip, last, channel}
+
+function pruneViewers() {
+  const now = Date.now();
+  for (const [cid, v] of viewers) if (now - v.last > VIEWER_TTL) viewers.delete(cid);
+}
+function activeViewerCount() {
+  pruneViewers();
+  return viewers.size;
+}
+function touchViewer(cid, ip, channel) {
+  viewers.set(cid, { ip, last: Date.now(), channel: channel || (viewers.get(cid) || {}).channel });
+}
+
+// ---------------------------------------------------------------------------
+// نظام التراخيص (تفعيل بالسيريال موقّع رقمياً Ed25519)
+// المفتاح العام يُشحن مع التطبيق؛ المفتاح الخاص يبقى لدى صاحب الخدمة لتوليد السيريالات.
+// ---------------------------------------------------------------------------
+function loadPubKey() {
+  try {
+    return fs.readFileSync(PUBKEY_PATH, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+// يتحقق من سيريال؛ يعيد {ok, data?, error?, open?}
+function verifySerial(serial) {
+  const pub = loadPubKey();
+  if (!pub) return { ok: false, open: true }; // نظام التراخيص غير مُفعّل (وضع مفتوح)
+  if (!serial || typeof serial !== 'string' || !serial.includes('.'))
+    return { ok: false, error: 'صيغة السيريال غير صحيحة' };
+  try {
+    const [pB64, sB64] = serial.trim().split('.');
+    const payload = Buffer.from(pB64, 'base64url');
+    const sig = Buffer.from(sB64, 'base64url');
+    if (!crypto.verify(null, payload, pub, sig))
+      return { ok: false, error: 'توقيع غير صالح (سيريال مزيّف أو غير مطابق لمفتاحك)' };
+    const data = JSON.parse(payload.toString('utf8'));
+    if (data.exp && Date.now() > data.exp) return { ok: false, error: 'انتهت صلاحية الاشتراك', data };
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: 'تعذّر قراءة السيريال: ' + e.message };
+  }
+}
+
+// حالة الترخيص الحالية بناءً على ما هو مُفعّل في config
+function licenseStatus() {
+  const pub = loadPubKey();
+  if (!pub) return { enabled: false, activated: true, maxDevices: 0 }; // مفتوح = بلا حد
+  const serial = config.activation && config.activation.serial;
+  const v = verifySerial(serial);
+  if (v.ok) {
+    const d = v.data;
+    return {
+      enabled: true,
+      activated: true,
+      customer: d.customer || '',
+      plan: d.plan || '',
+      maxDevices: d.maxDevices || 0,
+      exp: d.exp || 0,
+      daysLeft: d.exp ? Math.max(0, Math.ceil((d.exp - Date.now()) / 86400000)) : 0,
+    };
+  }
+  return {
+    enabled: true,
+    activated: false,
+    maxDevices: TRIAL_DEVICES,
+    error: serial ? v.error : '',
+  };
+}
+
+// السقف الفعّال لعدد الأجهزة (0 = بلا حد)
+function deviceCap() {
+  const s = licenseStatus();
+  return s.activated ? s.maxDevices || 0 : TRIAL_DEVICES;
 }
 
 // ---------------------------------------------------------------------------
@@ -443,36 +618,61 @@ const server = http.createServer(async (req, res) => {
   const p = u.pathname;
 
   try {
-    // ----- البروكسي / Stream relay -----
+    // ----- البروكسي / Shared Relay -----
     if (p === '/proxy') {
       const target = u.searchParams.get('u');
       if (!target) {
         res.writeHead(400);
         return res.end('missing u');
       }
-      // مرّر طلب النطاق (Range) للسماح بالتقديم/الترجيع في الأفلام والمسلسلات
-      const range = req.headers['range'];
-      const r = await upstreamFetch(target, { extraHeaders: range ? { Range: range } : {} });
-      const ct = (r.headers['content-type'] || '').toLowerCase();
-      const isPlaylist =
-        ct.includes('mpegurl') || /\.m3u8(\?|$)/i.test(target) || ct.includes('application/x-mpegurl');
-
       res.setHeader('Access-Control-Allow-Origin', '*');
+      const range = req.headers['range'];
+      const isPlaylist = /\.m3u8(\?|$)/i.test(target);
+      const clientIp = req.socket.remoteAddress;
 
-      if (isPlaylist) {
-        const chunks = [];
-        r.stream.on('data', (c) => chunks.push(c));
-        r.stream.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          const rewritten = rewriteM3U8(text, r.finalUrl);
-          res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8' });
-          res.end(rewritten);
-        });
-        r.stream.on('error', () => res.end());
-        return;
+      // قائمة بث حيّة: ذاكرة مشتركة + فرض حد الأجهزة عند بدء قناة جديدة
+      if (isPlaylist && !range) {
+        const cid = u.searchParams.get('cid');
+        if (cid) {
+          const cap = deviceCap();
+          const isNew = !viewers.has(cid);
+          if (cap > 0 && isNew && activeViewerCount() >= cap) {
+            res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(
+              JSON.stringify({ error: `بلغت الحد الأقصى للأجهزة في ترخيصك (${cap}).` })
+            );
+          }
+          touchViewer(cid, clientIp, target);
+        }
+        const pl = await getSharedPlaylist(target);
+        res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8' });
+        return res.end(rewriteM3U8(pl.text, pl.finalUrl));
       }
 
-      // أجزاء البث والملفات (ts/m4s/mp4/مفاتيح...) — تمرير مباشر مع دعم Range
+      // أجزاء البث بدون Range: تُسحب مرة واحدة وتُوزَّع على كل الأجهزة (anti-stutter)
+      if (!range) {
+        try {
+          const seg = await getSharedSegment(target);
+          // قد يكون المحتوى قائمة فرعية (variant) — أعِد كتابته
+          const ctl = (seg.ct || '').toLowerCase();
+          if (ctl.includes('mpegurl') || ctl.includes('application/x-mpegurl')) {
+            res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8' });
+            return res.end(rewriteM3U8(seg.buf.toString('utf8'), target));
+          }
+          res.writeHead(200, {
+            'Content-Type': seg.ct,
+            'Content-Length': seg.buf.length,
+            'Cache-Control': 'public, max-age=30',
+          });
+          return res.end(seg.buf);
+        } catch (e) {
+          res.writeHead(502);
+          return res.end('upstream error');
+        }
+      }
+
+      // طلبات Range (أفلام/مسلسلات للتقديم) — تمرير مباشر دون تخزين
+      const r = await upstreamFetch(target, { extraHeaders: { Range: range } });
       const headers = {
         'Content-Type': r.headers['content-type'] || 'application/octet-stream',
         'Accept-Ranges': 'bytes',
@@ -534,6 +734,41 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { addresses: lanAddresses(), port: PORT });
     }
 
+    // ----- نظام التراخيص / الاشتراكات -----
+    if (p === '/api/license' && req.method === 'GET') {
+      return sendJSON(res, 200, licenseStatus());
+    }
+
+    if (p === '/api/activate' && req.method === 'POST') {
+      const body = await readBody(req);
+      const v = verifySerial((body.serial || '').trim());
+      if (!v.ok) return sendJSON(res, 400, { ok: false, error: v.error || 'سيريال غير صالح' });
+      config.activation = { serial: body.serial.trim(), activatedAt: Date.now() };
+      saveConfig(config);
+      return sendJSON(res, 200, { ok: true, license: licenseStatus() });
+    }
+
+    // عدّاد الأجهزة المشاهِدة حالياً + السقف
+    if (p === '/api/viewers' && req.method === 'GET') {
+      return sendJSON(res, 200, {
+        active: activeViewerCount(),
+        cap: deviceCap(),
+        bySource: [...viewers.values()].length,
+      });
+    }
+
+    // نبضة إبقاء الجهاز نشطاً (heartbeat)
+    if (p === '/api/ping' && req.method === 'POST') {
+      const body = await readBody(req);
+      if (body.cid) {
+        const cap = deviceCap();
+        if (cap > 0 && !viewers.has(body.cid) && activeViewerCount() >= cap)
+          return sendJSON(res, 429, { ok: false, error: 'بلغت الحد الأقصى للأجهزة', cap });
+        touchViewer(body.cid, req.socket.remoteAddress, body.channel);
+      }
+      return sendJSON(res, 200, { ok: true, active: activeViewerCount(), cap: deviceCap() });
+    }
+
     if (p === '/api/sources' && req.method === 'DELETE') {
       const id = u.searchParams.get('id');
       config.sources = config.sources.filter((s) => s.id !== id);
@@ -577,5 +812,10 @@ server.listen(PORT, '0.0.0.0', () => {
   for (const ip of lanAddresses()) {
     console.log(`     من أجهزة الشبكة:     http://${ip}:${PORT}   ← افتحه على التلفزيون/الجوال (مثل Jellyfin)`);
   }
-  console.log('');
+  const ls = licenseStatus();
+  if (!ls.enabled) console.log(`     الترخيص:             وضع مفتوح (بلا حد أجهزة)`);
+  else if (ls.activated)
+    console.log(`     الترخيص:             مُفعّل · ${ls.customer || ''} · حد ${ls.maxDevices || '∞'} جهاز · ${ls.daysLeft} يوم متبقٍّ`);
+  else console.log(`     الترخيص:             غير مُفعّل (تجريبي: ${TRIAL_DEVICES} أجهزة)`);
+  console.log(`     Shared Relay مفعّل: نفس القناة تُسحب مرة واحدة وتُوزَّع على كل الأجهزة\n`);
 });

@@ -42,7 +42,25 @@ body {
   outline: none;
 }
 .search:focus { border-color: var(--accent); }
-.actions { margin-inline-start: auto; display: flex; gap: 8px; }
+.actions { margin-inline-start: auto; display: flex; gap: 8px; align-items: center; }
+.viewers {
+  font-size: 13px;
+  color: var(--accent2);
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  padding: 7px 12px;
+  border-radius: 999px;
+}
+.player-controls { display: flex; gap: 8px; align-items: center; }
+.quality {
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--text);
+}
+.lic-info { font-size: 14px; margin-bottom: 12px; line-height: 1.7; }
+.lic-lbl { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .btn {
   padding: 10px 16px;
   border-radius: 12px;

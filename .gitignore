@@ -114,3 +114,8 @@ client/public/__manus__/version.json
 
 # IPTV Pro Desktop — بيانات المستخدم المحلية
 desktop/config.json
+
+# License system secrets (vendor-only)
+desktop/license/private.pem
+desktop/license/issued.json
+desktop/license_pub.pem
