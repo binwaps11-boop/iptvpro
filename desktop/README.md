@@ -93,6 +93,56 @@ cd /opt/iptvpro && git pull && systemctl restart iptvpro   # تحديث
 
 ---
 
+## 🛡️ نظام VPN Egress الإنتاجي (WireGuard/OpenVPN + Split-tunnel + Kill Switch)
+
+نظام يوجّه **طلبات IPTV فقط** عبر VPN في دولة مسموحة (مثل المكسيك)، ويبقي SSH/الإدارة على IP
+السيرفر، مع **Kill Switch** (لا تسريب عند انقطاع VPN)، **watchdog** (إعادة اتصال + fallback)، وكل
+الأسرار في `.env` (لا مفاتيح داخل الكود).
+
+### التثبيت والتشغيل
+```bash
+cd /opt/iptvpro/desktop
+cp .env.example .env && nano .env          # اضبط VPN_COUNTRY والأسرار
+sudo bash vpn/install-vpn.sh               # يثبّت الأدوات + خدمة systemd (تعمل بعد الإقلاع)
+sudo nano /etc/iptvpro/vpn/MX.conf         # ضع ملف WireGuard المكسيكي هنا (فيه AllowedIPs=0.0.0.0/0)
+sudo systemctl restart iptvpro-vpn         # تشغيل
+```
+
+> **أين تضع المفاتيح؟** ملف WireGuard كاملاً (وفيه المفتاح الخاص) في `/etc/iptvpro/vpn/MX.conf`
+> — **خارج المستودع** (لا يُرفع إلى Git). `.env` للأسرار الأخرى وهو مُتجاهَل في Git أيضاً.
+
+### الفحص (نتائج حقيقية)
+```bash
+sudo bash vpn/verify.sh
+```
+يطبع: حالة VPN · IP السيرفر مقابل IP التطبيق · الدولة · مسار الحزمة · أكواد HTTP على مزوّدك
+(200/403/429/1020) · اختبار Kill Switch · الحالة بعد كل ذلك.
+
+### تغيير الدولة
+- **فوري (ad-hoc):** `sudo bash vpn/vpnctl.sh up US`
+- **دائم:** عدّل `VPN_COUNTRY=US` في `.env` ثم `sudo systemctl restart iptvpro-vpn`
+- ضع ملف الدولة الجديدة باسمها: `/etc/iptvpro/vpn/US.conf` (أو `US.ovpn` لـ OpenVPN).
+
+### إضافة مزوّد VPN جديد
+ضع ملف إعداده فقط باسم الدولة في `VPN_CONF_DIR`:
+- WireGuard → `<CC>.conf` ، OpenVPN → `<CC>.ovpn` (واضبط `VPN_TYPE`).
+لا تغيير في الكود — النظام يلتقط الملف حسب `VPN_COUNTRY`.
+
+### Cloudflare (حلول قانونية فقط)
+- **لا** نكسر حماية Cloudflare. إن كان الحجب من مزوّد خارجي لا تملكه → الحل القانوني الوحيد
+  هو IP خروج نظيف من دولة مسموحة (هذا النظام) أو مراسلة المزوّد.
+- **إن كنت تملك Cloudflare Zone** (لبوّابتك مثلاً): في Security → WAF أضف قاعدة مخصّصة
+  `(ip.src eq <VPN_EGRESS_IP>)` → Action: **Skip/Allow**؛ واخفض false positives بضبط
+  Security Level إلى Medium وإنشاء استثناء WAF لمسارات الـ API المشروعة.
+
+### الاستقرار
+- `Restart=always` + watchdog كل `VPN_HEALTH_INTERVAL` ثانية → auto‑reconnect.
+- fallback تلقائي إلى `VPN_FALLBACK_COUNTRY` إن فشلت الأساسية.
+- سجلّ واضح: `journalctl -u iptvpro-vpn -f` و `/var/log/iptvpro-vpn.log`.
+- يعمل بعد إعادة تشغيل السيرفر (الخدمة enabled).
+
+---
+
 ## 🚀 الأداء ومحدوديّات «آلاف الأجهزة» (بصراحة)
 
 - **Shared Relay** (مُختبَر): 100 جهاز يطلبون نفس الجزء = **سحبة واحدة** من المزوّد. هذا يلغي

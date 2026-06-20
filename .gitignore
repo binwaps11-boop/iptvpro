@@ -119,3 +119,7 @@ desktop/config.json
 # WireGuard config written at runtime (contains private key)
 desktop/mx.conf
 desktop/data/mx.conf
+
+# Secrets / env
+desktop/.env
+.env
