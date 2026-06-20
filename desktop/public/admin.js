@@ -172,21 +172,21 @@ function bind() {
     loadVpnAll();
   };
 
-  $('#btnAutoProxy').onclick = async () => {
-    const btn = $('#btnAutoProxy');
+  $('#btnAutoImport').onclick = async () => {
+    const btn = $('#btnAutoImport');
     btn.disabled = true;
-    $('#autoProxyResult').textContent = '🔎 جارٍ البحث والاختبار… (قد يستغرق دقيقة)';
+    $('#autoProxyResult').textContent = '🚀 جارٍ البحث عن بروكسي مكسيكي يعمل والاستيراد عبره… (حتى دقيقتين)';
     try {
-      const r = await fetch('/api/admin/autoproxy', { method: 'POST' }).then((x) => x.json());
+      const r = await fetch('/api/admin/autoimport', { method: 'POST' }).then((x) => x.json());
       if (r.ok) {
-        $('#autoProxyResult').textContent = `✅ تم العثور وتفعيل بروكسي مكسيكي: ${r.proxy.type} ${r.proxy.host}:${r.proxy.port} — جرّب الاستيراد الآن.`;
-        toast('تم تفعيل بروكسي مكسيكي مجاني ✓ — اذهب لمصادر IPTV واستورد', 6000);
+        $('#autoProxyResult').textContent = `✅ نجح! تم الاستيراد عبر المكسيك (${r.proxy.host}:${r.proxy.port}) — ${r.total} عنصر.`;
+        toast(`🎉 تم استيراد ${r.total} قناة/فيلم/مسلسل عبر المكسيك!`, 6000);
         refresh();
       } else {
-        $('#autoProxyResult').textContent = `✗ ${r.error || 'لم يُعثر على بروكسي يعمل'} (فُحص ${r.total || 0}). جرّب مرة أخرى أو استخدم WireGuard.`;
+        $('#autoProxyResult').textContent = `✗ ${r.error || 'فشل'}${r.total ? ' (فُحص ' + r.total + ' بروكسي)' : ''}. أعد المحاولة أو استخدم WireGuard للثبات.`;
       }
     } catch (e) {
-      $('#autoProxyResult').textContent = '✗ فشل البحث: ' + e.message;
+      $('#autoProxyResult').textContent = '✗ فشل: ' + e.message;
     }
     btn.disabled = false;
   };

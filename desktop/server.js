@@ -710,6 +710,61 @@ async function autoFindMexicanProxy() {
   return { ok: false, error: 'لم يُعثر على بروكسي مكسيكي مجاني يعمل حالياً', total: proxies.length };
 }
 
+// حل جذري: يجد بروكسي مكسيكي مجاني يعمل، ويستورد عبره فوراً (قبل أن يموت)، مع تجربة عدة بروكسيات
+async function autoFindAndImport() {
+  const src = config.sources.find((s) => s.type === 'xtream');
+  if (!src) return { ok: false, error: 'أضف مصدر Xtream أولاً ثم اضغط هنا.' };
+
+  const proxies = await fetchFreeMexicanProxies();
+  if (!proxies.length) return { ok: false, error: 'تعذّر جلب قائمة البروكسيات المجانية', total: 0 };
+
+  const base = xtreamBase(src.server);
+  const enc = encodeURIComponent;
+  // اختبار حقيقي بحمل فعلي: قائمة القنوات المباشرة (لا مجرد auth)
+  const testUrl = `${base}/player_api.php?username=${enc(src.username)}&password=${enc(src.password)}&action=get_live_streams`;
+
+  // ابحث عن بروكسيات تعمل فعلاً (بالتوازي، نجمع حتى ٦)
+  const working = [];
+  const start = Date.now();
+  const budget = 40000;
+  let idx = 0;
+  const list = proxies.slice(0, 90);
+  async function worker() {
+    while (idx < list.length && working.length < 6 && Date.now() - start < budget) {
+      const proxy = list[idx++];
+      try {
+        const txt = await fetchText(testUrl, { proxy, timeout: 9000, redirects: 3 });
+        const arr = JSON.parse(txt);
+        if (Array.isArray(arr) && arr.length > 0) working.push(proxy);
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: 14 }, () => worker()));
+  if (!working.length)
+    return { ok: false, error: 'لم يُعثر على بروكسي مكسيكي مجاني يعمل الآن — أعد المحاولة', total: proxies.length };
+
+  // استورد عبر كل بروكسي عامل حتى ينجح الاستيراد فعلياً
+  const xts = config.sources.filter((s) => s.type === 'xtream');
+  for (const proxy of working) {
+    config.settings.upstream = { enabled: true, type: proxy.type, host: proxy.host, port: proxy.port, username: '', password: '' };
+    let total = 0;
+    for (const s of xts) {
+      try {
+        const r = await importXtream(s.server, s.username, s.password);
+        if (r.live.length + r.movies.length + r.series.length > 0) {
+          s.live = r.live; s.movies = r.movies; s.series = r.series;
+          total += r.live.length + r.movies.length + r.series.length;
+        }
+      } catch {}
+    }
+    if (total > 0) {
+      saveConfig(config);
+      return { ok: true, proxy, total };
+    }
+  }
+  return { ok: false, error: 'وُجدت بروكسيات لكن تعذّر إكمال الاستيراد (بروكسي غير مستقر) — أعد المحاولة', total: proxies.length };
+}
+
 // يجمع محتوى نوع معيّن (live | movies | series) عبر كل المصادر
 function collect(kind) {
   const out = [];
@@ -991,6 +1046,11 @@ const requestHandler = async (req, res) => {
         return sendJSON(res, 200, { ok: true, proxy: r.proxy, total: r.total });
       }
       return sendJSON(res, 200, { ok: false, error: r.error, total: r.total });
+    }
+
+    // حل جذري: بحث عن بروكسي مكسيكي مجاني + استيراد فوري عبره (نقرة واحدة)
+    if (p === '/api/admin/autoimport' && req.method === 'POST') {
+      return sendJSON(res, 200, await autoFindAndImport());
     }
 
     // VPN مجاني مدمج (VPN Gate) باختيار الدولة
