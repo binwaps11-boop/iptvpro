@@ -51,8 +51,13 @@ case "$ACTION" in
     CSV="$(curl -s4 -m 30 'https://www.vpngate.net/api/iphone/' 2>/dev/null)"
     [ -n "$CSV" ] || { j '{"ok":false,"error":"تعذّر جلب قائمة VPN Gate"}'; exit 0; }
     # الأعمدة: HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,...,Base64Config(الأخير)
-    ROW="$(printf '%s\n' "$CSV" | awk -F, -v c="$COUNTRY" 'NF>14 && $7==c {print $5","$0}' | sort -t, -k1 -nr | head -1 | cut -d, -f2-)"
-    [ -n "$ROW" ] || { j "{\"ok\":false,\"error\":\"لا يوجد خادم VPN مجاني في $COUNTRY الآن — جرّب لاحقاً أو دولة أخرى\"}"; exit 0; }
+    # جرّب الدولة المطلوبة، ثم دول احتياطية مسموحة (US ثم CA)
+    ROW=""; PICKED=""
+    for CC in "$COUNTRY" US CA; do
+      ROW="$(printf '%s\n' "$CSV" | awk -F, -v c="$CC" 'NF>14 && $7==c {print $5","$0}' | sort -t, -k1 -nr | head -1 | cut -d, -f2-)"
+      [ -n "$ROW" ] && { PICKED="$CC"; break; }
+    done
+    [ -n "$ROW" ] || { j "{\"ok\":false,\"error\":\"لا يوجد خادم VPN مجاني في $COUNTRY ولا US/CA الآن — جرّب لاحقاً\"}"; exit 0; }
     printf '%s' "$ROW" | awk -F, '{print $NF}' | base64 -d > "$CONF" 2>/dev/null
     grep -q '^remote ' "$CONF" || { j '{"ok":false,"error":"إعداد OpenVPN غير صالح"}'; exit 0; }
     pkill -f "openvpn --config $CONF" 2>/dev/null || true

@@ -93,6 +93,35 @@ cd /opt/iptvpro && git pull && systemctl restart iptvpro   # تحديث
 
 ---
 
+## 🧪 تجربة VPN مجاني سريعاً (مرتّبة حسب الأفضلية)
+
+### 1) Proton VPN Free  (الأفضل ثباتاً — لكن **بلا مكسيك** في المجاني)
+المكسيك في Proton **مدفوعة (Plus)**. المجاني يعطي US/NL/JP. استعمل **WireGuard config**
+(headless، لا حاجة لـ CLI):
+1. سجّل في proton.me (مجاني) → Account → **WireGuard configuration**.
+2. اختر خادماً مجانياً (US/NL/JP) → نزّل ملف `.conf`.
+3. ضعه في نظامنا باسم الدولة وفعّل:
+   ```bash
+   sudo cp ~/proton-us.conf /etc/iptvpro/vpn/US.conf
+   sudo sed -i 's/^VPN_COUNTRY=.*/VPN_COUNTRY=US/' /opt/iptvpro/desktop/.env
+   sudo systemctl restart iptvpro-vpn && sudo bash /opt/iptvpro/desktop/vpn/verify.sh
+   ```
+> بياناتك لا تدخل الكود — ملف Proton في `/etc/iptvpro/vpn/` خارج المستودع.
+
+### 2) Cloudflare WARP  (الأسرع — لكن **لا يدعم المكسيك**)
+يخرج من أقرب مركز Cloudflare (ليس مكسيك). مفيد للتأكد أن «التوجيه يغيّر IP»:
+```bash
+cd /opt/iptvpro/desktop && sudo bash vpn/warp-setup.sh
+```
+يثبّت WARP بوضع **proxy** (SOCKS5 محلي split-tunnel)، يربط التطبيق به، ويطبع IP قبل/بعد + الدولة.
+الإيقاف: `sudo bash vpn/warp-setup.sh --off`.
+
+### 3) VPN Gate  (احتياطي مجاني عبر OpenVPN — غير ثابت)
+من **لوحة الإدارة → 🇲🇽 → اختر المكسيك → اتصال VPN مجاني** (يجرّب MX ثم US ثم CA تلقائياً).
+> لا تعتمده للإنتاج. للإنتاج: WireGuard مدفوع (مكسيك) في نظام vpnctl أدناه.
+
+---
+
 ## 🛡️ نظام VPN Egress الإنتاجي (WireGuard/OpenVPN + Split-tunnel + Kill Switch)
 
 نظام يوجّه **طلبات IPTV فقط** عبر VPN في دولة مسموحة (مثل المكسيك)، ويبقي SSH/الإدارة على IP
