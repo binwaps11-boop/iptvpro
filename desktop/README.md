@@ -46,53 +46,39 @@ ADMIN_PASSWORD='كلمة-مرور-قوية' node server.js
 
 ## 🌍 النشر على VPS (موقع بلا تطبيق)
 
-شغّل النظام على سيرفرك ليصل إليه عملاؤك عبر رابط/دومين. مثال (Ubuntu):
+### الطريقة الأسهل — أمر واحد (Ubuntu/Debian)
 
+من جهازك ادخل على السيرفر ثم نفّذ:
 ```bash
-# 1) ثبّت Node.js 18+
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs git
+ssh root@SERVER_IP
 
-# 2) أحضر المشروع
-git clone <REPO_URL> /opt/iptvpro && cd /opt/iptvpro/desktop
-
-# 3) شغّله كخدمة دائمة عبر systemd
-sudo tee /etc/systemd/system/iptvpro.service >/dev/null <<'UNIT'
-[Unit]
-Description=IPTV Pro Server
-After=network.target
-[Service]
-WorkingDirectory=/opt/iptvpro/desktop
-Environment=PORT=8787
-Environment=ADMIN_PASSWORD=ضع-كلمة-مرور-قوية
-ExecStart=/usr/bin/node server.js
-Restart=always
-User=www-data
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-sudo systemctl enable --now iptvpro
+apt update && apt install -y git curl
+git clone <REPO_URL> /opt/iptvpro
+cd /opt/iptvpro/desktop
+sudo ADMIN_PASSWORD='كلمة-مرور-قوية' bash deploy/install.sh
 ```
+السكربت يثبّت Node ويُعدّ خدمة دائمة (systemd) ويفتح المنفذ ويطبع الروابط. النتيجة:
+`http://SERVER_IP:8787/` (العملاء) و `/admin` (الإدارة).
 
-الآن الموقع يعمل على `http://SERVER_IP:8787`.
-
-**دومين + HTTPS (موصى به بشدّة):** ضع Nginx كوسيط عكسي مع شهادة Let's Encrypt:
-
-```nginx
-server {
-  server_name tv.example.com;
-  location / {
-    proxy_pass http://127.0.0.1:8787;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_buffering off;          # مهم للبث الحيّ
-    proxy_read_timeout 3600s;
-  }
-}
+**مع دومين و HTTPS تلقائياً** (وجّه الدومين A-record إلى السيرفر أولاً):
+```bash
+sudo ADMIN_PASSWORD='كلمة-قوية' DOMAIN=tv.example.com EMAIL=you@mail.com bash deploy/install.sh
 ```
-ثم `sudo certbot --nginx -d tv.example.com`. أعطِ عملاءك الرابط `https://tv.example.com`.
+ينصّب Nginx + شهادة Let's Encrypt تلقائياً، فيصبح الموقع `https://tv.example.com`.
+
+### أو عبر Docker
+```bash
+cd /opt/iptvpro/desktop
+ADMIN_PASSWORD='كلمة-قوية' docker compose -f deploy/docker-compose.yml up -d --build
+```
+البيانات تُحفظ في volume باسم `iptvpro_data`.
+
+### أوامر التشغيل
+```bash
+journalctl -u iptvpro -f          # متابعة السجل
+systemctl restart iptvpro         # إعادة تشغيل
+cd /opt/iptvpro && git pull && systemctl restart iptvpro   # تحديث
+```
 
 > **HDMI/شبكة:** أي جهاز (تلفزيون/جوال/لابتوب) يفتح الرابط في المتصفح ويشاهد — ومن المشغّل
 > زر «⛶ ملء الشاشة» لعرضه على شاشة التلفزيون عبر HDMI.

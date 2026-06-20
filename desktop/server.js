@@ -24,7 +24,9 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const CONFIG_PATH = process.env.CONFIG_DIR
+  ? path.join(process.env.CONFIG_DIR, 'config.json')
+  : path.join(__dirname, 'config.json');
 const PORT = process.env.PORT || 8787;
 
 // حدود الذاكرة المؤقتة المشتركة (Shared Relay)
@@ -66,6 +68,7 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
+  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 

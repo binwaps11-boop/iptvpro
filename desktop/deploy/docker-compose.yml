@@ -1,0 +1,20 @@
+services:
+  iptvpro:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: iptvpro:latest
+    container_name: iptvpro
+    restart: always
+    ports:
+      - "8787:8787"
+    environment:
+      - PORT=8787
+      - ADMIN_USER=admin
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
+      - CONFIG_DIR=/app/data
+    volumes:
+      - iptvpro_data:/app/data
+
+volumes:
+  iptvpro_data:
