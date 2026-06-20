@@ -19,6 +19,13 @@
       </div>
     </header>
 
+    <nav class="content-tabs">
+      <button class="ctab active" data-view="live">📡 المباشر</button>
+      <button class="ctab" data-view="movies">🎬 الأفلام</button>
+      <button class="ctab" data-view="series">📺 المسلسلات</button>
+      <span id="netbanner" class="netbanner"></span>
+    </nav>
+
     <nav id="cats" class="cats"></nav>
 
     <main id="grid" class="grid"></main>
@@ -31,10 +38,21 @@
     <div id="player" class="player hidden">
       <div class="player-top">
         <span id="nowPlaying"></span>
-        <button id="closePlayer" class="btn ghost">✕ إغلاق</button>
+        <div>
+          <button id="btnFullscreen" class="btn ghost">⛶ ملء الشاشة (HDMI)</button>
+          <button id="closePlayer" class="btn ghost">✕ إغلاق</button>
+        </div>
       </div>
       <video id="video" controls autoplay playsinline></video>
       <div id="playerStatus" class="player-status"></div>
+    </div>
+
+    <!-- نافذة تفاصيل المسلسل (المواسم والحلقات) -->
+    <div id="seriesModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head"><h3 id="seriesTitle">المسلسل</h3><button class="x" data-close>✕</button></div>
+        <div id="seriesBody" class="series-body">جارٍ التحميل…</div>
+      </div>
     </div>
 
     <!-- نافذة المصادر -->

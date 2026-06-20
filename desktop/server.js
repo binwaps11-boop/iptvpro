@@ -17,6 +17,7 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -255,26 +256,82 @@ function parseM3U(text) {
   return out;
 }
 
+function xtreamBase(server) {
+  return server.replace(/\/+$/, '');
+}
+
+async function xtreamApi(base, username, password, action, extra = '') {
+  const url =
+    `${base}/player_api.php?username=${encodeURIComponent(username)}` +
+    `&password=${encodeURIComponent(password)}&action=${action}${extra}`;
+  return JSON.parse(await fetchText(url));
+}
+
+// يستورد القنوات المباشرة + الأفلام + المسلسلات دفعة واحدة
 async function importXtream(server, username, password) {
-  const base = server.replace(/\/+$/, '');
-  const api = (action) =>
-    `${base}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(
-      password
-    )}&action=${action}`;
-  const [catsRaw, streamsRaw] = await Promise.all([
-    fetchText(api('get_live_categories')),
-    fetchText(api('get_live_streams')),
+  const base = xtreamBase(server);
+  const enc = encodeURIComponent;
+  const liveUrl = (id) => `${base}/live/${enc(username)}/${enc(password)}/${id}.m3u8`;
+  const movieUrl = (id, ext) => `${base}/movie/${enc(username)}/${enc(password)}/${id}.${ext || 'mp4'}`;
+
+  const safe = (action) => xtreamApi(base, username, password, action).catch(() => []);
+  const [liveCats, liveStreams, vodCats, vodStreams, serCats, series] = await Promise.all([
+    safe('get_live_categories'),
+    safe('get_live_streams'),
+    safe('get_vod_categories'),
+    safe('get_vod_streams'),
+    safe('get_series_categories'),
+    safe('get_series'),
   ]);
-  const cats = JSON.parse(catsRaw);
-  const streams = JSON.parse(streamsRaw);
-  const catMap = {};
-  for (const c of cats) catMap[c.category_id] = c.category_name;
-  return streams.map((st) => ({
-    name: st.name,
-    logo: st.stream_icon || '',
-    category: catMap[st.category_id] || 'غير مصنّف',
-    url: `${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${st.stream_id}.m3u8`,
+
+  const cmap = (arr) => Object.fromEntries((arr || []).map((c) => [c.category_id, c.category_name]));
+  const lc = cmap(liveCats);
+  const vc = cmap(vodCats);
+  const sc = cmap(serCats);
+
+  const live = (liveStreams || []).map((s) => ({
+    type: 'live',
+    name: s.name,
+    logo: s.stream_icon || '',
+    category: lc[s.category_id] || 'غير مصنّف',
+    url: liveUrl(s.stream_id),
   }));
+  const movies = (vodStreams || []).map((s) => ({
+    type: 'movie',
+    name: s.name,
+    logo: s.stream_icon || '',
+    category: vc[s.category_id] || 'غير مصنّف',
+    url: movieUrl(s.stream_id, s.container_extension),
+    rating: s.rating || '',
+  }));
+  const seriesList = (series || []).map((s) => ({
+    type: 'series',
+    name: s.name,
+    logo: s.cover || '',
+    category: sc[s.category_id] || 'غير مصنّف',
+    seriesId: s.series_id,
+    plot: s.plot || '',
+  }));
+  return { live, movies, series: seriesList };
+}
+
+// يجلب مواسم وحلقات مسلسل عند الطلب (lazy)
+async function seriesInfo(server, username, password, seriesId) {
+  const base = xtreamBase(server);
+  const enc = encodeURIComponent;
+  const data = await xtreamApi(base, username, password, 'get_series_info', '&series_id=' + seriesId);
+  const eps = data.episodes || {};
+  const seasons = Object.keys(eps)
+    .sort((a, b) => Number(a) - Number(b))
+    .map((season) => ({
+      season,
+      episodes: (eps[season] || []).map((e) => ({
+        title: e.title || 'حلقة ' + e.episode_num,
+        episode: e.episode_num,
+        url: `${base}/series/${enc(username)}/${enc(password)}/${e.id}.${e.container_extension || 'mp4'}`,
+      })),
+    }));
+  return { info: data.info || {}, seasons };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,10 +414,23 @@ function serveStatic(res, urlPath) {
   });
 }
 
-function flatChannels() {
+// يجمع محتوى نوع معيّن (live | movies | series) عبر كل المصادر
+function collect(kind) {
   const out = [];
   for (const src of config.sources) {
-    for (const ch of src.channels || []) out.push({ ...ch, source: src.name, sourceId: src.id });
+    for (const item of src[kind] || []) out.push({ ...item, source: src.name, sourceId: src.id });
+  }
+  return out;
+}
+
+// عناوين الشبكة المحلية (للوصول من أجهزة أخرى — مثل Jellyfin)
+function lanAddresses() {
+  const out = [];
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const i of ifs[name] || []) {
+      if (i.family === 'IPv4' && !i.internal) out.push(i.address);
+    }
   }
   return out;
 }
@@ -380,7 +450,9 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400);
         return res.end('missing u');
       }
-      const r = await upstreamFetch(target);
+      // مرّر طلب النطاق (Range) للسماح بالتقديم/الترجيع في الأفلام والمسلسلات
+      const range = req.headers['range'];
+      const r = await upstreamFetch(target, { extraHeaders: range ? { Range: range } : {} });
       const ct = (r.headers['content-type'] || '').toLowerCase();
       const isPlaylist =
         ct.includes('mpegurl') || /\.m3u8(\?|$)/i.test(target) || ct.includes('application/x-mpegurl');
@@ -400,9 +472,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // أجزاء البث (ts/m4s/مفاتيح...) — تمرير مباشر
-      const headers = { 'Content-Type': r.headers['content-type'] || 'application/octet-stream' };
+      // أجزاء البث والملفات (ts/m4s/mp4/مفاتيح...) — تمرير مباشر مع دعم Range
+      const headers = {
+        'Content-Type': r.headers['content-type'] || 'application/octet-stream',
+        'Accept-Ranges': 'bytes',
+      };
       if (r.headers['content-length']) headers['Content-Length'] = r.headers['content-length'];
+      if (r.headers['content-range']) headers['Content-Range'] = r.headers['content-range'];
       res.writeHead(r.status || 200, headers);
       r.stream.pipe(res);
       return;
@@ -415,9 +491,13 @@ const server = http.createServer(async (req, res) => {
           id: s.id,
           type: s.type,
           name: s.name,
-          count: (s.channels || []).length,
+          live: (s.live || []).length,
+          movies: (s.movies || []).length,
+          series: (s.series || []).length,
         })),
-        channels: flatChannels(),
+        live: collect('live'),
+        movies: collect('movies'),
+        series: collect('series'),
         settings: config.settings,
       });
     }
@@ -425,17 +505,33 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/sources' && req.method === 'POST') {
       const body = await readBody(req);
       const id = 's' + Date.now().toString(36);
-      let channels = [];
       const name = (body.name || '').trim() || 'مصدر';
-      if (body.type === 'm3u_url') channels = parseM3U(await fetchText(body.url));
-      else if (body.type === 'm3u_content') channels = parseM3U(body.content || '');
-      else if (body.type === 'xtream')
-        channels = await importXtream(body.server, body.username, body.password);
-      else return sendJSON(res, 400, { error: 'نوع مصدر غير معروف' });
+      let live = [];
+      let movies = [];
+      let series = [];
+      if (body.type === 'm3u_url') live = parseM3U(await fetchText(body.url));
+      else if (body.type === 'm3u_content') live = parseM3U(body.content || '');
+      else if (body.type === 'xtream') {
+        const r = await importXtream(body.server, body.username, body.password);
+        ({ live, movies, series } = r);
+      } else return sendJSON(res, 400, { error: 'نوع مصدر غير معروف' });
 
-      config.sources.push({ id, type: body.type, name, ...body, channels });
+      config.sources.push({ id, type: body.type, name, ...body, live, movies, series });
       saveConfig(config);
-      return sendJSON(res, 200, { id, count: channels.length });
+      return sendJSON(res, 200, { id, live: live.length, movies: movies.length, series: series.length });
+    }
+
+    // مواسم/حلقات مسلسل (تُجلب عند الطلب)
+    if (p === '/api/series-info' && req.method === 'GET') {
+      const src = config.sources.find((s) => s.id === u.searchParams.get('sourceId'));
+      if (!src) return sendJSON(res, 404, { error: 'المصدر غير موجود' });
+      const info = await seriesInfo(src.server, src.username, src.password, u.searchParams.get('seriesId'));
+      return sendJSON(res, 200, info);
+    }
+
+    // معلومات الشبكة (للوصول من أجهزة أخرى مثل Jellyfin)
+    if (p === '/api/netinfo' && req.method === 'GET') {
+      return sendJSON(res, 200, { addresses: lanAddresses(), port: PORT });
     }
 
     if (p === '/api/sources' && req.method === 'DELETE') {
@@ -475,7 +571,11 @@ const server = http.createServer(async (req, res) => {
 
 server.keepAliveTimeout = 60_000;
 server.requestTimeout = 0;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  ▶  IPTV Pro Desktop يعمل الآن`);
-  console.log(`     افتح المتصفح على:  http://localhost:${PORT}\n`);
+  console.log(`     على هذا الجهاز:      http://localhost:${PORT}`);
+  for (const ip of lanAddresses()) {
+    console.log(`     من أجهزة الشبكة:     http://${ip}:${PORT}   ← افتحه على التلفزيون/الجوال (مثل Jellyfin)`);
+  }
+  console.log('');
 });
