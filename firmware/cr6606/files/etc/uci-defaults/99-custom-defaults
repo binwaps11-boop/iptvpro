@@ -79,5 +79,22 @@ grep -q '/etc/health/healthcheck.sh' /etc/crontabs/root 2>/dev/null || \
 /etc/init.d/cron enable 2>/dev/null
 /etc/init.d/cron restart 2>/dev/null
 
-logger -t custom-defaults "99-custom-defaults applied (country=$COUNTRY)"
+# --- PERFORMANCE TUNING (premium) ---
+# Software flow offloading = faster NAT/routing. HW offload stays OFF (buggy on mt7621).
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+uci -q commit firewall
+# Packet steering = spread network load across both CPU cores.
+uci -q set network.globals.packet_steering='1'
+uci -q commit network
+# irqbalance service on.
+/etc/init.d/irqbalance enable 2>/dev/null
+/etc/init.d/irqbalance start 2>/dev/null
+
+# --- Heavy services installed but DISABLED by default (enable per your needs) ---
+/etc/init.d/sqm disable 2>/dev/null         # turn on after setting your link speeds
+/etc/init.d/miniupnpd disable 2>/dev/null   # security: enable only if needed
+# adblock present but starts only when you enable it in LuCI.
+
+logger -t custom-defaults "99-custom-defaults applied (country=$COUNTRY, premium tuning on)"
 exit 0
