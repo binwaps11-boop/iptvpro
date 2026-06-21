@@ -1,8 +1,10 @@
 # CR6606 — official build result
 
-Built with the **official OpenWrt ImageBuilder** on GitHub Actions
-(run #1, [27920013007](https://github.com/binwaps11-boop/iptvpro/actions/runs/27920013007)).
-Nothing was patched/faked; this is a stock OpenWrt image + our `files/` overlay.
+Built with the **official OpenWrt ImageBuilder** on GitHub Actions.
+Latest build (run #3, [27921078563](https://github.com/binwaps11-boop/iptvpro/actions/runs/27921078563))
+sets `txpower '30'` on both radios = "request maximum". The mt7915 driver clamps
+it to the legal+calibrated cap (real ~20-23 dBm, visible in `iwinfo`). No reghack,
+no EEPROM/ART/calibration edits, no faked numbers.
 
 ## (A) Build identity
 | Field | Value |
@@ -19,7 +21,7 @@ Nothing was patched/faked; this is a stock OpenWrt image + our `files/` overlay.
 
 | File | Role | SHA256 |
 |------|------|--------|
-| `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin` | **SYSUPGRADE — flash this** | `3a29adb8663d2568874091962671caf74b8e5f2795a68cd8afd6f18a375d5257` |
+| `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin` | **SYSUPGRADE — flash this** (txpower=30 request) | `01a8c4943198bf8fab70d136fedacfe03d02192baf0b4d9793f022cecbe0872d` |
 | `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-firmware.bin` | FACTORY / initial-install (stock→OpenWrt only) | `31de9d75a4cb93a5b81222b7c27799966b5783ba408ab11fc84c3a548dfaf843` |
 | `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606.manifest` | package manifest | — |
 | `build.log` | full build log | — |
@@ -28,7 +30,7 @@ Nothing was patched/faked; this is a stock OpenWrt image + our `files/` overlay.
 ## Download
 GitHub → **Actions** → run *Build CR6606 OpenWrt image* →
 **Artifacts** → `cr6606-firmware-25.12.4` (a zip; sign in to GitHub to download).
-Direct: https://github.com/binwaps11-boop/iptvpro/actions/runs/27920013007
+Direct: https://github.com/binwaps11-boop/iptvpro/actions/runs/27921078563
 
 ## (6) Backup BEFORE flashing — ✅ SAFE (run on router)
 ```sh
@@ -41,7 +43,7 @@ sysupgrade -b /tmp/backup-cr6606.tar.gz
 ```sh
 sha256sum /tmp/openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin
 # MUST equal:
-# 3a29adb8663d2568874091962671caf74b8e5f2795a68cd8afd6f18a375d5257
+# 01a8c4943198bf8fab70d136fedacfe03d02192baf0b4d9793f022cecbe0872d
 ```
 
 ## (5) Flash — 🔴 DANGEROUS (only after backup + checksum match)
