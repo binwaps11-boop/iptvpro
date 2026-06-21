@@ -115,6 +115,7 @@ jobs:
                 *sysupgrade*) role="SYSUPGRADE  <- flash this from OpenWrt (sysupgrade -n)";;
                 *initramfs*)  role="INITRAMFS/RECOVERY (boot via TFTP/uboot, do NOT sysupgrade-flash)";;
                 *factory*)    role="FACTORY (OEM/stock install only)";;
+                *firmware*)   role="FACTORY/INITIAL-INSTALL (stock->OpenWrt only; NOT for upgrading)";;
                 *) role="other";;
               esac
               echo "- $f : $role"
