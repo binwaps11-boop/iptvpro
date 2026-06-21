@@ -22,7 +22,7 @@ config wifi-device 'radio0'
 	option htmode 'HT20'         # stability first; HT40 only if survey is clean
 	option country 'US'          # regulatory domain
 	option cell_density '0'
-	# option txpower  -> intentionally omitted (let driver use legal max)
+	option txpower '30'          # requests max; driver clamps to legal cap (~20-23 dBm real)
 
 config wifi-iface 'default_radio0'
 	option device 'radio0'
@@ -41,7 +41,7 @@ config wifi-device 'radio1'
 	option htmode 'HE80'         # AX 80 MHz; drop to HE40/HE20 if instability seen
 	option country 'US'
 	option cell_density '0'
-	# option txpower  -> omitted on purpose
+	option txpower '30'          # requests max; driver clamps to legal cap (real value via iwinfo)
 
 config wifi-iface 'default_radio1'
 	option device 'radio1'
