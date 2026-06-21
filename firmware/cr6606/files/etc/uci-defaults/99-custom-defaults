@@ -7,7 +7,7 @@
 HOSTNAME="CR6606"
 TIMEZONE="UTC"                 # e.g. "Asia/Karachi", "Europe/Berlin", "America/New_York"
 ZONENAME="UTC"                 # human zonename, e.g. "Asia/Karachi"
-COUNTRY="00"                   # <-- set YOUR ISO regulatory code (US/DE/GB/PK/...)
+COUNTRY="US"                   # regulatory domain (set per your location)
 SSID_24="CR6606-24G"
 SSID_5="CR6606-5G"
 WIFI_KEY="CHANGE_ME_STRONG_PASSWORD"   # >=8 chars; CHANGE before/after flashing
