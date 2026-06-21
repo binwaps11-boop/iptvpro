@@ -1,0 +1,134 @@
+name: Build CR6606 OpenWrt image
+
+# Builds the REAL sysupgrade image for Xiaomi Mi Router CR6606 using the official
+# OpenWrt ImageBuilder, on GitHub's runners (which can reach downloads.openwrt.org).
+# Produces: sysupgrade .bin + sha256 + manifest + build.log as downloadable artifacts.
+# Flashes nothing. Touches no bootloader/factory/ART/MAC.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenWrt release (or "auto" for newest stable with a CR6606 image)'
+        required: true
+        default: 'auto'
+  push:
+    branches:
+      - claude/xiaomi-cr6606-openwrt-oqocb9
+    paths:
+      - 'firmware/cr6606/**'
+      - '.github/workflows/build-cr6606.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ramips
+      SUBTARGET: mt7621
+      PROFILE: xiaomi_mi-router-cr6606
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: sudo apt-get update && sudo apt-get install -y zstd wget tar xz-utils file build-essential libncurses-dev gawk
+
+      - name: Resolve ImageBuilder URL
+        id: resolve
+        run: |
+          set -e
+          VER="${{ github.event.inputs.version || 'auto' }}"
+          base() { echo "https://downloads.openwrt.org/releases/$1/targets/$TARGET/$SUBTARGET"; }
+          ibname() { echo "openwrt-imagebuilder-$1-$TARGET-$SUBTARGET.Linux-x86_64"; }
+          pick() {
+            for v in "$@"; do
+              for ext in tar.zst tar.xz; do
+                url="$(base "$v")/$(ibname "$v").$ext"
+                if curl -fsIL "$url" >/dev/null 2>&1; then
+                  echo "VER=$v"; echo "IBURL=$url"; echo "EXT=$ext"; return 0
+                fi
+              done
+            done
+            return 1
+          }
+          if [ "$VER" = "auto" ]; then
+            vers=$(curl -s https://downloads.openwrt.org/releases/ \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+/' | tr -d '/' | sort -Vr | uniq)
+            echo "Candidate releases: $vers"
+            OUT=$(pick $vers) || { echo "No release with a $TARGET/$SUBTARGET ImageBuilder found"; exit 1; }
+          else
+            OUT=$(pick "$VER") || { echo "Requested version $VER has no $TARGET/$SUBTARGET ImageBuilder"; exit 1; }
+          fi
+          echo "$OUT"
+          echo "$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Download + extract ImageBuilder
+        run: |
+          set -e
+          URL="${{ steps.resolve.outputs.IBURL }}"
+          EXT="${{ steps.resolve.outputs.EXT }}"
+          echo "Downloading $URL"
+          wget -q "$URL" -O ib.$EXT
+          mkdir -p ib
+          if [ "$EXT" = "tar.zst" ]; then tar --zstd -xf ib.$EXT -C ib --strip-components=1
+          else tar -xf ib.$EXT -C ib --strip-components=1; fi
+
+      - name: Build image
+        id: build
+        run: |
+          set -e
+          cd ib
+          cp -a "$GITHUB_WORKSPACE/firmware/cr6606/files" files
+          chmod +x files/etc/uci-defaults/* files/etc/health/* || true
+          PKGS=$(grep -v '^#' "$GITHUB_WORKSPACE/firmware/cr6606/build/packages.txt" \
+                 | grep -v '^[[:space:]]*$' | tr '\n' ' ')
+          echo "PROFILE=$PROFILE"
+          echo "PACKAGES=$PKGS"
+          echo "::group::make info (profile sanity check)"
+          make info 2>/dev/null | grep -i cr6606 || true
+          echo "::endgroup::"
+          make image PROFILE="$PROFILE" PACKAGES="$PKGS" FILES="$PWD/files" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Collect outputs + checksums
+        run: |
+          set -e
+          OUT="$GITHUB_WORKSPACE/cr6606-firmware"
+          SRC="ib/bin/targets/$TARGET/$SUBTARGET"
+          mkdir -p "$OUT"
+          cp -v "$SRC"/*xiaomi_mi-router-cr6606*.bin "$OUT"/ 2>/dev/null || true
+          cp -v "$SRC"/*.manifest "$OUT"/ 2>/dev/null || true
+          cp -v "$GITHUB_WORKSPACE/build.log" "$OUT"/ || true
+          cd "$OUT"
+          sha256sum *.bin > SHA256SUMS.txt || true
+          {
+            echo "# CR6606 build result"
+            echo "Release: ${{ steps.resolve.outputs.VER }}"
+            echo "Profile: $PROFILE   Target: $TARGET/$SUBTARGET"
+            echo
+            echo "## Files (which is which)"
+            for f in *.bin; do
+              case "$f" in
+                *sysupgrade*) role="SYSUPGRADE  <- flash this from OpenWrt (sysupgrade -n)";;
+                *initramfs*)  role="INITRAMFS/RECOVERY (boot via TFTP/uboot, do NOT sysupgrade-flash)";;
+                *factory*)    role="FACTORY (OEM/stock install only)";;
+                *) role="other";;
+              esac
+              echo "- $f : $role"
+            done
+            echo
+            echo "## SHA256"
+            cat SHA256SUMS.txt
+          } > RESULT.md
+          echo "----- RESULT.md -----"; cat RESULT.md
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cr6606-firmware-${{ steps.resolve.outputs.VER }}
+          path: cr6606-firmware/**
+          if-no-files-found: error
+          retention-days: 30
