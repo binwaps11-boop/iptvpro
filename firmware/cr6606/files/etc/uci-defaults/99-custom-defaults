@@ -1,0 +1,83 @@
+#!/bin/sh
+# (F) Runs ONCE on first boot. Applies fast, safe defaults. Path-safe Wi-Fi setup.
+# Edit the CONFIG block below (country, timezone, SSIDs, password) before building.
+# It does NOT touch bootloader, factory partition, ART/calibration, or MACs.
+
+############################ CONFIG ############################
+HOSTNAME="CR6606"
+TIMEZONE="UTC"                 # e.g. "Asia/Karachi", "Europe/Berlin", "America/New_York"
+ZONENAME="UTC"                 # human zonename, e.g. "Asia/Karachi"
+COUNTRY="00"                   # <-- set YOUR ISO regulatory code (US/DE/GB/PK/...)
+SSID_24="CR6606-24G"
+SSID_5="CR6606-5G"
+WIFI_KEY="CHANGE_ME_STRONG_PASSWORD"   # >=8 chars; CHANGE before/after flashing
+ROOT_PW="CHANGE_ME_ROOT_PASSWORD"      # placeholder admin pw; change immediately
+###############################################################
+
+# --- system identity ---
+uci -q set system.@system[0].hostname="$HOSTNAME"
+uci -q set system.@system[0].timezone="$TIMEZONE"
+uci -q set system.@system[0].zonename="$ZONENAME"
+uci -q commit system
+
+# --- LAN already 192.168.100.1 via shipped network config; ensure dnsmasq DHCP ---
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='150'
+uci -q set dhcp.lan.leasetime='12h'
+uci -q set dhcp.lan.dhcpv4='server'
+# upstream DNS (change if you prefer ISP DNS): Cloudflare + Quad9
+uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
+uci -q add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+uci -q add_list dhcp.@dnsmasq[0].server='9.9.9.9'
+uci -q commit dhcp
+
+# --- Wi-Fi: configure the AUTO-DETECTED radios in place (path-safe). ---
+[ -f /etc/config/wireless ] || /sbin/wifi config 2>/dev/null
+if [ -f /etc/config/wireless ]; then
+  # radio0 = 2.4 GHz, radio1 = 5 GHz on this hardware
+  uci -q set wireless.radio0.country="$COUNTRY"
+  uci -q set wireless.radio0.channel='1'
+  uci -q set wireless.radio0.htmode='HT20'
+  uci -q set wireless.radio0.cell_density='0'
+  uci -q delete wireless.radio0.txpower 2>/dev/null   # let driver use legal max
+  uci -q set wireless.radio0.disabled='0'
+
+  uci -q set wireless.radio1.country="$COUNTRY"
+  uci -q set wireless.radio1.channel='36'
+  uci -q set wireless.radio1.htmode='HE80'
+  uci -q set wireless.radio1.cell_density='0'
+  uci -q delete wireless.radio1.txpower 2>/dev/null
+  uci -q set wireless.radio1.disabled='0'
+
+  # SSIDs / security (default wifi-iface sections created by `wifi config`)
+  uci -q set wireless.default_radio0.ssid="$SSID_24"
+  uci -q set wireless.default_radio0.encryption='sae-mixed'
+  uci -q set wireless.default_radio0.key="$WIFI_KEY"
+  uci -q set wireless.default_radio0.network='lan'
+  uci -q set wireless.default_radio0.disabled='0'
+
+  uci -q set wireless.default_radio1.ssid="$SSID_5"
+  uci -q set wireless.default_radio1.encryption='sae-mixed'
+  uci -q set wireless.default_radio1.key="$WIFI_KEY"
+  uci -q set wireless.default_radio1.network='lan'
+  uci -q set wireless.default_radio1.disabled='0'
+
+  uci -q commit wireless
+fi
+
+# --- admin password placeholder (forces a known value; CHANGE IT) ---
+(echo "$ROOT_PW"; sleep 1; echo "$ROOT_PW") | passwd root >/dev/null 2>&1
+
+# --- ensure key services run ---
+for s in network firewall dnsmasq uhttpd dropbear cron; do
+  /etc/init.d/$s enable 2>/dev/null
+done
+
+# --- enable health-check cron (every 5 min) ---
+grep -q '/etc/health/healthcheck.sh' /etc/crontabs/root 2>/dev/null || \
+  echo '*/5 * * * * /etc/health/healthcheck.sh' >> /etc/crontabs/root
+/etc/init.d/cron enable 2>/dev/null
+/etc/init.d/cron restart 2>/dev/null
+
+logger -t custom-defaults "99-custom-defaults applied (country=$COUNTRY)"
+exit 0

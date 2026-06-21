@@ -1,0 +1,16 @@
+# (K) PPPoE broadband WAN. Apply with safe rollback (see docs/recovery.md):
+#   uci changes ; then commit only after `uci commit network` works.
+# >>> Use `luci-proto-ppp` + `ppp-mod-pppoe` (already in packages.txt). <<<
+
+uci set network.wan.proto='pppoe'
+uci set network.wan.username='YOUR_ISP_USERNAME'
+uci set network.wan.password='YOUR_ISP_PASSWORD'
+uci set network.wan.ipv6='auto'
+uci set network.wan.peerdns='1'
+# Many DSL/GPON lines need MTU 1492 (PPPoE overhead). Adjust to ISP spec.
+uci set network.wan.mtu='1492'
+# Some ISPs require a VLAN tag on WAN (e.g. VLAN 35). If so, also do:
+#   uci set network.wan.device='wan.35'
+#   (creates tagged sub-interface on the physical wan port)
+uci commit network
+/etc/init.d/network reload
