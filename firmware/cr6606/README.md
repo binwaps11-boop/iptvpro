@@ -51,7 +51,7 @@ Class: Xiaomi AX1800 (CR660x carrier series).
 | D ImageBuilder / BuildSystem | `build/imagebuilder-build.sh`, `docs/build.md` |
 | E Package list               | `build/packages.txt` |
 | F uci-defaults               | `files/etc/uci-defaults/99-custom-defaults` |
-| G network template           | `files/etc/config/network` |
+| G network (DSA)              | device-default DSA layout (lan1/lan2/lan3 + wan), LAN IP set by uci-defaults |
 | H wireless template          | `templates/wireless.txt` (reference) + applied live by uci-defaults |
 | I firewall template          | `files/etc/config/firewall` |
 | J VLAN templates             | `templates/network-vlan-*.txt` |

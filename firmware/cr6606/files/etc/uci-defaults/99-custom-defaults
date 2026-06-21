@@ -20,7 +20,15 @@ uci -q set system.@system[0].timezone="$TIMEZONE"
 uci -q set system.@system[0].zonename="$ZONENAME"
 uci -q commit system
 
-# --- LAN already 192.168.100.1 via shipped network config; ensure dnsmasq DHCP ---
+# --- DSA-safe: keep the device's OWN correct port layout; only change LAN IP. ---
+# (We do NOT ship /etc/config/network, so OpenWrt generates the correct DSA bridge
+#  with the right ports (lan1/lan2/lan3 + wan) for THIS device. No lock-out risk.)
+uci -q set network.lan.ipaddr='192.168.100.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q set network.wan.proto='dhcp'          # WAN DHCP by default (DSA wan port)
+uci -q commit network
+
+# --- DHCP server on LAN ---
 uci -q set dhcp.lan.start='100'
 uci -q set dhcp.lan.limit='150'
 uci -q set dhcp.lan.leasetime='12h'
