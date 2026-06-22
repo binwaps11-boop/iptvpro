@@ -55,14 +55,22 @@ jobs:
 
       - name: Build image (with files/ overlay baked in)
         run: |
-          PKGS="$(grep -vE '^\s*#|^\s*$' openwrt-kt412/packages.txt | tr '\n' ' ')"
+          # Strip inline comments (# ...) AND blank lines, then join.
+          # A literal '#' inside PACKAGES truncates the opkg install command -> broken rootfs.
+          PKGS="$(sed -E 's/#.*$//' openwrt-kt412/packages.txt | tr '\n' ' ' | tr -s ' ')"
           echo "Profile : $PROFILE"
           echo "Packages: $PKGS"
+          case "$PKGS" in *'#'*) echo "ERROR: '#' leaked into PACKAGES"; exit 1;; esac
           make -C "${IB_DIR}" image \
             PROFILE="$PROFILE" \
             PACKAGES="$PKGS" \
             FILES="${GITHUB_WORKSPACE}/openwrt-kt412/files" \
             EXTRA_IMAGE_NAME="kt412-custom"
+          # Verify the rootfs actually contains an init (catch broken builds early)
+          RB="${IB_DIR}/build_dir/target-mips_24kc_musl/linux-ath79_nand/root.squashfs"
+          unsquashfs -l "$RB" 2>/dev/null | grep -q 'squashfs-root/sbin/init' \
+            && echo "OK: /sbin/init present" \
+            || { echo "FATAL: /sbin/init missing in rootfs"; exit 1; }
 
       - name: Collect, rename, checksum
         run: |

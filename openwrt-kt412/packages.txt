@@ -1,34 +1,152 @@
-# KT412 (Dongwon DW02-412H) — curated LIGHT package list for 128MB RAM.
-# Everything here is official OpenWrt and actually works. No heavy charts, no DB.
-#
-# ---- LuCI (official web UI) ----
-luci                       # luci-base + mod-admin-full + theme-bootstrap + uhttpd + rpcd
-luci-proto-ppp             # PPPoE WAN
-ppp-mod-pppoe
+# KT412 (Dongwon DW02-412H) — COMPLETE package list (one name per line, NO inline #).
+# = official complete 23.05.5 ath79-nand set + KT412 extras (mwan3, commands).
+# Inline comments are FORBIDDEN here (they break 'opkg install').
+ath10k-board-qca988x
+ath10k-firmware-qca988x-ct
+base-files
+busybox
+ca-bundle
+cgi-io
+dnsmasq
+dropbear
+firewall4
+fstools
+fwtool
+getrandom
+hostapd-common
+iw
+iwinfo
+jansson4
+jshn
+jsonfilter
+kmod-ath
+kmod-ath10k-ct
+kmod-ath9k
+kmod-ath9k-common
+kmod-cfg80211
+kmod-crypto-acompress
+kmod-crypto-aead
+kmod-crypto-ccm
+kmod-crypto-cmac
+kmod-crypto-crc32c
+kmod-crypto-ctr
+kmod-crypto-gcm
+kmod-crypto-gf128
+kmod-crypto-ghash
+kmod-crypto-hash
+kmod-crypto-hmac
+kmod-crypto-manager
+kmod-crypto-null
+kmod-crypto-rng
+kmod-crypto-seqiv
+kmod-crypto-sha512
+kmod-gpio-button-hotplug
+kmod-hwmon-core
+kmod-lib-crc-ccitt
+kmod-lib-crc32c
+kmod-lib-lzo
+kmod-mac80211
+kmod-nf-conntrack
+kmod-nf-conntrack6
+kmod-nf-flow
+kmod-nf-log
+kmod-nf-log6
+kmod-nf-nat
+kmod-nf-reject
+kmod-nf-reject6
+kmod-nfnetlink
+kmod-nft-core
+kmod-nft-fib
+kmod-nft-nat
+kmod-nft-offload
+kmod-nls-base
+kmod-phy-ath79-usb
+kmod-ppp
+kmod-pppoe
+kmod-pppox
+kmod-random-core
+kmod-slhc
+kmod-usb-core
+kmod-usb-ehci
+kmod-usb2
+libblobmsg-json20230523
+libc
+libgcc1
+libiwinfo-data
+libiwinfo20230701
+libjson-c5
+libjson-script20230523
+liblucihttp-ucode
+liblucihttp0
+libmbedtls12
+libmnl0
+libnftnl11
+libnl-tiny1
+libpthread
+libubox20230523
+libubus20230605
+libuci20130104
+libuclient20201210
+libucode20230711
+libustream-mbedtls20201210
+logd
+luci
+luci-app-firewall
+luci-app-opkg
+luci-base
+luci-light
+luci-mod-admin-full
+luci-mod-network
+luci-mod-status
+luci-mod-system
 luci-proto-ipv6
-luci-app-firewall          # (usually pulled by luci) zone/NAT UI
-luci-app-commands          # REAL working buttons (Reconnect/Restart/Verify) — light
-#
-# ---- Multi-WAN: ECMP / Failover / Health-check ----
+luci-proto-ppp
+luci-ssl
+luci-theme-bootstrap
+mtd
+netifd
+nftables-json
+odhcp6c
+odhcpd-ipv6only
+openwrt-keyring
+opkg
+ppp
+ppp-mod-pppoe
+procd
+procd-seccomp
+procd-ujail
+px5g-mbedtls
+rpcd
+rpcd-mod-file
+rpcd-mod-iwinfo
+rpcd-mod-luci
+rpcd-mod-rrdns
+rpcd-mod-ucode
+swconfig
+ubi-utils
+uboot-envtools
+ubox
+ubus
+ubusd
+uci
+uclient-fetch
+ucode
+ucode-mod-fs
+ucode-mod-html
+ucode-mod-math
+ucode-mod-nl80211
+ucode-mod-rtnl
+ucode-mod-ubus
+ucode-mod-uci
+ucode-mod-uloop
+uhttpd
+uhttpd-mod-ubus
+urandom-seed
+urngd
+usign
+wireless-regdb
+wpad-basic-mbedtls
 mwan3
 luci-app-mwan3
-#
-# ---- Wi-Fi (dual-band, real) ----
-kmod-ath9k                 # 2.4G QCA9557 WMAC
-kmod-ath10k-ct             # 5G QCA9882 (already in device defaults)
-ath10k-firmware-qca988x-ct
-wpad-basic-mbedtls         # light WPA2/WPA3-personal supplicant/AP
-#
-# ---- switch / diagnostics / base tools (most already in image) ----
-swconfig
-iwinfo
+luci-app-commands
 ip-full
-#
-# ---- USB (device has 1x USB2; keep minimal, storage opt-in) ----
-kmod-usb2
-#
-# NOTE: intentionally EXCLUDED (too heavy for 128MB / not needed):
-#   luci-app-statistics + collectd*  (RAM-hungry graphing)
-#   luci-app-sqm / sqm-scripts        (CPU heavy on 720MHz; add only if you need QoS)
-#   nlbwmon / vnstat databases        (flash/RAM writes)
-#   docker / podman / samba / minidlna / adblock-big-lists

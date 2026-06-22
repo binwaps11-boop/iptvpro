@@ -37,7 +37,8 @@ fi
 cd "$IB"
 
 # Package list (strip comments/blank lines)
-PKGS="$(grep -vE '^\s*#|^\s*$' "${HERE}/packages.txt" | tr '\n' ' ')"
+# Strip inline '#' comments too — a literal '#' in PACKAGES breaks 'opkg install'.
+PKGS="$(sed -E 's/#.*$//' "${HERE}/packages.txt" | tr '\n' ' ' | tr -s ' ')"
 
 echo "[*] Building image with baked-in ./files overlay..."
 make image \
