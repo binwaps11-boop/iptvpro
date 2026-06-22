@@ -7,6 +7,9 @@ name: Build KT412 firmware
 # Run it: Actions tab -> "Build KT412 firmware" -> Run workflow
 # (it also runs automatically on push to this branch when files here change).
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -25,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1                 # serialize so both jobs publish to one Release safely
       matrix:
         variant: [ "64m", "128m" ]   # both built; flash the one matching your NAND
     env:
@@ -79,3 +83,15 @@ jobs:
           name: kt412-firmware-${{ matrix.variant }}
           path: out/*
           if-no-files-found: error
+
+      - name: Publish to GitHub Release (permanent direct download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kt412-fw
+          name: KT412 firmware (Dongwon DW02-412H, ath79/nand)
+          body: |
+            Custom OpenWrt firmware for KT GiGA WiFi home / Dongwon DW02-412H.
+            Pick the file matching `cat /proc/mtd` ubi size: 64m (~0x3c00000) or 128m (~0x7c00000).
+            Flash: sysupgrade -v -n openwrt-kt412-<variant>-custom-sysupgrade.bin
+          files: out/*
+          fail_on_unmatched_files: true
