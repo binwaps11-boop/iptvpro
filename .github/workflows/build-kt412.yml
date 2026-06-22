@@ -77,6 +77,21 @@ jobs:
           ( cd out && sha256sum openwrt-kt412-${{ matrix.variant }}-* > SHA256-${{ matrix.variant }}.txt )
           echo "==== OUTPUT (${{ matrix.variant }}) ===="; ls -lh out; cat out/SHA256-${{ matrix.variant }}.txt
 
+      - name: Fetch OFFICIAL OpenWrt images (recovery baseline, unmodified)
+        run: |
+          BASE="https://downloads.openwrt.org/releases/${VERSION}/targets/ath79/nand"
+          for kind in initramfs-kernel.bin squashfs-factory.img squashfs-sysupgrade.bin; do
+            f="openwrt-${VERSION}-ath79-nand-${PROFILE}-${kind}"
+            if wget -q "$BASE/$f" -O "out/official-${{ matrix.variant }}-${kind}"; then
+              echo "fetched $f"
+            else
+              rm -f "out/official-${{ matrix.variant }}-${kind}"
+              echo "NOT AVAILABLE: $f"
+            fi
+          done
+          ( cd out && sha256sum official-* >> SHA256-${{ matrix.variant }}.txt 2>/dev/null || true )
+          echo "==== OUTPUT incl official (${{ matrix.variant }}) ===="; ls -lh out
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
