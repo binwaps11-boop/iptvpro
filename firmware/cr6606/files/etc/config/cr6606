@@ -1,0 +1,5 @@
+# Persisted CR6606 custom state (managed by Port Control / rpcd backend).
+# Per-port admin state is stored here, e.g.:
+#   config port 'lan2'
+#       option disabled '1'
+# Applied on boot by /etc/init.d/cr6606-ports.

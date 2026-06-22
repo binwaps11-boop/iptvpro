@@ -1,0 +1,21 @@
+{
+	"luci-app-cr6606": {
+		"description": "Grant access to CR6606 custom dashboard / port control / wifi",
+		"read": {
+			"ubus": {
+				"cr6606": [ "system", "ports", "wifi", "wan", "mesh", "vlans" ],
+				"network.interface.wan": [ "status" ],
+				"network.device": [ "status" ],
+				"system": [ "board", "info" ],
+				"iwinfo": [ "info", "assoclist", "scan" ]
+			},
+			"uci": [ "wireless", "network", "firewall", "dhcp", "cr6606" ]
+		},
+		"write": {
+			"ubus": {
+				"cr6606": [ "port_action", "wifi_action", "wan_action" ]
+			},
+			"uci": [ "wireless", "network", "firewall", "dhcp", "cr6606" ]
+		}
+	}
+}

@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# Re-apply persisted per-port disabled state after boot (Port Control).
+START=21
+boot() { start; }
+start() {
+	. /lib/functions.sh
+	config_load cr6606
+	apply_port() {
+		local cfg="$1" disabled
+		config_get disabled "$cfg" disabled 0
+		case "$cfg" in lan1|lan2|lan3|wan) ;; *) return ;; esac
+		[ "$disabled" = "1" ] && ip link set dev "$cfg" down 2>/dev/null
+	}
+	config_foreach apply_port port
+}
