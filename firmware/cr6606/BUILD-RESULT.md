@@ -1,7 +1,7 @@
 # CR6606 — official build result
 
 Built with the **official OpenWrt ImageBuilder** on GitHub Actions.
-Latest build (run #8, [27929276899](https://github.com/binwaps11-boop/iptvpro/actions/runs/27929276899)) =
+Latest build (run #9, [27929276899](https://github.com/binwaps11-boop/iptvpro/actions/runs/27929585269)) =
 **PRO edition**: country **US**, **radio-level txpower 30** on BOTH 2.4G and 5G
 (request; real applied value proven by `iwinfo` on device), device-default DSA layout,
 + WireGuard / Adblock / SQM-CAKE / Argon / DDNS / UPnP / vnStat / flow-offload +
@@ -23,7 +23,7 @@ packet-steering + irqbalance. Includes `/root/verify-wifi.sh` and
 
 | File | Role | SHA256 |
 |------|------|--------|
-| `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin` | **SYSUPGRADE — flash this** (txpower=30 request) | `bd2179b8c2940425c8f0e869f0c031c579a8724aeffc8084406c26c2c83262d9` |
+| `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin` | **SYSUPGRADE — flash this** (txpower=30 request) | `69a2f56cf53f29845bc9864da5df89139ae5e9d9c6fc0fb1013e82aa261464d4` |
 | `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-firmware.bin` | FACTORY / initial-install (stock→OpenWrt only) | `9c797a43d64109e5e1a31cf0fd272485d6ccc6df329217fd72d815b3c108b8ff` |
 | `openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606.manifest` | package manifest | — |
 | `build.log` | full build log | — |
@@ -32,7 +32,7 @@ packet-steering + irqbalance. Includes `/root/verify-wifi.sh` and
 ## Download
 GitHub → **Actions** → run *Build CR6606 OpenWrt image* →
 **Artifacts** → `cr6606-firmware-25.12.4` (a zip; sign in to GitHub to download).
-Direct: https://github.com/binwaps11-boop/iptvpro/actions/runs/27929276899
+Direct: https://github.com/binwaps11-boop/iptvpro/actions/runs/27929585269
 
 ## (6) Backup BEFORE flashing — ✅ SAFE (run on router)
 ```sh
@@ -45,7 +45,7 @@ sysupgrade -b /tmp/backup-cr6606.tar.gz
 ```sh
 sha256sum /tmp/openwrt-25.12.4-ramips-mt7621-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin
 # MUST equal:
-# bd2179b8c2940425c8f0e869f0c031c579a8724aeffc8084406c26c2c83262d9
+# 69a2f56cf53f29845bc9864da5df89139ae5e9d9c6fc0fb1013e82aa261464d4
 ```
 
 ## (5) Flash — 🔴 DANGEROUS (only after backup + checksum match)
