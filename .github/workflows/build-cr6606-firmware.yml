@@ -20,7 +20,7 @@ on:
       - ".github/workflows/build-cr6606-firmware.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -105,10 +105,32 @@ jobs:
           echo "===== FILE TYPE ====="; file openwrt-cr6606-custom-sysupgrade.bin
           ls -la
 
-      - name: Upload firmware artifacts
+      - name: Upload firmware artifacts (workflow run)
         uses: actions/upload-artifact@v4
         with:
           name: cr6606-custom-firmware
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+      # Permanent home on GitHub: publish/refresh a Release with everything.
+      - name: Publish GitHub Release (permanent download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cr6606-${{ steps.cfg.outputs.version }}
+          name: CR6606 Custom Firmware (OpenWrt ${{ steps.cfg.outputs.version }})
+          body: |
+            Custom OpenWrt firmware for **Xiaomi Mi Router CR6606 ONLY**
+            (profile `xiaomi_mi-router-cr6606`, target ramips/mt7621).
+
+            Files:
+            - `openwrt-cr6606-custom-sysupgrade.bin` — flashable image
+            - `openwrt-cr6606-custom-sysupgrade.bin.sha256` — checksum
+            - `manifest.txt` / `packages.list` — exact packages with versions
+            - `build.log` — full ImageBuilder log
+
+            Flash: `sysupgrade -v -n openwrt-cr6606-custom-sysupgrade.bin`
+            Verify on device: `sh /root/verify-all.sh` and friends.
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: "true"
