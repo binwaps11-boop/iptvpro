@@ -7,7 +7,7 @@
 HOSTNAME="CR6606"
 TIMEZONE="<+03>-3"             # Yemen (Asia/Aden)
 ZONENAME="Asia/Aden"
-COUNTRY="YE"                   # regulatory domain (Yemen)
+COUNTRY="US"                   # regulatory domain (per user request)
 SSID_24="CR6606-24G"
 SSID_5="CR6606-5G"
 WIFI_KEY="CHANGE_ME_STRONG_PASSWORD"   # >=8 chars; CHANGE before/after flashing
@@ -51,7 +51,7 @@ if [ -f /etc/config/wireless ]; then
   uci -q set wireless.radio0.disabled='0'
 
   uci -q set wireless.radio1.country="$COUNTRY"
-  uci -q set wireless.radio1.channel='36'
+  uci -q set wireless.radio1.channel='149'
   uci -q set wireless.radio1.htmode='HE80'
   uci -q set wireless.radio1.cell_density='0'
   uci -q set wireless.radio1.txpower='30'   # request max; driver clamps to legal+calibrated cap (real value via iwinfo)

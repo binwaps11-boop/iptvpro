@@ -20,7 +20,7 @@ config wifi-device 'radio0'
 	option band '2g'
 	option channel 'auto'        # pick a clean one from your survey (1/6/11)
 	option htmode 'HT20'         # stability first; HT40 only if survey is clean
-	option country 'YE'          # regulatory domain
+	option country 'US'          # regulatory domain
 	option cell_density '0'
 	option txpower '30'          # requests max; driver clamps to legal cap (~20-23 dBm real)
 
@@ -39,7 +39,7 @@ config wifi-device 'radio1'
 	option band '5g'
 	option channel 'auto'        # 36/40/44/48 (UNII-1) are universally legal & no-DFS
 	option htmode 'HE80'         # AX 80 MHz; drop to HE40/HE20 if instability seen
-	option country 'YE'
+	option country 'US'
 	option cell_density '0'
 	option txpower '30'          # requests max; driver clamps to legal cap (real value via iwinfo)
 
