@@ -1,7 +1,7 @@
 # CR6606 — official build result
 
 Built with the **official OpenWrt ImageBuilder** on GitHub Actions.
-Latest build (run #9, [27929276899](https://github.com/binwaps11-boop/iptvpro/actions/runs/27929585269)) =
+Latest build (run #9, [27929585269](https://github.com/binwaps11-boop/iptvpro/actions/runs/27929585269)) =
 **PRO edition**: country **US**, **radio-level txpower 30** on BOTH 2.4G and 5G
 (request; real applied value proven by `iwinfo` on device), device-default DSA layout,
 + WireGuard / Adblock / SQM-CAKE / Argon / DDNS / UPnP / vnStat / flow-offload +
