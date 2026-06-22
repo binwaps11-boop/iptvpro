@@ -1,0 +1,34 @@
+# KT412 (Dongwon DW02-412H) — curated LIGHT package list for 128MB RAM.
+# Everything here is official OpenWrt and actually works. No heavy charts, no DB.
+#
+# ---- LuCI (official web UI) ----
+luci                       # luci-base + mod-admin-full + theme-bootstrap + uhttpd + rpcd
+luci-proto-ppp             # PPPoE WAN
+ppp-mod-pppoe
+luci-proto-ipv6
+luci-app-firewall          # (usually pulled by luci) zone/NAT UI
+luci-app-commands          # REAL working buttons (Reconnect/Restart/Verify) — light
+#
+# ---- Multi-WAN: ECMP / Failover / Health-check ----
+mwan3
+luci-app-mwan3
+#
+# ---- Wi-Fi (dual-band, real) ----
+kmod-ath9k                 # 2.4G QCA9557 WMAC
+kmod-ath10k-ct             # 5G QCA9882 (already in device defaults)
+ath10k-firmware-qca988x-ct
+wpad-basic-mbedtls         # light WPA2/WPA3-personal supplicant/AP
+#
+# ---- switch / diagnostics / base tools (most already in image) ----
+swconfig
+iwinfo
+ip-full
+#
+# ---- USB (device has 1x USB2; keep minimal, storage opt-in) ----
+kmod-usb2
+#
+# NOTE: intentionally EXCLUDED (too heavy for 128MB / not needed):
+#   luci-app-statistics + collectd*  (RAM-hungry graphing)
+#   luci-app-sqm / sqm-scripts        (CPU heavy on 720MHz; add only if you need QoS)
+#   nlbwmon / vnstat databases        (flash/RAM writes)
+#   docker / podman / samba / minidlna / adblock-big-lists

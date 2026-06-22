@@ -1,0 +1,84 @@
+#
+# KT412 / Dongwon DW02-412H  (ath79-nand, QCA9557, swconfig switch0)
+# Real port map (from OpenWrt board.d):  WAN=port1  LAN1..4=ports 5,4,3,2  CPU=eth0
+# Management/LAN IP = 192.168.100.1  (br-lan over the 4 LAN ports)
+#
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option ula_prefix 'fd00:4120::/48'
+	# packet steering: spreads NIC IRQs across the 4 cores -> lower latency, light
+	option packet_steering '1'
+
+# ---- LAN bridge (4 LAN ports), Management ----
+config interface 'lan'
+	option type 'bridge'
+	option ifname 'eth0.1'
+	option proto 'static'
+	option ipaddr '192.168.100.1'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+
+# ---- WAN (default: DHCP). Templates for static/pppoe are commented below ----
+config interface 'wan'
+	option ifname 'eth0.2'
+	option proto 'dhcp'
+
+config interface 'wan6'
+	option ifname 'eth0.2'
+	option proto 'dhcpv6'
+
+# ===== Static WAN template (uncomment + edit, then Quick Setup applies safely) =====
+#config interface 'wan'
+#	option ifname 'eth0.2'
+#	option proto 'static'
+#	option ipaddr '203.0.113.10'
+#	option netmask '255.255.255.0'
+#	option gateway '203.0.113.1'
+#	option dns '1.1.1.1 8.8.8.8'
+
+# ===== PPPoE WAN template (MSS clamp handled in firewall) =====
+#config interface 'wan'
+#	option ifname 'eth0.2'
+#	option proto 'pppoe'
+#	option username 'USER'
+#	option password 'PASS'
+#	option ipv6 'auto'
+
+# ===== Optional 2nd WAN for ECMP / Failover (needs a free port / VLAN) =====
+#config interface 'wan2'
+#	option ifname 'eth0.3'
+#	option proto 'dhcp'
+
+# ---- swconfig: QCA8337 on switch0 ----
+config switch
+	option name 'switch0'
+	option reset '1'
+	option enable_vlan '1'
+
+# VLAN1 = LAN  (LAN ports 2,3,4,5 + CPU tagged)
+config switch_vlan
+	option device 'switch0'
+	option vlan '1'
+	option ports '2 3 4 5 0t'
+
+# VLAN2 = WAN  (WAN port 1 + CPU tagged)
+config switch_vlan
+	option device 'switch0'
+	option vlan '2'
+	option ports '1 0t'
+
+# ===== Extra VLAN template (e.g. VLAN10 on LAN port 5 only -> eth0.10) =====
+#config switch_vlan
+#	option device 'switch0'
+#	option vlan '10'
+#	option ports '5 0t'
+#config interface 'vlan10'
+#	option ifname 'eth0.10'
+#	option proto 'static'
+#	option ipaddr '192.168.10.1'
+#	option netmask '255.255.255.0'

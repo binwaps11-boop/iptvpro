@@ -1,0 +1,42 @@
+#
+# Wi-Fi template (DISABLED by default for a predictable first boot).
+# 2.4G = ath9k (QCA9557 WMAC), 5G = ath10k-ct (QCA9882, 11ac).
+# Enable + set country in Quick Setup. txpower below is a REQUEST; the real
+# achievable value is whatever `iwinfo <dev> info` reports (regdomain-limited).
+# Do NOT touch EEPROM/caldata.
+#
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/ahb/18100000.wmac'
+	option band '2g'
+	option channel '1'
+	option htmode 'HT20'
+	option country '00'          # <-- set your real country code (e.g. SA, EG, DE)
+	option txpower '20'
+	option disabled '1'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'KT412'
+	option encryption 'psk2'
+	option key 'ChangeMe12345'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path 'pci0000:00/0000:00:00.0'
+	option band '5g'
+	option channel '36'
+	option htmode 'VHT80'
+	option country '00'          # <-- set your real country code
+	option txpower '23'
+	option disabled '1'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'KT412-5G'
+	option encryption 'psk2'
+	option key 'ChangeMe12345'
