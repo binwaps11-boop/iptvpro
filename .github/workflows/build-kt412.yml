@@ -1,0 +1,81 @@
+name: Build KT412 firmware
+
+# Builds the real sysupgrade.bin for KT GiGA WiFi home / Dongwon DW02-412H
+# (ath79/nand, QCA9557) on a GitHub runner that HAS internet access to
+# downloads.openwrt.org. Outputs are uploaded as artifacts.
+#
+# Run it: Actions tab -> "Build KT412 firmware" -> Run workflow
+# (it also runs automatically on push to this branch when files here change).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OpenWrt release (swconfig-compatible)"
+        default: "23.05.5"
+        required: true
+  push:
+    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
+    paths:
+      - "openwrt-kt412/**"
+      - ".github/workflows/build-kt412.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ "64m", "128m" ]   # both built; flash the one matching your NAND
+    env:
+      VERSION: ${{ github.event.inputs.version || '23.05.5' }}
+      PROFILE: dongwon_dw02-412h-${{ matrix.variant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev \
+            gawk git gettext libssl-dev xsltproc wget unzip python3 file
+
+      - name: Download & extract ImageBuilder
+        run: |
+          IB="openwrt-imagebuilder-${VERSION}-ath79-nand.Linux-x86_64"
+          URL="https://downloads.openwrt.org/releases/${VERSION}/targets/ath79/nand/${IB}.tar.xz"
+          echo "Fetching $URL"
+          wget -q "$URL"
+          tar -xf "${IB}.tar.xz"
+          echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
+
+      - name: Build image (with files/ overlay baked in)
+        run: |
+          PKGS="$(grep -vE '^\s*#|^\s*$' openwrt-kt412/packages.txt | tr '\n' ' ')"
+          echo "Profile : $PROFILE"
+          echo "Packages: $PKGS"
+          make -C "${IB_DIR}" image \
+            PROFILE="$PROFILE" \
+            PACKAGES="$PKGS" \
+            FILES="${GITHUB_WORKSPACE}/openwrt-kt412/files" \
+            EXTRA_IMAGE_NAME="kt412-custom"
+
+      - name: Collect, rename, checksum
+        run: |
+          mkdir -p out
+          BIN="${IB_DIR}/bin/targets/ath79/nand"
+          cp "$(ls $BIN/*${PROFILE}*sysupgrade.bin | head -1)" \
+             "out/openwrt-kt412-${{ matrix.variant }}-custom-sysupgrade.bin"
+          FAC="$(ls $BIN/*${PROFILE}*factory.img 2>/dev/null | head -1 || true)"
+          [ -n "$FAC" ] && cp "$FAC" "out/openwrt-kt412-${{ matrix.variant }}-custom-factory.img" || true
+          cp "$BIN"/*.manifest "out/openwrt-kt412-${{ matrix.variant }}-custom.manifest" || true
+          cp "$BIN/sha256sums" "out/sha256sums-${{ matrix.variant }}.txt" 2>/dev/null || true
+          ( cd out && sha256sum openwrt-kt412-${{ matrix.variant }}-* > SHA256-${{ matrix.variant }}.txt )
+          echo "==== OUTPUT (${{ matrix.variant }}) ===="; ls -lh out; cat out/SHA256-${{ matrix.variant }}.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kt412-firmware-${{ matrix.variant }}
+          path: out/*
+          if-no-files-found: error

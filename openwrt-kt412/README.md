@@ -49,6 +49,15 @@ LAN  = eth0.1 (VLAN1, ports 2-5)     WAN = eth0.2 (VLAN2, port 1)
 
 ## 2. Build the real `.bin` (pick ONE)
 
+### Option C — GitHub Actions (builds in CI, zero local setup) ✅ recommended
+This repo ships `.github/workflows/build-kt412.yml`. GitHub's runners have full
+internet, so they build the real image for you and bake in the `files/` overlay.
+- It **auto‑runs on push** to this branch (when `openwrt-kt412/**` changes), and
+- can be run manually: **Actions → “Build KT412 firmware” → Run workflow**.
+- Builds **both** variants (64m + 128m). Download from the run’s **Artifacts**:
+  `kt412-firmware-64m` / `kt412-firmware-128m` (each has the `…-sysupgrade.bin`,
+  `…-factory.img`, `.manifest`, and SHA256). Flash the one matching `cat /proc/mtd`.
+
 ### Option A — OpenWrt Firmware Selector (easiest, builds server‑side)
 1. Open <https://firmware-selector.openwrt.org/>
 2. Search **`DW02-412H`** → pick the variant matching your flash (**64M** or **128M**).
