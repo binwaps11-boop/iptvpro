@@ -77,16 +77,38 @@ jobs:
           # DSA-safe base (mgmt IP, theme, uci-defaults) — lets DSA board.d build the network
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/files" ./files
           # Custom KT412 purple-glass dashboard (network-agnostic: www + cgi-bin api)
-          mkdir -p ./files/www
+          mkdir -p ./files/www ./files/root
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/root/." ./files/root/ 2>/dev/null || true
           chmod +x files/etc/uci-defaults/* || true
           chmod 0755 files/www/cgi-bin/kt412 || true
+          chmod 0755 files/root/*.sh 2>/dev/null || true
           find files -type f
 
       - name: Download sources
         run: |
           cd openwrt
           make -j$(nproc) download || make -j1 download
+
+      - name: "Patch ath9k 2.4G power to 30 dBm (consented bypass)"
+        run: |
+          cd openwrt
+          echo "=== prepare kernel source so we can patch ath9k before compile ==="
+          make target/linux/prepare V=s -j$(nproc) 2>&1 | tail -5 \
+            || make target/linux/prepare V=s -j1 2>&1 | tail -30
+          EEP="$(find build_dir -path '*ath9k/ar9003_eeprom.c' 2>/dev/null | head -1)"
+          if [ -n "$EEP" ]; then
+            cp "$EEP" "$EEP.orig"
+            # 1) ignore the conservative CTL edge clamp on 2.4G target power
+            sed -i 's/minCtlPower = (u8)min(twiceMaxEdgePower, scaledPower);/minCtlPower = scaledPower; \/* KT412-30dbm *\//' "$EEP"
+            # 2) force every 2.4G per-rate target to 60 half-dB (= 30 dBm) before
+            #    max_power_level is derived -> iw/iwinfo report 30, PA driven to max.
+            sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
+            echo "--- KT412 power-patch markers (expect 2) ---"; grep -c 'KT412-30dbm' "$EEP"
+            echo "--- diff ---"; diff "$EEP.orig" "$EEP" || true
+          else
+            echo "ar9003_eeprom.c not found (build proceeds UNPATCHED, 2.4G stays ~24)"
+          fi
 
       - name: Build
         run: |
