@@ -90,30 +90,43 @@ jobs:
           cd openwrt
           make -j$(nproc) download || make -j1 download
 
-      - name: "Patch ath9k 2.4G power to 30 dBm (consented bypass)"
+      - name: "Patch ath9k 2.4G power to 30 dBm (consented bypass) - MUST apply"
         run: |
           cd openwrt
-          echo "=== prepare kernel source so we can patch ath9k before compile ==="
-          make target/linux/prepare V=s -j$(nproc) 2>&1 | tail -5 \
-            || make target/linux/prepare V=s -j1 2>&1 | tail -30
+          echo "=== build tools + toolchain first so the kernel source actually extracts ==="
+          make -j$(nproc) tools/install    || make -j1 tools/install
+          make -j$(nproc) toolchain/install || make -j1 toolchain/install
+          echo "=== extract + prepare kernel (so ath9k source exists to patch) ==="
+          make -j$(nproc) target/linux/prepare || make -j1 V=s target/linux/prepare
           EEP="$(find build_dir -path '*ath9k/ar9003_eeprom.c' 2>/dev/null | head -1)"
-          if [ -n "$EEP" ]; then
-            cp "$EEP" "$EEP.orig"
-            # 1) ignore the conservative CTL edge clamp on 2.4G target power
-            sed -i 's/minCtlPower = (u8)min(twiceMaxEdgePower, scaledPower);/minCtlPower = scaledPower; \/* KT412-30dbm *\//' "$EEP"
-            # 2) force every 2.4G per-rate target to 60 half-dB (= 30 dBm) before
-            #    max_power_level is derived -> iw/iwinfo report 30, PA driven to max.
-            sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
-            echo "--- KT412 power-patch markers (expect 2) ---"; grep -c 'KT412-30dbm' "$EEP"
-            echo "--- diff ---"; diff "$EEP.orig" "$EEP" || true
-          else
-            echo "ar9003_eeprom.c not found (build proceeds UNPATCHED, 2.4G stays ~24)"
+          if [ -z "$EEP" ]; then
+            echo "FATAL: ar9003_eeprom.c not found after prepare - cannot apply power patch."
+            echo "Refusing to ship a DSA bin that claims 30 but isn't patched."
+            exit 1
           fi
+          echo "Found: $EEP"
+          cp "$EEP" "$EEP.orig"
+          # 1) ignore the conservative CTL edge clamp on 2.4G target power
+          sed -i 's/minCtlPower = (u8)min(twiceMaxEdgePower, scaledPower);/minCtlPower = scaledPower; \/* KT412-30dbm *\//' "$EEP"
+          # 2) force every 2.4G per-rate target to 60 half-dB (= 30 dBm) before
+          #    max_power_level is derived -> iw/iwinfo report 30, PA driven to max.
+          sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
+          M="$(grep -c 'KT412-30dbm' "$EEP")"
+          echo "--- power-patch markers (need 2): $M ---"
+          echo "--- diff ---"; diff "$EEP.orig" "$EEP" || true
+          if [ "$M" != "2" ]; then
+            echo "FATAL: power patch did not apply cleanly (markers=$M). Aborting."
+            exit 1
+          fi
+          echo "POWER PATCH APPLIED OK (2.4G target forced to 30 dBm)."
 
       - name: Build
         run: |
           cd openwrt
           make -j$(nproc) || (echo '=== retry verbose for error ==='; make -j1 V=s 2>&1 | tail -200; exit 1)
+          # prove the patched object is in the kernel build
+          echo "=== confirm patched source compiled ==="
+          grep -c 'KT412-30dbm' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c 2>/dev/null || true
 
       - name: Collect images
         id: collect
