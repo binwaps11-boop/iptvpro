@@ -1,14 +1,27 @@
 #!/bin/sh
 # KT412 DSA build first-boot defaults. DSA generates its own network config
-# (br-lan over lan1-4 + wan), so we ONLY set the management IP + theme here.
+# (br-lan over lan1-4 + wan), so we ONLY set the management IP here.
+# LuCI is removed; the custom purple dashboard is the only web UI, with the
+# ttyd web terminal (:7681) for advanced access.
 uci -q set network.lan.ipaddr='192.168.100.1'
 uci -q set network.lan.netmask='255.255.255.0'
-uci -q set luci.main.mediaurlbase='/luci-static/material'
 uci -q set system.@system[0].hostname='KT412-DSA'
 uci -q commit
 
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/kt412 2>/dev/null
+
+# --- ttyd web terminal (advanced access) on port 7681 ---
+if ! uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
+	uci -q add ttyd ttyd >/dev/null
+fi
+uci -q set ttyd.@ttyd[0].port='7681'
+uci -q set ttyd.@ttyd[0].command='/bin/login'
+uci -q delete ttyd.@ttyd[0].interface 2>/dev/null
+uci -q commit ttyd
+/etc/init.d/ttyd enable 2>/dev/null
+/etc/init.d/ttyd restart 2>/dev/null
+
 /etc/init.d/rpcd restart 2>/dev/null
 /etc/init.d/uhttpd restart 2>/dev/null
 exit 0

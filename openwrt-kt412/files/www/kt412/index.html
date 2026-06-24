@@ -29,7 +29,7 @@
     <div class="brand"><b>KT412</b><span>Dongwon DW02-412H · لوحة تحكم خاصة</span></div>
     <div class="spacer"></div>
     <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
-    <button class="btn-ghost" onclick="location.href='/cgi-bin/luci'">إعدادات متقدمة</button>
+    <button class="btn-ghost" onclick="window.open('http://'+location.hostname+':7681','_blank')">طرفية متقدمة</button>
     <button class="btn-ghost" id="logoutBtn">خروج</button>
   </div>
 
@@ -119,7 +119,7 @@
     </div>
   </section>
 
-  <div class="foot">KT412 Control · واجهة خاصة فوق OpenWrt · <a href="/cgi-bin/luci">LuCI المتقدم</a></div>
+  <div class="foot">KT412 Control · واجهة خاصة · <a href="javascript:window.open('http://'+location.hostname+':7681','_blank')">طرفية الويب</a></div>
 </div>
 
 <div id="toast"></div>

@@ -1,5 +1,7 @@
-# KT412 (Dongwon DW02-412H) — COMPLETE package list (one name per line, NO inline #).
-# = official complete 23.05.5 ath79-nand set + KT412 extras (mwan3, commands).
+# KT412 (Dongwon DW02-412H) — package list (one name per line, NO inline #).
+# LuCI fully REMOVED: the custom purple dashboard (www/ + cgi-bin/kt412) is the
+# only web UI. Backend kept: uhttpd + rpcd (session login) + ubus/uci + iwinfo/
+# iw/swconfig + jsonfilter. Advanced access = ttyd web terminal (port 7681).
 # Inline comments are FORBIDDEN here (they break 'opkg install').
 ath10k-board-qca988x
 ath10k-firmware-qca988x-ct
@@ -76,8 +78,6 @@ libiwinfo-data
 libiwinfo20230701
 libjson-c5
 libjson-script20230523
-liblucihttp-ucode
-liblucihttp0
 libmbedtls12
 libmnl0
 libnftnl11
@@ -90,20 +90,6 @@ libuclient20201210
 libucode20230711
 libustream-mbedtls20201210
 logd
-luci
-luci-app-firewall
-luci-app-opkg
-luci-base
-luci-light
-luci-mod-admin-full
-luci-mod-network
-luci-mod-status
-luci-mod-system
-luci-proto-ipv6
-luci-proto-ppp
-luci-ssl
-luci-theme-bootstrap
-luci-theme-material
 mtd
 netifd
 nftables-json
@@ -120,8 +106,6 @@ px5g-mbedtls
 rpcd
 rpcd-mod-file
 rpcd-mod-iwinfo
-rpcd-mod-luci
-rpcd-mod-rrdns
 rpcd-mod-ucode
 swconfig
 ubi-utils
@@ -148,12 +132,7 @@ usign
 wireless-regdb
 wpad-basic-mbedtls
 mwan3
-luci-app-mwan3
-luci-app-commands
 ip-full
-luci-app-sqm
 sqm-scripts
 kmod-sched-cake
-luci-app-ttyd
 ttyd
-luci-app-uhttpd
