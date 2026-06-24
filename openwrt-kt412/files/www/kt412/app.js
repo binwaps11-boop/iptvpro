@@ -473,8 +473,14 @@ $('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if
   dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#lanApply').onclick=applyLan;
 $('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim(); if(!vid){toast('اكتب VLAN ID',false);return;}
-  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:$('#vlanIp').value,dhcp:$('#vlanDhcp').checked?1:0,isolate:$('#vlanIso').checked?1:0},true));
+  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:$('#vlanIp').value,dhcp:$('#vlanDhcp').checked?1:0,
+    routing:$('#vlanRouting').value,allow_vids:$('#vlanAllow').value,nat:$('#vlanNat').value,
+    dns_mode:$('#vlanDns').value,dns1:$('#vlanDns1').value,dns2:$('#vlanDns2').value},true));
   toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
+$('#vlanImport').onclick=async()=>{ const d=$('#vlanImportData').value.trim(); if(!d){toast('ألصق الإعداد',false);return;}
+  let b64; try{ b64=btoa(unescape(encodeURIComponent(d))); }catch(e){ toast('نص غير صالح',false); return; }
+  const r=await safeApply(()=>call({act:'vlan_import',config:b64},true));
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
 $('#vlanPortApply').onclick=async()=>{ const r=await safeApply(()=>call({act:'vlan_port',vid:$('#vlanPortVid').value,port:$('#vlanPortSel').value,mode:$('#vlanPortMode').value},true));
   toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
 $('#vlanSsidApply').onclick=async()=>{ const r=await safeApply(()=>call({act:'vlan_ssid',ssid:$('#vlanSsidSel').value,vid:$('#vlanSsidVid').value},true));

@@ -161,9 +161,14 @@ if [ -n "$ACT" ]; then
 				*) fail "bad_mode";;
 			esac;;
 		vlan_add)
-			vid="$(sani_int "$(getp vid)")"; ip="$(sani_ip "$(getp ip)")"
-			dh="$(getp dhcp | tr -cd '01')"; iso="$(getp isolate | tr -cd '01')"
+			vid="$(sani_int "$(getp vid)")"; ip="$(sani_ip "$(getp ip)")"; dh="$(getp dhcp | tr -cd '01')"
+			routing="$(getp routing | tr -cd 'a-z')"; [ -n "$routing" ] || routing=internet   # KT412-VLAN-INTER
+			allowv="$(getp allow_vids | tr -cd '0-9,')"
+			dnsm="$(getp dns_mode | tr -cd 'a-z')"; [ -n "$dnsm" ] || dnsm=auto                # KT412-VLAN-DNS
+			dns1="$(sani_ip "$(getp dns1)")"; dns2="$(sani_ip "$(getp dns2)")"
+			nat="$(getp nat | tr -cd 'a-z')"; [ -n "$nat" ] || nat=on                          # KT412-VLAN-NAT
 			[ -n "$vid" ] && [ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			vip="${ip:-192.168.$vid.1}"
 			brsec=""; i=0
 			while uci -q get network.@device[$i] >/dev/null 2>&1; do
 				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
@@ -175,24 +180,53 @@ if [ -n "$ACT" ]; then
 				v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
 				for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done
 			fi
-			# new VLAN (tagged on all lan ports by default; user re-assigns per port)
 			vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
 			for pp in lan1 lan2 lan3 lan4; do uci add_list network.$vs.ports="$pp:t"; done
 			uci set network.vlan$vid=interface; uci set network.vlan$vid.device="br-lan.$vid"
-			uci set network.vlan$vid.proto='static'; uci set network.vlan$vid.ipaddr="${ip:-192.168.$vid.1}"
-			uci set network.vlan$vid.netmask='255.255.255.0'
+			uci set network.vlan$vid.proto='static'; uci set network.vlan$vid.ipaddr="$vip"; uci set network.vlan$vid.netmask='255.255.255.0'
 			if [ "$dh" = "1" ]; then
 				uci set dhcp.vlan$vid=dhcp; uci set dhcp.vlan$vid.interface="vlan$vid"
 				uci set dhcp.vlan$vid.start='100'; uci set dhcp.vlan$vid.limit='150'; uci set dhcp.vlan$vid.leasetime='12h'
+				case "$dnsm" in   # DNS per VLAN via DHCP option 6
+					router|forced) uci add_list dhcp.vlan$vid.dhcp_option="6,$vip";;
+					manual) o="6,${dns1:-1.1.1.1}"; [ -n "$dns2" ] && o="$o,$dns2"; uci add_list dhcp.vlan$vid.dhcp_option="$o";;
+				esac
 			fi
 			z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"
 			uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'
-			# isolate=1 -> no inter-VLAN; allow internet only
-			uci set firewall.$z.forward='REJECT'
-			fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			case "$routing" in inter) uci set firewall.$z.forward='ACCEPT';; *) uci set firewall.$z.forward='REJECT';; esac
+			# internet via WAN NAT, unless nat=off or routing=isolated
+			if [ "$nat" != "off" ] && [ "$routing" != "isolated" ]; then
+				fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			fi
+			if [ "$routing" = "inter" ]; then           # full inter-VLAN (with mgmt LAN)
+				f2="$(uci add firewall forwarding)"; uci set firewall.$f2.src="vlan$vid"; uci set firewall.$f2.dest='lan'
+				f3="$(uci add firewall forwarding)"; uci set firewall.$f3.src='lan'; uci set firewall.$f3.dest="vlan$vid"
+			elif [ "$routing" = "selected" ] && [ -n "$allowv" ]; then   # route to selected VLANs only
+				oIFS="$IFS"; IFS=','; for t in $allowv; do t="$(printf '%s' "$t" | tr -cd '0-9')"; [ -n "$t" ] || continue
+					fa="$(uci add firewall forwarding)"; uci set firewall.$fa.src="vlan$vid"; uci set firewall.$fa.dest="vlan$t"
+					fb="$(uci add firewall forwarding)"; uci set firewall.$fb.src="vlan$t"; uci set firewall.$fb.dest="vlan$vid"
+				done; IFS="$oIFS"
+			fi
+			if [ "$dnsm" = "forced" ]; then             # force clients to router DNS (hijack 53)
+				rd="$(uci add firewall redirect)"; uci set firewall.$rd.name="vlan$vid-dns"; uci set firewall.$rd.src="vlan$vid"
+				uci set firewall.$rd.proto='tcp udp'; uci set firewall.$rd.src_dport='53'; uci set firewall.$rd.dest_ip="$vip"; uci set firewall.$rd.dest_port='53'; uci set firewall.$rd.target='DNAT'
+			fi
 			uci commit
 			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
-			printf '{"ok":true,"msg":"VLAN %s أُنشئ (IP %s)"}\n' "$vid" "$(json_esc "${ip:-192.168.$vid.1}")";;
+			printf '{"ok":true,"msg":"VLAN %s: routing=%s NAT=%s DNS=%s IP %s"}\n' "$vid" "$routing" "$nat" "$dnsm" "$(json_esc "$vip")";;
+		vlan_import)
+			data="$(getp config)"; [ -n "$data" ] || fail "no_data"
+			dec="$(printf '%s' "$data" | base64 -d 2>/dev/null)"
+			printf '%s' "$dec" | grep -q 'vlan' || fail "invalid_config"   # validate before apply
+			printf '%s\n' "$dec" | while IFS= read -r line; do
+				case "$line" in
+					network.*vlan*=*|dhcp.*vlan*=*|firewall.*vlan*=*) uci set "$line" 2>/dev/null;;
+				esac
+			done
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم استيراد إعداد VLAN (محمي بـ Safe Apply)"}\n';;
 		vlan_del)
 			vid="$(sani_int "$(getp vid)")"; [ -n "$vid" ] && [ "$vid" != "1" ] || fail "protected_vid"
 			i=0; while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do

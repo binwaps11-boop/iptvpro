@@ -95,9 +95,15 @@ jobs:
           fi
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
-          grep -q 'vlan_add'   files/www/cgi-bin/kt412 && echo "VLAN MANAGER INCLUDED" || { echo "FATAL: VLAN manager missing"; exit 1; }
-          grep -q 'safe_arm'   files/www/cgi-bin/kt412 && echo "SAFE APPLY INCLUDED"   || { echo "FATAL: Safe Apply missing"; exit 1; }
-          test -s files/root/kt412-super-check.sh       && echo "SUPER CHECK INCLUDED"  || { echo "FATAL: super-check missing"; exit 1; }
+          C=files/www/cgi-bin/kt412
+          grep -q 'vlan_add'          "$C" && echo "VLAN MANAGER INCLUDED"        || { echo "FATAL: VLAN manager missing"; exit 1; }
+          grep -q 'KT412-VLAN-INTER'  "$C" && echo "VLAN INTER-VLAN INCLUDED"      || { echo "FATAL: inter-vlan missing"; exit 1; }
+          grep -q 'KT412-VLAN-DNS'    "$C" && echo "VLAN DNS PER VLAN INCLUDED"    || { echo "FATAL: vlan dns missing"; exit 1; }
+          grep -q 'KT412-VLAN-NAT'    "$C" && echo "VLAN NAT PER VLAN INCLUDED"    || { echo "FATAL: vlan nat missing"; exit 1; }
+          grep -q 'vlan_import' "$C" && grep -q 'vlan_export' "$C" && echo "VLAN IMPORT EXPORT INCLUDED" || { echo "FATAL: vlan import/export missing"; exit 1; }
+          grep -q 'safe_arm'          "$C" && echo "SAFE APPLY INCLUDED"           || { echo "FATAL: Safe Apply missing"; exit 1; }
+          grep -q 'safe_restore'      "$C" && echo "SAFE APPLY ROLLBACK INCLUDED"  || { echo "FATAL: rollback missing"; exit 1; }
+          test -s files/root/kt412-super-check.sh && echo "SUPER CHECK INCLUDED"   || { echo "FATAL: super-check missing"; exit 1; }
           test -s files/root/POWER-REPORT.txt && test -s files/root/RF-SOLUTION.txt && test -s files/root/kt412-report.sh && echo "REPORTS INCLUDED" || { echo "FATAL: reports missing"; exit 1; }
           echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"
 

@@ -133,7 +133,22 @@
         <div><label class="f">IP (اختياري)</label><input id="vlanIp" class="t" placeholder="192.168.10.1"></div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2)"><input type="checkbox" id="vlanDhcp" checked> خادم DHCP</label>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2);margin-top:4px"><input type="checkbox" id="vlanIso" checked> عزل عن باقي VLANs (إنترنت فقط)</label>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">التوجيه (Routing)</label><select id="vlanRouting" class="t">
+          <option value="internet">إنترنت فقط (معزول عن VLANs)</option>
+          <option value="isolated">معزول تماماً (بلا إنترنت)</option>
+          <option value="inter">السماح inter-VLAN (+ LAN)</option>
+          <option value="selected">VLANs محددة فقط</option></select></div>
+        <div><label class="f">VLANs المسموحة (للمحدد: 20,30)</label><input id="vlanAllow" class="t" placeholder="20,30"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">NAT</label><select id="vlanNat" class="t"><option value="on">مُفعّل (إنترنت)</option><option value="off">معطّل (محلي فقط)</option></select></div>
+        <div><label class="f">DNS</label><select id="vlanDns" class="t"><option value="auto">تلقائي</option><option value="router">DNS الراوتر</option><option value="manual">يدوي</option><option value="forced">إجبار DNS الراوتر</option></select></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">DNS 1</label><input id="vlanDns1" class="t" placeholder="1.1.1.1"></div>
+        <div><label class="f">DNS 2</label><input id="vlanDns2" class="t" placeholder="8.8.8.8"></div>
+      </div>
       <button class="btn" id="vlanAdd" style="margin-top:8px">إنشاء VLAN (Safe Apply)</button>
       <h4 style="margin:14px 0 6px">ربط منفذ / SSID بـ VLAN</h4>
       <div class="row">
@@ -152,6 +167,9 @@
         <div><button class="btn bad sm" id="vlanReset" style="width:100%">إعادة ضبط VLAN فقط</button></div>
       </div>
       <pre id="vlanExportBox" class="hide" style="margin-top:10px;max-height:30vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)"></pre>
+      <h4 style="margin:14px 0 6px">استيراد إعداد VLAN</h4>
+      <textarea id="vlanImportData" class="t" rows="3" placeholder="ألصق ناتج التصدير هنا"></textarea>
+      <button class="btn sec sm" id="vlanImport" style="margin-top:6px">استيراد + تطبيق (Safe Apply)</button>
     </div>
   </section>
 

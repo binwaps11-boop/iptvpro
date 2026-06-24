@@ -48,8 +48,13 @@ echo "conntrack: $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)/$
 for t in /sys/class/thermal/thermal_zone*/temp; do [ -e "$t" ] && echo "temp $t = $(cat "$t")"; done
 
 echo; echo "## VLAN"
-uci show network 2>/dev/null | grep -E "bridge-vlan|vlan_filtering|vlan[0-9]" || echo "(no custom VLANs — normal bridge)"
-bridge vlan show 2>/dev/null | head -30
+echo "-- bridge-vlan + vlan_filtering --"; uci show network 2>/dev/null | grep -E "bridge-vlan|vlan_filtering" || echo "(none — normal bridge)"
+echo "-- bridge vlan show (PVID / tagged-untagged per port) --"; bridge vlan show 2>/dev/null | head -40
+echo "-- VLAN interfaces (IP) --"; uci show network 2>/dev/null | grep -E "network\.vlan[0-9]"
+echo "-- DHCP per VLAN (+ dhcp_option DNS) --"; uci show dhcp 2>/dev/null | grep -E "vlan[0-9]"
+echo "-- firewall zones / forwardings / redirects per VLAN (NAT, inter-VLAN, DNS force) --"; uci show firewall 2>/dev/null | grep -iE "vlan[0-9]"
+echo "-- Safe Apply backup present? --"; ls /tmp/kt412-rb 2>/dev/null && echo "backup dir EXISTS" || echo "(no active safe-apply backup right now)"
+echo "-- Restore (safe_restore) present in API? --"; grep -c 'safe_restore' /www/cgi-bin/kt412 2>/dev/null
 
 echo; echo "## WIFI STABILITY — 60s ping"
 ping -c60 -W2 1.1.1.1 2>&1 | tail -4
