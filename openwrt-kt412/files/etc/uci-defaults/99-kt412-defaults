@@ -28,6 +28,28 @@ uci -q commit ttyd
 /etc/init.d/ttyd enable 2>/dev/null
 /etc/init.d/ttyd restart 2>/dev/null
 
+# --- performance + stability (128MB): NAT flow offloading, conntrack sizing,
+#     auto-reboot on kernel panic so it never stays hung ---
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q commit firewall
+if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-tune
+net.netfilter.nf_conntrack_max=16384
+net.ipv4.tcp_fin_timeout=30
+kernel.panic=10
+kernel.panic_on_oops=1
+SYS
+fi
+sysctl -p >/dev/null 2>&1
+
+# --- service watchdog (cron, every 2 min): revive dead critical daemons ---
+mkdir -p /etc/crontabs
+if ! grep -q 'kt412-wd' /etc/crontabs/root 2>/dev/null; then
+	echo '*/2 * * * * for s in dnsmasq uhttpd rpcd; do pgrep -x "$s" >/dev/null || /etc/init.d/"$s" restart; done # kt412-wd' >> /etc/crontabs/root
+fi
+/etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
+
 # --- restart web services so the dashboard + login are live on first boot ---
 /etc/init.d/rpcd restart 2>/dev/null
 /etc/init.d/uhttpd restart 2>/dev/null

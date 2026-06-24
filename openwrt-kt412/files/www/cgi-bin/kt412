@@ -222,6 +222,28 @@ if [ -n "$ACT" ]; then
 			printf '{"ok":true,"requested":%s,"actual":%s}\n' "${dbm:-0}" "${actp:-0}";;
 		wifi_restart)
 			wifi reload >/dev/null 2>&1; printf '{"ok":true,"msg":"Wi-Fi restarted"}\n';;
+		wifi_optimize)
+			radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || fail "no_radio"
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			band="$(uci -q get wireless.$radio.band)"
+			if [ "$band" = "5g" ]; then cand="36 149 157 165"; else cand="1 6 11"; fi
+			counts="$(iwinfo "$dev" scan 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
+			best=""; bestn=99999
+			for c in $cand; do
+				n="$(printf '%s\n' "$counts" | grep -cx "$c" 2>/dev/null)"
+				[ "${n:-0}" -lt "$bestn" ] && { bestn="$n"; best="$c"; }
+			done
+			[ -n "$best" ] || best=auto
+			uci set wireless.$radio.channel="$best"
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"channel":"%s","neighbors":%s}\n' "$best" "${bestn:-0}";;
+		port_toggle)
+			port="$(sani_word "$(getp port)")"; on="$(getp on | tr -cd '01')"
+			[ -n "$port" ] || fail "no_port"
+			[ -e "/sys/class/net/$port" ] || fail "no_such_port"
+			if [ "$on" = "1" ]; then ip link set "$port" up 2>/dev/null; else ip link set "$port" down 2>/dev/null; fi
+			printf '{"ok":true,"port":"%s","state":"%s"}\n' "$port" "$([ "$on" = 1 ] && echo up || echo down)";;
 		power_profile)
 			radio="$(sani_word "$(getp radio)")"; mode="$(getp mode | tr -cd 'a-z')"
 			[ -n "$radio" ] || fail "no_radio"
@@ -452,6 +474,26 @@ case "$OP" in
 				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")")"
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	scan)
+		out=""; first=1
+		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			cells="$(iwinfo "$dev" scan 2>/dev/null | awk '
+				BEGIN{RS="Cell ";n=0}
+				NR>1{
+					essid="";ch="";sig="";enc="";
+					m=split($0,L,"\n");
+					for(i=1;i<=m;i++){
+						if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
+						else if(L[i] ~ /Channel:/){t=L[i];sub(/.*Channel: /,"",t);sub(/[^0-9].*/,"",t);ch=t}
+						else if(L[i] ~ /Signal:/){t=L[i];sub(/.*Signal: /,"",t);sub(/ .*/,"",t);sig=t}
+						else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);sig=sig;enc=t}
+					}
+					gsub(/[\\"]/,"",essid); gsub(/[\\"]/,"",enc); gsub(/\r/,"",enc);
+					if(ch!=""){ printf "%s{\"essid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,ch,sig,substr(enc,1,24) }
+				}')"
+			[ -n "$cells" ] && { [ "$first" -eq 1 ] || out="$out,"; first=0; out="$out$cells"; }
+		done
+		printf '{"ok":true,"nets":[%s]}\n' "$out";;
 	*)
 		fail "unknown_op";;
 esac

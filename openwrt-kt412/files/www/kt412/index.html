@@ -29,7 +29,6 @@
     <div class="brand"><b>KT412</b><span>Dongwon DW02-412H · لوحة تحكم خاصة</span></div>
     <div class="spacer"></div>
     <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
-    <button class="btn-ghost" onclick="window.open('http://'+location.hostname+':7681','_blank')">طرفية متقدمة</button>
     <button class="btn-ghost" id="logoutBtn">خروج</button>
   </div>
 
@@ -119,6 +118,13 @@
   <!-- WIFI -->
   <section data-pane="wifi" class="hide">
     <div id="wifiCards" class="grid cols-2"><div class="card"><div class="sub">جارٍ التحميل…</div></div></div>
+    <div class="card" style="margin-top:16px">
+      <h3>الشبكات المجاورة — Nearby Networks</h3>
+      <div class="sub">فحص الشبكات والقنوات حولك لاختيار أفضل قناة وتقليل التشويش.</div>
+      <button class="btn sec sm" id="scanBtn" style="margin-top:10px">فحص الجوار</button>
+      <div id="scanBox" style="margin-top:12px"></div>
+      <div id="chanBars" style="margin-top:12px"></div>
+    </div>
   </section>
 
   <!-- CLIENTS -->
@@ -224,7 +230,9 @@
         <div class="note">يُفحص الملف أنه متوافق مع هذا الجهاز قبل السماح بالتفليش. لا تقطع الكهرباء أثناء الترقية.</div>
       </div>
     </div>
-  </section>KT412 Control · واجهة خاصة · <a href="javascript:window.open('http://'+location.hostname+':7681','_blank')">طرفية الويب</a></div>
+  </section>
+
+  <div class="foot">KT412 Control · واجهة خاصة</div>
 </div>
 
 <div id="toast"></div>

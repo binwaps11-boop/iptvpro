@@ -165,7 +165,10 @@ async function loadWifi(){
       <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--txt2)">
         <input type="checkbox" class="whid" ${rd.hidden==='1'?'checked':''}> إخفاء اسم الشبكة</label>
       <div class="sub" style="margin-top:6px">المتصلون: ${lv.clients||0} · الوضع الحالي: ${esc(lv.mode||rd.mode||'ap')}</div>
-      <button class="btn wapply">حفظ الإعدادات</button>
+      <div class="row">
+        <div><button class="btn wapply" style="width:100%">حفظ الإعدادات</button></div>
+        <div><button class="btn sec wopt" style="width:100%">تحسين تلقائي (أفضل قناة)</button></div>
+      </div>
     </div>`;
   }).join('')||'<div class="card"><div class="sub">لا توجد راديوهات</div></div>';
 
@@ -177,6 +180,13 @@ async function loadWifi(){
     const en=card.querySelector('.wen');
     if(en)en.onchange=async()=>{ const r=await call({act:'wifi_toggle',radio:card.dataset.radio,on:en.checked?'1':'0'},true);
       toast(r.ok?(r.msg||'تم'):'فشل',r.ok); };
+    const opt=card.querySelector('.wopt');
+    if(opt)opt.onclick=async()=>{ opt.innerHTML='<span class="spin"></span>';
+      const r=await call({act:'wifi_optimize',radio:card.dataset.radio},true);
+      opt.innerHTML='تحسين تلقائي (أفضل قناة)';
+      if(r.ok)toast(`أفضل قناة: ${r.channel} (${r.neighbors} جار)`,true); else toast('فشل التحسين',false);
+      setTimeout(loadWifi,2000);
+    };
     const b=card.querySelector('.wapply');
     if(b)b.onclick=async()=>{
       const g=c=>card.querySelector(c);
@@ -209,9 +219,35 @@ async function loadPorts(){
   const r=await call({op:'ports'});
   if(!(r&&r.ok)){ $('#portsBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
   $('#portsBox').innerHTML=(r.ports||[]).map(p=>{ const up=p.link==='up';
-    return `<div class="port ${up?'up':''}"><div class="ic"></div><div class="nm">${esc(p.name)}</div>
-      <div class="sp">${up?(p.speed?p.speed+'M':'متصل'):'مفصول'}</div></div>`;
+    return `<div class="port ${up?'up':''}" data-port="${esc(p.name)}"><div class="ic"></div><div class="nm">${esc(p.name)}</div>
+      <div class="sp">${up?(p.speed?p.speed+'M':'متصل'):'مفصول'}</div>
+      <div style="margin-top:6px;display:flex;gap:4px;justify-content:center">
+        <button class="btn-ghost ptgl" data-on="1" style="font-size:11px;padding:3px 8px">تشغيل</button>
+        <button class="btn-ghost ptgl" data-on="0" style="font-size:11px;padding:3px 8px">إيقاف</button></div>
+    </div>`;
   }).join('')||'<div class="sub">لا منافذ مقروءة</div>';
+  $$('#portsBox .port').forEach(el=>{ el.querySelectorAll('.ptgl').forEach(btn=>{ btn.onclick=async()=>{
+    const r=await call({act:'port_toggle',port:el.dataset.port,on:btn.dataset.on},true);
+    toast(r.ok?`المنفذ ${el.dataset.port} → ${r.state}`:'تعذّر (منافذ DSA فقط)', r.ok);
+    setTimeout(loadPorts,1200);
+  };});});
+}
+
+/* ---------- NEIGHBORS / scan ---------- */
+async function loadScan(){
+  $('#scanBox').innerHTML='<div class="sub">جارٍ الفحص… (~10 ثوانٍ)</div>'; $('#chanBars').innerHTML='';
+  const r=await call({op:'scan'});
+  if(!(r&&r.ok)){ $('#scanBox').innerHTML='<div class="sub">تعذّر الفحص</div>'; return; }
+  const nets=(r.nets||[]).slice().sort((a,b)=>(+b.sig||-999)-(+a.sig||-999));
+  $('#scanBox').innerHTML = nets.length? nets.map(n=>
+    `<div class="kv"><span class="k">${esc(n.essid||'(مخفية)')} <span class="badge ok">قناة ${esc(n.ch)}</span></span>`+
+    `<span class="v">${esc(n.sig)} dBm · ${esc(n.enc||'')}</span></div>`).join('')
+    : '<div class="sub">لا شبكات مجاورة</div>';
+  const tally={}; nets.forEach(n=>{ if(n.ch) tally[n.ch]=(tally[n.ch]||0)+1; });
+  const keys=Object.keys(tally).sort((a,b)=>(+a)-(+b)); const max=Math.max(1,...Object.values(tally));
+  $('#chanBars').innerHTML = keys.length? '<div class="sub" style="margin-bottom:6px">ازدحام القنوات (الأقل = الأفضل):</div>'+
+    keys.map(ch=>`<div class="kv"><span class="k">قناة ${esc(ch)}</span><span class="v" style="flex:1;max-width:55%">`+
+    `<span class="bar"><i style="width:${Math.round(tally[ch]/max*100)}%"></i></span> ${tally[ch]}</span></div>`).join('') : '';
 }
 
 /* ---------- HEALTH ---------- */
@@ -320,6 +356,7 @@ $('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if
   dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#lanApply').onclick=applyLan;
 $('#clRefresh').onclick=loadClients;
+$('#scanBtn').onclick=loadScan;
 $('#hRefresh').onclick=loadHealth;
 $('#logRefresh').onclick=loadLogs;
 $('#logSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
