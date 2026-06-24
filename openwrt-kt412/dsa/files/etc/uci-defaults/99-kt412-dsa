@@ -1,0 +1,9 @@
+#!/bin/sh
+# KT412 DSA build first-boot defaults. DSA generates its own network config
+# (br-lan over lan1-4 + wan), so we ONLY set the management IP + theme here.
+uci -q set network.lan.ipaddr='192.168.100.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q set luci.main.mediaurlbase='/luci-static/material'
+uci -q set system.@system[0].hostname='KT412-DSA'
+uci -q commit
+exit 0
