@@ -103,6 +103,7 @@ luci-proto-ipv6
 luci-proto-ppp
 luci-ssl
 luci-theme-bootstrap
+luci-theme-material
 mtd
 netifd
 nftables-json

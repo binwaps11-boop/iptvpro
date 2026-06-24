@@ -23,8 +23,30 @@ add_cmd kt412_verifysvc   'Verify: Services'      '/root/verify-services.sh'
 add_cmd kt412_verifywifi  'Verify: Wi-Fi'         '/root/verify-wifi.sh'
 uci -q commit luci
 
+# --- Professional UI: set Material as the default theme (modern, colored) ---
+uci -q set luci.main.mediaurlbase='/luci-static/material'
+uci -q set luci.main.lang='auto'
+uci -q commit luci
+
 # --- Make verify scripts executable ---
 chmod 0755 /root/verify-*.sh 2>/dev/null
+
+# --- More shortcut buttons (Dashboard quick actions) ---
+uci -q batch <<-EOF
+	set luci.kt412_reboot=command
+	set luci.kt412_reboot.name='System: Reboot'
+	set luci.kt412_reboot.command='reboot'
+	set luci.kt412_reboot.public='0'
+	set luci.kt412_speed=command
+	set luci.kt412_speed.name='Ports: Live status'
+	set luci.kt412_speed.command='swconfig dev switch0 show'
+	set luci.kt412_speed.public='0'
+	set luci.kt412_wifipow=command
+	set luci.kt412_wifipow.name='Wi-Fi: Tx-Power (real)'
+	set luci.kt412_wifipow.command='iwinfo | grep -iE "ESSID|Tx-Power"'
+	set luci.kt412_wifipow.public='0'
+EOF
+uci -q commit luci
 
 # --- uhttpd: keep it light (fewer workers, no keepalive flood) ---
 uci -q set uhttpd.main.max_requests='3'
