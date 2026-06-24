@@ -176,6 +176,16 @@
       <pre id="logBox" style="margin-top:12px;max-height:60vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:12px;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">جارٍ التحميل…</pre>
       <button class="btn sec sm" id="logRefresh" style="margin-top:10px">تحديث</button>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h3>التقارير والفحوصات — Reports &amp; Tests</h3>
+      <div class="row">
+        <div><button class="btn sec sm" id="viewPower" style="width:100%">تقرير الباور (4 طبقات)</button></div>
+        <div><button class="btn sec sm" id="viewRf" style="width:100%">حل RF / EIRP</button></div>
+      </div>
+      <button class="btn" id="runSuper" style="margin-top:10px">تشغيل الفحص الشامل (Super Check) — ~3 دقائق</button>
+      <div class="note">الفحص الشامل يختبر الباور على القنوات 1–11، الاتصال، الأداء، الاستقرار، والأخطاء، ويحفظ حزمة في <code>/tmp/kt412-super-check-*.tar.gz</code>.</div>
+      <pre id="reportBox" class="hide" style="margin-top:12px;max-height:55vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)"></pre>
+    </div>
   </section>
 
   <!-- POWER CONTROL -->
@@ -245,6 +255,11 @@
   <div class="foot">KT412 Control · واجهة خاصة</div>
 </div>
 
+<div id="safeBanner" class="hide" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#7c2d12;color:#fff;padding:12px;text-align:center;box-shadow:0 2px 16px rgba(0,0,0,.5);font-size:14px">
+  <b>Safe Apply:</b> طُبّق تغيير شبكي — أكّد خلال <span id="safeCount">80</span>ث وإلا يرجع تلقائياً للإعداد السابق.
+  <button class="btn" id="safeConfirmBtn" style="margin:0 6px;padding:6px 14px">تأكيد الإبقاء</button>
+  <button class="btn sec" id="safeRestoreBtn" style="padding:6px 14px">رجوع الآن</button>
+</div>
 <div id="toast"></div>
 <script src="/kt412/app.js"></script>
 </body>

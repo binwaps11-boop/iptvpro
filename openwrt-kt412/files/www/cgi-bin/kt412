@@ -325,6 +325,35 @@ if [ -n "$ACT" ]; then
 		factory)
 			printf '{"ok":true,"msg":"Factory reset + reboot..."}\n'
 			(sleep 1; jffs2reset -y >/dev/null 2>&1; reboot) >/dev/null 2>&1 &;;
+		safe_arm)
+			RB=/tmp/kt412-rb
+			[ -f "$RB.pid" ] && kill "$(cat "$RB.pid")" 2>/dev/null
+			rm -rf "$RB"; mkdir -p "$RB"
+			for c in network wireless dhcp firewall; do cp "/etc/config/$c" "$RB/$c" 2>/dev/null; done
+			rm -f /tmp/kt412-confirmed
+			( sleep 80
+			  [ -f /tmp/kt412-confirmed ] && exit 0
+			  for c in network wireless dhcp firewall; do cp "$RB/$c" "/etc/config/$c" 2>/dev/null; done
+			  /etc/init.d/network reload; wifi reload; /etc/init.d/dnsmasq restart 2>/dev/null; /etc/init.d/firewall reload 2>/dev/null
+			) >/dev/null 2>&1 &
+			echo $! > "$RB.pid"
+			printf '{"ok":true,"timeout":80}\n';;
+		safe_confirm)
+			touch /tmp/kt412-confirmed
+			[ -f /tmp/kt412-rb.pid ] && kill "$(cat /tmp/kt412-rb.pid)" 2>/dev/null
+			rm -f /tmp/kt412-rb.pid
+			printf '{"ok":true,"msg":"تم التأكيد — الإعدادات محفوظة"}\n';;
+		safe_restore)
+			RB=/tmp/kt412-rb
+			[ -d "$RB" ] || fail "no_backup"
+			for c in network wireless dhcp firewall; do cp "$RB/$c" "/etc/config/$c" 2>/dev/null; done
+			/etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم استرجاع آخر إعداد عامل"}\n';;
+		super_check)
+			rm -f /tmp/kt412-sc-done
+			( sh /root/kt412-super-check.sh >/tmp/kt412-sc.out 2>&1; touch /tmp/kt412-sc-done ) >/dev/null 2>&1 &
+			printf '{"ok":true,"msg":"بدأ الفحص الشامل (~2-3 دقائق)"}\n';;
 		*) fail "unknown_action";;
 	esac
 	exit 0
@@ -512,6 +541,21 @@ case "$OP" in
 			[ -n "$cells" ] && { [ "$first" -eq 1 ] || out="$out,"; first=0; out="$out$cells"; }
 		done
 		printf '{"ok":true,"nets":[%s]}\n' "$out";;
+	super_status)
+		dn=false; [ -f /tmp/kt412-sc-done ] && dn=true
+		rep="$(ls -t /tmp/kt412-super-check-*/report.txt 2>/dev/null | head -1)"
+		b64="$(tail -n 250 "$rep" 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
+		bundle="$(ls -t /tmp/kt412-super-check-*.tar.gz 2>/dev/null | head -1)"
+		printf '{"ok":true,"done":%s,"report":"%s","bundle":"%s"}\n' "$dn" "$b64" "$(json_esc "$bundle")";;
+	readfile)
+		ff="$(getp f | tr -cd 'A-Za-z-')"
+		case "$ff" in
+			POWER-REPORT) pp=/root/POWER-REPORT.txt;;
+			RF-SOLUTION)  pp=/root/RF-SOLUTION.txt;;
+			*) fail "bad_file";;
+		esac
+		b64="$(base64 < "$pp" 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"content":"%s"}\n' "$b64";;
 	*)
 		fail "unknown_op";;
 esac

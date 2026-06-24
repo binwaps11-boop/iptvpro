@@ -113,7 +113,7 @@ async function applyWan(){
   let p={act:'wan_'+wanMode};
   if(wanMode==='pppoe'){ p.user=$('#w_user').value; p.pass=$('#w_pass').value; }
   if(wanMode==='static'){ p.ip=$('#w_ip').value; p.mask=$('#w_mask').value; p.gw=$('#w_gw').value; p.dns=$('#w_dns').value; }
-  const r=await call(p,true); toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok); if(r.ok)setTimeout(loadWan,1500);
+  const r=await safeApply(()=>call(p,true)); toast(r&&r.ok?(r.msg||'طُبّق — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadWan,1500);
 }
 
 /* ---------- live WAN throughput (rx/tx Mbps) ---------- */
@@ -151,9 +151,9 @@ async function loadLan(){
     $$('#dhcpSeg button').forEach(b=>b.classList.toggle('active',b.dataset.d===dhcpOn)); }
 }
 async function applyLan(){
-  const r=await call({act:'lan_set',ip:$('#l_ip').value,mask:$('#l_mask').value,dhcp:dhcpOn,
-    start:$('#l_start').value,limit:$('#l_limit').value,lease:$('#l_lease').value},true);
-  toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok);
+  const r=await safeApply(()=>call({act:'lan_set',ip:$('#l_ip').value,mask:$('#l_mask').value,dhcp:dhcpOn,
+    start:$('#l_start').value,limit:$('#l_limit').value,lease:$('#l_lease').value},true));
+  toast(r&&r.ok?(r.msg||'طُبّق — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
 }
 
 /* ---------- WIFI (modes) ---------- */
@@ -367,6 +367,34 @@ async function loadSystem(){
   $('#s_host').value=s.host||''; $('#s_tz').value=s.tz||'';
 }
 
+/* ---------- Safe Apply / auto-rollback ---------- */
+let safeTimer=null;
+async function safeApply(actionFn){
+  const a=await call({act:'safe_arm'},true);        // snapshot + schedule revert
+  const r=await actionFn();                          // apply the risky change
+  let n=(a&&a.timeout)?a.timeout:80;
+  const banner=$('#safeBanner'), cnt=$('#safeCount');
+  if(banner){ banner.classList.remove('hide'); cnt.textContent=n;
+    if(safeTimer)clearInterval(safeTimer);
+    safeTimer=setInterval(()=>{ n--; if(cnt)cnt.textContent=n; if(n<=0){ clearInterval(safeTimer); banner.classList.add('hide'); } },1000); }
+  return r;
+}
+
+/* ---------- reports & super-check ---------- */
+async function showReport(f){
+  const box=$('#reportBox'); box.classList.remove('hide'); box.textContent='…';
+  const r=await call({op:'readfile',f}); box.textContent=(r&&r.ok)?b64dec(r.content):'تعذّر القراءة';
+}
+function pollSuper(){
+  const box=$('#reportBox'); box.classList.remove('hide'); box.textContent='جارٍ الفحص الشامل… (~2-3 دقائق)';
+  let n=0; const iv=setInterval(async()=>{ n++;
+    const s=await call({op:'super_status'});
+    if(s&&s.ok){ if(s.report)box.textContent=b64dec(s.report);
+      if(s.done){ clearInterval(iv); box.textContent=(s.report?b64dec(s.report):'')+'\n\n[اكتمل] الحزمة: '+(s.bundle||''); } }
+    if(n>80)clearInterval(iv);
+  },3000);
+}
+
 /* ---------- nav + loop ---------- */
 // fewer menus: each nav tab groups several related panes
 const TABS={
@@ -409,9 +437,14 @@ $('#netModeSeg').addEventListener('click',e=>{const b=e.target.closest('button')
   netMode=b.dataset.m; $$('#netModeSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#netModeApply').onclick=async()=>{
   if(netMode==='ap' && !confirm('وضع Access Point: كل المنافذ تُجسَّر وDHCP يُعطَّل. الإدارة تبقى 192.168.100.1. متابعة؟'))return;
-  const r=await call({act:'net_mode',mode:netMode},true);
-  toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok);
+  const r=await safeApply(()=>call({act:'net_mode',mode:netMode},true));
+  toast(r&&r.ok?(r.msg||'طُبّق — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
 };
+$('#safeConfirmBtn').onclick=async()=>{ await call({act:'safe_confirm'},true); if(safeTimer)clearInterval(safeTimer); $('#safeBanner').classList.add('hide'); toast('تم الإبقاء على الإعدادات',true); };
+$('#safeRestoreBtn').onclick=async()=>{ await call({act:'safe_restore'},true); if(safeTimer)clearInterval(safeTimer); $('#safeBanner').classList.add('hide'); toast('رجوع لآخر إعداد عامل…',true); setTimeout(()=>location.reload(),1500); };
+$('#viewPower').onclick=()=>showReport('POWER-REPORT');
+$('#viewRf').onclick=()=>showReport('RF-SOLUTION');
+$('#runSuper').onclick=async()=>{ const r=await call({act:'super_check'},true); toast(r&&r.ok?(r.msg||'بدأ'):'فشل',r&&r.ok); if(r&&r.ok)pollSuper(); };
 $('#wanApply').onclick=applyWan;
 $('#wanReco').onclick=async()=>{const r=await call({act:'wan_reconnect'},true);toast(r.ok?'يُعاد الاتصال…':'فشل',r.ok);};
 $('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();
