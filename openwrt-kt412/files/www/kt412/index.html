@@ -183,11 +183,10 @@
     <div class="card">
       <h3>التحكم بقوة الإرسال — Power Control</h3>
       <div class="note" style="border-color:rgba(255,107,138,.45);color:#ffb3c2;background:rgba(255,107,138,.07)">
-        <b>وضعان:</b> <b>Clean / Stable</b> (2.4G على الحد النظيف الحقيقي 24) — للاستخدام اليومي ·
-        <b>Extreme 30 dBm</b> (يجبر النظام على 30، يظهر في iwinfo/iw phy/debugfs).
-        <br><b>⚠ تحذير وضع Extreme:</b> Test only · may cause clipping · may cause heat ·
-        may cause RF distortion · <b>not clean RF 30 dBm</b> (driver bypass) · no ART/EEPROM writing.
-        الحل النظيف لـ30+ EIRP = هوائي أعلى كسب أو PA خارجي. 5GHz = 30 حقيقي. الافتراضي = Clean/Safe.
+        <b>الباور على 2.4GHz — أربع طبقات منفصلة (بصدق):</b>
+        <br>1) <b>System (uci)</b> = 30 ✅ &nbsp; 2) <b>Driver</b> (iwinfo/iw phy/debugfs) = 30 ✅ ويدفع الـPA لأقصاه
+        <br>3) <b>Conducted RF</b> ≈ 25–26 ⚠️ <b>غير مُقاس</b> (تشبّع PA؛ فوقها قصّ) &nbsp; 4) <b>EIRP</b> = Conducted + كسب الهوائي − فقد الكابل ⚠️ <b>غير مُقاس</b>
+        <br>إذن «30» هنا = <b>System+Driver</b> فقط، وليس RF نظيف مُثبَت. للوصول لـ30 conducted نظيف تحتاج <b>PA خارجي</b>؛ ولـ30 EIRP تحتاج <b>هوائي أعلى كسب</b>. 5GHz = 30 نظيف حقيقي. التفاصيل: <code>cat /root/POWER-REPORT.txt</code>.
       </div>
       <div id="powerBox"><div class="sub">جارٍ التحميل…</div></div>
       <div class="sub" style="margin-top:10px">شغّل <code>sh /root/kt412-report.sh</code> للإثبات الكامل من جهازك.</div>
