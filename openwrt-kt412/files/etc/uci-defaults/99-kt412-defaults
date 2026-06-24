@@ -37,6 +37,10 @@ if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
 # kt412-tune
 net.netfilter.nf_conntrack_max=16384
 net.ipv4.tcp_fin_timeout=30
+net.core.rmem_max=4194304
+net.core.wmem_max=4194304
+net.core.netdev_max_backlog=2000
+net.ipv4.tcp_fastopen=3
 kernel.panic=10
 kernel.panic_on_oops=1
 SYS

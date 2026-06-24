@@ -227,14 +227,19 @@ if [ -n "$ACT" ]; then
 			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
 			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
 			band="$(uci -q get wireless.$radio.band)"
-			if [ "$band" = "5g" ]; then cand="36 149 157 165"; else cand="1 6 11"; fi
+			# 2.4G: evaluate ALL channels 1..11 weighted by adjacent overlap (+-2);
+			# 5G: exact non-DFS channels.
+			if [ "$band" = "5g" ]; then cand="36 40 44 48 149 153 157 161 165"; ov=0; else cand="1 2 3 4 5 6 7 8 9 10 11"; ov=2; fi
 			counts="$(iwinfo "$dev" scan 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
-			best=""; bestn=99999
+			best=""; bestn=999999
 			for c in $cand; do
-				n="$(printf '%s\n' "$counts" | grep -cx "$c" 2>/dev/null)"
-				[ "${n:-0}" -lt "$bestn" ] && { bestn="$n"; best="$c"; }
+				lo=$((c-ov)); hi=$((c+ov)); w=0
+				for ch in $counts; do
+					[ "$ch" -ge "$lo" ] 2>/dev/null && [ "$ch" -le "$hi" ] 2>/dev/null && w=$((w+1))
+				done
+				[ "$w" -lt "$bestn" ] && { bestn="$w"; best="$c"; }
 			done
-			[ -n "$best" ] || best=auto
+			[ -n "$best" ] || best=1
 			uci set wireless.$radio.channel="$best"
 			uci commit wireless; wifi reload >/dev/null 2>&1
 			printf '{"ok":true,"channel":"%s","neighbors":%s}\n' "$best" "${bestn:-0}";;

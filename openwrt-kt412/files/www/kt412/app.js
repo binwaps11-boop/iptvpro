@@ -58,9 +58,20 @@ async function loadDash(){
   }
   const w=await call({op:'wan'});
   if(w&&w.ok){ const up=w.up===true||w.up==='true';
+    window._wanDev=w.device||'';
     $('#d_wan').innerHTML=up?'<span style="color:var(--ok)">متصل</span>':'<span style="color:var(--bad)">منقطع</span>';
     $('#d_wanip').textContent=(w.ip||'—')+' · '+(w.proto||'');
     $('#netDot').className='dot '+(up?'on':'off'); $('#netTxt').textContent=up?'متصل':'منقطع'; }
+  const p=await call({op:'ports'});
+  if(p&&p.ok) $('#d_links').innerHTML=(p.ports||[]).map(x=>`<div class="kv"><span class="k">${esc(x.name)}</span>`+
+    `<span class="v">${x.link==='up'?(x.speed?x.speed+' Mbps':'متصل'):'مفصول'}</span></div>`).join('')||'<div class="sub">—</div>';
+  const c=await call({op:'clients'});
+  if(c&&c.ok) $('#d_clients').textContent=(c.clients||[]).length;
+  const tr=await call({op:'traffic'});
+  if(tr&&tr.ok){ const dev=window._wanDev; const wi=(tr.ifaces||[]).find(x=>x.if===dev);
+    if(wi) $('#d_wanusage').innerHTML=`<div class="kv"><span class="k">↓ تنزيل</span><span class="v">${human(wi.rx)}</span></div>`+
+      `<div class="kv"><span class="k">↑ رفع</span><span class="v">${human(wi.tx)}</span></div>`;
+    else $('#d_wanusage').innerHTML='<div class="sub">—</div>'; }
   const wi=await call({op:'wifi'});
   if(wi&&wi.ok) $('#d_wifi').innerHTML=(wi.radios||[]).map(r=>
     `<div class="kv"><span class="k">${esc(r.essid||r.mode||'—')} <span class="badge ok">${esc(r.band)}</span></span>`+
@@ -103,6 +114,23 @@ async function applyWan(){
   if(wanMode==='pppoe'){ p.user=$('#w_user').value; p.pass=$('#w_pass').value; }
   if(wanMode==='static'){ p.ip=$('#w_ip').value; p.mask=$('#w_mask').value; p.gw=$('#w_gw').value; p.dns=$('#w_dns').value; }
   const r=await call(p,true); toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok); if(r.ok)setTimeout(loadWan,1500);
+}
+
+/* ---------- live WAN throughput (rx/tx Mbps) ---------- */
+let lastTr={}, lastTrTs=0;
+async function loadSpeed(){
+  const r=await call({op:'traffic'}); if(!(r&&r.ok))return;
+  const m={}; (r.ifaces||[]).forEach(x=>m[x.if]={rx:+x.rx,tx:+x.tx});
+  const ts=+r.ts, dev=window._wanDev;
+  if(lastTrTs && dev && m[dev] && lastTr[dev]){
+    const dt=ts-lastTrTs;
+    if(dt>0){
+      const dl=Math.max(0,(m[dev].rx-lastTr[dev].rx)*8/1e6/dt);
+      const ul=Math.max(0,(m[dev].tx-lastTr[dev].tx)*8/1e6/dt);
+      $('#d_speed').innerHTML=dl.toFixed(1)+'<small> ↓</small> / '+ul.toFixed(1)+'<small> ↑</small>';
+    }
+  }
+  lastTr=m; lastTrTs=ts;
 }
 
 /* ---------- NETWORK: device mode ---------- */
@@ -221,6 +249,8 @@ async function loadPorts(){
   $('#portsBox').innerHTML=(r.ports||[]).map(p=>{ const up=p.link==='up';
     return `<div class="port ${up?'up':''}" data-port="${esc(p.name)}"><div class="ic"></div><div class="nm">${esc(p.name)}</div>
       <div class="sp">${up?(p.speed?p.speed+'M':'متصل'):'مفصول'}</div>
+      <div class="prate" style="font-size:11px;color:var(--txt2);margin-top:4px">—</div>
+      <div class="pcons" style="font-size:11px;color:var(--txt2)">—</div>
       <div style="margin-top:6px;display:flex;gap:4px;justify-content:center">
         <button class="btn-ghost ptgl" data-on="1" style="font-size:11px;padding:3px 8px">تشغيل</button>
         <button class="btn-ghost ptgl" data-on="0" style="font-size:11px;padding:3px 8px">إيقاف</button></div>
@@ -231,6 +261,21 @@ async function loadPorts(){
     toast(r.ok?`المنفذ ${el.dataset.port} → ${r.state}`:'تعذّر (منافذ DSA فقط)', r.ok);
     setTimeout(loadPorts,1200);
   };});});
+  loadPortRates();
+}
+let lastPort={}, lastPortTs=0;
+async function loadPortRates(){
+  const r=await call({op:'traffic'}); if(!(r&&r.ok))return;
+  const m={}; (r.ifaces||[]).forEach(x=>m[x.if]={rx:+x.rx,tx:+x.tx}); const ts=+r.ts;
+  $$('#portsBox .port').forEach(el=>{ const name=el.dataset.port, cur=m[name];
+    if(!cur)return;
+    const cons=el.querySelector('.pcons'), rate=el.querySelector('.prate');
+    if(cons)cons.textContent='استهلك ↓'+human(cur.rx)+' ↑'+human(cur.tx);
+    if(lastPortTs && lastPort[name] && rate){ const dt=ts-lastPortTs;
+      if(dt>0){ const dl=Math.max(0,(cur.rx-lastPort[name].rx)*8/1e6/dt), ul=Math.max(0,(cur.tx-lastPort[name].tx)*8/1e6/dt);
+        rate.textContent='↓'+dl.toFixed(1)+' ↑'+ul.toFixed(1)+' Mbps'; } }
+  });
+  lastPort=m; lastPortTs=ts;
 }
 
 /* ---------- NEIGHBORS / scan ---------- */
@@ -330,8 +375,13 @@ function switchTab(tab){
   if(tab==='power')loadPower();
   if(tab==='system')loadSystem();
 }
-function startLoop(){ if(timer)clearInterval(timer); timer=setInterval(()=>{
-  const a=document.querySelector('#nav button.active'); if(a&&a.dataset.tab==='dash')loadDash(); },5000); }
+function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
+  const a=document.querySelector('#nav button.active'); if(!a)return;
+  const t=a.dataset.tab;
+  if(t==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
+  else if(t==='ports'){ loadPortRates(); }
+  tick++;
+},2000); }
 
 /* ---------- wire up ---------- */
 $('#loginBtn').onclick=doLogin;
