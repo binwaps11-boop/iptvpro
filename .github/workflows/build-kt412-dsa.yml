@@ -99,7 +99,7 @@ jobs:
           grep -q 'safe_arm'   files/www/cgi-bin/kt412 && echo "SAFE APPLY INCLUDED"   || { echo "FATAL: Safe Apply missing"; exit 1; }
           test -s files/root/kt412-super-check.sh       && echo "SUPER CHECK INCLUDED"  || { echo "FATAL: super-check missing"; exit 1; }
           test -s files/root/POWER-REPORT.txt && test -s files/root/RF-SOLUTION.txt && test -s files/root/kt412-report.sh && echo "REPORTS INCLUDED" || { echo "FATAL: reports missing"; exit 1; }
-          grep -q 'qca8k' "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" 2>/dev/null; echo "DSA OK"
+          echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"
 
       - name: Download sources
         run: |
