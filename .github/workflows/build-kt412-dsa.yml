@@ -1,9 +1,9 @@
-name: Build KT412 DSA (clean-stable + extreme-30dbm)
+name: Build KT412 DSA (clean-stable + real-30dbm)
 
 # Full source build of OpenWrt main + PR #21837 (ath79 dw02-412h swconfig -> DSA).
 # Two variants:
 #   clean-stable  : 2.4G at the real calibrated 24 dBm (no driver patch), 5G 30.
-#   extreme-30dbm : ath9k patched so 2.4G target ceiling = 30.0 dBm; default
+#   real-30dbm : ath9k patched so 2.4G target ceiling = 30.0 dBm; default
 #                   txpower 30 -> iwinfo / iw phy / debugfs show 30 after flash,
 #                   persists across reboot. TEST mode: clipped/non-clean RF.
 # ~60-90 min per variant. ART/EEPROM/caldata are never written.
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        variant: [ "clean-stable", "extreme-30dbm" ]
+        variant: [ "clean-stable", "real-30dbm" ]
     steps:
       - name: Checkout repo (for config + files)
         uses: actions/checkout@v4
@@ -87,7 +87,7 @@ jobs:
           chmod +x files/etc/uci-defaults/* || true
           chmod 0755 files/www/cgi-bin/kt412 || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
-          if [ "${{ matrix.variant }}" = "extreme-30dbm" ]; then
+          if [ "${{ matrix.variant }}" = "real-30dbm" ]; then
             # bake 2.4G default to 30 (extreme); clean-stable keeps the 24 default
             sed -i "s/txpower='24'/txpower='30'/g" files/etc/uci-defaults/99-kt412-dsa
             echo "EXTREME: 2.4G default txpower set to 30"
@@ -100,7 +100,7 @@ jobs:
           make -j$(nproc) download || make -j1 download
 
       - name: "Patch ath9k 2.4G ceiling -> 30.0 dBm (extreme only) - MUST apply"
-        if: matrix.variant == 'extreme-30dbm'
+        if: matrix.variant == 'real-30dbm'
         run: |
           cd openwrt
           echo "=== build tools + toolchain so the kernel source extracts ==="
@@ -117,18 +117,22 @@ jobs:
           sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
           M="$(grep -c 'KT412-30dbm' "$EEP")"
           echo "--- power-patch markers (need 2): $M ---"; diff "$EEP.orig" "$EEP" || true
+          echo "markers=$M"
           if [ "$M" != "2" ]; then echo "FATAL: power patch not applied (markers=$M)"; exit 1; fi
           echo "POWER PATCH APPLIED OK (2.4G ceiling = 30.0 dBm)."
+          echo "KT412 2.4G 30DBM GATE PASSED"
 
       - name: Build
         run: |
           cd openwrt
           make -j$(nproc) || (echo '=== retry verbose ==='; make -j1 V=s 2>&1 | tail -200; exit 1)
-          if [ "${{ matrix.variant }}" = "extreme-30dbm" ]; then
+          if [ "${{ matrix.variant }}" = "real-30dbm" ]; then
             echo "=== confirm patched source compiled (must be 2) ==="
             N="$(grep -c 'KT412-30dbm' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c 2>/dev/null || echo 0)"
-            echo "markers in compiled source: $N"
-            [ "$N" = "2" ] || { echo "FATAL: extreme bin would NOT have the power patch"; exit 1; }
+            echo "markers=$N"
+            [ "$N" = "2" ] || { echo "FATAL: real-30dbm bin would NOT have the power patch"; exit 1; }
+            echo "POWER PATCH APPLIED OK"
+            echo "KT412 2.4G 30DBM GATE PASSED"
           fi
 
       - name: Collect images
@@ -158,11 +162,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kt412-dsa
-          name: KT412 DSA (clean-stable + extreme-30dbm)
+          name: KT412 DSA (clean-stable + real-30dbm)
           body: |
             DSA build (qca8k, not swconfig). OpenWrt main + PR #21837.
             - clean-stable : 2.4G = real calibrated 24 dBm, 5G = 30. Daily use.
-            - extreme-30dbm: 2.4G forced to 30.0 dBm in iw phy / iwinfo / debugfs
+            - real-30dbm: 2.4G forced to 30.0 dBm in iw phy / iwinfo / debugfs
               (driver bypass, TEST mode; RF above ~26 is clipped/non-clean).
             ART/EEPROM never written. Rollback = reflash a previous bin.
           files: out/*
