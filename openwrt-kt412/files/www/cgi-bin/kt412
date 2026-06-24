@@ -243,6 +243,19 @@ if [ -n "$ACT" ]; then
 			uci set wireless.$radio.channel="$best"
 			uci commit wireless; wifi reload >/dev/null 2>&1
 			printf '{"ok":true,"channel":"%s","neighbors":%s}\n' "$best" "${bestn:-0}";;
+		wifi_autochan)
+			radio="$(sani_word "$(getp radio)")"; on="$(getp on | tr -cd '01')"; ch="$(sani_word "$(getp channel)")"
+			[ -n "$radio" ] || fail "no_radio"
+			if [ "$on" = "1" ]; then
+				uci set wireless.$radio.channel='auto'
+			else
+				if [ -z "$ch" ] || [ "$ch" = "auto" ]; then
+					[ "$(uci -q get wireless.$radio.band)" = "5g" ] && ch=149 || ch=6
+				fi
+				uci set wireless.$radio.channel="$ch"
+			fi
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"auto":"%s","channel":"%s"}\n' "${on:-0}" "$(uci -q get wireless.$radio.channel)";;
 		port_toggle)
 			port="$(sani_word "$(getp port)")"; on="$(getp on | tr -cd '01')"
 			[ -n "$port" ] || fail "no_port"

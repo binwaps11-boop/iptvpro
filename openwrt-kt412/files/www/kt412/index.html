@@ -34,13 +34,9 @@
 
   <div class="nav" id="nav">
     <button data-tab="dash" class="active"><span class="i">▦</span> الرئيسية</button>
-    <button data-tab="net"><span class="i">🌐</span> الشبكة</button>
-    <button data-tab="wifi"><span class="i">📶</span> الواي‑فاي</button>
-    <button data-tab="clients"><span class="i">💻</span> الأجهزة</button>
-    <button data-tab="ports"><span class="i">🔌</span> المنافذ</button>
-    <button data-tab="health"><span class="i">❤</span> الصحة</button>
-    <button data-tab="logs"><span class="i">📜</span> السجلّات</button>
-    <button data-tab="power"><span class="i">📡</span> الباور</button>
+    <button data-tab="net"><span class="i">🌐</span> الشبكة والمنافذ والأجهزة</button>
+    <button data-tab="wifi"><span class="i">📶</span> الواي‑فاي والقوة</button>
+    <button data-tab="diag"><span class="i">🩺</span> التشخيص والسجلّات</button>
     <button data-tab="system"><span class="i">⚙</span> النظام</button>
   </div>
 
@@ -131,6 +127,7 @@
 
   <!-- WIFI -->
   <section data-pane="wifi" class="hide">
+    <div class="note" style="margin-bottom:12px">عرض القناة لأقصى سرعة ارتباط: 2.4G = 20/40MHz · 5G = 20/40/80MHz. (160MHz غير مدعوم في رقاقة QCA9880). القناة «تلقائي» = اختيار ذكي (ACS).</div>
     <div id="wifiCards" class="grid cols-2"><div class="card"><div class="sub">جارٍ التحميل…</div></div></div>
     <div class="card" style="margin-top:16px">
       <h3>الشبكات المجاورة — Nearby Networks</h3>

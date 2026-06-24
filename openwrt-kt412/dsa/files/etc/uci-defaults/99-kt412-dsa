@@ -16,7 +16,13 @@ chmod 0755 /www/cgi-bin/* 2>/dev/null
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 	b="$(uci -q get wireless.$r.band)"
 	# Safe default: 5G = real 30, 2.4G = clean calibrated 24 (raise to Max/Extreme from UI)
-	if [ "$b" = "5g" ]; then uci -q set wireless.$r.txpower='30'; else uci -q set wireless.$r.txpower='24'; fi
+	if [ "$b" = "5g" ]; then
+		uci -q set wireless.$r.txpower='30'; uci -q set wireless.$r.htmode='VHT80'
+	else
+		uci -q set wireless.$r.txpower='24'
+		# HT40 (+noscan) on 2.4G = max link rate (~150-300 vs 72-144 on HT20)
+		uci -q set wireless.$r.htmode='HT40'; uci -q set wireless.$r.noscan='1'
+	fi
 	uci -q set wireless.$r.country='US'
 done
 uci -q commit wireless

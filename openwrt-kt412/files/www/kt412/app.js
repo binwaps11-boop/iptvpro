@@ -157,7 +157,8 @@ async function applyLan(){
 }
 
 /* ---------- WIFI (modes) ---------- */
-const HTMODES={'2g':['HT20','HT40'],'5g':['VHT80','VHT40','VHT20','HT40','HT20','HE80','HE40','HE20']};
+// real hardware support: 2.4G QCA9550 = 20/40 only; 5G QCA9880 = 20/40/80 (no 160)
+const HTMODES={'2g':['HT40','HT20'],'5g':['VHT80','VHT40','VHT20']};
 const MODES=[['ap','نقطة وصول (AP)'],['ap-wds','نقطة وصول + WDS'],['mesh','شبكة Mesh (802.11s)'],['sta','عميل / Client']];
 async function loadWifi(){
   const r=await call({op:'wifi_radios'});
@@ -183,7 +184,8 @@ async function loadWifi(){
       <label class="f">كلمة المرور (فارغة = مفتوحة)</label>
       <input class="t wkey" type="text" placeholder="••••••••">
       <div class="row">
-        <div><label class="f">القناة</label><select class="t wchan">${chopts}</select></div>
+        <div><label class="f">القناة <label style="font-weight:400;font-size:11px;color:var(--txt2)"><input type="checkbox" class="wauto" ${rd.channel==='auto'?'checked':''}> تلقائي</label></label>
+          <select class="t wchan" ${rd.channel==='auto'?'disabled':''}>${chopts}</select></div>
         <div><label class="f">العرض (HT)</label><select class="t wht">${hts}</select></div>
         <div><label class="f">الدولة</label><input class="t wcc" value="${esc(rd.country||'US')}" maxlength="2" style="text-transform:uppercase"></div>
       </div>
@@ -208,6 +210,10 @@ async function loadWifi(){
     const en=card.querySelector('.wen');
     if(en)en.onchange=async()=>{ const r=await call({act:'wifi_toggle',radio:card.dataset.radio,on:en.checked?'1':'0'},true);
       toast(r.ok?(r.msg||'تم'):'فشل',r.ok); };
+    const au=card.querySelector('.wauto'), chsel=card.querySelector('.wchan');
+    if(au)au.onchange=async()=>{ if(chsel)chsel.disabled=au.checked;
+      const r=await call({act:'wifi_autochan',radio:card.dataset.radio,on:au.checked?'1':'0',channel:chsel?chsel.value:''},true);
+      toast(r.ok?(au.checked?'القناة تلقائية مفعّلة (ACS)':'قناة ثابتة: '+r.channel):'فشل',r.ok); };
     const opt=card.querySelector('.wopt');
     if(opt)opt.onclick=async()=>{ opt.innerHTML='<span class="spin"></span>';
       const r=await call({act:'wifi_optimize',radio:card.dataset.radio},true);
@@ -362,24 +368,33 @@ async function loadSystem(){
 }
 
 /* ---------- nav + loop ---------- */
+// fewer menus: each nav tab groups several related panes
+const TABS={
+  dash:['dash'],
+  net:['net','ports','clients'],
+  wifi:['wifi','power'],
+  diag:['health','logs'],
+  system:['system']
+};
 function switchTab(tab){
+  const panes=TABS[tab]||[tab];
   $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
-  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==tab));
-  if(tab==='dash')loadDash();
-  if(tab==='net'){ loadWan(); loadLan(); loadNetMode(); }
-  if(tab==='wifi')loadWifi();
-  if(tab==='clients')loadClients();
-  if(tab==='ports')loadPorts();
-  if(tab==='health')loadHealth();
-  if(tab==='logs')loadLogs();
-  if(tab==='power')loadPower();
-  if(tab==='system')loadSystem();
+  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',panes.indexOf(s.dataset.pane)<0));
+  if(panes.indexOf('dash')>=0)loadDash();
+  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); }
+  if(panes.indexOf('ports')>=0)loadPorts();
+  if(panes.indexOf('clients')>=0)loadClients();
+  if(panes.indexOf('wifi')>=0)loadWifi();
+  if(panes.indexOf('power')>=0)loadPower();
+  if(panes.indexOf('health')>=0)loadHealth();
+  if(panes.indexOf('logs')>=0)loadLogs();
+  if(panes.indexOf('system')>=0)loadSystem();
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
   const a=document.querySelector('#nav button.active'); if(!a)return;
   const t=a.dataset.tab;
   if(t==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
-  else if(t==='ports'){ loadPortRates(); }
+  else if(t==='net'){ loadPortRates(); }
   tick++;
 },2000); }
 
