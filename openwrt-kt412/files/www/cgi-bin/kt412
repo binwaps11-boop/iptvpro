@@ -1,0 +1,265 @@
+#!/bin/sh
+# KT412 Dashboard API  -- real commands only, no fake output.
+# Auth: login with the router's root password -> a ubus session token.
+# Every privileged call re-validates that token (a marker we set on the session).
+# The CGI runs as root (uhttpd), so local ubus/uci/iw/etc. work; the ONLY gate
+# is our own token check below.  Access to port 80 from WAN is blocked by the
+# firewall (LAN-only), same model LuCI uses.
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 65536 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	local want="$1" pair rest
+	local IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; urldecode "$rest"; return 0;;
+		esac
+	done
+	return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+sani()     { printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._@!#%^*()+=:/-' | cut -c1-128; }
+sani_ip()  { printf '%s' "$1" | tr -cd '0-9.' | cut -c1-15; }
+sani_int() { printf '%s' "$1" | tr -cd '0-9' | cut -c1-9; }
+sani_hex() { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-32; }
+fail()     { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- login (bootstrap, no token required) ----------
+if [ "$OP" = "login" ]; then
+	PW="$(getp password)"
+	ESC="$(json_esc "$PW")"
+	SID="$(ubus call session login "{\"username\":\"root\",\"password\":\"$ESC\",\"timeout\":3600}" 2>/dev/null | jsonfilter -e '@.ubus_rpc_session' 2>/dev/null)"
+	if [ -n "$SID" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "bad_password"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid session ----------
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
+[ "$MARK" = "1" ] || fail "unauthorized"
+# keep the session alive on activity
+ubus call session set "{\"ubus_rpc_session\":\"$TOK\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+
+# ---------- actions (state changing, POST only) ----------
+ACT="$(getp act | tr -cd 'a-z_')"
+if [ -n "$ACT" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	case "$ACT" in
+		wan_dhcp)
+			uci set network.wan.proto='dhcp'
+			uci -q delete network.wan.username; uci -q delete network.wan.password
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> DHCP"}\n';;
+		wan_pppoe)
+			u="$(sani "$(getp user)")"; p="$(sani "$(getp pass)")"
+			uci set network.wan.proto='pppoe'
+			uci set network.wan.username="$u"; uci set network.wan.password="$p"
+			uci set network.wan.ipv6='auto'
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> PPPoE (%s)"}\n' "$(json_esc "$u")";;
+		wan_static)
+			ip="$(sani_ip "$(getp ip)")"; mask="$(sani_ip "$(getp mask)")"
+			gw="$(sani_ip "$(getp gw)")"; dns="$(sani_ip "$(getp dns)")"
+			[ -n "$ip" ] || fail "no_ip"
+			uci set network.wan.proto='static'
+			uci set network.wan.ipaddr="$ip"
+			uci set network.wan.netmask="${mask:-255.255.255.0}"
+			[ -n "$gw" ] && uci set network.wan.gateway="$gw"
+			[ -n "$dns" ] && uci set network.wan.dns="$dns"
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> Static"}\n';;
+		wan_reconnect)
+			ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN reconnecting"}\n';;
+		wifi_apply)
+			radio="$(getp radio | tr -cd 'a-z0-9')"
+			ssid="$(sani "$(getp ssid)")"; key="$(sani "$(getp key)")"
+			[ -n "$radio" ] && [ -n "$ssid" ] || fail "missing_params"
+			ifsec=""
+			for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+				d="$(uci -q get wireless.$s.device)"
+				[ "$d" = "$radio" ] && { ifsec="$s"; break; }
+			done
+			[ -n "$ifsec" ] || fail "radio_not_found"
+			uci set wireless.$ifsec.ssid="$ssid"
+			if [ -n "$key" ]; then
+				uci set wireless.$ifsec.encryption='psk2'
+				uci set wireless.$ifsec.key="$key"
+			else
+				uci set wireless.$ifsec.encryption='none'
+				uci -q delete wireless.$ifsec.key
+			fi
+			uci -q delete wireless.$radio.disabled
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Wi-Fi updated"}\n';;
+		txpower)
+			radio="$(getp radio | tr -cd 'a-z0-9')"
+			dbm="$(sani_int "$(getp dbm)")"
+			[ -n "$radio" ] && [ -n "$dbm" ] || fail "missing_params"
+			uci set wireless.$radio.txpower="$dbm"
+			uci commit wireless
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			iw phy "phy${idx:-0}" set txpower fixed "$((dbm*100))" >/dev/null 2>&1
+			wifi reload >/dev/null 2>&1
+			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			actp="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+			printf '{"ok":true,"requested":%s,"actual":%s}\n' "${dbm:-0}" "${actp:-0}";;
+		wifi_restart)
+			wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Wi-Fi restarted"}\n';;
+		sqm)
+			en="$(getp enabled | tr -cd '01')"
+			dn="$(sani_int "$(getp down)")"; up="$(sani_int "$(getp up)")"
+			sec="$(uci show sqm 2>/dev/null | sed -n 's/^sqm\.\([^.=]*\)=queue/\1/p' | head -1)"
+			[ -n "$sec" ] || sec="wan"
+			uci set sqm.$sec=queue
+			uci set sqm.$sec.interface="$(uci -q get network.wan.device || echo eth0)"
+			[ -n "$dn" ] && uci set sqm.$sec.download="$dn"
+			[ -n "$up" ] && uci set sqm.$sec.upload="$up"
+			uci set sqm.$sec.enabled="${en:-0}"
+			uci commit sqm
+			/etc/init.d/sqm enable >/dev/null 2>&1
+			/etc/init.d/sqm restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"SQM updated"}\n';;
+		reboot)
+			printf '{"ok":true,"msg":"Rebooting..."}\n'
+			reboot >/dev/null 2>&1;;
+		*) fail "unknown_action";;
+	esac
+	exit 0
+fi
+
+# ---------- read-only data ops ----------
+case "$OP" in
+	summary)
+		BRD="$(ubus call system board 2>/dev/null)"
+		INF="$(ubus call system info 2>/dev/null)"
+		gv(){ printf '%s' "$1" | jsonfilter -e "$2" 2>/dev/null; }
+		model="$(gv "$BRD" '@.model')"; host="$(gv "$BRD" '@.hostname')"
+		kern="$(gv "$BRD" '@.kernel')"; rel="$(gv "$BRD" '@.release.description')"
+		up="$(gv "$INF" '@.uptime')"; l1="$(gv "$INF" '@.load[0]')"
+		mt="$(gv "$INF" '@.memory.total')"; mf="$(gv "$INF" '@.memory.free')"
+		mb="$(gv "$INF" '@.memory.buffered')"
+		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s}\n' \
+			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \
+			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}";;
+	wan)
+		S="$(ubus call network.interface.wan status 2>/dev/null)"
+		gv(){ printf '%s' "$S" | jsonfilter -e "$1" 2>/dev/null; }
+		up="$(gv '@.up')"; proto="$(gv '@.proto')"; dev="$(gv '@.l3_device')"
+		ip="$(gv '@["ipv4-address"][0].address')"; mask="$(gv '@["ipv4-address"][0].mask')"
+		gw="$(gv '@.route[0].nexthop')"; upt="$(gv '@.uptime')"; dns="$(gv '@["dns-server"][0]')"
+		printf '{"ok":true,"up":%s,"proto":"%s","device":"%s","ip":"%s","mask":%s,"gateway":"%s","dns":"%s","uptime":%s}\n' \
+			"${up:-false}" "$(json_esc "$proto")" "$(json_esc "$dev")" "$(json_esc "$ip")" \
+			"${mask:-0}" "$(json_esc "$gw")" "$(json_esc "$dns")" "${upt:-0}";;
+	wifi)
+		out=""; first=1
+		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			info="$(iwinfo "$dev" info 2>/dev/null)"
+			essid="$(printf '%s' "$info" | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)"
+			chan="$(printf '%s' "$info" | sed -n 's/.*Channel: \([0-9]*\).*/\1/p' | head -1)"
+			txp="$(printf '%s' "$info" | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+			sig="$(printf '%s' "$info" | sed -n 's/.*Signal: \(-\{0,1\}[0-9]*\).*/\1/p' | head -1)"
+			enc="$(printf '%s' "$info" | sed -n 's/.*Encryption: \(.*\)/\1/p' | head -1)"
+			cnt="$(iwinfo "$dev" assoclist 2>/dev/null | grep -c 'SNR')"
+			band="2.4 GHz"
+			[ -n "$chan" ] && [ "$chan" -gt 14 ] 2>/dev/null && band="5 GHz"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"dev":"%s","essid":"%s","channel":%s,"band":"%s","txpower":%s,"signal":%s,"enc":"%s","clients":%s}' \
+				"$(json_esc "$dev")" "$(json_esc "$essid")" "${chan:-0}" "$band" "${txp:-0}" "${sig:-0}" "$(json_esc "$enc")" "${cnt:-0}")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	ports)
+		out=""; first=1
+		raw="$(swconfig dev switch0 show 2>/dev/null)"
+		if [ -n "$raw" ]; then
+			while IFS= read -r line; do
+				case "$line" in
+					*"link: port:"*)
+						pn="$(printf '%s' "$line" | sed -n 's/.*port:\([0-9]*\).*/\1/p')"
+						st=down; case "$line" in *"link:up"*) st=up;; esac
+						sp="$(printf '%s' "$line" | sed -n 's/.*speed:\([0-9]*\)baseT.*/\1/p')"
+						[ "$first" -eq 1 ] || out="$out,"; first=0
+						out="$out$(printf '{"name":"port%s","link":"%s","speed":%s}' "${pn:-0}" "$st" "${sp:-0}")"
+						;;
+				esac
+			done <<-EOF
+			$raw
+			EOF
+		fi
+		if [ -z "$out" ]; then
+			for p in wan lan1 lan2 lan3 lan4; do
+				[ -e "/sys/class/net/$p" ] || continue
+				st="$(cat /sys/class/net/$p/operstate 2>/dev/null)"
+				sp="$(cat /sys/class/net/$p/speed 2>/dev/null)"; case "$sp" in ''|*[!0-9]*) sp=0;; esac
+				lk=down; [ "$st" = "up" ] && lk=up
+				[ "$first" -eq 1 ] || out="$out,"; first=0
+				out="$out$(printf '{"name":"%s","link":"%s","speed":%s}' "$p" "$lk" "${sp:-0}")"
+			done
+		fi
+		printf '{"ok":true,"ports":[%s]}\n' "$out";;
+	health)
+		pl(){ printf '%s' "$1" | sed -n 's/.*, \([0-9]*\)% packet loss.*/\1/p' | head -1; }
+		rt(){ printf '%s' "$1" | sed -n 's#.* = [0-9.]*/\([0-9.]*\)/.*#\1#p' | head -1; }
+		a="$(ping -c2 -W1 1.1.1.1 2>/dev/null)"; b="$(ping -c2 -W1 8.8.8.8 2>/dev/null)"
+		la="$(pl "$a")"; ra="$(rt "$a")"; lb="$(pl "$b")"; rb="$(rt "$b")"
+		mw="$(mwan3 status 2>/dev/null | grep -c 'is online')"
+		printf '{"ok":true,"cf":{"loss":%s,"rtt":%s},"goog":{"loss":%s,"rtt":%s},"mwan_online":%s}\n' \
+			"${la:-100}" "${ra:-0}" "${lb:-100}" "${rb:-0}" "${mw:-0}";;
+	traffic)
+		out=""; first=1
+		while IFS= read -r line; do
+			case "$line" in
+				*:*)
+					name="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/:.*//')"
+					case "$name" in lo|''|Inter-*|*face*) continue;; esac
+					rest="${line#*:}"
+					rx="$(printf '%s' "$rest" | awk '{print $1+0}')"
+					tx="$(printf '%s' "$rest" | awk '{print $9+0}')"
+					[ "$first" -eq 1 ] || out="$out,"; first=0
+					out="$out$(printf '{"if":"%s","rx":%s,"tx":%s}' "$(json_esc "$name")" "${rx:-0}" "${tx:-0}")"
+					;;
+			esac
+		done < /proc/net/dev
+		printf '{"ok":true,"ts":%s,"ifaces":[%s]}\n' "$(date +%s)" "$out";;
+	wifi_radios)
+		# list radios for the WiFi form (radio id + band)
+		out=""; first=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			band="$(uci -q get wireless.$r.band)"; ch="$(uci -q get wireless.$r.channel)"
+			ssid=""; tp="$(uci -q get wireless.$r.txpower)"
+			for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+				[ "$(uci -q get wireless.$s.device)" = "$r" ] && { ssid="$(uci -q get wireless.$s.ssid)"; break; }
+			done
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","ssid":"%s","txpower":"%s"}' \
+				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$ch")" "$(json_esc "$ssid")" "$(json_esc "$tp")")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	*)
+		fail "unknown_op";;
+esac
+exit 0

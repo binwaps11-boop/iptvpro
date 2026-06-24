@@ -6,4 +6,9 @@ uci -q set network.lan.netmask='255.255.255.0'
 uci -q set luci.main.mediaurlbase='/luci-static/material'
 uci -q set system.@system[0].hostname='KT412-DSA'
 uci -q commit
+
+# --- custom purple-glass dashboard: make the API CGI executable ---
+chmod 0755 /www/cgi-bin/kt412 2>/dev/null
+/etc/init.d/rpcd restart 2>/dev/null
+/etc/init.d/uhttpd restart 2>/dev/null
 exit 0

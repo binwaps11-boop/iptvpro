@@ -46,6 +46,14 @@ jobs:
           echo "HEAD: $(git log --oneline -1)"
           echo "DSA-related files changed by PR:"
           git diff --name-only main...dsa 2>/dev/null | grep -i 'dw02-412h\|412h' || true
+          # --- Fix the PR's DTS syntax error: a LED property is missing its ';' ---
+          DTSI="target/linux/ath79/dts/qca9558_dongwon_dw02-412h.dtsi"
+          if grep -q 'linux,default-trigger = "phy1tpt"$' "$DTSI"; then
+            sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
+            echo "PATCHED: added missing semicolon in $DTSI"
+          fi
+          echo "--- phy1tpt line(s) after patch ---"
+          grep -n 'phy1tpt' "$DTSI" || true
 
       - name: Update & install feeds
         run: |
@@ -63,11 +71,16 @@ jobs:
           echo "=== DSA confirm: board.d for dw02-412h ==="
           grep -A4 'dw02-412h' target/linux/ath79/*/base-files/etc/board.d/02_network 2>/dev/null | head || true
 
-      - name: "Add files overlay (DSA-safe - IP + theme only)"
+      - name: "Add files overlay (DSA-safe configs + custom purple dashboard)"
         run: |
           cd openwrt
+          # DSA-safe base (mgmt IP, theme, uci-defaults) — lets DSA board.d build the network
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/files" ./files
+          # Custom KT412 purple-glass dashboard (network-agnostic: www + cgi-bin api)
+          mkdir -p ./files/www
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
           chmod +x files/etc/uci-defaults/* || true
+          chmod 0755 files/www/cgi-bin/kt412 || true
           find files -type f
 
       - name: Download sources

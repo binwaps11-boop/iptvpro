@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>KT412 — لوحة التحكم</title>
+<link rel="stylesheet" href="/kt412/style.css">
+</head>
+<body>
+<div class="blob b1"></div><div class="blob b2"></div>
+
+<!-- LOGIN -->
+<div id="login">
+  <div class="box">
+    <div class="logo">K4</div>
+    <h2>KT412 Control</h2>
+    <p>لوحة تحكم الراوتر — سجّل الدخول بكلمة مرور الجهاز</p>
+    <input id="pw" class="t" type="password" placeholder="كلمة المرور (root)" autocomplete="current-password">
+    <button id="loginBtn" class="btn" style="width:100%;margin-top:16px">دخول</button>
+    <div id="loginMsg" class="note hide"></div>
+    <div class="foot">إذا لم تكن قد عيّنت كلمة مرور، اتركها فارغة واضغط دخول.</div>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="wrap hide" id="app">
+  <div class="top">
+    <div class="logo">K4</div>
+    <div class="brand"><b>KT412</b><span>Dongwon DW02-412H · لوحة تحكم خاصة</span></div>
+    <div class="spacer"></div>
+    <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
+    <button class="btn-ghost" onclick="location.href='/cgi-bin/luci'">إعدادات متقدمة</button>
+    <button class="btn-ghost" id="logoutBtn">خروج</button>
+  </div>
+
+  <div class="nav" id="nav">
+    <button data-tab="dash" class="active"><span class="i">▦</span> الرئيسية</button>
+    <button data-tab="wan"><span class="i">🌐</span> الإنترنت</button>
+    <button data-tab="wifi"><span class="i">📶</span> الواي‑فاي</button>
+    <button data-tab="ports"><span class="i">🔌</span> المنافذ</button>
+    <button data-tab="health"><span class="i">❤</span> الصحة</button>
+    <button data-tab="quick"><span class="i">⚡</span> إعداد سريع</button>
+  </div>
+
+  <!-- DASHBOARD -->
+  <section data-pane="dash">
+    <div class="grid cols-4">
+      <div class="card"><h3>النظام</h3><div class="stat" id="d_model">—</div><div class="sub" id="d_rel">—</div></div>
+      <div class="card"><h3>مدة التشغيل</h3><div class="stat" id="d_up">—</div><div class="sub" id="d_load">الحِمل: —</div></div>
+      <div class="card"><h3>الذاكرة</h3><div class="stat" id="d_mem">—</div><div class="bar"><i id="d_membar" style="width:0"></i></div><div class="sub" id="d_memsub">—</div></div>
+      <div class="card"><h3>الإنترنت</h3><div class="stat" id="d_wan">—</div><div class="sub" id="d_wanip">—</div></div>
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>الواي‑فاي</h3><div id="d_wifi"><div class="sub">جارٍ التحميل…</div></div></div>
+      <div class="card"><h3>حالة الاتصال</h3><div id="d_health"><div class="sub">جارٍ التحميل…</div></div></div>
+    </div>
+  </section>
+
+  <!-- WAN -->
+  <section data-pane="wan" class="hide">
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>حالة الإنترنت (WAN)</h3>
+        <div id="wanStatus"><div class="sub">جارٍ التحميل…</div></div>
+        <button class="btn sec sm" id="wanReco" style="margin-top:14px">إعادة الاتصال</button>
+      </div>
+      <div class="card">
+        <h3>نوع الاتصال</h3>
+        <div class="seg" id="wanSeg">
+          <button data-m="dhcp" class="active">DHCP تلقائي</button>
+          <button data-m="pppoe">PPPoE</button>
+          <button data-m="static">ثابت</button>
+        </div>
+        <div id="wanForm" style="margin-top:6px"></div>
+        <button class="btn" id="wanApply">حفظ وتطبيق</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- WIFI -->
+  <section data-pane="wifi" class="hide">
+    <div id="wifiCards" class="grid cols-2"><div class="card"><div class="sub">جارٍ التحميل…</div></div></div>
+  </section>
+
+  <!-- PORTS -->
+  <section data-pane="ports" class="hide">
+    <div class="card">
+      <h3>منافذ الشبكة (LAN / WAN)</h3>
+      <div class="ports" id="portsBox"><div class="sub">جارٍ التحميل…</div></div>
+    </div>
+  </section>
+
+  <!-- HEALTH -->
+  <section data-pane="health" class="hide">
+    <div class="grid cols-3">
+      <div class="card"><h3>Cloudflare 1.1.1.1</h3><div class="stat" id="h_cf">—</div><div class="sub" id="h_cf_s">—</div></div>
+      <div class="card"><h3>Google 8.8.8.8</h3><div class="stat" id="h_gg">—</div><div class="sub" id="h_gg_s">—</div></div>
+      <div class="card"><h3>Multi‑WAN</h3><div class="stat" id="h_mw">—</div><div class="sub">روابط متصلة (online)</div></div>
+    </div>
+    <button class="btn sec" id="hRefresh">تحديث الفحص</button>
+  </section>
+
+  <!-- QUICK -->
+  <section data-pane="quick" class="hide">
+    <div class="card">
+      <h3>إعداد سريع — كل شيء في خطوة</h3>
+      <label class="f">اسم الواي‑فاي (SSID)</label>
+      <input id="q_ssid" class="t" placeholder="KT412">
+      <label class="f">كلمة مرور الواي‑فاي (8 أحرف على الأقل، أو فارغة = مفتوح)</label>
+      <input id="q_key" class="t" placeholder="••••••••">
+      <div class="row">
+        <div><label class="f">قوة 2.4GHz (dBm)</label>
+          <input id="q_p24" type="range" min="10" max="30" value="24"><div class="sub">القيمة: <span id="q_p24v" class="pw-val">24</span></div></div>
+        <div><label class="f">قوة 5GHz (dBm)</label>
+          <input id="q_p5" type="range" min="10" max="30" value="30"><div class="sub">القيمة: <span id="q_p5v" class="pw-val">30</span></div></div>
+      </div>
+      <div class="note">2.4GHz محدود فيزيائياً بمضخّم الجهاز (~24–27dBm فعلياً)؛ سيُطلب الأقصى وتُعرض القيمة الحقيقية. 5GHz يدعم 30dBm فعلي على القنوات العالية.</div>
+      <button class="btn" id="qApply">تطبيق الإعداد السريع</button>
+    </div>
+  </section>
+
+  <div class="foot">KT412 Control · واجهة خاصة فوق OpenWrt · <a href="/cgi-bin/luci">LuCI المتقدم</a></div>
+</div>
+
+<div id="toast"></div>
+<script src="/kt412/app.js"></script>
+</body>
+</html>
