@@ -105,6 +105,14 @@ async function applyWan(){
   const r=await call(p,true); toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok); if(r.ok)setTimeout(loadWan,1500);
 }
 
+/* ---------- NETWORK: device mode ---------- */
+let netMode='router';
+async function loadNetMode(){
+  const r=await call({op:'netmode'});
+  if(r&&r.ok){ netMode=r.mode||'router';
+    $$('#netModeSeg button').forEach(b=>b.classList.toggle('active',b.dataset.m===netMode)); }
+}
+
 /* ---------- NETWORK: LAN ---------- */
 let dhcpOn='1';
 async function loadLan(){
@@ -133,6 +141,8 @@ async function loadWifi(){
     const cur=+(rd.txpower||lv.txpower||30); const en=(rd.enabled===true||rd.enabled==='true');
     const hts=(HTMODES[rd.band]||HTMODES['5g']).map(h=>`<option value="${h}" ${rd.htmode===h?'selected':''}>${h}</option>`).join('');
     const modes=MODES.map(m=>`<option value="${m[0]}" ${rd.mode===m[0]?'selected':''}>${m[1]}</option>`).join('');
+    const chans=is5?['auto',36,40,44,48,149,153,157,161,165]:['auto',1,2,3,4,5,6,7,8,9,10,11];
+    const chopts=chans.map(c=>`<option value="${c}" ${String(rd.channel||'')===String(c)?'selected':''}>${c==='auto'?'تلقائي (Auto)':c}</option>`).join('');
     return `<div class="card" data-radio="${esc(rd.radio)}" data-band="${esc(rd.band)}">
       <h3>${is5?'📡':'📶'} ${band} <span class="badge ok">${esc(rd.radio)}</span>
         <span style="flex:1"></span>
@@ -145,7 +155,7 @@ async function loadWifi(){
       <label class="f">كلمة المرور (فارغة = مفتوحة)</label>
       <input class="t wkey" type="text" placeholder="••••••••">
       <div class="row">
-        <div><label class="f">القناة</label><input class="t wchan" value="${esc(rd.channel||'')}" placeholder="auto"></div>
+        <div><label class="f">القناة</label><select class="t wchan">${chopts}</select></div>
         <div><label class="f">العرض (HT)</label><select class="t wht">${hts}</select></div>
         <div><label class="f">الدولة</label><input class="t wcc" value="${esc(rd.country||'US')}" maxlength="2" style="text-transform:uppercase"></div>
       </div>
@@ -275,7 +285,7 @@ function switchTab(tab){
   $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==tab));
   if(tab==='dash')loadDash();
-  if(tab==='net'){ loadWan(); loadLan(); }
+  if(tab==='net'){ loadWan(); loadLan(); loadNetMode(); }
   if(tab==='wifi')loadWifi();
   if(tab==='clients')loadClients();
   if(tab==='ports')loadPorts();
@@ -294,6 +304,13 @@ $('#logoutBtn').onclick=logout;
 $('#nav').addEventListener('click',e=>{const b=e.target.closest('button');if(b)switchTab(b.dataset.tab);});
 $('#wanSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
   wanMode=b.dataset.m; $$('#wanSeg button').forEach(x=>x.classList.toggle('active',x===b)); $('#wanForm').innerHTML=wanFormHtml(wanMode);});
+$('#netModeSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  netMode=b.dataset.m; $$('#netModeSeg button').forEach(x=>x.classList.toggle('active',x===b));});
+$('#netModeApply').onclick=async()=>{
+  if(netMode==='ap' && !confirm('وضع Access Point: كل المنافذ تُجسَّر وDHCP يُعطَّل. الإدارة تبقى 192.168.100.1. متابعة؟'))return;
+  const r=await call({act:'net_mode',mode:netMode},true);
+  toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok);
+};
 $('#wanApply').onclick=applyWan;
 $('#wanReco').onclick=async()=>{const r=await call({act:'wan_reconnect'},true);toast(r.ok?'يُعاد الاتصال…':'فشل',r.ok);};
 $('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();

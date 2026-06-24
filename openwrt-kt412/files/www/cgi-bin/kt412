@@ -123,6 +123,43 @@ if [ -n "$ACT" ]; then
 			uci commit network
 			/etc/init.d/network reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
 			printf '{"ok":true,"msg":"WAN VLAN tag = %s"}\n' "$vid";;
+		net_mode)
+			mode="$(getp mode | tr -cd 'a-z')"
+			wandev="$(uci -q get network.wan.device 2>/dev/null)"; [ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname 2>/dev/null)"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"
+				i=$((i+1))
+			done
+			case "$mode" in
+				ap)
+					# dumb AP / switch: bridge WAN port into LAN, DHCP server off,
+					# keep mgmt 192.168.100.1 so access is never lost. PPPoE stays WAN-only.
+					if [ -n "$brsec" ] && [ -n "$wandev" ]; then
+						uci -q del_list network.$brsec.ports="$wandev"
+						uci -q add_list network.$brsec.ports="$wandev"
+					elif [ -n "$wandev" ]; then
+						cur="$(uci -q get network.lan.ifname 2>/dev/null)"
+						case " $cur " in *" $wandev "*) :;; *) uci -q set network.lan.ifname="${cur:+$cur }$wandev";; esac
+					fi
+					uci -q set network.wan.disabled='1'; uci -q set network.wan.auto='0'
+					uci -q set dhcp.lan.ignore='1'
+					uci commit
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+					printf '{"ok":true,"msg":"Access Point: كل المنافذ موصولة، DHCP معطّل، الإدارة تبقى 192.168.100.1"}\n';;
+				router)
+					if [ -n "$brsec" ] && [ -n "$wandev" ]; then uci -q del_list network.$brsec.ports="$wandev"; fi
+					if [ -n "$wandev" ]; then
+						cur="$(uci -q get network.lan.ifname 2>/dev/null)"
+						[ -n "$cur" ] && uci -q set network.lan.ifname="$(echo "$cur" | sed "s/ *$wandev//")"
+					fi
+					uci -q delete network.wan.disabled; uci -q delete network.wan.auto
+					uci -q delete dhcp.lan.ignore
+					uci commit
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+					printf '{"ok":true,"msg":"Router: WAN إنترنت + LAN DHCP + NAT"}\n';;
+				*) fail "bad_mode";;
+			esac;;
 		wifi_apply)
 			radio="$(sani_word "$(getp radio)")"
 			ssid="$(sani "$(getp ssid)")"; key="$(sani "$(getp key)")"
@@ -285,6 +322,10 @@ case "$OP" in
 		dh=true; [ "$ign" = "1" ] && dh=false
 		printf '{"ok":true,"ip":"%s","mask":"%s","dhcp":%s,"start":"%s","limit":"%s","lease":"%s"}\n' \
 			"$(json_esc "$ip")" "$(json_esc "$mask")" "$dh" "$(json_esc "${st:-100}")" "$(json_esc "${lim:-150}")" "$(json_esc "${lt:-12h}")";;
+	netmode)
+		dis="$(uci -q get network.wan.disabled)"; ign="$(uci -q get dhcp.lan.ignore)"
+		mode="router"; { [ "$dis" = "1" ] || [ "$ign" = "1" ]; } && mode="ap"
+		printf '{"ok":true,"mode":"%s"}\n' "$mode";;
 	wifi)
 		out=""; first=1
 		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do

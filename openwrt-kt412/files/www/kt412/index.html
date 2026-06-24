@@ -61,6 +61,19 @@
 
   <!-- NETWORK (WAN + VLAN + LAN) -->
   <section data-pane="net" class="hide">
+    <div class="card" style="margin-bottom:16px">
+      <h3>وضع الجهاز — Device Mode</h3>
+      <div class="seg" id="netModeSeg" style="max-width:420px">
+        <button data-m="router" class="active">راوتر (Router)</button>
+        <button data-m="ap">نقطة وصول (Access Point)</button>
+      </div>
+      <div class="note">
+        <b>Router:</b> WAN هو مدخل الإنترنت (DHCP/PPPoE/Static) + NAT + خادم DHCP على LAN. ·
+        <b>Access Point:</b> كل المنافذ (LAN+WAN) في جسر واحد، DHCP معطّل، وتتصل بأي منفذ.
+        الإدارة تبقى على <b>192.168.100.1</b> في الوضعين (لا تفقد الوصول). PPPoE يبقى على WAN فقط.
+      </div>
+      <button class="btn" id="netModeApply">تطبيق وضع الجهاز</button>
+    </div>
     <div class="grid cols-2">
       <div class="card">
         <h3>الإنترنت (WAN)</h3>
