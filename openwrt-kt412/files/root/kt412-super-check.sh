@@ -47,6 +47,10 @@ uptime; echo; free -m; echo
 echo "conntrack: $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
 for t in /sys/class/thermal/thermal_zone*/temp; do [ -e "$t" ] && echo "temp $t = $(cat "$t")"; done
 
+echo; echo "## VLAN"
+uci show network 2>/dev/null | grep -E "bridge-vlan|vlan_filtering|vlan[0-9]" || echo "(no custom VLANs — normal bridge)"
+bridge vlan show 2>/dev/null | head -30
+
 echo; echo "## WIFI STABILITY — 60s ping"
 ping -c60 -W2 1.1.1.1 2>&1 | tail -4
 

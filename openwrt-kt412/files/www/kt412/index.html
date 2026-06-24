@@ -123,6 +123,36 @@
         <button class="btn" id="lanApply">حفظ إعدادات LAN</button>
       </div>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h3>مدير VLAN المتقدم — VLAN Manager</h3>
+      <div class="note">VLAN اختياري. كل تعديل يمرّ عبر <b>Safe Apply</b> (يرجع تلقائياً خلال 80ث إن انقطع الوصول). VLAN 1 = الإدارة (محمي، لا يُحذف).</div>
+      <div id="vlanList"><div class="sub">جارٍ التحميل…</div></div>
+      <h4 style="margin:14px 0 6px">إنشاء VLAN</h4>
+      <div class="row">
+        <div><label class="f">VLAN ID (2–4094)</label><input id="vlanVid" class="t" placeholder="10"></div>
+        <div><label class="f">IP (اختياري)</label><input id="vlanIp" class="t" placeholder="192.168.10.1"></div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2)"><input type="checkbox" id="vlanDhcp" checked> خادم DHCP</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2);margin-top:4px"><input type="checkbox" id="vlanIso" checked> عزل عن باقي VLANs (إنترنت فقط)</label>
+      <button class="btn" id="vlanAdd" style="margin-top:8px">إنشاء VLAN (Safe Apply)</button>
+      <h4 style="margin:14px 0 6px">ربط منفذ / SSID بـ VLAN</h4>
+      <div class="row">
+        <div><label class="f">المنفذ</label><select id="vlanPortSel" class="t"></select></div>
+        <div><label class="f">VLAN</label><select id="vlanPortVid" class="t"></select></div>
+        <div><label class="f">النوع</label><select id="vlanPortMode" class="t"><option value="untagged">Untagged (PVID)</option><option value="tagged">Tagged</option><option value="off">إزالة</option></select></div>
+      </div>
+      <button class="btn sec sm" id="vlanPortApply">ربط المنفذ (Safe Apply)</button>
+      <div class="row" style="margin-top:8px">
+        <div><label class="f">SSID</label><select id="vlanSsidSel" class="t"></select></div>
+        <div><label class="f">VLAN</label><select id="vlanSsidVid" class="t"></select></div>
+      </div>
+      <button class="btn sec sm" id="vlanSsidApply">ربط SSID (Safe Apply)</button>
+      <div class="row" style="margin-top:12px">
+        <div><button class="btn sec sm" id="vlanExport" style="width:100%">تصدير إعداد VLAN</button></div>
+        <div><button class="btn bad sm" id="vlanReset" style="width:100%">إعادة ضبط VLAN فقط</button></div>
+      </div>
+      <pre id="vlanExportBox" class="hide" style="margin-top:10px;max-height:30vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)"></pre>
+    </div>
   </section>
 
   <!-- WIFI -->

@@ -160,6 +160,96 @@ if [ -n "$ACT" ]; then
 					printf '{"ok":true,"msg":"Router: WAN إنترنت + LAN DHCP + NAT"}\n';;
 				*) fail "bad_mode";;
 			esac;;
+		vlan_add)
+			vid="$(sani_int "$(getp vid)")"; ip="$(sani_ip "$(getp ip)")"
+			dh="$(getp dhcp | tr -cd '01')"; iso="$(getp isolate | tr -cd '01')"
+			[ -n "$vid" ] && [ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			uci -q set network.$brsec.vlan_filtering='1'
+			# default VLAN 1 untagged + pvid on lan ports so MANAGEMENT survives filtering
+			if ! uci show network 2>/dev/null | grep -q "vlan='1'"; then
+				v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
+				for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done
+			fi
+			# new VLAN (tagged on all lan ports by default; user re-assigns per port)
+			vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
+			for pp in lan1 lan2 lan3 lan4; do uci add_list network.$vs.ports="$pp:t"; done
+			uci set network.vlan$vid=interface; uci set network.vlan$vid.device="br-lan.$vid"
+			uci set network.vlan$vid.proto='static'; uci set network.vlan$vid.ipaddr="${ip:-192.168.$vid.1}"
+			uci set network.vlan$vid.netmask='255.255.255.0'
+			if [ "$dh" = "1" ]; then
+				uci set dhcp.vlan$vid=dhcp; uci set dhcp.vlan$vid.interface="vlan$vid"
+				uci set dhcp.vlan$vid.start='100'; uci set dhcp.vlan$vid.limit='150'; uci set dhcp.vlan$vid.leasetime='12h'
+			fi
+			z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"
+			uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'
+			# isolate=1 -> no inter-VLAN; allow internet only
+			uci set firewall.$z.forward='REJECT'
+			fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"VLAN %s أُنشئ (IP %s)"}\n' "$vid" "$(json_esc "${ip:-192.168.$vid.1}")";;
+		vlan_del)
+			vid="$(sani_int "$(getp vid)")"; [ -n "$vid" ] && [ "$vid" != "1" ] || fail "protected_vid"
+			i=0; while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+				if [ "$(uci -q get network.@bridge-vlan[$i].vlan)" = "$vid" ]; then uci delete network.@bridge-vlan[$i]; else i=$((i+1)); fi
+			done
+			uci -q delete network.vlan$vid; uci -q delete dhcp.vlan$vid
+			j=0; while uci -q get firewall.@zone[$j] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@zone[$j].name)" = "vlan$vid" ]; then uci delete firewall.@zone[$j]; else j=$((j+1)); fi
+			done
+			k=0; while uci -q get firewall.@forwarding[$k] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@forwarding[$k].src)" = "vlan$vid" ]; then uci delete firewall.@forwarding[$k]; else k=$((k+1)); fi
+			done
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"VLAN %s حُذف"}\n' "$vid";;
+		vlan_port)
+			vid="$(sani_int "$(getp vid)")"; port="$(sani_word "$(getp port)")"; mode="$(getp mode | tr -cd 'a-z')"
+			[ -n "$vid" ] && [ -n "$port" ] || fail "missing"
+			i=0; sec=""
+			while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@bridge-vlan[$i].vlan)" = "$vid" ] && sec="@bridge-vlan[$i]"; i=$((i+1))
+			done
+			[ -n "$sec" ] || fail "no_vlan"
+			# remove any existing entry for this port, then add new
+			for e in $(uci -q get network.$sec.ports); do
+				case "$e" in "$port"|"$port:"*) uci -q del_list network.$sec.ports="$e";; esac
+			done
+			case "$mode" in
+				untagged) uci add_list network.$sec.ports="$port:u*";;
+				tagged)   uci add_list network.$sec.ports="$port:t";;
+				off)      : ;;  # leave removed
+				*)        uci add_list network.$sec.ports="$port:t";;
+			esac
+			uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"المنفذ %s -> VLAN %s (%s)"}\n' "$port" "$vid" "${mode:-tagged}";;
+		vlan_ssid)
+			sec="$(sani_word "$(getp ssid)")"; vid="$(sani_int "$(getp vid)")"
+			[ -n "$sec" ] || fail "no_ssid"
+			if [ -z "$vid" ] || [ "$vid" = "1" ]; then uci set wireless.$sec.network='lan'; else uci set wireless.$sec.network="vlan$vid"; fi
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"SSID -> %s"}\n' "$([ -z "$vid" ] || [ "$vid" = 1 ] && echo lan || echo vlan$vid)";;
+		vlan_reset)
+			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
+			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done
+			for d in $(uci show dhcp 2>/dev/null | sed -n "s/^dhcp\.\(vlan[0-9]*\)=dhcp/\1/p"); do uci -q delete dhcp.$d; done
+			j=0; while uci -q get firewall.@zone[$j] >/dev/null 2>&1; do
+				case "$(uci -q get firewall.@zone[$j].name)" in vlan[0-9]*) uci delete firewall.@zone[$j];; *) j=$((j+1));; esac
+			done
+			k=0; while uci -q get firewall.@forwarding[$k] >/dev/null 2>&1; do
+				case "$(uci -q get firewall.@forwarding[$k].src)" in vlan[0-9]*) uci delete firewall.@forwarding[$k];; *) k=$((k+1));; esac
+			done
+			brsec=""; i=0; while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1)); done
+			[ -n "$brsec" ] && uci -q delete network.$brsec.vlan_filtering
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تمت إعادة ضبط VLAN (الإدارة سليمة)"}\n';;
 		wifi_apply)
 			radio="$(sani_word "$(getp radio)")"
 			ssid="$(sani "$(getp ssid)")"; key="$(sani "$(getp key)")"
@@ -427,9 +517,9 @@ case "$OP" in
 			fi
 			en=true; [ "$dis" = "1" ] && en=false
 			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","htmode":"%s","country":"%s","ssid":"%s","mode":"%s","hidden":"%s","txpower":"%s","enabled":%s}' \
+			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","htmode":"%s","country":"%s","ssid":"%s","mode":"%s","hidden":"%s","txpower":"%s","enabled":%s,"iface":"%s"}' \
 				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$ch")" "$(json_esc "$ht")" "$(json_esc "$cc")" \
-				"$(json_esc "$ssid")" "$(json_esc "${mode:-ap}")" "$(json_esc "${hidden:-0}")" "$(json_esc "$tp")" "$en")"
+				"$(json_esc "$ssid")" "$(json_esc "${mode:-ap}")" "$(json_esc "${hidden:-0}")" "$(json_esc "$tp")" "$en" "$(json_esc "$s")")"
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
 	ports)
@@ -547,6 +637,21 @@ case "$OP" in
 		b64="$(tail -n 250 "$rep" 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
 		bundle="$(ls -t /tmp/kt412-super-check-*.tar.gz 2>/dev/null | head -1)"
 		printf '{"ok":true,"done":%s,"report":"%s","bundle":"%s"}\n' "$dn" "$b64" "$(json_esc "$bundle")";;
+	vlan_list)
+		out=""; first=1; i=0
+		while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+			v="$(uci -q get network.@bridge-vlan[$i].vlan)"
+			ports="$(uci -q get network.@bridge-vlan[$i].ports | tr '\n' ' ')"
+			ip="$(uci -q get network.vlan$v.ipaddr)"
+			dh=false; uci -q get dhcp.vlan$v >/dev/null 2>&1 && dh=true
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"vid":"%s","ports":"%s","ip":"%s","dhcp":%s}' "$v" "$(json_esc "$ports")" "$(json_esc "$ip")" "$dh")"
+			i=$((i+1))
+		done
+		printf '{"ok":true,"vlans":[%s]}\n' "$out";;
+	vlan_export)
+		d="$( { uci show network 2>/dev/null | grep -E 'bridge-vlan|\.vlan[0-9]'; uci show dhcp 2>/dev/null | grep 'vlan[0-9]'; uci show firewall 2>/dev/null | grep 'vlan[0-9]'; } | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"config":"%s"}\n' "$d";;
 	readfile)
 		ff="$(getp f | tr -cd 'A-Za-z-')"
 		case "$ff" in

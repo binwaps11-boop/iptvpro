@@ -141,6 +141,25 @@ async function loadNetMode(){
     $$('#netModeSeg button').forEach(b=>b.classList.toggle('active',b.dataset.m===netMode)); }
 }
 
+/* ---------- VLAN Manager ---------- */
+async function loadVlan(){
+  const r=await call({op:'vlan_list'});
+  const vlans=(r&&r.ok)?(r.vlans||[]):[];
+  $('#vlanList').innerHTML = vlans.length? vlans.map(v=>
+    `<div class="kv"><span class="k">VLAN ${esc(v.vid)} <span class="sub">${esc(v.ip||'')} ${esc(v.ports||'')}</span></span>`+
+    `<span class="v">${v.dhcp?'<span class="badge ok">DHCP</span> ':''}`+
+    (v.vid!=='1'?`<button class="btn-ghost vdel" data-vid="${esc(v.vid)}" style="font-size:11px;padding:2px 8px">حذف</button>`:'<span class="badge warn">إدارة</span>')+
+    `</span></div>`).join('') : '<div class="sub">لا VLANs — الوضع العادي (جسر واحد بدون VLAN).</div>';
+  const vopts='<option value="1">1 (إدارة)</option>'+vlans.filter(v=>v.vid!=='1').map(v=>`<option value="${esc(v.vid)}">${esc(v.vid)}</option>`).join('');
+  $('#vlanPortVid').innerHTML=vopts; $('#vlanSsidVid').innerHTML=vopts;
+  const p=await call({op:'ports'});
+  $('#vlanPortSel').innerHTML=((p&&p.ok)?(p.ports||[]):[]).filter(x=>/^(lan|wan)/.test(x.name)).map(x=>`<option>${esc(x.name)}</option>`).join('')||'<option>lan1</option>';
+  const w=await call({op:'wifi_radios'});
+  $('#vlanSsidSel').innerHTML=((w&&w.ok)?(w.radios||[]):[]).filter(r=>r.iface).map(r=>`<option value="${esc(r.iface)}">${esc(r.ssid||r.radio)} (${esc(r.band)})</option>`).join('')||'<option value="">—</option>';
+  $$('#vlanList .vdel').forEach(b=>b.onclick=async()=>{ if(!confirm('حذف VLAN '+b.dataset.vid+'؟'))return;
+    const r=await safeApply(()=>call({act:'vlan_del',vid:b.dataset.vid},true)); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadVlan,1500); });
+}
+
 /* ---------- NETWORK: LAN ---------- */
 let dhcpOn='1';
 async function loadLan(){
@@ -409,7 +428,7 @@ function switchTab(tab){
   $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',panes.indexOf(s.dataset.pane)<0));
   if(panes.indexOf('dash')>=0)loadDash();
-  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); }
+  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); loadVlan(); }
   if(panes.indexOf('ports')>=0)loadPorts();
   if(panes.indexOf('clients')>=0)loadClients();
   if(panes.indexOf('wifi')>=0)loadWifi();
@@ -453,6 +472,16 @@ $('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();
 $('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
   dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#lanApply').onclick=applyLan;
+$('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim(); if(!vid){toast('اكتب VLAN ID',false);return;}
+  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:$('#vlanIp').value,dhcp:$('#vlanDhcp').checked?1:0,isolate:$('#vlanIso').checked?1:0},true));
+  toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
+$('#vlanPortApply').onclick=async()=>{ const r=await safeApply(()=>call({act:'vlan_port',vid:$('#vlanPortVid').value,port:$('#vlanPortSel').value,mode:$('#vlanPortMode').value},true));
+  toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
+$('#vlanSsidApply').onclick=async()=>{ const r=await safeApply(()=>call({act:'vlan_ssid',ssid:$('#vlanSsidSel').value,vid:$('#vlanSsidVid').value},true));
+  toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#vlanExport').onclick=async()=>{ const r=await call({op:'vlan_export'}); const box=$('#vlanExportBox'); box.classList.remove('hide'); box.textContent=(r&&r.ok)?(b64dec(r.config)||'(فارغ)'):'تعذّر'; };
+$('#vlanReset').onclick=async()=>{ if(!confirm('إعادة ضبط كل VLANs؟ (الإدارة تبقى سليمة)'))return;
+  const r=await safeApply(()=>call({act:'vlan_reset'},true)); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
 $('#clRefresh').onclick=loadClients;
 $('#scanBtn').onclick=loadScan;
 $('#hRefresh').onclick=loadHealth;

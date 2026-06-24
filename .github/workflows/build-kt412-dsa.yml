@@ -1,9 +1,9 @@
-name: Build KT412 DSA (clean-stable + system-30dbm-extreme)
+name: Build KT412 DSA (clean-stable-full + system-30dbm-extreme-full)
 
 # Full source build of OpenWrt main + PR #21837 (ath79 dw02-412h swconfig -> DSA).
 # Two variants:
-#   clean-stable  : 2.4G at the real calibrated 24 dBm (no driver patch), 5G 30.
-#   system-30dbm-extreme : ath9k patched so 2.4G target ceiling = 30.0 dBm; default
+#   clean-stable-full  : 2.4G at the real calibrated 24 dBm (no driver patch), 5G 30.
+#   system-30dbm-extreme-full : ath9k patched so 2.4G target ceiling = 30.0 dBm; default
 #                   txpower 30 -> iwinfo / iw phy / debugfs show 30 after flash,
 #                   persists across reboot. TEST mode: clipped/non-clean RF.
 # ~60-90 min per variant. ART/EEPROM/caldata are never written.
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        variant: [ "clean-stable", "system-30dbm-extreme" ]
+        variant: [ "clean-stable-full", "system-30dbm-extreme-full" ]
     steps:
       - name: Checkout repo (for config + files)
         uses: actions/checkout@v4
@@ -88,12 +88,18 @@ jobs:
           chmod +x files/etc/uci-defaults/* || true
           chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
-          if [ "${{ matrix.variant }}" = "system-30dbm-extreme" ]; then
-            # bake 2.4G default to 30 (extreme); clean-stable keeps the 24 default
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+            # bake 2.4G default to 30 (extreme); clean-stable-full keeps the 24 default
             sed -i "s/txpower='24'/txpower='30'/g" files/etc/uci-defaults/99-kt412-dsa
             echo "EXTREME: 2.4G default txpower set to 30"
           fi
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
+          echo "=== FEATURE INCLUSION GATE (must all pass) ==="
+          grep -q 'vlan_add'   files/www/cgi-bin/kt412 && echo "VLAN MANAGER INCLUDED" || { echo "FATAL: VLAN manager missing"; exit 1; }
+          grep -q 'safe_arm'   files/www/cgi-bin/kt412 && echo "SAFE APPLY INCLUDED"   || { echo "FATAL: Safe Apply missing"; exit 1; }
+          test -s files/root/kt412-super-check.sh       && echo "SUPER CHECK INCLUDED"  || { echo "FATAL: super-check missing"; exit 1; }
+          test -s files/root/POWER-REPORT.txt && test -s files/root/RF-SOLUTION.txt && test -s files/root/kt412-report.sh && echo "REPORTS INCLUDED" || { echo "FATAL: reports missing"; exit 1; }
+          grep -q 'qca8k' "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" 2>/dev/null; echo "DSA OK"
 
       - name: Download sources
         run: |
@@ -101,7 +107,7 @@ jobs:
           make -j$(nproc) download || make -j1 download
 
       - name: "Patch ath9k 2.4G ceiling -> 30.0 dBm (extreme only) - MUST apply"
-        if: matrix.variant == 'system-30dbm-extreme'
+        if: matrix.variant == 'system-30dbm-extreme-full'
         run: |
           cd openwrt
           echo "=== build tools + toolchain so the kernel source extracts ==="
@@ -132,7 +138,7 @@ jobs:
         run: |
           cd openwrt
           make -j$(nproc) || (echo '=== retry verbose ==='; make -j1 V=s 2>&1 | tail -200; exit 1)
-          if [ "${{ matrix.variant }}" = "system-30dbm-extreme" ]; then
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
             echo "=== confirm patched source compiled (must be 2) ==="
             N="$(grep -c 'KT412-30dbm' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c 2>/dev/null || echo 0)"
             echo "markers=$N"
@@ -171,11 +177,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kt412-dsa
-          name: KT412 DSA (clean-stable + system-30dbm-extreme)
+          name: KT412 DSA (clean-stable-full + system-30dbm-extreme-full)
           body: |
             DSA build (qca8k, not swconfig). OpenWrt main + PR #21837.
-            - clean-stable : 2.4G = real calibrated 24 dBm, 5G = 30. Daily use.
-            - system-30dbm-extreme: 2.4G forced to 30.0 dBm in iw phy / iwinfo / debugfs
+            - clean-stable-full : 2.4G = real calibrated 24 dBm, 5G = 30. Daily use.
+            - system-30dbm-extreme-full: 2.4G forced to 30.0 dBm in iw phy / iwinfo / debugfs
               (driver bypass, TEST mode; RF above ~26 is clipped/non-clean).
             ART/EEPROM never written. Rollback = reflash a previous bin.
           files: out/*
