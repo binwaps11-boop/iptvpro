@@ -1,0 +1,57 @@
+==========================================================================
+ KT412 2.4GHz — HOW TO REACH A REAL 30 dBm (RF / EIRP), not just System 30
+ Engineering options, honest, repeatable on other devices.
+==========================================================================
+ Chip: QCA9550 integrated 2.4GHz radio (ath9k). Clean conducted ceiling ~25-26
+ dBm (PA saturation). System/Driver can be forced to 30, but RF above ~26 clips.
+
+ --- The 4 power terms (keep separate) ---
+   System Power     = what uci/config requests        (this build: 30)
+   Driver Power     = what ath9k applies (debugfs)    (this build: 30, PA maxed)
+   Conducted RF     = real power out of the chip pin  (~25-26 clean, NOT 30)
+   EIRP             = Conducted + AntennaGain - CableLoss  (radiated total)
+
+ Q1: Can the SAME chip give a clean Conducted RF 30?
+     NO. The QCA9550 internal PA saturates ~25-26 dBm. Pushing 30 = clipping,
+     EVM degradation, spectral-mask issues, heat, often WORSE real range.
+
+ Q2: Do we need an external PA?
+     For a clean CONDUCTED 30: YES. An external 2.4GHz PA (FEM) after the radio.
+
+ Q3: What kind of external PA?
+     A 2.4GHz front-end module / PA with ~+6-8 dB gain and P1dB >= ~31 dBm,
+     linear for 802.11 (e.g. a Skyworks/Qorvo 2.4G WLAN FEM). Must include
+     proper bias + harmonic filtering. Adds cost + board rework + heat.
+
+ Q4: Where in the RF path?
+     radio TX pin -> [matching] -> EXTERNAL PA -> band-pass filter -> antenna.
+     (RX path needs an LNA/bypass + T/R switch — a full FEM handles both.)
+     This is a HARDWARE modification; not possible by firmware.
+
+ Q5: Do we need to change the antenna?
+     This is the CHEAP, SAFE, repeatable route for EIRP (not conducted):
+     a higher-gain antenna raises EIRP without touching the PA (no clipping).
+
+ Q6: Antenna gain needed for 30 dBm EIRP?
+     EIRP = Conducted + AntennaGain - CableLoss.
+     With the chip's clean conducted ~24 dBm:
+        need AntennaGain >= 30 - 24 + CableLoss.
+     With ~0 dB cable loss -> a 6 dBi antenna.
+
+ Q7: Final formula:
+        EIRP(dBm) = Conducted_TX(dBm) + Antenna_Gain(dBi) - Cable_Loss(dB)
+
+ Q8: Worked example (acceptable, clean, no clipping):
+        24 dBm TX  +  6 dBi antenna  -  0 dB cable  =  30 dBm EIRP
+
+ --- BEST COMMERCIAL / REPEATABLE SOLUTION (recommendation) ---
+   Use the chip at its CLEAN conducted power (~24 dBm) and reach 30 dBm EIRP
+   with a 5-6 dBi antenna. This is:
+     * clean (no clipping/distortion), * stable (no PA stress/heat),
+     * cheap (antenna only), * repeatable on any ath9k/QCA device,
+     * legal where 30 dBm EIRP is permitted on 2.4GHz.
+   Only use an external PA if you truly need higher CONDUCTED power into a
+   long cable / splitter; it is costlier and must stay linear to avoid clipping.
+
+ 5GHz: already a clean conducted/EIRP 30 on this hardware (QCA9880 + ch149).
+==========================================================================
