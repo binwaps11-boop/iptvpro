@@ -40,7 +40,8 @@ jobs:
 
       - name: Install ImageBuilder dependencies
         run: |
-          sudo apt-get update
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          sudo apt-get update || true
           sudo apt-get install -y build-essential libncurses-dev zlib1g-dev \
             gawk git gettext libssl-dev xsltproc wget unzip python3 file
 
