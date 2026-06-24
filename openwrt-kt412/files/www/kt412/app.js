@@ -1,15 +1,16 @@
 'use strict';
 const API='/cgi-bin/kt412';
 let TOKEN = sessionStorage.getItem('kt412tok') || '';
-let timer=null, trafPrev=null;
+let timer=null, logKind='sys';
 
 const $=s=>document.querySelector(s);
 const $$=s=>document.querySelectorAll(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function b64dec(s){ try{return decodeURIComponent(escape(atob(s||'')));}catch(e){try{return atob(s||'');}catch(_){return '';}} }
 
 function toast(msg, ok){
   const t=$('#toast'); t.textContent=msg; t.className='show '+(ok===false?'bad':(ok?'ok':''));
-  clearTimeout(t._t); t._t=setTimeout(()=>t.className='', 3200);
+  clearTimeout(t._t); t._t=setTimeout(()=>t.className='', 3400);
 }
 async function call(params, post){
   const usp=new URLSearchParams(params);
@@ -29,207 +30,221 @@ async function doLogin(){
   const btn=$('#loginBtn'); btn.innerHTML='<span class="spin"></span>'; btn.disabled=true;
   const r=await call({op:'login', password:$('#pw').value}, true);
   btn.innerHTML='دخول'; btn.disabled=false;
-  if(r.ok && r.token){
-    TOKEN=r.token; sessionStorage.setItem('kt412tok', TOKEN);
-    showApp();
-  }else{
-    const m=$('#loginMsg'); m.classList.remove('hide');
-    m.textContent = r.error==='bad_password' ? 'كلمة المرور غير صحيحة.' : 'تعذّر تسجيل الدخول: '+(r.error||'خطأ');
-  }
+  if(r.ok && r.token){ TOKEN=r.token; sessionStorage.setItem('kt412tok',TOKEN); showApp(); }
+  else{ const m=$('#loginMsg'); m.classList.remove('hide');
+    m.textContent = r.error==='bad_password' ? 'كلمة المرور غير صحيحة.' : 'تعذّر الدخول: '+(r.error||'خطأ'); }
 }
-function logout(){
-  TOKEN=''; sessionStorage.removeItem('kt412tok');
-  if(timer) clearInterval(timer);
-  $('#app').classList.add('hide'); $('#login').classList.remove('hide'); $('#pw').value='';
-}
-function showApp(){
-  $('#login').classList.add('hide'); $('#app').classList.remove('hide');
-  switchTab('dash'); startLoop();
-}
+function logout(){ TOKEN=''; sessionStorage.removeItem('kt412tok'); if(timer)clearInterval(timer);
+  $('#app').classList.add('hide'); $('#login').classList.remove('hide'); $('#pw').value=''; }
+function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); switchTab('dash'); startLoop(); }
 
 /* ---------- helpers ---------- */
 function human(b){ b=+b||0; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(b<10&&i>0?1:0)+' '+u[i]; }
 function dur(s){ s=+s||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
-  if(d>0) return d+'ي '+h+'س'; if(h>0) return h+'س '+m+'د'; return m+'د'; }
+  if(d>0)return d+'ي '+h+'س'; if(h>0)return h+'س '+m+'د'; return m+'د'; }
 
 /* ---------- dashboard ---------- */
 async function loadDash(){
   const s=await call({op:'summary'});
-  if(s && s.ok){
-    $('#d_model').textContent=s.model||'KT412';
-    $('#d_rel').textContent=s.release||'';
-    $('#d_up').textContent=dur(s.uptime);
-    $('#d_load').textContent='الحِمل: '+((+s.load/65536)||0).toFixed(2);
+  if(s&&s.ok){
+    $('#d_model').textContent=s.model||'KT412'; $('#d_rel').textContent=s.release||'';
+    $('#d_up').textContent=dur(s.uptime); $('#d_load').textContent='الحِمل: '+((+s.load/65536)||0).toFixed(2);
     const used=(+s.mem_total)-(+s.mem_free)-(+s.mem_buf);
     const pct=s.mem_total>0?Math.round(used/s.mem_total*100):0;
-    $('#d_mem').innerHTML=pct+'<small>%</small>';
-    $('#d_membar').style.width=pct+'%';
+    $('#d_mem').innerHTML=pct+'<small>%</small>'; $('#d_membar').style.width=pct+'%';
     $('#d_memsub').textContent=human(used)+' / '+human(s.mem_total);
   }
   const w=await call({op:'wan'});
-  if(w && w.ok){
-    const up=w.up===true||w.up==='true';
-    $('#d_wan').innerHTML = up?'<span style="color:var(--ok)">متصل</span>':'<span style="color:var(--bad)">منقطع</span>';
+  if(w&&w.ok){ const up=w.up===true||w.up==='true';
+    $('#d_wan').innerHTML=up?'<span style="color:var(--ok)">متصل</span>':'<span style="color:var(--bad)">منقطع</span>';
     $('#d_wanip').textContent=(w.ip||'—')+' · '+(w.proto||'');
-    $('#netDot').className='dot '+(up?'on':'off');
-    $('#netTxt').textContent=up?'متصل':'منقطع';
-  }
+    $('#netDot').className='dot '+(up?'on':'off'); $('#netTxt').textContent=up?'متصل':'منقطع'; }
   const wi=await call({op:'wifi'});
-  if(wi && wi.ok){
-    $('#d_wifi').innerHTML = (wi.radios||[]).map(r=>
-      `<div class="kv"><span class="k">${esc(r.essid||'—')} <span class="badge ok">${esc(r.band)}</span></span>`+
-      `<span class="v">${r.txpower} dBm · ${r.clients} جهاز</span></div>`).join('') || '<div class="sub">لا توجد شبكات نشطة</div>';
-  }
+  if(wi&&wi.ok) $('#d_wifi').innerHTML=(wi.radios||[]).map(r=>
+    `<div class="kv"><span class="k">${esc(r.essid||r.mode||'—')} <span class="badge ok">${esc(r.band)}</span></span>`+
+    `<span class="v">${r.txpower} dBm · ${r.clients} جهاز</span></div>`).join('')||'<div class="sub">لا شبكات نشطة</div>';
   const h=await call({op:'health'});
-  if(h && h.ok){
-    const row=(n,o)=>{const good=(+o.loss)<100;return `<div class="kv"><span class="k">${n}</span><span class="v">`+
-      (good?`<span class="badge ok">${o.rtt} ms</span>`:`<span class="badge bad">منقطع</span>`)+`</span></div>`;};
+  if(h&&h.ok){ const row=(n,o)=>{const g=(+o.loss)<100;return `<div class="kv"><span class="k">${n}</span><span class="v">`+
+    (g?`<span class="badge ok">${o.rtt} ms</span>`:`<span class="badge bad">منقطع</span>`)+`</span></div>`;};
     $('#d_health').innerHTML=row('Cloudflare',h.cf)+row('Google',h.goog)+
-      `<div class="kv"><span class="k">Multi‑WAN online</span><span class="v">${h.mwan_online}</span></div>`;
-  }
+      `<div class="kv"><span class="k">Multi‑WAN online</span><span class="v">${h.mwan_online}</span></div>`; }
 }
 
-/* ---------- WAN ---------- */
+/* ---------- NETWORK: WAN ---------- */
 let wanMode='dhcp';
 function wanFormHtml(m){
-  if(m==='pppoe') return `<label class="f">اسم المستخدم</label><input id="w_user" class="t">
+  if(m==='pppoe')return `<label class="f">اسم المستخدم</label><input id="w_user" class="t">
     <label class="f">كلمة المرور</label><input id="w_pass" class="t" type="text">`;
-  if(m==='static') return `<div class="row"><div><label class="f">IP</label><input id="w_ip" class="t" placeholder="192.168.1.2"></div>
+  if(m==='static')return `<div class="row"><div><label class="f">IP</label><input id="w_ip" class="t"></div>
     <div><label class="f">Netmask</label><input id="w_mask" class="t" placeholder="255.255.255.0"></div></div>
-    <div class="row"><div><label class="f">Gateway</label><input id="w_gw" class="t" placeholder="192.168.1.1"></div>
+    <div class="row"><div><label class="f">Gateway</label><input id="w_gw" class="t"></div>
     <div><label class="f">DNS</label><input id="w_dns" class="t" placeholder="1.1.1.1"></div></div>`;
-  return `<div class="sub" style="margin-top:10px">سيحصل الراوتر على عنوان تلقائياً من مزوّد الخدمة.</div>`;
+  return `<div class="sub" style="margin:8px 0">عنوان تلقائي من مزوّد الخدمة.</div>`;
 }
 async function loadWan(){
   const w=await call({op:'wan'});
-  if(w && w.ok){
-    const up=w.up===true||w.up==='true';
+  if(w&&w.ok){ const up=w.up===true||w.up==='true';
     $('#wanStatus').innerHTML=
       `<div class="kv"><span class="k">الحالة</span><span class="v">${up?'<span class="badge ok">متصل</span>':'<span class="badge bad">منقطع</span>'}</span></div>`+
       `<div class="kv"><span class="k">النوع</span><span class="v">${esc(w.proto||'—')}</span></div>`+
-      `<div class="kv"><span class="k">عنوان IP</span><span class="v">${esc(w.ip||'—')}</span></div>`+
+      `<div class="kv"><span class="k">IP</span><span class="v">${esc(w.ip||'—')}</span></div>`+
       `<div class="kv"><span class="k">البوابة</span><span class="v">${esc(w.gateway||'—')}</span></div>`+
-      `<div class="kv"><span class="k">DNS</span><span class="v">${esc(w.dns||'—')}</span></div>`+
-      `<div class="kv"><span class="k">مدة الاتصال</span><span class="v">${dur(w.uptime)}</span></div>`;
+      `<div class="kv"><span class="k">VLAN</span><span class="v">${esc(w.vlan||'—')}</span></div>`;
     wanMode=(w.proto==='pppoe'||w.proto==='static')?w.proto:'dhcp';
-    $$('#wanSeg button').forEach(b=>b.classList.toggle('active', b.dataset.m===wanMode));
+    $$('#wanSeg button').forEach(b=>b.classList.toggle('active',b.dataset.m===wanMode));
     $('#wanForm').innerHTML=wanFormHtml(wanMode);
+    if(w.vlan) $('#w_vlan').value=w.vlan;
   }
 }
 async function applyWan(){
   let p={act:'wan_'+wanMode};
   if(wanMode==='pppoe'){ p.user=$('#w_user').value; p.pass=$('#w_pass').value; }
   if(wanMode==='static'){ p.ip=$('#w_ip').value; p.mask=$('#w_mask').value; p.gw=$('#w_gw').value; p.dns=$('#w_dns').value; }
-  const r=await call(p,true); toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')), r.ok);
-  if(r.ok) setTimeout(loadWan,1500);
+  const r=await call(p,true); toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok); if(r.ok)setTimeout(loadWan,1500);
 }
 
-/* ---------- WIFI ---------- */
+/* ---------- NETWORK: LAN ---------- */
+let dhcpOn='1';
+async function loadLan(){
+  const l=await call({op:'lan'});
+  if(l&&l.ok){ $('#l_ip').value=l.ip||''; $('#l_mask').value=l.mask||''; $('#l_start').value=l.start||'';
+    $('#l_limit').value=l.limit||''; $('#l_lease').value=l.lease||'';
+    dhcpOn=(l.dhcp===true||l.dhcp==='true')?'1':'0';
+    $$('#dhcpSeg button').forEach(b=>b.classList.toggle('active',b.dataset.d===dhcpOn)); }
+}
+async function applyLan(){
+  const r=await call({act:'lan_set',ip:$('#l_ip').value,mask:$('#l_mask').value,dhcp:dhcpOn,
+    start:$('#l_start').value,limit:$('#l_limit').value,lease:$('#l_lease').value},true);
+  toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok);
+}
+
+/* ---------- WIFI (modes) ---------- */
+const HTMODES={'2g':['HT20','HT40'],'5g':['VHT80','VHT40','VHT20','HT40','HT20','HE80','HE40','HE20']};
+const MODES=[['ap','نقطة وصول (AP)'],['ap-wds','نقطة وصول + WDS'],['mesh','شبكة Mesh (802.11s)'],['sta','عميل / Client']];
 async function loadWifi(){
   const r=await call({op:'wifi_radios'});
   const live=await call({op:'wifi'});
-  const liveMap={};
-  if(live&&live.ok)(live.radios||[]).forEach((x,i)=>liveMap[i]=x);
+  const lm={}; if(live&&live.ok)(live.radios||[]).forEach((x,i)=>lm[i]=x);
   if(!(r&&r.ok)){ $('#wifiCards').innerHTML='<div class="card"><div class="sub">تعذّر التحميل</div></div>'; return; }
   $('#wifiCards').innerHTML=(r.radios||[]).map((rd,i)=>{
-    const lv=liveMap[i]||{};
-    const is5=(rd.band==='5g'||(lv.band&&lv.band.indexOf('5')>=0));
-    const max=30, cur=+(rd.txpower||lv.txpower||(is5?30:24));
-    return `<div class="card" data-radio="${esc(rd.radio)}">
-      <h3>${is5?'📡 5GHz':'📶 2.4GHz'} <span class="badge ok">${esc(rd.radio)}</span></h3>
-      <label class="f">اسم الشبكة (SSID)</label>
+    const lv=lm[i]||{}; const is5=(rd.band==='5g'); const band=is5?'5GHz':'2.4GHz';
+    const cur=+(rd.txpower||lv.txpower||30); const en=(rd.enabled===true||rd.enabled==='true');
+    const hts=(HTMODES[rd.band]||HTMODES['5g']).map(h=>`<option value="${h}" ${rd.htmode===h?'selected':''}>${h}</option>`).join('');
+    const modes=MODES.map(m=>`<option value="${m[0]}" ${rd.mode===m[0]?'selected':''}>${m[1]}</option>`).join('');
+    return `<div class="card" data-radio="${esc(rd.radio)}" data-band="${esc(rd.band)}">
+      <h3>${is5?'📡':'📶'} ${band} <span class="badge ok">${esc(rd.radio)}</span>
+        <span style="flex:1"></span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--txt2)">
+          <input type="checkbox" class="wen" ${en?'checked':''}> مُفعّل</label></h3>
+      <label class="f">الوضع (Mode)</label>
+      <select class="t wmode">${modes}</select>
+      <label class="f wssidlbl">اسم الشبكة (SSID)</label>
       <input class="t wssid" value="${esc(rd.ssid||'')}">
       <label class="f">كلمة المرور (فارغة = مفتوحة)</label>
       <input class="t wkey" type="text" placeholder="••••••••">
+      <div class="row">
+        <div><label class="f">القناة</label><input class="t wchan" value="${esc(rd.channel||'')}" placeholder="auto"></div>
+        <div><label class="f">العرض (HT)</label><select class="t wht">${hts}</select></div>
+        <div><label class="f">الدولة</label><input class="t wcc" value="${esc(rd.country||'US')}" maxlength="2" style="text-transform:uppercase"></div>
+      </div>
       <label class="f">قوة الإرسال: <span class="pw-val wpv">${cur}</span> dBm</label>
-      <input class="t wpow" type="range" min="10" max="${max}" value="${cur}">
-      ${!is5?'<div class="note">القيمة الفعلية على 2.4GHz محدودة بالعتاد (~24–27dBm).</div>':''}
-      <div class="sub" style="margin-top:8px">القناة: ${esc(rd.channel||lv.channel||'auto')} · المتصلون: ${lv.clients||0}</div>
-      <button class="btn wapply">حفظ الشبكة</button>
+      <input class="t wpow" type="range" min="10" max="30" value="${cur}">
+      ${!is5?'<div class="note">الفعلي على 2.4GHz محدود بالعتاد (~24–27).</div>':''}
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--txt2)">
+        <input type="checkbox" class="whid" ${rd.hidden==='1'?'checked':''}> إخفاء اسم الشبكة</label>
+      <div class="sub" style="margin-top:6px">المتصلون: ${lv.clients||0} · الوضع الحالي: ${esc(lv.mode||rd.mode||'ap')}</div>
+      <button class="btn wapply">حفظ الإعدادات</button>
     </div>`;
-  }).join('') || '<div class="card"><div class="sub">لا توجد راديوهات</div></div>';
+  }).join('')||'<div class="card"><div class="sub">لا توجد راديوهات</div></div>';
 
   $$('#wifiCards .card').forEach(card=>{
     const pow=card.querySelector('.wpow'), pv=card.querySelector('.wpv');
-    if(pow) pow.oninput=()=>pv.textContent=pow.value;
+    if(pow)pow.oninput=()=>pv.textContent=pow.value;
+    const mode=card.querySelector('.wmode'), lbl=card.querySelector('.wssidlbl');
+    if(mode)mode.onchange=()=>{ lbl.textContent= mode.value==='mesh'?'معرّف الشبكة (Mesh ID)': (mode.value==='sta'?'اسم شبكة الاتصال (SSID)':'اسم الشبكة (SSID)'); };
+    const en=card.querySelector('.wen');
+    if(en)en.onchange=async()=>{ const r=await call({act:'wifi_toggle',radio:card.dataset.radio,on:en.checked?'1':'0'},true);
+      toast(r.ok?(r.msg||'تم'):'فشل',r.ok); };
     const b=card.querySelector('.wapply');
-    if(b) b.onclick=async()=>{
-      const radio=card.dataset.radio;
-      const ssid=card.querySelector('.wssid').value;
-      const key=card.querySelector('.wkey').value;
-      const dbm=card.querySelector('.wpow').value;
+    if(b)b.onclick=async()=>{
+      const g=c=>card.querySelector(c);
       b.innerHTML='<span class="spin"></span>'; b.disabled=true;
-      let r1=await call({act:'wifi_apply',radio,ssid,key},true);
-      let r2=await call({act:'txpower',radio,dbm},true);
-      b.innerHTML='حفظ الشبكة'; b.disabled=false;
-      if(r1.ok){
-        let m='تم تحديث الشبكة';
-        if(r2.ok) m+=` · القوة المطلوبة ${r2.requested} والفعلية ${r2.actual}dBm`;
-        toast(m,true); setTimeout(loadWifi,2000);
-      }else toast('فشل: '+(r1.error||''),false);
+      const r1=await call({act:'wifi_apply',radio:card.dataset.radio,ssid:g('.wssid').value,key:g('.wkey').value,
+        mode:g('.wmode').value,channel:g('.wchan').value,htmode:g('.wht').value,country:g('.wcc').value,
+        hidden:g('.whid').checked?'1':'0'},true);
+      const r2=await call({act:'txpower',radio:card.dataset.radio,dbm:g('.wpow').value},true);
+      b.innerHTML='حفظ الإعدادات'; b.disabled=false;
+      if(r1.ok){ let m=r1.msg||'تم'; if(r2.ok)m+=` · القوة المطلوبة ${r2.requested} والفعلية ${r2.actual}dBm`;
+        toast(m,true); setTimeout(loadWifi,2200); }
+      else toast('فشل: '+(r1.error||''),false);
     };
   });
+}
+
+/* ---------- CLIENTS ---------- */
+async function loadClients(){
+  const r=await call({op:'clients'});
+  if(!(r&&r.ok)){ $('#clientsBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
+  const c=r.clients||[];
+  $('#clientsBox').innerHTML = c.length? c.map(x=>
+    `<div class="kv"><span class="k">${esc(x.name&&x.name!=='*'?x.name:'جهاز')}<br><span class="sub">${esc(x.mac)}</span></span>`+
+    `<span class="v">${esc(x.ip)}</span></div>`).join('')
+    : '<div class="sub">لا أجهزة مؤجَّرة حالياً</div>';
 }
 
 /* ---------- PORTS ---------- */
 async function loadPorts(){
   const r=await call({op:'ports'});
   if(!(r&&r.ok)){ $('#portsBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
-  $('#portsBox').innerHTML=(r.ports||[]).map(p=>{
-    const up=p.link==='up';
-    return `<div class="port ${up?'up':''}"><div class="ic"></div>
-      <div class="nm">${esc(p.name)}</div>
+  $('#portsBox').innerHTML=(r.ports||[]).map(p=>{ const up=p.link==='up';
+    return `<div class="port ${up?'up':''}"><div class="ic"></div><div class="nm">${esc(p.name)}</div>
       <div class="sp">${up?(p.speed?p.speed+'M':'متصل'):'مفصول'}</div></div>`;
-  }).join('') || '<div class="sub">لا توجد منافذ مقروءة (قد يكون السويتش DSA)</div>';
+  }).join('')||'<div class="sub">لا منافذ مقروءة</div>';
 }
 
 /* ---------- HEALTH ---------- */
 async function loadHealth(){
-  const h=await call({op:'health'});
-  if(!(h&&h.ok)) return;
-  const set=(idEl,idSub,o)=>{ const g=(+o.loss)<100;
-    $(idEl).innerHTML=g?o.rtt+'<small> ms</small>':'<span style="color:var(--bad)">✕</span>';
-    $(idSub).textContent=g?('فقد: '+o.loss+'%'):'لا استجابة'; };
-  set('#h_cf','#h_cf_s',h.cf); set('#h_gg','#h_gg_s',h.goog);
-  $('#h_mw').textContent=h.mwan_online;
+  const h=await call({op:'health'}); if(!(h&&h.ok))return;
+  const set=(e,s,o)=>{const g=(+o.loss)<100;$(e).innerHTML=g?o.rtt+'<small> ms</small>':'<span style="color:var(--bad)">✕</span>';
+    $(s).textContent=g?('فقد: '+o.loss+'%'):'لا استجابة';};
+  set('#h_cf','#h_cf_s',h.cf); set('#h_gg','#h_gg_s',h.goog); $('#h_mw').textContent=h.mwan_online;
 }
 
-/* ---------- QUICK ---------- */
-async function applyQuick(){
-  const ssid=$('#q_ssid').value, key=$('#q_key').value;
-  const p24=$('#q_p24').value, p5=$('#q_p5').value;
-  if(!ssid){ toast('اكتب اسم الواي‑فاي', false); return; }
-  const b=$('#qApply'); b.innerHTML='<span class="spin"></span>'; b.disabled=true;
-  const rr=await call({op:'wifi_radios'});
-  let done=0, msgs=[];
-  if(rr&&rr.ok){
-    for(const rd of (rr.radios||[])){
-      const is5=rd.band==='5g';
-      await call({act:'wifi_apply',radio:rd.radio,ssid:ssid+(is5?'-5G':''),key},true);
-      const pr=await call({act:'txpower',radio:rd.radio,dbm:is5?p5:p24},true);
-      if(pr.ok) msgs.push(`${is5?'5G':'2.4G'}: ${pr.actual}dBm`);
-      done++;
-    }
-  }
-  b.innerHTML='تطبيق الإعداد السريع'; b.disabled=false;
-  toast(done?('تم الإعداد · '+msgs.join(' · ')):'لم يتم العثور على راديو', !!done);
-  if(done) setTimeout(()=>{loadWifi();loadDash();},2000);
+/* ---------- LOGS ---------- */
+async function loadLogs(){
+  $('#logBox').textContent='جارٍ التحميل…';
+  const r=await call({op:'logs'}); if(!(r&&r.ok)){ $('#logBox').textContent='تعذّر التحميل'; return; }
+  $('#logBox').textContent=b64dec(logKind==='ker'?r.ker:r.sys)||'(فارغ)';
+}
+
+/* ---------- SYSTEM ---------- */
+async function loadSystem(){
+  const s=await call({op:'system'}); if(!(s&&s.ok))return;
+  const hp=(s.has_password===true||s.has_password==='true');
+  $('#sysInfo').innerHTML=
+    `<div class="kv"><span class="k">الإصدار</span><span class="v">${esc(s.release||'—')}</span></div>`+
+    `<div class="kv"><span class="k">الاسم</span><span class="v">${esc(s.host||'—')}</span></div>`+
+    `<div class="kv"><span class="k">الوقت</span><span class="v">${esc(s.time||'—')}</span></div>`+
+    `<div class="kv"><span class="k">المنطقة</span><span class="v">${esc(s.tz||'UTC')}</span></div>`+
+    `<div class="kv"><span class="k">كلمة المرور</span><span class="v">${hp?'<span class="badge ok">مضبوطة</span>':'<span class="badge warn">غير مضبوطة!</span>'}</span></div>`;
+  $('#s_host').value=s.host||''; $('#s_tz').value=s.tz||'';
 }
 
 /* ---------- nav + loop ---------- */
 function switchTab(tab){
-  $$('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
-  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide', s.dataset.pane!==tab));
-  if(tab==='dash') loadDash();
-  if(tab==='wan') loadWan();
-  if(tab==='wifi') loadWifi();
-  if(tab==='ports') loadPorts();
-  if(tab==='health') loadHealth();
+  $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==tab));
+  if(tab==='dash')loadDash();
+  if(tab==='net'){ loadWan(); loadLan(); }
+  if(tab==='wifi')loadWifi();
+  if(tab==='clients')loadClients();
+  if(tab==='ports')loadPorts();
+  if(tab==='health')loadHealth();
+  if(tab==='logs')loadLogs();
+  if(tab==='system')loadSystem();
 }
-function startLoop(){ if(timer) clearInterval(timer); timer=setInterval(()=>{
-  const active=document.querySelector('#nav button.active');
-  if(active && active.dataset.tab==='dash') loadDash();
-},5000); }
+function startLoop(){ if(timer)clearInterval(timer); timer=setInterval(()=>{
+  const a=document.querySelector('#nav button.active'); if(a&&a.dataset.tab==='dash')loadDash(); },5000); }
 
 /* ---------- wire up ---------- */
 $('#loginBtn').onclick=doLogin;
@@ -240,12 +255,32 @@ $('#wanSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(
   wanMode=b.dataset.m; $$('#wanSeg button').forEach(x=>x.classList.toggle('active',x===b)); $('#wanForm').innerHTML=wanFormHtml(wanMode);});
 $('#wanApply').onclick=applyWan;
 $('#wanReco').onclick=async()=>{const r=await call({act:'wan_reconnect'},true);toast(r.ok?'يُعاد الاتصال…':'فشل',r.ok);};
+$('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();
+  if(!v){toast('اكتب رقم VLAN',false);return;} const r=await call({act:'wan_vlan',vid:v},true);
+  toast(r.ok?(r.msg||'تم'):('فشل: '+(r.error||'')),r.ok); if(r.ok)setTimeout(loadWan,1500);};
+$('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
+$('#lanApply').onclick=applyLan;
+$('#clRefresh').onclick=loadClients;
 $('#hRefresh').onclick=loadHealth;
-$('#qApply').onclick=applyQuick;
-$('#q_p24').oninput=()=>$('#q_p24v').textContent=$('#q_p24').value;
-$('#q_p5').oninput=()=>$('#q_p5v').textContent=$('#q_p5').value;
+$('#logRefresh').onclick=loadLogs;
+$('#logSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  logKind=b.dataset.l; $$('#logSeg button').forEach(x=>x.classList.toggle('active',x===b)); loadLogs();});
+$('#pwApply').onclick=async()=>{
+  const a=$('#s_pw1').value,b=$('#s_pw2').value;
+  if(!a){toast('اكتب كلمة المرور',false);return;} if(a!==b){toast('كلمتا المرور غير متطابقتين',false);return;}
+  const r=await call({act:'sys_passwd',newpass:a},true);
+  toast(r.ok?'تم تغيير كلمة المرور':('فشل: '+(r.error||'')),r.ok); if(r.ok){$('#s_pw1').value='';$('#s_pw2').value='';loadSystem();}};
+$('#hostApply').onclick=async()=>{const r=await call({act:'sys_hostname',hostname:$('#s_host').value},true);
+  toast(r.ok?(r.msg||'تم'):'فشل',r.ok);};
+$('#tzApply').onclick=async()=>{const r=await call({act:'sys_timezone',tz:$('#s_tz').value},true);
+  toast(r.ok?(r.msg||'تم'):'فشل',r.ok);};
+$('#rebootBtn').onclick=async()=>{ if(!confirm('إعادة تشغيل الراوتر الآن؟'))return;
+  const r=await call({act:'reboot'},true); toast(r.ok?'يُعاد التشغيل…':'فشل',r.ok); };
+$('#factoryBtn').onclick=async()=>{ if(!confirm('تحذير: ضبط المصنع يمسح كل الإعدادات. متابعة؟'))return;
+  const r=await call({act:'factory'},true); toast(r.ok?'ضبط مصنع + إعادة تشغيل…':'فشل',r.ok); };
 
-/* boot: if we have a token, try to use it; else show login */
+/* boot */
 (async function(){
   if(TOKEN){ const s=await call({op:'summary'}); if(s&&s.ok){ showApp(); return; } TOKEN=''; sessionStorage.removeItem('kt412tok'); }
   $('#login').classList.remove('hide');

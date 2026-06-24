@@ -11,6 +11,14 @@ uci -q commit
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/kt412 2>/dev/null
 
+# --- request max Tx power (30) by default on every radio (DSA wireless is
+#     auto-generated on first boot). Real 2.4GHz output stays hardware-capped. ---
+for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+	uci -q set wireless.$r.txpower='30'
+	uci -q set wireless.$r.country='US'
+done
+uci -q commit wireless
+
 # --- ttyd web terminal (advanced access) on port 7681 ---
 if ! uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
 	uci -q add ttyd ttyd >/dev/null
