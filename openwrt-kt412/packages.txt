@@ -151,3 +151,9 @@ mwan3
 luci-app-mwan3
 luci-app-commands
 ip-full
+luci-app-sqm
+sqm-scripts
+kmod-sched-cake
+luci-app-ttyd
+ttyd
+luci-app-uhttpd

@@ -1,0 +1,15 @@
+#
+# SQM / QoS (cake) — DISABLED by default. Enable + set your real speeds.
+# On this 720MHz MIPS, SQM works well up to ~50-80 Mbps. Above that, disable it.
+# To use: set download/upload to ~90% of your measured speed, then enabled '1'.
+#
+config queue 'wan'
+	option interface 'eth0.2'
+	option enabled '0'
+	option download '0'
+	option upload '0'
+	option qdisc 'cake'
+	option script 'piece_of_cake.qos'
+	option linklayer 'none'
+	option debug_logging '0'
+	option verbosity '5'
