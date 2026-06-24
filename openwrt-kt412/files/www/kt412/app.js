@@ -1,5 +1,7 @@
 'use strict';
 const API='/cgi-bin/kt412';
+const API_FW='/cgi-bin/kt412-fw';
+let fwForce=0;
 let TOKEN = sessionStorage.getItem('kt412tok') || '';
 let timer=null, logKind='sys';
 
@@ -314,6 +316,29 @@ $('#hostApply').onclick=async()=>{const r=await call({act:'sys_hostname',hostnam
   toast(r.ok?(r.msg||'تم'):'فشل',r.ok);};
 $('#tzApply').onclick=async()=>{const r=await call({act:'sys_timezone',tz:$('#s_tz').value},true);
   toast(r.ok?(r.msg||'تم'):'فشل',r.ok);};
+$('#fwUpload').onclick=async()=>{
+  const f=$('#fwFile').files[0];
+  if(!f){ toast('اختر ملف الفيرموير أولاً',false); return; }
+  const m=$('#fwMsg'); m.classList.remove('hide'); m.textContent='جارٍ الرفع والفحص…';
+  const b=$('#fwUpload'); b.disabled=true; $('#fwFlash').disabled=true;
+  try{
+    const r=await fetch(API_FW+'?act=upload&token='+encodeURIComponent(TOKEN),{method:'POST',body:f});
+    const j=await r.json(); b.disabled=false;
+    if(!j.ok){ m.textContent='فشل الرفع: '+(j.error||''); return; }
+    const mb=(j.size/1048576).toFixed(1);
+    if(j.valid){ m.innerHTML='✅ الملف صالح ومتوافق مع الجهاز ('+mb+' MB). اضغط «تفليش الآن».'; fwForce=0; $('#fwFlash').disabled=false; }
+    else { m.innerHTML='⚠ الملف غير مُتحقق لهذا الجهاز ('+mb+' MB): '+esc(j.detail||'')+'<br>التفليش بالإجبار متاح على مسؤوليتك.'; fwForce=1; $('#fwFlash').disabled=false; }
+  }catch(e){ b.disabled=false; m.textContent='خطأ شبكة أثناء الرفع'; }
+};
+$('#fwFlash').onclick=async()=>{
+  if(!confirm('تفليش الفيرموير الآن؟ سيُعاد تشغيل الجهاز ويعود على 192.168.100.1'))return;
+  const keep=$('#fwKeep').checked?1:0;
+  try{
+    const r=await fetch(API_FW+'?act=flash&keep='+keep+'&force='+fwForce+'&token='+encodeURIComponent(TOKEN),{method:'POST'});
+    const j=await r.json();
+    toast(j.ok?(j.msg||'يُفلَّش…'):('فشل: '+(j.error||'')), j.ok);
+  }catch(e){ toast('بدأ التفليش — انتظر ~3 دقائق ثم افتح 192.168.100.1', true); }
+};
 $('#rebootBtn').onclick=async()=>{ if(!confirm('إعادة تشغيل الراوتر الآن؟'))return;
   const r=await call({act:'reboot'},true); toast(r.ok?'يُعاد التشغيل…':'فشل',r.ok); };
 $('#factoryBtn').onclick=async()=>{ if(!confirm('تحذير: ضبط المصنع يمسح كل الإعدادات. متابعة؟'))return;

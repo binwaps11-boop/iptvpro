@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         variant: [ "clean-stable", "real-30dbm" ]
     steps:
@@ -85,7 +85,7 @@ jobs:
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/root/." ./files/root/ 2>/dev/null || true
           chmod +x files/etc/uci-defaults/* || true
-          chmod 0755 files/www/cgi-bin/kt412 || true
+          chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
           if [ "${{ matrix.variant }}" = "real-30dbm" ]; then
             # bake 2.4G default to 30 (extreme); clean-stable keeps the 24 default

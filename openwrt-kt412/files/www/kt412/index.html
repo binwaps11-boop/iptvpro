@@ -197,10 +197,21 @@
           <div><button class="btn bad" id="factoryBtn" style="width:100%">ضبط مصنع</button></div>
         </div>
       </div>
+      <div class="card">
+        <h3>ترقية الفيرموير — Firmware Upgrade</h3>
+        <label class="f">اختر ملف <code>sysupgrade.bin</code></label>
+        <input id="fwFile" class="t" type="file" accept=".bin,.img,application/octet-stream">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--txt2)">
+          <input type="checkbox" id="fwKeep"> الاحتفاظ بالإعدادات (Keep settings)</label>
+        <div class="row" style="margin-top:8px">
+          <div><button class="btn sec" id="fwUpload" style="width:100%">رفع وفحص</button></div>
+          <div><button class="btn bad" id="fwFlash" style="width:100%" disabled>تفليش الآن</button></div>
+        </div>
+        <div id="fwMsg" class="note hide"></div>
+        <div class="note">يُفحص الملف أنه متوافق مع هذا الجهاز قبل السماح بالتفليش. لا تقطع الكهرباء أثناء الترقية.</div>
+      </div>
     </div>
-  </section>
-
-  <div class="foot">KT412 Control · واجهة خاصة · <a href="javascript:window.open('http://'+location.hostname+':7681','_blank')">طرفية الويب</a></div>
+  </section>KT412 Control · واجهة خاصة · <a href="javascript:window.open('http://'+location.hostname+':7681','_blank')">طرفية الويب</a></div>
 </div>
 
 <div id="toast"></div>
