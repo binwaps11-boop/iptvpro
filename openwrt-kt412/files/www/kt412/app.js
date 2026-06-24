@@ -217,6 +217,44 @@ async function loadLogs(){
   $('#logBox').textContent=b64dec(logKind==='ker'?r.ker:r.sys)||'(فارغ)';
 }
 
+/* ---------- POWER CONTROL ---------- */
+async function loadPower(){
+  const r=await call({op:'power'});
+  if(!(r&&r.ok)){ $('#powerBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
+  $('#powerBox').innerHTML=(r.radios||[]).map(rd=>{
+    const is5=rd.band==='5g'; const ap=+rd.applied||0;
+    const cls = ap>=30?'bad':(ap>=27?'warn':'ok');
+    const lbl = (!is5 && ap>=27)?'<span class="badge bad">software-reported (bypass)</span>'
+              : (ap>=27?'<span class="badge ok">حقيقي</span>':'<span class="badge ok">نظيف</span>');
+    return `<div class="card" data-radio="${esc(rd.radio)}" style="margin-top:14px;background:rgba(255,255,255,.04)">
+      <h3>${is5?'📡 5GHz':'📶 2.4GHz'} <span class="badge ok">${esc(rd.radio)}</span></h3>
+      <div class="kv"><span class="k">Requested (uci)</span><span class="v">${esc(rd.requested)} dBm</span></div>
+      <div class="kv"><span class="k">Driver Applied (iwinfo)</span><span class="v"><span class="badge ${cls}">${esc(rd.applied)} dBm</span> ${lbl}</span></div>
+      <div class="kv"><span class="k">PHY Limit (iw phy)</span><span class="v">${esc(rd.phy_limit)} dBm</span></div>
+      <div class="kv"><span class="k">user_power (debugfs)</span><span class="v">${esc(rd.user_power)}</span></div>
+      <label class="f">الوضع:</label>
+      <div class="seg pwseg">
+        <button data-m="safe">Safe (24)</button>
+        <button data-m="max">Max (26)</button>
+        <button data-m="extreme">Extreme (30)${is5?'':' ⚠'}</button>
+      </div>
+    </div>`;
+  }).join('')||'<div class="sub">لا راديوهات</div>';
+  $$('#powerBox .card').forEach(card=>{
+    card.querySelectorAll('.pwseg button').forEach(b=>{ b.onclick=async()=>{
+      const m=b.dataset.m;
+      if(m==='extreme' && card.dataset.radio.indexOf('1')<0){ // 2.4G radio0 -> warn
+      }
+      if(m==='extreme'){ if(!confirm('Extreme = رقم برمجي مقصوص (driver bypass)، ليس RF نظيفاً حقيقياً، وقد يضغط الـ PA. متابعة؟'))return; }
+      b.innerHTML='<span class="spin"></span>';
+      const r=await call({act:'power_profile',radio:card.dataset.radio,mode:m},true);
+      if(r.ok) toast(`الوضع ${m} · المطلوب ${r.requested} والمُطبَّق (iwinfo) ${r.applied}dBm`,true);
+      else toast('فشل: '+(r.error||''),false);
+      setTimeout(loadPower,1800);
+    };});
+  });
+}
+
 /* ---------- SYSTEM ---------- */
 async function loadSystem(){
   const s=await call({op:'system'}); if(!(s&&s.ok))return;
@@ -241,6 +279,7 @@ function switchTab(tab){
   if(tab==='ports')loadPorts();
   if(tab==='health')loadHealth();
   if(tab==='logs')loadLogs();
+  if(tab==='power')loadPower();
   if(tab==='system')loadSystem();
 }
 function startLoop(){ if(timer)clearInterval(timer); timer=setInterval(()=>{

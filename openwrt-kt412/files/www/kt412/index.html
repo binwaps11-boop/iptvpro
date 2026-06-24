@@ -41,6 +41,7 @@
     <button data-tab="ports"><span class="i">🔌</span> المنافذ</button>
     <button data-tab="health"><span class="i">❤</span> الصحة</button>
     <button data-tab="logs"><span class="i">📜</span> السجلّات</button>
+    <button data-tab="power"><span class="i">📡</span> الباور</button>
     <button data-tab="system"><span class="i">⚙</span> النظام</button>
   </div>
 
@@ -144,6 +145,22 @@
       </div>
       <pre id="logBox" style="margin-top:12px;max-height:60vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:12px;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">جارٍ التحميل…</pre>
       <button class="btn sec sm" id="logRefresh" style="margin-top:10px">تحديث</button>
+    </div>
+  </section>
+
+  <!-- POWER CONTROL -->
+  <section data-pane="power" class="hide">
+    <div class="card">
+      <h3>التحكم بقوة الإرسال — Power Control</h3>
+      <div class="note" style="border-color:rgba(255,107,138,.45);color:#ffb3c2;background:rgba(255,107,138,.07)">
+        <b>تنبيه صدق RF:</b> على 2.4GHz (QCA9550/ath9k) يتشبّع مضخّم الرقاقة عند ~25–26dBm.
+        وضع <b>Extreme (30)</b> يجعل <code>iwinfo</code> و<code>iw phy</code> يعرضان 30، لكنه
+        <b>رقم برمجي (Driver bypass) مقصوص وغير مُقاس بجهاز RF</b> — وليس 30 نظيفاً حقيقياً.
+        للحصول على 30+ EIRP نظيف تحتاج <b>هوائي أعلى كسب</b> أو <b>PA خارجي</b> (عتاد، لا برمجة).
+        5GHz: الـ 30 حقيقي. الافتراضي = Safe.
+      </div>
+      <div id="powerBox"><div class="sub">جارٍ التحميل…</div></div>
+      <div class="sub" style="margin-top:10px">شغّل <code>sh /root/kt412-report.sh</code> للإثبات الكامل من جهازك.</div>
     </div>
   </section>
 

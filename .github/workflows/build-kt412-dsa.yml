@@ -108,9 +108,10 @@ jobs:
           cp "$EEP" "$EEP.orig"
           # 1) ignore the conservative CTL edge clamp on 2.4G target power
           sed -i 's/minCtlPower = (u8)min(twiceMaxEdgePower, scaledPower);/minCtlPower = scaledPower; \/* KT412-30dbm *\//' "$EEP"
-          # 2) force every 2.4G per-rate target to 60 half-dB (= 30 dBm) before
-          #    max_power_level is derived -> iw/iwinfo report 30, PA driven to max.
-          sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
+          # 2) RAISE the 2.4G per-rate target CEILING to 63 half-dB (=31.5 dBm) so the
+          #    caldata 24 cap no longer limits; the ACTUAL applied power is then chosen
+          #    at runtime by uci txpower (Safe 24 / Max 26 / Extreme 30 from the UI).
+          sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 63) targetPowerValT2[_k] = 63; } \/* KT412-30dbm *\/ \1/' "$EEP"
           M="$(grep -c 'KT412-30dbm' "$EEP")"
           echo "--- power-patch markers (need 2): $M ---"
           echo "--- diff ---"; diff "$EEP.orig" "$EEP" || true
