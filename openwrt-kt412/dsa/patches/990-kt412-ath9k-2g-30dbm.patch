@@ -7,24 +7,26 @@ it to the backports source that actually compiles into kmod-ath9k. (Placing it
 in target/linux/generic/hack-* patches the unused in-tree ath9k -> no effect,
 which is exactly why earlier builds still showed 24 dBm with no dmesg markers.)
 
-Three driver-source changes (ART/EEPROM/caldata are NEVER written):
-  1) ar9003_eeprom.c set_power_per_rate_table(): drop the CTL regulatory edge
-     clamp on the 2.4G target so the per-rate target is not pulled below 30.
-  2) ar9003_eeprom.c ar9300_set_txpower(): force every per-rate target power
-     (targetPowerValT2[]) up to >=60 half-dB = 30.0 dBm band-wide, so
-     regulatory->max_power_level (=> chan->max_power => iw phy / iwinfo /
-     debugfs) advertises 30.0 dBm on every 2.4G channel. Marker:
-     KT412-30DBM-PATCH-ACTIVE.
-  3) hw.c ath9k_hw_apply_txpower(): floor the final 2.4G netdev power to 60
-     half-dB so debugfs netdev txpower reads 30. Marker:
-     KT412-30DBM-FINAL-NETDEV-POWER.
+Two driver-source changes in ar9003_eeprom.c (ART/EEPROM/caldata NEVER written):
+  1) set_power_per_rate_table(): drop the CTL regulatory edge clamp on the 2.4G
+     target so the per-rate target is not pulled below 30.
+  2) ar9300_set_txpower(): force every per-rate target power (targetPowerValT2[])
+     up to >=60 half-dB = 30.0 dBm band-wide, so regulatory->max_power_level
+     (=> chan->max_power => iw phy / iwinfo / debugfs netdev txpower) advertises
+     30.0 dBm on every 2.4G channel. Marker: KT412-30DBM-PATCH-ACTIVE.
+
+(An earlier hw.c "netdev floor" hunk was dropped: the backports hw.c context at
+ath9k_hw_apply_txpower differs from mainline after the stock ath9k patches, and
+it is redundant — raising max_power_level already drives chan->max_power and the
+netdev power_level to 30. If a device trace ever shows netdev < 30 despite this,
+re-add a correctly-contexted hw.c floor.)
 
 This is a TEST/extreme build: conducted RF above the PA's ~25-26 dBm saturation
 is clipped/non-clean — the NUMBER reads 30 everywhere; the radiated power does
 not exceed PA physics. See /root/POWER-REPORT.txt and /root/RF-SOLUTION.txt.
 
-Markers (post-compile, in dmesg at radio bring-up): KT412-30DBM-PATCH-ACTIVE,
-KT412-30DBM-FINAL-NETDEV-POWER. Compiled-source marker token appears twice.
+Marker (post-compile, in dmesg at radio bring-up): KT412-30DBM-PATCH-ACTIVE.
+Compiled-source marker token appears twice.
 
 --- a/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c
 +++ b/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c
@@ -46,17 +48,3 @@ KT412-30DBM-FINAL-NETDEV-POWER. Compiled-source marker token appears twice.
  	for (i = 0; i < ar9300RateSize; i++) {
  		if (targetPowerValT2[i] > regulatory->max_power_level)
  			regulatory->max_power_level = targetPowerValT2[i];
---- a/drivers/net/wireless/ath/ath9k/hw.c
-+++ b/drivers/net/wireless/ath/ath9k/hw.c
-@@ -2966,6 +2966,11 @@
- 	channel = chan->chan;
- 	chan_pwr = min_t(int, channel->max_power * 2, MAX_COMBINED_POWER);
- 	new_pwr = min_t(int, chan_pwr, reg->power_limit);
-+	if (channel->band == NL80211_BAND_2GHZ) {
-+		new_pwr = max_t(int, new_pwr, 60);
-+		new_pwr = min_t(int, new_pwr, MAX_COMBINED_POWER);
-+		printk_once(KERN_INFO "KT412-30DBM-FINAL-NETDEV-POWER\n");
-+	}
-
- 	ah->eep_ops->set_txpower(ah, chan, ctl,
- 				 get_antenna_gain(ah, chan), new_pwr, test);

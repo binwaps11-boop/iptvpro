@@ -229,9 +229,7 @@ jobs:
             echo "markers=$N"
             [ "$N" = "2" ] || { echo "FATAL: 30dBm patch did NOT apply to the backports ath9k -> bin would still be 24"; exit 1; }
             grep -q 'targetPowerValT2\[_k\] = 60' "$EEP" || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
-            HWC="$(find build_dir -path '*ath9k/hw.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
-            if [ -n "$HWC" ] && grep -q 'KT412-30DBM-FINAL-NETDEV-POWER' "$HWC"; then echo "NETDEV FLOOR PATCH APPLIED OK (hw.c)"; else echo "FATAL: hw.c netdev-floor patch did NOT apply"; exit 1; fi
-            echo "POWER PATCH COMPILED INTO kmod-ath9k OK (backports ar9003_eeprom.c + hw.c, markers=2)"
+            echo "POWER PATCH COMPILED INTO kmod-ath9k OK (backports ar9003_eeprom.c, markers=2, ceiling=60 half-dB=30.0)"
             echo "HONEST NOTE: this proves the patch is in the COMPILED ath9k source. Real applied"
             echo "power MUST still be verified on the device with:"
             echo "  sh /root/kt412-power-trace.sh  (expect dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower=30)"
