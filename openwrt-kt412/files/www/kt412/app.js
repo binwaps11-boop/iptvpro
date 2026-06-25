@@ -414,13 +414,101 @@ function pollSuper(){
   },3000);
 }
 
+/* ---------- FIREWALL / DNS / LEASES / ROUTES ---------- */
+async function loadFw(){
+  const r=await call({op:'fw_list'});
+  const rules=(r&&r.ok)?(r.rules||[]):[];
+  $('#fwList').innerHTML = rules.length? rules.map(x=>
+    `<div class="kv"><span class="k">${esc(x.name||x.id)} <span class="sub">${esc(x.proto||'')} ${esc(x.sport)}→${esc(x.dip)}:${esc(x.dport||x.sport)}</span></span>`+
+    `<span class="v"><button class="btn-ghost fwdel" data-id="${esc(x.id)}" style="font-size:11px;padding:2px 8px">حذف</button></span></div>`).join('')
+    : '<div class="sub">لا توجد توجيهات.</div>';
+  if(r&&r.ok&&r.dmz)$('#fw_dmz').value=r.dmz;
+  $$('#fwList .fwdel').forEach(b=>b.onclick=async()=>{ const x=await call({act:'fw_forward_del',name:b.dataset.id},true);
+    toast(x&&x.ok?(x.msg||'حُذف'):'فشل',x&&x.ok); setTimeout(loadFw,800); });
+}
+async function loadDns(){
+  const r=await call({op:'dns_get'}); if(!(r&&r.ok))return;
+  $('#dns1').value=r.dns1||''; $('#dns2').value=r.dns2||''; $('#dnsForce').checked=(r.force===true||r.force==='true');
+}
+async function loadLeases(){
+  const r=await call({op:'lease_list'});
+  const ls=(r&&r.ok)?(r.leases||[]):[];
+  $('#leaseList').innerHTML = ls.length? ls.map(x=>
+    `<div class="kv"><span class="k">${esc(x.name||'جهاز')} <span class="sub">${esc(x.mac)}</span></span>`+
+    `<span class="v">${esc(x.ip)} <button class="btn-ghost lsdel" data-mac="${esc(x.mac)}" style="font-size:11px;padding:2px 8px">حذف</button></span></div>`).join('')
+    : '<div class="sub">لا حجوزات.</div>';
+  $$('#leaseList .lsdel').forEach(b=>b.onclick=async()=>{ const x=await call({act:'lease_del',mac:b.dataset.mac},true);
+    toast(x&&x.ok?'حُذف':'فشل',x&&x.ok); setTimeout(loadLeases,800); });
+}
+async function loadRoutes(){
+  const r=await call({op:'route_list'});
+  const rs=(r&&r.ok)?(r.routes||[]):[];
+  $('#routeList').innerHTML = rs.length? rs.map(x=>
+    `<div class="kv"><span class="k">${esc(x.target)}/${esc(x.mask)} → ${esc(x.gw)}</span>`+
+    `<span class="v"><button class="btn-ghost rtdel" data-t="${esc(x.target)}" style="font-size:11px;padding:2px 8px">حذف</button></span></div>`).join('')
+    : '<div class="sub">لا مسارات.</div>';
+  $$('#routeList .rtdel').forEach(b=>b.onclick=async()=>{ const x=await call({act:'route_del',target:b.dataset.t},true);
+    toast(x&&x.ok?'حُذف':'فشل',x&&x.ok); setTimeout(loadRoutes,800); });
+}
+
+/* ---------- SERVICES (guest / upnp / adblock / ddns / init) ---------- */
+async function loadSvcStates(){
+  const r=await call({op:'svc_states'}); if(!(r&&r.ok))return;
+  const set=(id,on)=>{ const b=$(id); if(!b)return; b.textContent=on?'مفعّل ✓':'تفعيل'; b.dataset.on=on?'1':'0'; };
+  set('#upnpToggle', r.upnp===true||r.upnp==='true');
+  set('#adblockToggle', r.adblock===true||r.adblock==='true');
+  if(r.ddns_domain)$('#dd_domain').value=r.ddns_domain;
+}
+async function loadSvcList(){
+  const r=await call({op:'svc_list'});
+  const ss=(r&&r.ok)?(r.services||[]):[];
+  $('#svcList').innerHTML = ss.length? ss.map(x=>{
+    const en=x.enabled===true||x.enabled==='true', rn=x.running===true||x.running==='true';
+    return `<div class="kv"><span class="k">${esc(x.name)} ${rn?'<span class="badge ok">يعمل</span>':'<span class="badge bad">متوقف</span>'} ${en?'<span class="badge ok">تلقائي</span>':'<span class="badge warn">يدوي</span>'}</span>`+
+    `<span class="v" style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">`+
+    `<button class="btn-ghost svcb" data-n="${esc(x.name)}" data-do="restart" style="font-size:11px;padding:2px 8px">↻</button>`+
+    `<button class="btn-ghost svcb" data-n="${esc(x.name)}" data-do="${rn?'stop':'start'}" style="font-size:11px;padding:2px 8px">${rn?'إيقاف':'تشغيل'}</button>`+
+    `<button class="btn-ghost svcb" data-n="${esc(x.name)}" data-do="${en?'disable':'enable'}" style="font-size:11px;padding:2px 8px">${en?'يدوي':'تلقائي'}</button>`+
+    `</span></div>`;
+  }).join('') : '<div class="sub">—</div>';
+  $$('#svcList .svcb').forEach(b=>b.onclick=async()=>{ const x=await call({act:'svc_toggle',name:b.dataset.n,do:b.dataset.do},true);
+    toast(x&&x.ok?(x.msg||'تم'):'فشل',x&&x.ok); setTimeout(loadSvcList,1000); });
+}
+
+/* ---------- TOOLS: diagnostics + packages ---------- */
+async function runDiag(){
+  const box=$('#diagBox'); box.classList.remove('hide'); box.textContent='جارٍ التشغيل…';
+  const r=await call({op:'diag',type:$('#dg_type').value,target:$('#dg_target').value});
+  box.textContent=(r&&r.ok)?(b64dec(r.out)||'(لا مخرجات)'):('فشل: '+((r&&r.error)||''));
+}
+let pkgAll=[];
+async function loadPkgs(){
+  $('#pkgBox').innerHTML='<div class="sub">جارٍ التحميل…</div>';
+  const r=await call({op:'pkg_list'});
+  if(!(r&&r.ok)){ $('#pkgBox').innerHTML='<div class="sub">تعذّر</div>'; return; }
+  pkgAll=b64dec(r.list).split('\n').filter(Boolean); renderPkgs();
+}
+function renderPkgs(){
+  const q=($('#pkg_search').value||'').toLowerCase();
+  const list=pkgAll.filter(p=>!q||p.toLowerCase().indexOf(q)>=0).slice(0,300);
+  $('#pkgBox').innerHTML = list.length? list.map(p=>
+    `<div class="kv"><span class="k">${esc(p)}</span><span class="v"><button class="btn-ghost pkgdel" data-p="${esc(p)}" style="font-size:11px;padding:2px 8px">إزالة</button></span></div>`).join('')
+    : '<div class="sub">لا نتائج</div>';
+  $$('#pkgBox .pkgdel').forEach(b=>b.onclick=async()=>{ if(!confirm('إزالة '+b.dataset.p+'؟'))return;
+    b.innerHTML='<span class="spin"></span>'; const x=await call({act:'pkg_remove',name:b.dataset.p},true);
+    toast(x&&x.ok?(x.msg||'تم'):'فشل',x&&x.ok); setTimeout(loadPkgs,1500); });
+}
+
+/* ---------- CRON ---------- */
+async function loadCron(){ const r=await call({op:'cron_get'}); if(r&&r.ok)$('#cronBox').value=b64dec(r.body); }
+
 /* ---------- nav + loop ---------- */
 // fewer menus: each nav tab groups several related panes
 const TABS={
   dash:['dash'],
-  net:['net','ports','clients'],
+  net:['net','ports','clients','firewall','services'],
   wifi:['wifi','power'],
-  diag:['health','logs'],
+  diag:['health','logs','tools'],
   system:['system']
 };
 function switchTab(tab){
@@ -435,7 +523,9 @@ function switchTab(tab){
   if(panes.indexOf('power')>=0)loadPower();
   if(panes.indexOf('health')>=0)loadHealth();
   if(panes.indexOf('logs')>=0)loadLogs();
-  if(panes.indexOf('system')>=0)loadSystem();
+  if(panes.indexOf('system')>=0){ loadSystem(); loadCron(); }
+  if(panes.indexOf('firewall')>=0){ loadFw(); loadDns(); loadLeases(); loadRoutes(); }
+  if(panes.indexOf('services')>=0){ loadSvcStates(); loadSvcList(); }
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
   const a=document.querySelector('#nav button.active'); if(!a)return;
@@ -530,6 +620,51 @@ $('#rebootBtn').onclick=async()=>{ if(!confirm('إعادة تشغيل الراو
   const r=await call({act:'reboot'},true); toast(r.ok?'يُعاد التشغيل…':'فشل',r.ok); };
 $('#factoryBtn').onclick=async()=>{ if(!confirm('تحذير: ضبط المصنع يمسح كل الإعدادات. متابعة؟'))return;
   const r=await call({act:'factory'},true); toast(r.ok?'ضبط مصنع + إعادة تشغيل…':'فشل',r.ok); };
+
+/* ---------- wire up: firewall / dns / leases / routes ---------- */
+$('#fwAdd').onclick=async()=>{ const r=await call({act:'fw_forward',name:$('#fw_name').value,proto:$('#fw_proto').value,sport:$('#fw_sport').value,dip:$('#fw_dip').value,dport:$('#fw_dport').value},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadFw,800); };
+$('#fwDmzBtn').onclick=async()=>{ const r=await call({act:'fw_dmz',ip:$('#fw_dmz').value},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#dnsApply').onclick=async()=>{ const r=await call({act:'dns_set',dns1:$('#dns1').value,dns2:$('#dns2').value,force:$('#dnsForce').checked?'1':'0'},true);
+  toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#leaseAdd').onclick=async()=>{ const r=await call({act:'lease_add',mac:$('#ls_mac').value,ip:$('#ls_ip').value,name:$('#ls_name').value},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadLeases,800); };
+$('#routeAdd').onclick=async()=>{ const r=await call({act:'route_add',target:$('#rt_target').value,mask:$('#rt_mask').value,gw:$('#rt_gw').value,iface:'lan'},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadRoutes,800); };
+
+/* ---------- wire up: services ---------- */
+$('#guestOn').onclick=async()=>{ const r=await call({act:'guest_wifi',enabled:'1',ssid:$('#g_ssid').value,key:$('#g_key').value},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); setTimeout(loadSvcStates,1200); };
+$('#guestOff').onclick=async()=>{ if(!confirm('إيقاف شبكة الضيوف؟'))return; const r=await call({act:'guest_wifi',enabled:'0'},true);
+  toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadSvcStates,1200); };
+$('#upnpToggle').onclick=async()=>{ const on=$('#upnpToggle').dataset.on==='1'?'0':'1';
+  const r=await call({act:'upnp_toggle',enabled:on},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadSvcStates,800); };
+$('#adblockToggle').onclick=async()=>{ const on=$('#adblockToggle').dataset.on==='1'?'0':'1';
+  const r=await call({act:'adblock_toggle',enabled:on},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadSvcStates,800); };
+$('#ddnsApply').onclick=async()=>{ const r=await call({act:'ddns_set',provider:$('#dd_provider').value,domain:$('#dd_domain').value,user:$('#dd_user').value,pass:$('#dd_pass').value},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); };
+
+/* ---------- wire up: tools (diag + packages) ---------- */
+$('#diagRun').onclick=runDiag;
+$('#pkgRefresh').onclick=loadPkgs;
+$('#pkg_search').addEventListener('input',renderPkgs);
+$('#pkgInstall').onclick=async()=>{ const n=$('#pkg_name').value.trim(); if(!n){toast('اكتب اسم الحزمة',false);return;}
+  toast('جارٍ التثبيت…',true); const r=await call({act:'pkg_install',name:n},true);
+  toast(r&&r.ok?(r.msg||'تم'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadPkgs,1500); };
+
+/* ---------- wire up: cron / backup / restore ---------- */
+$('#cronSave').onclick=async()=>{ let b64; try{b64=btoa(unescape(encodeURIComponent($('#cronBox').value)));}catch(e){toast('نص غير صالح',false);return;}
+  const r=await call({act:'cron_set',body:b64},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#backupBtn').onclick=async()=>{ const r=await call({op:'backup_make'}); if(!(r&&r.ok)){toast('فشل النسخ',false);return;}
+  const a=document.createElement('a'); a.href='data:application/gzip;base64,'+r.data; a.download='kt412-backup.tar.gz';
+  document.body.appendChild(a); a.click(); a.remove(); toast('تم تنزيل النسخة الاحتياطية',true); };
+$('#restoreBtn').onclick=async()=>{ const f=$('#restoreFile').files[0]; if(!f){toast('اختر ملف النسخة',false);return;}
+  if(!confirm('استعادة الإعدادات من الملف؟ ستُستبدل الإعدادات الحالية.'))return;
+  const buf=await f.arrayBuffer(); const u8=new Uint8Array(buf); let bin='';
+  for(let i=0;i<u8.length;i++)bin+=String.fromCharCode(u8[i]);
+  const r=await call({act:'restore_cfg',body:btoa(bin)},true);
+  toast(r&&r.ok?(r.msg||'تمت الاستعادة'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
+  if(r&&r.ok)setTimeout(()=>location.reload(),2500); };
 
 /* boot */
 (async function(){

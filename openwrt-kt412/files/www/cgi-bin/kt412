@@ -15,7 +15,7 @@ QS="${QUERY_STRING}"
 if [ "$REQUEST_METHOD" = "POST" ]; then
 	CL="${CONTENT_LENGTH:-0}"
 	case "$CL" in ''|*[!0-9]*) CL=0;; esac
-	if [ "$CL" -gt 0 ] && [ "$CL" -lt 65536 ]; then
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
 		BODY="$(head -c "$CL")"
 		QS="${QS}&${BODY}"
 	fi
@@ -478,6 +478,185 @@ if [ -n "$ACT" ]; then
 			rm -f /tmp/kt412-sc-done
 			( sh /root/kt412-super-check.sh >/tmp/kt412-sc.out 2>&1; touch /tmp/kt412-sc-done ) >/dev/null 2>&1 &
 			printf '{"ok":true,"msg":"بدأ الفحص الشامل (~2-3 دقائق)"}\n';;
+
+		# ===================== FIREWALL: port-forward / DMZ =====================
+		fw_forward)   # name proto sport dip dport  -> DNAT from WAN to a LAN host
+			nm="$(sani_word "$(getp name)")"; pr="$(getp proto | tr -cd 'a-z')"
+			sp="$(sani_int "$(getp sport)")"; di="$(sani_ip "$(getp dip)")"; dp="$(sani_int "$(getp dport)")"
+			[ -n "$nm" ] && [ -n "$sp" ] && [ -n "$di" ] || fail "missing_fields"
+			case "$pr" in tcp|udp) :;; *) pr="tcp udp";; esac
+			uci -q delete firewall.kt_$nm 2>/dev/null
+			uci set firewall.kt_$nm=redirect
+			uci set firewall.kt_$nm.name="kt-$nm"
+			uci set firewall.kt_$nm.target='DNAT'
+			uci set firewall.kt_$nm.src='wan'
+			uci set firewall.kt_$nm.dest='lan'
+			uci set firewall.kt_$nm.proto="$pr"
+			uci set firewall.kt_$nm.src_dport="$sp"
+			uci set firewall.kt_$nm.dest_ip="$di"
+			[ -n "$dp" ] && uci set firewall.kt_$nm.dest_port="$dp"
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم توجيه المنفذ %s -> %s"}\n' "$sp" "$(json_esc "$di")";;
+		fw_forward_del)
+			nm="$(sani_word "$(getp name)")"; [ -n "$nm" ] || fail "no_name"
+			uci -q delete firewall.kt_$nm; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف التوجيه"}\n';;
+		fw_dmz)        # ip='' to disable, otherwise expose one host fully
+			di="$(sani_ip "$(getp ip)")"
+			uci -q delete firewall.kt_dmz 2>/dev/null
+			if [ -n "$di" ]; then
+				uci set firewall.kt_dmz=redirect; uci set firewall.kt_dmz.name='kt-DMZ'
+				uci set firewall.kt_dmz.target='DNAT'; uci set firewall.kt_dmz.src='wan'
+				uci set firewall.kt_dmz.dest='lan'; uci set firewall.kt_dmz.proto='all'
+				uci set firewall.kt_dmz.dest_ip="$di"
+				m="DMZ مفعّل على $di"
+			else m="DMZ معطّل"; fi
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"%s"}\n' "$(json_esc "$m")";;
+
+		# ===================== STATIC DHCP LEASES =====================
+		lease_add)     # mac ip name -> fixed IP for a device
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; ip="$(sani_ip "$(getp ip)")"; nm="$(sani_word "$(getp name)")"
+			[ -n "$mac" ] && [ -n "$ip" ] || fail "mac_ip_required"
+			id="h_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci set dhcp.$id=host; uci set dhcp.$id.mac="$mac"; uci set dhcp.$id.ip="$ip"
+			[ -n "$nm" ] && uci set dhcp.$id.name="$nm"
+			uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حجز %s -> %s"}\n' "$(json_esc "$mac")" "$(json_esc "$ip")";;
+		lease_del)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="h_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci -q delete dhcp.$id; uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف الحجز"}\n';;
+
+		# ===================== CUSTOM DNS =====================
+		dns_set)       # dns1 dns2 force(0/1) -> upstream DNS for the whole network
+			d1="$(sani_ip "$(getp dns1)")"; d2="$(sani_ip "$(getp dns2)")"; fr="$(getp force | tr -cd '01')"
+			sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"; [ -n "$sec" ] || sec="@dnsmasq[0]"
+			uci -q delete dhcp.$sec.server 2>/dev/null
+			[ -n "$d1" ] && uci add_list dhcp.$sec.server="$d1"
+			[ -n "$d2" ] && uci add_list dhcp.$sec.server="$d2"
+			if [ "$fr" = "1" ] && [ -n "$d1" ]; then uci set dhcp.$sec.noresolv='1'; else uci -q delete dhcp.$sec.noresolv; fi
+			uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"DNS مُحدّث (%s %s)"}\n' "$(json_esc "$d1")" "$(json_esc "$d2")";;
+
+		# ===================== STATIC ROUTES =====================
+		route_add)     # target mask gw iface
+			tg="$(sani_ip "$(getp target)")"; mk="$(sani_ip "$(getp mask)")"; gw="$(sani_ip "$(getp gw)")"; ifc="$(sani_word "$(getp iface)")"
+			[ -n "$tg" ] && [ -n "$gw" ] || fail "target_gw_required"
+			id="r_$(printf '%s' "$tg" | tr -cd '0-9')"
+			uci set network.$id=route; uci set network.$id.target="$tg"
+			uci set network.$id.netmask="${mk:-255.255.255.0}"; uci set network.$id.gateway="$gw"
+			uci set network.$id.interface="${ifc:-lan}"
+			uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"مسار %s عبر %s"}\n' "$(json_esc "$tg")" "$(json_esc "$gw")";;
+		route_del)
+			tg="$(sani_ip "$(getp target)")"; [ -n "$tg" ] || fail "no_target"
+			id="r_$(printf '%s' "$tg" | tr -cd '0-9')"
+			uci -q delete network.$id; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف المسار"}\n';;
+
+		# ===================== SERVICES (init.d) =====================
+		svc_toggle)    # name do(enable|disable|start|stop|restart)
+			nm="$(sani_word "$(getp name)")"; dx="$(getp do | tr -cd 'a-z')"
+			[ -n "$nm" ] && [ -x "/etc/init.d/$nm" ] || fail "no_service"
+			case "$dx" in enable|disable|start|stop|restart) /etc/init.d/$nm $dx >/dev/null 2>&1;; *) fail "bad_op";; esac
+			printf '{"ok":true,"msg":"%s: %s"}\n' "$(json_esc "$nm")" "$(json_esc "$dx")";;
+
+		# ===================== CRON =====================
+		cron_set)      # body (base64) -> crontab
+			b="$(getp body)"; txt="$(printf '%s' "$b" | base64 -d 2>/dev/null)"
+			mkdir -p /etc/crontabs
+			printf '%s\n' "$txt" > /etc/crontabs/root
+			/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم حفظ المهام المجدولة"}\n';;
+
+		# ===================== PACKAGES (apk) =====================
+		pkg_install)
+			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
+			out="$( (apk add "$nm" 2>&1 || opkg install "$nm" 2>&1) | tail -8 )"
+			b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+			printf '{"ok":true,"msg":"تثبيت %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;
+		pkg_remove)
+			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
+			out="$( (apk del "$nm" 2>&1 || opkg remove "$nm" 2>&1) | tail -8 )"
+			b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+			printf '{"ok":true,"msg":"إزالة %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;
+
+		# ===================== SERVICES TOGGLES (ddns/upnp/adblock) =====================
+		ddns_set)      # domain provider user pass
+			dm="$(sani "$(getp domain)")"; pv="$(sani_word "$(getp provider)")"; u="$(sani "$(getp user)")"; p="$(sani "$(getp pass)")"
+			[ -n "$dm" ] || fail "no_domain"
+			uci set ddns.kt=service; uci set ddns.kt.enabled='1'
+			uci set ddns.kt.service_name="${pv:-dyndns.org}"; uci set ddns.kt.domain="$dm"
+			[ -n "$u" ] && uci set ddns.kt.username="$u"; [ -n "$p" ] && uci set ddns.kt.password="$p"
+			uci set ddns.kt.ip_source='network'; uci set ddns.kt.ip_network='wan'
+			uci commit ddns; /etc/init.d/ddns enable >/dev/null 2>&1; /etc/init.d/ddns restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"DDNS مفعّل لـ %s"}\n' "$(json_esc "$dm")";;
+		upnp_toggle)
+			en="$(getp enabled | tr -cd '01')"
+			uci -q get upnpd.config >/dev/null 2>&1 || { uci set upnpd.config=upnpd; }
+			uci set upnpd.config.enabled="${en:-0}"
+			uci commit upnpd
+			if [ "$en" = "1" ]; then /etc/init.d/miniupnpd enable >/dev/null 2>&1; /etc/init.d/miniupnpd restart >/dev/null 2>&1
+			else /etc/init.d/miniupnpd stop >/dev/null 2>&1; /etc/init.d/miniupnpd disable >/dev/null 2>&1; fi
+			printf '{"ok":true,"msg":"UPnP: %s"}\n' "$( [ "$en" = "1" ] && echo مفعّل || echo معطّل )";;
+		adblock_toggle)
+			en="$(getp enabled | tr -cd '01')"
+			uci -q get adblock.global >/dev/null 2>&1 || uci set adblock.global=adblock
+			uci set adblock.global.adb_enabled="${en:-0}"; uci commit adblock
+			if [ "$en" = "1" ]; then /etc/init.d/adblock enable >/dev/null 2>&1; /etc/init.d/adblock restart >/dev/null 2>&1
+			else /etc/init.d/adblock stop >/dev/null 2>&1; /etc/init.d/adblock disable >/dev/null 2>&1; fi
+			printf '{"ok":true,"msg":"حجب الإعلانات: %s"}\n' "$( [ "$en" = "1" ] && echo مفعّل || echo معطّل )";;
+
+		# ===================== GUEST WIFI (one-click, isolated) =====================
+		guest_wifi)    # enabled ssid key  -> isolated SSID + subnet 192.168.180.0/24 + WAN-only
+			en="$(getp enabled | tr -cd '01')"; ss="$(sani "$(getp ssid)")"; ky="$(sani "$(getp key)")"
+			if [ "$en" = "1" ]; then
+				[ -n "$ss" ] || ss="KT412-Guest"
+				uci set network.guest=interface; uci set network.guest.proto='static'
+				uci set network.guest.ipaddr='192.168.180.1'; uci set network.guest.netmask='255.255.255.0'
+				uci set dhcp.guest=dhcp; uci set dhcp.guest.interface='guest'
+				uci set dhcp.guest.start='100'; uci set dhcp.guest.limit='100'; uci set dhcp.guest.leasetime='4h'
+				uci -q delete dhcp.guest.ignore
+				for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+					gi="guest_$r"
+					uci set wireless.$gi=wifi-iface; uci set wireless.$gi.device="$r"
+					uci set wireless.$gi.mode='ap'; uci set wireless.$gi.network='guest'
+					uci set wireless.$gi.ssid="$ss"; uci set wireless.$gi.isolate='1'
+					if [ -n "$ky" ]; then uci set wireless.$gi.encryption='psk2'; uci set wireless.$gi.key="$ky"
+					else uci set wireless.$gi.encryption='none'; fi
+				done
+				uci set firewall.guest=zone; uci set firewall.guest.name='guest'
+				uci set firewall.guest.network='guest'; uci set firewall.guest.input='REJECT'
+				uci set firewall.guest.output='ACCEPT'; uci set firewall.guest.forward='REJECT'
+				uci set firewall.guest_fw=forwarding; uci set firewall.guest_fw.src='guest'; uci set firewall.guest_fw.dest='wan'
+				uci set firewall.guest_dns=rule; uci set firewall.guest_dns.name='guest-dns'; uci set firewall.guest_dns.src='guest'
+				uci set firewall.guest_dns.dest_port='53'; uci set firewall.guest_dns.target='ACCEPT'
+				uci set firewall.guest_dh=rule; uci set firewall.guest_dh.name='guest-dhcp'; uci set firewall.guest_dh.src='guest'
+				uci set firewall.guest_dh.dest_port='67'; uci set firewall.guest_dh.target='ACCEPT'
+				uci commit; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+				/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"شبكة الضيوف مفعّلة: %s (معزولة)"}\n' "$(json_esc "$ss")"
+			else
+				for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\(guest_[^.=]*\)=wifi-iface/\1/p'); do uci -q delete wireless.$s; done
+				uci -q delete network.guest; uci -q delete dhcp.guest
+				uci -q delete firewall.guest; uci -q delete firewall.guest_fw
+				uci -q delete firewall.guest_dns; uci -q delete firewall.guest_dh
+				uci commit; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+				/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"شبكة الضيوف معطّلة"}\n'
+			fi;;
+
+		# ===================== RESTORE CONFIG (from backup) =====================
+		restore_cfg)   # body = base64 of a tar.gz of etc/config
+			b="$(getp body)"
+			printf '%s' "$b" | base64 -d 2>/dev/null > /tmp/kt-restore.tgz || fail "bad_data"
+			tar tzf /tmp/kt-restore.tgz >/dev/null 2>&1 || fail "bad_archive"
+			cp -a /etc/config /etc/config.bak.$$ 2>/dev/null
+			tar xzf /tmp/kt-restore.tgz -C / 2>/dev/null && { uci commit; for s in network dhcp firewall wireless system; do /etc/init.d/$s reload >/dev/null 2>&1; done; printf '{"ok":true,"msg":"تمت استعادة الإعدادات (نسخة احتياطية محفوظة)"}\n'; } || fail "restore_failed"
+			rm -f /tmp/kt-restore.tgz;;
+
 		*) fail "unknown_action";;
 	esac
 	exit 0
@@ -697,6 +876,81 @@ case "$OP" in
 		esac
 		b64="$(base64 < "$pp" 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"content":"%s"}\n' "$b64";;
+	# ===================== DIAGNOSTICS (ping/traceroute/dns) =====================
+	diag)
+		ty="$(getp type | tr -cd 'a-z')"; tg="$(printf '%s' "$(getp target)" | tr -cd 'A-Za-z0-9._:-' | cut -c1-64)"
+		[ -n "$tg" ] || fail "no_target"
+		case "$ty" in
+			ping)  out="$(ping -c4 -W2 "$tg" 2>&1)";;
+			trace) out="$( (traceroute -w2 -m15 "$tg" 2>&1 || busybox traceroute "$tg" 2>&1) | head -25 )";;
+			dns)   out="$(nslookup "$tg" 2>&1 | head -20)";;
+			*) fail "bad_type";;
+		esac
+		b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	fw_list)
+		out=""; first=1
+		for s in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(kt_[^.=]*\)=redirect/\1/p'); do
+			[ "$s" = "kt_dmz" ] && continue
+			nm="$(uci -q get firewall.$s.name)"; sp="$(uci -q get firewall.$s.src_dport)"
+			di="$(uci -q get firewall.$s.dest_ip)"; dp="$(uci -q get firewall.$s.dest_port)"; pr="$(uci -q get firewall.$s.proto)"
+			key="${s#kt_}"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"id":"%s","name":"%s","proto":"%s","sport":"%s","dip":"%s","dport":"%s"}' "$(json_esc "$key")" "$(json_esc "$nm")" "$(json_esc "$pr")" "$(json_esc "$sp")" "$(json_esc "$di")" "$(json_esc "$dp")")"
+		done
+		dmz="$(uci -q get firewall.kt_dmz.dest_ip)"
+		printf '{"ok":true,"rules":[%s],"dmz":"%s"}\n' "$out" "$(json_esc "$dmz")";;
+	lease_list)
+		out=""; first=1
+		for s in $(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\(h_[^.=]*\)=host/\1/p'); do
+			mac="$(uci -q get dhcp.$s.mac)"; ip="$(uci -q get dhcp.$s.ip)"; nm="$(uci -q get dhcp.$s.name)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s"}' "$(json_esc "$mac")" "$(json_esc "$ip")" "$(json_esc "$nm")")"
+		done
+		printf '{"ok":true,"leases":[%s]}\n' "$out";;
+	dns_get)
+		sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"; [ -n "$sec" ] || sec="@dnsmasq[0]"
+		srv="$(uci -q get dhcp.$sec.server | tr '\n' ' ')"; nr="$(uci -q get dhcp.$sec.noresolv)"
+		set -- $srv
+		printf '{"ok":true,"dns1":"%s","dns2":"%s","force":%s}\n' "$(json_esc "$1")" "$(json_esc "$2")" "$( [ "$nr" = "1" ] && echo true || echo false )";;
+	route_list)
+		out=""; first=1
+		for s in $(uci show network 2>/dev/null | sed -n 's/^network\.\(r_[^.=]*\)=route/\1/p'); do
+			tg="$(uci -q get network.$s.target)"; mk="$(uci -q get network.$s.netmask)"; gw="$(uci -q get network.$s.gateway)"; ifc="$(uci -q get network.$s.interface)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"target":"%s","mask":"%s","gw":"%s","iface":"%s"}' "$(json_esc "$tg")" "$(json_esc "$mk")" "$(json_esc "$gw")" "$(json_esc "$ifc")")"
+		done
+		printf '{"ok":true,"routes":[%s]}\n' "$out";;
+	svc_list)
+		out=""; first=1
+		for s in dnsmasq firewall network odhcpd uhttpd ttyd cron dropbear sqm mwan3 ddns miniupnpd adblock nlbwmon banip; do
+			[ -x "/etc/init.d/$s" ] || continue
+			en=false; /etc/init.d/$s enabled 2>/dev/null && en=true
+			rn=false; pgrep -f "$s" >/dev/null 2>&1 && rn=true
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","enabled":%s,"running":%s}' "$s" "$en" "$rn")"
+		done
+		printf '{"ok":true,"services":[%s]}\n' "$out";;
+	cron_get)
+		b="$(base64 < /etc/crontabs/root 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"body":"%s"}\n' "$b";;
+	pkg_list)
+		lst="$( (apk list --installed 2>/dev/null | awk '{print $1}' | sed 's/-[0-9].*//' || opkg list-installed 2>/dev/null | awk '{print $1}') | sort -u | head -400 )"
+		b="$(printf '%s' "$lst" | base64 2>/dev/null | tr -d '\n')"
+		mgr="opkg"; command -v apk >/dev/null 2>&1 && mgr="apk"
+		printf '{"ok":true,"mgr":"%s","list":"%s"}\n' "$mgr" "$b";;
+	svc_states)
+		up="$(uci -q get upnpd.config.enabled)"; ab="$(uci -q get adblock.global.adb_enabled)"; dd="$(uci -q get ddns.kt.enabled)"
+		ddm="$(uci -q get ddns.kt.domain)"
+		gw=false; uci -q get network.guest >/dev/null 2>&1 && gw=true
+		printf '{"ok":true,"upnp":%s,"adblock":%s,"ddns":%s,"ddns_domain":"%s","guest":%s}\n' \
+			"$( [ "$up" = "1" ] && echo true || echo false )" \
+			"$( [ "$ab" = "1" ] && echo true || echo false )" \
+			"$( [ "$dd" = "1" ] && echo true || echo false )" \
+			"$(json_esc "$ddm")" "$gw";;
+	backup_make)
+		b="$(tar czf - -C / etc/config 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"data":"%s"}\n' "$b";;
 	*)
 		fail "unknown_op";;
 esac

@@ -34,9 +34,9 @@
 
   <div class="nav" id="nav">
     <button data-tab="dash" class="active"><span class="i">▦</span> الرئيسية</button>
-    <button data-tab="net"><span class="i">🌐</span> الشبكة والمنافذ والأجهزة</button>
+    <button data-tab="net"><span class="i">🌐</span> الشبكة · جدار ناري · خدمات</button>
     <button data-tab="wifi"><span class="i">📶</span> الواي‑فاي والقوة</button>
-    <button data-tab="diag"><span class="i">🩺</span> التشخيص والسجلّات</button>
+    <button data-tab="diag"><span class="i">🩺</span> التشخيص · السجلّات · أدوات</button>
     <button data-tab="system"><span class="i">⚙</span> النظام</button>
   </div>
 
@@ -253,6 +253,128 @@
     </div>
   </section>
 
+  <!-- FIREWALL / DNS / ROUTES / LEASES -->
+  <section data-pane="firewall" class="hide">
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>توجيه المنافذ — Port Forwarding</h3>
+        <div class="sub">افتح منفذاً من الإنترنت إلى جهاز داخلي (كاميرا، سيرفر، لعبة).</div>
+        <div id="fwList" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div>
+        <div class="row" style="margin-top:8px">
+          <div><label class="f">اسم</label><input id="fw_name" class="t" placeholder="cam"></div>
+          <div><label class="f">بروتوكول</label><select id="fw_proto" class="t"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="">TCP+UDP</option></select></div>
+        </div>
+        <div class="row">
+          <div><label class="f">منفذ خارجي</label><input id="fw_sport" class="t" placeholder="8080"></div>
+          <div><label class="f">IP الوجهة</label><input id="fw_dip" class="t" placeholder="192.168.100.50"></div>
+          <div><label class="f">منفذ داخلي</label><input id="fw_dport" class="t" placeholder="80"></div>
+        </div>
+        <button class="btn" id="fwAdd">إضافة توجيه</button>
+        <h4 style="margin:14px 0 6px">DMZ — تعريض جهاز كاملاً</h4>
+        <div class="row">
+          <div><input id="fw_dmz" class="t" placeholder="192.168.100.50 (اتركه فارغاً للإيقاف)"></div>
+          <div><button class="btn sec sm" id="fwDmzBtn" style="margin-top:0;width:100%">حفظ DMZ</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>DNS المخصص</h3>
+        <div class="row">
+          <div><label class="f">DNS 1</label><input id="dns1" class="t" placeholder="1.1.1.1"></div>
+          <div><label class="f">DNS 2</label><input id="dns2" class="t" placeholder="8.8.8.8"></div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2)"><input type="checkbox" id="dnsForce"> إجبار كل الأجهزة على هذا الـDNS</label>
+        <button class="btn sec sm" id="dnsApply" style="margin-top:8px">حفظ DNS</button>
+        <h4 style="margin:16px 0 6px">حجوزات IP ثابتة — Static Leases</h4>
+        <div id="leaseList"><div class="sub">—</div></div>
+        <div class="row" style="margin-top:6px">
+          <div><label class="f">MAC</label><input id="ls_mac" class="t" placeholder="aa:bb:cc:dd:ee:ff"></div>
+          <div><label class="f">IP</label><input id="ls_ip" class="t" placeholder="192.168.100.50"></div>
+          <div><label class="f">اسم</label><input id="ls_name" class="t" placeholder="phone"></div>
+        </div>
+        <button class="btn sec sm" id="leaseAdd">إضافة حجز</button>
+        <h4 style="margin:16px 0 6px">مسارات ثابتة — Static Routes</h4>
+        <div id="routeList"><div class="sub">—</div></div>
+        <div class="row" style="margin-top:6px">
+          <div><label class="f">الوجهة</label><input id="rt_target" class="t" placeholder="10.0.0.0"></div>
+          <div><label class="f">Netmask</label><input id="rt_mask" class="t" placeholder="255.0.0.0"></div>
+          <div><label class="f">Gateway</label><input id="rt_gw" class="t" placeholder="192.168.100.2"></div>
+        </div>
+        <button class="btn sec sm" id="routeAdd">إضافة مسار</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- SERVICES: guest wifi / upnp / adblock / ddns / init services -->
+  <section data-pane="services" class="hide">
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>شبكة الضيوف — Guest WiFi (معزولة)</h3>
+        <div class="note">شبكة منفصلة للضيوف: إنترنت فقط، معزولة تماماً عن شبكتك وأجهزتك (192.168.180.x).</div>
+        <div class="row">
+          <div><label class="f">اسم الشبكة</label><input id="g_ssid" class="t" placeholder="KT412-Guest"></div>
+          <div><label class="f">كلمة المرور (فارغ=مفتوحة)</label><input id="g_key" class="t" placeholder="••••••••"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div><button class="btn" id="guestOn" style="width:100%">تفعيل الضيوف</button></div>
+          <div><button class="btn bad sec" id="guestOff" style="width:100%">إيقاف</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>خدمات إضافية</h3>
+        <div class="row" style="align-items:center">
+          <div><b>UPnP</b><div class="sub">فتح المنافذ تلقائياً للألعاب</div></div>
+          <div><button class="btn sec sm" id="upnpToggle" style="width:100%">—</button></div>
+        </div>
+        <div class="row" style="align-items:center;margin-top:10px">
+          <div><b>حجب الإعلانات (Adblock)</b><div class="sub">حجب عبر DNS لكل الشبكة</div></div>
+          <div><button class="btn sec sm" id="adblockToggle" style="width:100%">—</button></div>
+        </div>
+        <h4 style="margin:16px 0 6px">DDNS — نطاق ديناميكي</h4>
+        <div class="row">
+          <div><label class="f">المزود</label><input id="dd_provider" class="t" placeholder="dyndns.org"></div>
+          <div><label class="f">النطاق</label><input id="dd_domain" class="t" placeholder="myhome.example.com"></div>
+        </div>
+        <div class="row">
+          <div><label class="f">المستخدم</label><input id="dd_user" class="t"></div>
+          <div><label class="f">كلمة المرور</label><input id="dd_pass" class="t" type="password"></div>
+        </div>
+        <button class="btn sec sm" id="ddnsApply">حفظ DDNS</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3>الخدمات (تشغيل/إيقاف) — Services</h3>
+      <div class="sub">تفعيل/إيقاف/إعادة تشغيل خدمات النظام.</div>
+      <div id="svcList" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div>
+    </div>
+  </section>
+
+  <!-- TOOLS: diagnostics + packages -->
+  <section data-pane="tools" class="hide">
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>أدوات التشخيص — Diagnostics</h3>
+        <div class="row">
+          <div><label class="f">النوع</label><select id="dg_type" class="t"><option value="ping">Ping</option><option value="trace">Traceroute</option><option value="dns">DNS Lookup</option></select></div>
+          <div><label class="f">الهدف</label><input id="dg_target" class="t" placeholder="8.8.8.8 أو google.com"></div>
+        </div>
+        <button class="btn sec sm" id="diagRun">تشغيل</button>
+        <pre id="diagBox" class="hide" style="margin-top:10px;max-height:40vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)"></pre>
+      </div>
+      <div class="card">
+        <h3>مدير الحزم — Packages</h3>
+        <div class="row">
+          <div><input id="pkg_name" class="t" placeholder="اسم الحزمة مثل: htop"></div>
+          <div><button class="btn sec sm" id="pkgInstall" style="margin-top:0;width:100%">تثبيت</button></div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div><input id="pkg_search" class="t" placeholder="بحث في المثبّتة"></div>
+          <div><button class="btn sec sm" id="pkgRefresh" style="margin-top:0;width:100%">تحديث القائمة</button></div>
+        </div>
+        <div id="pkgBox" style="margin-top:10px;max-height:40vh;overflow:auto"><div class="sub">اضغط «تحديث القائمة» لعرض الحزم المثبّتة.</div></div>
+      </div>
+    </div>
+  </section>
+
   <!-- SYSTEM -->
   <section data-pane="system" class="hide">
     <div class="grid cols-2">
@@ -298,6 +420,20 @@
         </div>
         <div id="fwMsg" class="note hide"></div>
         <div class="note">يُفحص الملف أنه متوافق مع هذا الجهاز قبل السماح بالتفليش. لا تقطع الكهرباء أثناء الترقية.</div>
+      </div>
+      <div class="card">
+        <h3>المهام المجدولة — Scheduled Tasks (Cron)</h3>
+        <div class="note">مثال: إطفاء الواي‑فاي 1ص وتشغيله 7ص:<br><code>0 1 * * * wifi down</code> &nbsp; <code>0 7 * * * wifi up</code></div>
+        <textarea id="cronBox" class="t" rows="5" placeholder="# دقيقة ساعة يوم شهر يوم‑الأسبوع  الأمر"></textarea>
+        <button class="btn sec sm" id="cronSave" style="margin-top:6px">حفظ المهام</button>
+      </div>
+      <div class="card">
+        <h3>نسخ / استعادة الإعدادات — Backup / Restore</h3>
+        <div class="note">النسخة تحفظ كل <code>/etc/config</code>. الاستعادة تستبدل الإعدادات الحالية وتعيد تحميل الخدمات.</div>
+        <button class="btn sec" id="backupBtn" style="margin-top:8px">تنزيل نسخة احتياطية</button>
+        <label class="f" style="margin-top:12px">استعادة من ملف نسخة (.tar.gz)</label>
+        <input id="restoreFile" class="t" type="file" accept=".tar.gz,.tgz,application/gzip">
+        <button class="btn bad sec" id="restoreBtn" style="margin-top:8px">استعادة من ملف</button>
       </div>
     </div>
   </section>
