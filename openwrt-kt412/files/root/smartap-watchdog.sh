@@ -35,6 +35,12 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 	else
 		rm -f "$fcf"
 	fi
+	# enforce the configured txpower at the DRIVER (firmware can negotiate back down to
+	# the calibrated ceiling, so iwinfo/iw phy show 24 even when uci says 30). Re-pin it.
+	if [ -n "$ifc" ] && [ -e "/sys/class/net/$ifc" ]; then
+		tp="$(uci -q get wireless.$r.txpower)"; phyn="$(cat /sys/class/net/$ifc/phy80211/index 2>/dev/null)"
+		[ -n "$tp" ] && [ -n "$phyn" ] && iw phy "phy$phyn" set txpower fixed "$((tp*100))" >/dev/null 2>&1
+	fi
 done
 
 # ---------- 2) DSA LAN/WAN port health (NOT the eth0/eth1 conduit) ----------

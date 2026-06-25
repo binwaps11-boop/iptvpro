@@ -33,6 +33,17 @@ if ! uci -q show wireless 2>/dev/null | grep -q '=wifi-device'; then
 	uci -q commit wireless
 fi
 
+# --- force the configured txpower ~35s after boot (driver may negotiate back to the
+#     calibrated ceiling, so iwinfo shows 24 even when uci=30). Backgrounded so it
+#     never delays boot. The self-heal watchdog re-pins it every 2 min thereafter. ---
+( sleep 35
+  for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+    tp="$(uci -q get wireless.$r.txpower)"
+    ifc="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+    phyn="$(cat /sys/class/net/$ifc/phy80211/index 2>/dev/null)"
+    [ -n "$tp" ] && [ -n "$phyn" ] && iw phy "phy$phyn" set txpower fixed "$((tp*100))" >/dev/null 2>&1
+  done ) >/dev/null 2>&1 &
+
 # --- NO web terminal (ttyd removed): the custom dashboard is the only UI ---
 /etc/init.d/ttyd disable 2>/dev/null; /etc/init.d/ttyd stop 2>/dev/null
 
