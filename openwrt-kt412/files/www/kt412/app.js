@@ -38,7 +38,7 @@ async function doLogin(){
 }
 function logout(){ TOKEN=''; sessionStorage.removeItem('kt412tok'); if(timer)clearInterval(timer);
   $('#app').classList.add('hide'); $('#login').classList.remove('hide'); $('#pw').value=''; }
-function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); renderCats(); selectCat(0); startLoop(); }
+function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); renderSidebar(); selectPane('dash'); startLoop(); }
 
 /* ---------- helpers ---------- */
 function human(b){ b=+b||0; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(b<10&&i>0?1:0)+' '+u[i]; }
@@ -55,29 +55,38 @@ async function loadDash(){
     const pct=s.mem_total>0?Math.round(used/s.mem_total*100):0;
     $('#d_mem').innerHTML=pct+'<small>%</small>'; $('#d_membar').style.width=pct+'%';
     $('#d_memsub').textContent=human(used)+' / '+human(s.mem_total);
-    if(s.fs_total&&+s.fs_total>0)$('#d_storage').textContent='التخزين: '+human(+s.fs_used*1024)+' / '+human(+s.fs_total*1024);
-    if(s.ncpu)$('#d_cpu').textContent='المعالج: '+s.ncpu+' نواة';
+    setGauge('g_mem',pct,pct+'%');
+    const loadv=(+s.load/65536)||0, lp=s.ncpu?Math.min(100,loadv/(+s.ncpu)*100):loadv*100;
+    setGauge('g_load',lp,loadv.toFixed(2));
+    if(s.fs_total&&+s.fs_total>0){ const sp=Math.round(+s.fs_used/+s.fs_total*100);
+      setGauge('g_store',sp,sp+'%'); $('#d_storage').textContent='التخزين: '+human(+s.fs_used*1024)+' / '+human(+s.fs_total*1024); }
+    $('#d_up').textContent='⏱ '+dur(s.uptime);
+    if(s.ncpu)$('#d_cpu').textContent='المعالج: '+s.ncpu+' نواة · حِمل '+loadv.toFixed(2);
   }
   const w=await call({op:'wan'});
   if(w&&w.ok){ const up=w.up===true||w.up==='true';
     window._wanDev=w.device||'';
-    $('#d_wan').innerHTML=up?'<span style="color:var(--ok)">متصل</span>':'<span style="color:var(--bad)">منقطع</span>';
+    $('#d_wan').innerHTML=up?'<span style="color:var(--ok)">● متصل</span>':'<span style="color:var(--bad)">● منقطع</span>';
     $('#d_wanip').textContent=(w.ip||'—')+' · '+(w.proto||'');
-    $('#netDot').className='dot '+(up?'on':'off'); $('#netTxt').textContent=up?'متصل':'منقطع'; }
+    $('#netDot').className='dot '+(up?'on':'off'); $('#netTxt').textContent=up?'متصل':'منقطع';
+    const d2=$('#netDot2'),t2=$('#netTxt2'); if(d2)d2.className='dot '+(up?'on':'off'); if(t2)t2.textContent=up?'متصل':'منقطع'; }
   const p=await call({op:'ports'});
-  if(p&&p.ok) $('#d_links').innerHTML=(p.ports||[]).map(x=>`<div class="kv"><span class="k">${esc(x.name)}</span>`+
+  if(p&&p.ok){ $('#d_links').innerHTML=(p.ports||[]).map(x=>`<div class="kv"><span class="k">${esc(x.name)}</span>`+
     `<span class="v">${x.link==='up'?(x.speed?x.speed+' Mbps':'متصل'):'مفصول'}</span></div>`).join('')||'<div class="sub">—</div>';
+    const act=(p.ports||[]).filter(x=>x.link==='up').length; const tp=$('#t_ports'); if(tp)tp.textContent=act; }
   const c=await call({op:'clients'});
-  if(c&&c.ok) $('#d_clients').textContent=(c.clients||[]).length;
+  if(c&&c.ok){ $('#d_clients').textContent=(c.clients||[]).length; const tc=$('#t_clients'); if(tc)tc.textContent=(c.clients||[]).length; }
   const tr=await call({op:'traffic'});
   if(tr&&tr.ok){ const dev=window._wanDev; const wi=(tr.ifaces||[]).find(x=>x.if===dev);
     if(wi) $('#d_wanusage').innerHTML=`<div class="kv"><span class="k">↓ تنزيل</span><span class="v">${human(wi.rx)}</span></div>`+
       `<div class="kv"><span class="k">↑ رفع</span><span class="v">${human(wi.tx)}</span></div>`;
     else $('#d_wanusage').innerHTML='<div class="sub">—</div>'; }
   const wi=await call({op:'wifi'});
-  if(wi&&wi.ok) $('#d_wifi').innerHTML=(wi.radios||[]).map(r=>
+  if(wi&&wi.ok){ $('#d_wifi').innerHTML=(wi.radios||[]).map(r=>
     `<div class="kv"><span class="k">${esc(r.essid||r.mode||'—')} <span class="badge ok">${esc(r.band)}</span></span>`+
     `<span class="v">${r.txpower} dBm · ${r.clients} جهاز</span></div>`).join('')||'<div class="sub">لا شبكات نشطة</div>';
+    let w24=0,w5=0; (wi.radios||[]).forEach(r=>{ const n=+r.clients||0; (String(r.band).indexOf('5')>=0)?w5+=n:w24+=n; });
+    const a=$('#t_w24'),b=$('#t_w5'); if(a)a.textContent=w24; if(b)b.textContent=w5; }
   const h=await call({op:'health'});
   if(h&&h.ok){ const row=(n,o)=>{const g=(+o.loss)<100;return `<div class="kv"><span class="k">${n}</span><span class="v">`+
     (g?`<span class="badge ok">${o.rtt} ms</span>`:`<span class="badge bad">منقطع</span>`)+`</span></div>`;};
@@ -129,7 +138,10 @@ async function loadSpeed(){
     if(dt>0){
       const dl=Math.max(0,(m[dev].rx-lastTr[dev].rx)*8/1e6/dt);
       const ul=Math.max(0,(m[dev].tx-lastTr[dev].tx)*8/1e6/dt);
-      $('#d_speed').innerHTML=dl.toFixed(1)+'<small> ↓</small> / '+ul.toFixed(1)+'<small> ↑</small>';
+      const sp=$('#d_speed'); if(sp)sp.innerHTML=dl.toFixed(1)+'<small> ↓</small> / '+ul.toFixed(1)+'<small> ↑</small>';
+      const a=$('#d_dl'),b=$('#d_ul'); if(a)a.textContent=dl.toFixed(1); if(b)b.textContent=ul.toFixed(1);
+      dlH.push(dl); ulH.push(ul); if(dlH.length>HIST)dlH.shift(); if(ulH.length>HIST)ulH.shift();
+      drawChart();
     }
   }
   lastTr=m; lastTrTs=ts;
@@ -574,59 +586,107 @@ async function loadMonitor(){
 
 /* ---------- nav (LuCI-style: category -> submenu -> single page) ---------- */
 const MENU=[
-  {cat:'الحالة', icon:'▦', items:[
-    {id:'dash',name:'نظرة عامة'},
-    {id:'monitor',name:'الاتصالات والمراقبة'},
-    {id:'health',name:'فحص الاتصال'},
-    {id:'clients',name:'الأجهزة/الإيجارات'},
-    {id:'logs',name:'السجلّات'},
+  {cat:'الحالة', items:[
+    {id:'dash',name:'نظرة عامة',i:'▦'},
+    {id:'monitor',name:'الاتصالات والمراقبة',i:'📊'},
+    {id:'health',name:'فحص الاتصال',i:'🩺'},
+    {id:'clients',name:'الأجهزة والإيجارات',i:'📱'},
+    {id:'logs',name:'السجلّات',i:'📜'},
   ]},
-  {cat:'الشبكة', icon:'🌐', items:[
-    {id:'net',name:'الواجهات'},
-    {id:'wifi',name:'اللاسلكي'},
-    {id:'firewall',name:'الجدار الناري · DNS · المسارات'},
-    {id:'ports',name:'منافذ DSA'},
+  {cat:'الشبكة', items:[
+    {id:'net',name:'الواجهات',i:'🌐'},
+    {id:'wifi',name:'اللاسلكي',i:'📶'},
+    {id:'firewall',name:'الجدار الناري وDNS',i:'🛡️'},
+    {id:'ports',name:'منافذ DSA',i:'🔌'},
   ]},
-  {cat:'الخدمات', icon:'🧩', items:[
-    {id:'services',name:'الخدمات والضيوف'},
-    {id:'power',name:'قوة الإرسال'},
+  {cat:'الخدمات', items:[
+    {id:'services',name:'الخدمات والضيوف',i:'🧩'},
+    {id:'power',name:'قوة الإرسال',i:'⚡'},
   ]},
-  {cat:'النظام', icon:'⚙', items:[
-    {id:'system',name:'النظام · النسخ · الترقية'},
-    {id:'tools',name:'الأدوات · التشخيص · الحِزم'},
+  {cat:'النظام', items:[
+    {id:'system',name:'النظام والنسخ والترقية',i:'⚙️'},
+    {id:'tools',name:'الأدوات والتشخيص',i:'🧰'},
   ]},
 ];
 const PANE_LOAD={
-  dash:loadDash, monitor:loadMonitor, health:loadHealth, clients:loadClients, logs:loadLogs,
+  dash:loadDash, monitor:loadMonitor, health:loadHealth, clients:()=>{loadClients();loadDevices();}, logs:loadLogs,
   net:()=>{loadWan();loadLan();loadNetMode();loadVlan();loadInterfaces();},
   wifi:loadWifi, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
   services:()=>{loadSvcStates();loadSvcList();}, power:loadPower,
   system:()=>{loadSystem();loadCron();}, tools:()=>{},
 };
-let curCat=0, curPane='dash';
-function renderCats(){
-  $('#catNav').innerHTML=MENU.map((m,i)=>`<button data-ci="${i}"><span class="i">${m.icon}</span> ${esc(m.cat)}</button>`).join('');
-  $$('#catNav button').forEach(b=>b.onclick=()=>selectCat(+b.dataset.ci));
-}
-function selectCat(i){
-  curCat=i;
-  $$('#catNav button').forEach(b=>b.classList.toggle('active',+b.dataset.ci===i));
-  const items=MENU[i].items;
-  $('#subNav').innerHTML=items.map(it=>`<button data-pane="${it.id}">${esc(it.name)}</button>`).join('');
-  $$('#subNav button').forEach(b=>b.onclick=()=>selectPane(b.dataset.pane));
-  selectPane(items[0].id);
+let curPane='dash';
+function renderSidebar(){
+  let h='';
+  MENU.forEach(m=>{ h+=`<div class="side-cat">${esc(m.cat)}</div>`;
+    m.items.forEach(it=>{ h+=`<button class="side-item" data-pane="${it.id}"><span class="si">${it.i}</span> ${esc(it.name)}</button>`; }); });
+  $('#sideNav').innerHTML=h;
+  $$('#sideNav .side-item').forEach(b=>b.onclick=()=>{ selectPane(b.dataset.pane); closeDrawer(); });
 }
 function selectPane(id){
   curPane=id;
-  $$('#subNav button').forEach(b=>b.classList.toggle('active',b.dataset.pane===id));
+  let title=id; MENU.forEach(m=>m.items.forEach(it=>{ if(it.id===id)title=it.name; }));
+  const pt=$('#pageTitle'); if(pt)pt.textContent=title;
+  $$('#sideNav .side-item').forEach(b=>b.classList.toggle('active',b.dataset.pane===id));
   $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==id));
   const fn=PANE_LOAD[id]; if(fn)fn();
+  if(id==='dash')setTimeout(drawChart,60);
+}
+function openDrawer(){ $('#side').classList.add('open'); $('#scrim').classList.add('show'); }
+function closeDrawer(){ $('#side').classList.remove('open'); $('#scrim').classList.remove('show'); }
+/* gauges + live chart */
+function setGauge(id,pct,text){ const g=$('#'+id); if(!g)return; pct=Math.max(0,Math.min(100,pct||0));
+  g.style.setProperty('--p',pct); const s=g.querySelector('span'); if(s)s.textContent=(text!=null?text:Math.round(pct)+'%'); }
+const HIST=44; let dlH=[], ulH=[];
+function drawChart(){
+  const cv=$('#trafChart'); if(!cv||!cv.offsetWidth)return;
+  const ctx=cv.getContext('2d'); const W=cv.width=cv.offsetWidth, H=cv.height=130;
+  ctx.clearRect(0,0,W,H);
+  const max=Math.max(1,...dlH,...ulH);
+  ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){ const y=H*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  const plot=(arr,col,fill)=>{ if(arr.length<2)return;
+    ctx.beginPath(); arr.forEach((v,i)=>{ const x=W*i/(HIST-1), y=H-(v/max)*(H-10)-5; i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.strokeStyle=col; ctx.lineWidth=2.2; ctx.lineJoin='round'; ctx.stroke();
+    ctx.lineTo(W*(arr.length-1)/(HIST-1),H); ctx.lineTo(0,H); ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); };
+  plot(dlH,'#3bc9db','rgba(59,201,219,.13)'); plot(ulH,'#ff6ba6','rgba(255,107,166,.13)');
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
   if(curPane==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
   else if(curPane==='net'||curPane==='ports'){ loadPortRates(); }
+  else if(curPane==='clients'&&tick%4===0){ loadDevices(); }
   tick++;
 },2000); }
+/* rich device row: signal -> distance estimate */
+function sigInfo(sig){
+  const r=parseInt(sig,10); if(isNaN(r))return null;
+  const d=Math.pow(10,((-50)-r)/(10*2.7));               // ref -50dBm@1m, n=2.7 (تقديري)
+  let cls='near',lbl='قريب'; if(r<-75){cls='far';lbl='بعيد';} else if(r<-62){cls='mid';lbl='متوسط';}
+  const pct=Math.max(5,Math.min(100,2*(r+100)));
+  const col=cls==='near'?'var(--ok)':(cls==='mid'?'var(--warn)':'var(--bad)');
+  return {dist:(d<1?'~1':'~'+d.toFixed(d<10?1:0)),cls,lbl,pct,col};
+}
+async function loadDevices(){
+  const r=await call({op:'devices'});
+  const ds=(r&&r.ok)?(r.devices||[]):[];
+  if(!ds.length){ $('#devicesBox').innerHTML='<div class="sub">لا أجهزة على الجسر حالياً</div>'; return; }
+  $('#devicesBox').innerHTML=ds.map(x=>{
+    const wifi=String(x.kind).indexOf('wifi')>=0; const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'');
+    const ic=wifi?'<div class="dic w">📶</div>':'<div class="dic l">🔌</div>';
+    let right='';
+    if(wifi && x.signal){ const s=sigInfo(x.signal);
+      if(s) right=`<span class="badge ${s.cls}">${s.lbl} ${s.dist}م</span>`+
+        `<div class="sigbar"><i style="width:${s.pct}%;background:${s.col}"></i></div>`+
+        `<span class="sub">${esc(x.signal)}dBm</span>`; }
+    else right='<span class="badge ok">سلكي</span>';
+    const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">↓${esc(x.rxrate||'?')} ↑${esc(x.txrate||'?')} Mb</span>`:'';
+    return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
+      `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''}</div></div>`+
+      `<div class="dright">${rate}${right}<button class="btn-ghost devblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:3px 8px">حظر</button></div></div>`;
+  }).join('');
+  $$('#devicesBox .devblk').forEach(b=>b.onclick=async()=>{ if(!confirm('حظر '+b.dataset.mac+'؟'))return;
+    const r=await call({act:'client_block',mac:b.dataset.mac},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadDevices,800); });
+}
 
 /* ---------- wire up ---------- */
 $('#loginBtn').onclick=doLogin;
@@ -742,6 +802,10 @@ $('#speedBtn').onclick=async()=>{ const el=$('#speedRes'); el.textContent='جا�
   const r=await call({op:'speedtest'}); b.disabled=false;
   if(r&&r.ok&&+r.bps>0){ el.innerHTML=(+r.bps*8/1e6).toFixed(1)+'<small> Mbps ↓</small>'; } else el.textContent='تعذّر القياس'; };
 $('#monRefresh').onclick=loadMonitor;
+$('#menuToggle').onclick=openDrawer;
+$('#scrim').onclick=closeDrawer;
+$('#devRefresh').onclick=loadDevices;
+window.addEventListener('resize',()=>{ if(curPane==='dash')drawChart(); });
 /* interfaces / firewall zones / ntp / logs filter+search+download */
 $('#ntpApply').onclick=async()=>{ const r=await call({act:'ntp_set',ntp1:$('#s_ntp1').value,ntp2:$('#s_ntp2').value},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
 $('#fwRestart').onclick=async()=>{ const r=await call({act:'fw_restart'},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };

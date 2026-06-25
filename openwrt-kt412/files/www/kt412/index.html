@@ -24,43 +24,52 @@
 
 <!-- APP -->
 <div class="wrap hide" id="app">
-  <div class="top">
-    <div class="logo">K4</div>
-    <div class="brand"><b>KT412</b><span>Dongwon DW02-412H · لوحة تحكم خاصة</span></div>
-    <div class="spacer"></div>
-    <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
-    <button class="btn-ghost" id="logoutBtn">خروج</button>
-  </div>
-
-  <div class="nav" id="catNav"></div>
-  <div class="subnav" id="subNav"></div>
+  <button class="menu-toggle" id="menuToggle" aria-label="القائمة">☰</button>
+  <div class="scrim" id="scrim"></div>
+  <aside class="side" id="side">
+    <div class="side-brand"><div class="logo">K4</div><div class="brand"><b>KT412</b><span>DW02‑412H</span></div></div>
+    <nav id="sideNav"></nav>
+    <div class="side-foot">
+      <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
+      <button class="btn-ghost" id="logoutBtn">خروج</button>
+    </div>
+  </aside>
+  <main class="main" id="main">
+  <div class="topbar"><h2 id="pageTitle">نظرة عامة</h2><div class="spacer"></div>
+    <span class="pill sm"><span id="netDot2" class="dot"></span><span id="netTxt2">—</span></span></div>
 
   <!-- DASHBOARD -->
   <section data-pane="dash">
     <div class="grid cols-4">
-      <div class="card"><h3>النظام</h3><div class="stat" id="d_model">—</div><div class="sub" id="d_rel">—</div></div>
-      <div class="card"><h3>مدة التشغيل</h3><div class="stat" id="d_up">—</div><div class="sub" id="d_load">الحِمل: —</div><div class="sub" id="d_cpu"></div></div>
-      <div class="card"><h3>الذاكرة</h3><div class="stat" id="d_mem">—</div><div class="bar"><i id="d_membar" style="width:0"></i></div><div class="sub" id="d_memsub">—</div><div class="sub" id="d_storage">التخزين: —</div></div>
-      <div class="card"><h3>الإنترنت</h3><div class="stat" id="d_wan">—</div><div class="sub" id="d_wanip">—</div></div>
+      <div class="card gcard"><div class="gauge" id="g_load" style="--p:0;--gc:var(--c-cyan)"><span>—</span></div><div class="glabel">المعالج / الحِمل</div><div class="sub" id="d_cpu">—</div></div>
+      <div class="card gcard"><div class="gauge" id="g_mem" style="--p:0;--gc:var(--c-purple)"><span>—</span></div><div class="glabel">الذاكرة (RAM)</div><div class="sub" id="d_memsub">—</div></div>
+      <div class="card gcard"><div class="gauge" id="g_store" style="--p:0;--gc:var(--c-green)"><span>—</span></div><div class="glabel">التخزين</div><div class="sub" id="d_storage">—</div></div>
+      <div class="card"><h3>🖥️ النظام</h3><div class="stat" id="d_model">—</div><div class="sub" id="d_rel">—</div><div class="sub" id="d_up" style="margin-top:6px">—</div></div>
+    </div>
+
+    <div class="card chartcard" style="margin-top:16px">
+      <h3>📈 حركة الإنترنت الحية — Live Traffic</h3>
+      <div class="legend"><span class="lg dl"></span> تنزيل <b id="d_dl">0.0</b> &nbsp;·&nbsp; <span class="lg ul"></span> رفع <b id="d_ul">0.0</b> <span class="sub" style="display:inline">Mbps</span></div>
+      <canvas id="trafChart" height="130"></canvas>
+    </div>
+
+    <div class="grid cols-4" style="margin-top:16px">
+      <div class="tile t-blue"><div class="ti">📱</div><div class="tn" id="t_clients">0</div><div class="tl">أجهزة متصلة</div></div>
+      <div class="tile t-green"><div class="ti">📶</div><div class="tn" id="t_w24">0</div><div class="tl">واي‑فاي 2.4G</div></div>
+      <div class="tile t-cyan"><div class="ti">📡</div><div class="tn" id="t_w5">0</div><div class="tl">واي‑فاي 5G</div></div>
+      <div class="tile t-orange"><div class="ti">🔌</div><div class="tn" id="t_ports">0</div><div class="tl">منافذ نشطة</div></div>
+    </div>
+
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>🌍 الإنترنت (WAN)</h3><div class="stat" id="d_wan">—</div><div class="sub" id="d_wanip">—</div>
+        <div id="d_wanusage" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div></div>
+      <div class="card"><h3>🩺 حالة الاتصال</h3><div id="d_health"><div class="sub">جارٍ التحميل…</div></div></div>
     </div>
     <div class="grid cols-2" style="margin-top:16px">
-      <div class="card"><h3>السرعة الحية — Live Speed (WAN)</h3>
-        <div class="stat" id="d_speed">—</div>
-        <div class="sub" id="d_speed_sub">↓ تنزيل / ↑ رفع (Mbps)</div></div>
-      <div class="card"><h3>الأجهزة المتصلة</h3>
-        <div class="stat" id="d_clients">—</div>
-        <div class="sub">عدد المتصلين الآن</div></div>
+      <div class="card"><h3>🔗 سرعة الارتباط (Link)</h3><div id="d_links"><div class="sub">جارٍ التحميل…</div></div></div>
+      <div class="card"><h3>📶 الواي‑فاي</h3><div id="d_wifi"><div class="sub">جارٍ التحميل…</div></div></div>
     </div>
-    <div class="grid cols-2" style="margin-top:16px">
-      <div class="card"><h3>سرعة الارتباط (Link)</h3>
-        <div id="d_links"><div class="sub">جارٍ التحميل…</div></div></div>
-      <div class="card"><h3>إجمالي الاستهلاك (WAN)</h3>
-        <div id="d_wanusage"><div class="sub">جارٍ التحميل…</div></div></div>
-    </div>
-    <div class="grid cols-2" style="margin-top:16px">
-      <div class="card"><h3>الواي‑فاي</h3><div id="d_wifi"><div class="sub">جارٍ التحميل…</div></div></div>
-      <div class="card"><h3>حالة الاتصال</h3><div id="d_health"><div class="sub">جارٍ التحميل…</div></div></div>
-    </div>
+    <div class="hide"><span id="d_mem"></span><i id="d_membar"></i><span id="d_load"></span><span id="d_speed"></span><span id="d_speed_sub"></span><span id="d_clients"></span></div>
   </section>
 
   <!-- NETWORK (WAN + VLAN + LAN) -->
@@ -190,6 +199,12 @@
 
   <!-- CLIENTS -->
   <section data-pane="clients" class="hide">
+    <div class="card" style="margin-bottom:16px">
+      <h3>🌐 كل الأجهزة على الشبكة (الجسر) — النوع · الإشارة · المسافة · السرعة</h3>
+      <div class="sub">يشمل أجهزة DHCP + ARP + الواي‑فاي (حتى بلا إيجار IP). المسافة تقديرية من قوة الإشارة.</div>
+      <div id="devicesBox" style="margin-top:12px"><div class="sub">جارٍ التحميل…</div></div>
+      <button class="btn sec sm" id="devRefresh" style="margin-top:10px">تحديث الأجهزة</button>
+    </div>
     <div class="card">
       <h3>الأجهزة المتصلة (DHCP) — حظر/سماح</h3>
       <div id="clientsBox"><div class="sub">جارٍ التحميل…</div></div>
@@ -493,6 +508,7 @@
   </section>
 
   <div class="foot">KT412 Control · واجهة خاصة</div>
+  </main>
 </div>
 
 <div id="safeBanner" class="hide" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#7c2d12;color:#fff;padding:12px;text-align:center;box-shadow:0 2px 16px rgba(0,0,0,.5);font-size:14px">
