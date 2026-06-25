@@ -634,6 +634,7 @@ const MENU=[
     {id:'dash',name:'نظرة عامة',i:'▦'},
     {id:'monitor',name:'الاتصالات والمراقبة',i:'📊'},
     {id:'health',name:'فحص الاتصال',i:'🩺'},
+    {id:'smartap',name:'صحة Smart AP',i:'💚'},
     {id:'clients',name:'الأجهزة والإيجارات',i:'📱'},
     {id:'logs',name:'السجلّات',i:'📜'},
   ]},
@@ -654,7 +655,7 @@ const MENU=[
 ];
 const PANE_LOAD={
   quick:loadQuick,
-  dash:loadDash, monitor:loadMonitor, health:loadHealth, clients:()=>{loadClients();loadDevices();}, logs:loadLogs,
+  dash:loadDash, monitor:loadMonitor, health:loadHealth, smartap:loadSmartap, clients:()=>{loadClients();loadDevices();}, logs:loadLogs,
   net:()=>{loadWan();loadLan();loadNetMode();loadVlan();loadInterfaces();},
   wifi:loadWifi, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
   services:()=>{loadSvcStates();loadSvcList();}, power:loadPower,
@@ -711,6 +712,10 @@ function sigInfo(sig){
   const pct=Math.max(5,Math.min(100,2*(r+100)));
   const col=cls==='near'?'var(--ok)':(cls==='mid'?'var(--warn)':'var(--bad)');
   return {dist:(d<1?'~1':'~'+d.toFixed(d<10?1:0)),cls,lbl,pct,col};
+}
+async function loadSmartap(){
+  const r=await call({op:'selfheal'}); const b=$('#smartapBox');
+  if(b)b.textContent=(r&&r.ok)?b64dec(r.out):'تعذّر التحميل';
 }
 async function loadDevices(){
   const r=await call({op:'devices'});
@@ -863,6 +868,7 @@ $('#monRefresh').onclick=loadMonitor;
 $('#menuToggle').onclick=openDrawer;
 $('#scrim').onclick=closeDrawer;
 $('#devRefresh').onclick=loadDevices;
+if($('#smartapRef')) $('#smartapRef').onclick=loadSmartap;
 if($('#sqmOn')) $('#sqmOn').onclick=async()=>{ const r=await call({act:'sqm',enabled:1,down:$('#sqm_dn').value,up:$('#sqm_up').value},true);
   toast(r&&r.ok?(r.msg||'تم تفعيل SQM'):'فشل',r&&r.ok); };
 if($('#sqmOff')) $('#sqmOff').onclick=async()=>{ const r=await call({act:'sqm',enabled:0,down:$('#sqm_dn').value,up:$('#sqm_up').value},true);

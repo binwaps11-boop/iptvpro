@@ -130,6 +130,8 @@ jobs:
           g 'data-pane="ports"'     "$H" "OPENWRT UI DSA PORTS INCLUDED"
           g 'data-pane="clients"'   "$H" "OPENWRT UI CLIENTS INCLUDED"
           g 'data-pane="quick"'     "$H" "QUICK SETTINGS INCLUDED"
+          g 'data-pane="smartap"'   "$H" "SMART AP HEALTH PANE INCLUDED"
+          g 'selfheal)'           "$C" "SELF-HEAL STATUS BACKEND INCLUDED"
           g 'quick_setup)'          "$C" "QUICK SETUP BACKEND INCLUDED"
           g 'data-pane="logs"'      "$H" "OPENWRT UI LOGS INCLUDED"
           g 'diag)'                 "$C" "OPENWRT UI DIAGNOSTICS INCLUDED"

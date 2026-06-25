@@ -1230,6 +1230,22 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 		rm -f "$L" "$S" "$N"
 		printf '{"ok":true,"band24":%s,"band5":%s,"devices":[%s]}\n' "${b24:-0}" "${b5:-0}" "$out";;
 
+	# ===================== SMART AP HEALTH / SELF-HEAL (read-only) =====================
+	selfheal)
+		t="$( { echo '=== Smart AP — الصحة والشفاء الذاتي ==='; uptime 2>/dev/null
+			echo; echo '## conntrack (المستخدم/الأقصى)'
+			echo "$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+			echo; echo '## الذاكرة (MB)'; free -m 2>/dev/null | head -2
+			echo; echo '## الراديوهات'; iwinfo 2>/dev/null | grep -iE 'ESSID|Tx-Power|Mode|Bit Rate' | head -12
+			echo; echo '## أحداث الشفاء الذاتي (آخر 30)'
+			logread 2>/dev/null | grep smartap-wd | tail -30 || true
+			logread 2>/dev/null | grep smartap-wd >/dev/null 2>&1 || echo '(لا أحداث — الجهاز مستقر، لم يحتج تدخّلاً)'
+			echo; echo '## watchdog العتاد (procd)'; ubus call system watchdog 2>/dev/null
+			echo; echo '## مدّة عمل الخدمات الحرجة'
+			for s in dnsmasq uhttpd rpcd netifd; do echo -n "$s: "; pidof "$s" >/dev/null 2>&1 && echo يعمل || echo متوقف; done
+		} | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$t";;
+
 	*)
 		fail "unknown_op";;
 esac
