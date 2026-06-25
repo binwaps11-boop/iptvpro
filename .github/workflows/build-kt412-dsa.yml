@@ -125,10 +125,20 @@ jobs:
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "target=ath79/nand"
             echo "board=dongwon_dw02-412h-128m"
+            echo "kernel_version=$(sed -n 's/^LINUX_VERSION:=//p' include/kernel-version.mk 2>/dev/null | head -1)"
             printf "ath_user_regd="; grep -q "^CONFIG_ATH_USER_REGD=y" .config && echo y || echo n
             printf "power_patch_sha256="; sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" | cut -d" " -f1
           } > files/etc/kt412-build-info
           echo "=== /etc/kt412-build-info ==="; cat files/etc/kt412-build-info
+          # ship an explicit kernel-config snapshot in the image (device may lack /proc/config.gz path)
+          {
+            echo "# KT412 kernel/wireless config snapshot (from build .config)"
+            echo "# variant=${{ matrix.variant }} commit=${{ github.sha }}"
+            grep -E '^(CONFIG_ATH_USER_REGD|CONFIG_PACKAGE_kmod-ath9k|CONFIG_PACKAGE_kmod-ath10k|CONFIG_PACKAGE_kmod-mac80211|CONFIG_PACKAGE_kmod-cfg80211|CONFIG_PACKAGE_ath10k-firmware|CONFIG_KERNEL_IKCONFIG|CONFIG_KERNEL_CFG80211|CONFIG_KERNEL_MAC80211|CONFIG_PACKAGE_wpad)' .config 2>/dev/null | sort
+            echo "# (ath9k debugfs is enabled by the mac80211 package default; verify on device with"
+            echo "#  ls /sys/kernel/debug/ieee80211/phy1/ath9k/ )"
+          } > files/etc/kt412-kernel-config.txt
+          echo "=== /etc/kt412-kernel-config.txt ==="; cat files/etc/kt412-kernel-config.txt
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
           H=files/www/kt412/index.html
