@@ -53,7 +53,7 @@ Marker: KT412-30dbm-regcap  (build gate: >=1 occurrence post-compile)
 +#define KT412_2G_DBM 30
 +static inline void kt412_lift_2g(struct ieee80211_channel *chan)
 +{
-+	if (chan->center_freq < 2400 || chan->center_freq > 2500)
++	if (chan->center_freq < 2400)   /* lift BOTH 2.4G (24->30) and 5G (23->30) */
 +		return;
 +	if (chan->max_reg_power < KT412_2G_DBM)
 +		chan->max_reg_power = KT412_2G_DBM;
@@ -110,6 +110,7 @@ Marker: KT412-30dbm-regcap  (build gate: >=1 occurrence post-compile)
 +	 * is already lifted to 30 by the cfg80211 reg.c hunk; this also defeats a low
 +	 * reg->power_limit. Units are half-dB; MAX_COMBINED_POWER (254) is the ceiling. */
 +	if (channel->band == NL80211_BAND_2GHZ) {
++		printk_once(KERN_INFO "KT412-30DBM-FINAL-NETDEV-POWER: ath9k_hw_apply_txpower band=2G forcing new_pwr=60 (30.0 dBm)\n");
 +		if (new_pwr < 2 * 30)
 +			new_pwr = 2 * 30;
 +		if (new_pwr > MAX_COMBINED_POWER)
