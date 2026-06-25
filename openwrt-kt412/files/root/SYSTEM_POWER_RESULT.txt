@@ -10,7 +10,8 @@ ART / EEPROM / caldata / mtd10 are NEVER written.
 System requested power (uci) ........... 30 dBm   (expected)
 debugfs user_power ..................... 30 dBm   (expected)
 PHY advertised power (iw phy CH1-11) ... 30.0 dBm (expected, after the patch)
-iwinfo Tx-Power ........................ 30 dBm   (expected)
+iwinfo Tx-Power ........................ 33 dBm   (EXPECTED: 2-chain aggregate =
+                                         30/chain + 3 dB for 2x2; NOT a bug)
 System applied netdev power ............ 30 dBm   (expected)  <== decisive
 Driver final applied power ............. 30 dBm   (expected)
 EEPROM target power (calibrated) ....... 24 dBm   (the original clean ceiling)

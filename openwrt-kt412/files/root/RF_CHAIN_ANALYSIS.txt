@@ -59,6 +59,19 @@ ART / EEPROM / caldata / mtd10 are READ-ONLY here — nothing was written.
    2-chain sum + antenna gain. 30 dBm *clean conducted per chain* is NOT,
    without a bigger external PA.
 
+5b) WHY iwinfo = 33 dBm WHILE iw phy / netdev = 30 dBm  (NOT a bug)
+   iw phy and debugfs netdev txpower report the PER-CHAIN regulatory/applied
+   power = 30 dBm. iwinfo (and the driver's MAX_COMBINED_POWER) report the
+   AGGREGATE across the 2 active TX chains (this board is 2x2, TX mask = 3):
+       30 dBm/chain + 10*log10(2) ~= +3 dB  =  33 dBm combined.
+   So 33 = the two-chain combined conducted figure; 30 = per chain. 33 dBm is
+   MORE total power, not a discrepancy. To make iwinfo read 30 you would have
+   to LOWER each chain to ~27 dBm (so the sum = 30), which REDUCES real output
+   — not recommended when the goal is maximum power. (Caveat from section 4:
+   the external PA still saturates ~24-26 dBm/chain clean, so the radiated
+   power does not actually reach the full 33 cleanly; the 33 is the commanded
+   aggregate, not a measured clean conducted value.)
+
 6) HONEST BOTTOM LINE
    System/Driver power = 30  -> ACHIEVED by the patch (real register value).
    Conducted RF (per chain) = NOT MEASURED here; PA physics caps clean output
