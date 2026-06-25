@@ -1,0 +1,36 @@
+KT412 (Dongwon DW02-412H) — ath9k 2.4G FINAL hardware power register floor.
+
+This is the third leg of the 30 dBm extreme build, applied to the mac80211
+*backports* ath9k source (package/kernel/mac80211/patches/ath9k/) — the tree
+that actually compiles into kmod-ath9k. Patching the in-tree kernel does nothing.
+
+990 lifts the EEPROM per-rate targets (targetPowerValT2 => max_power_level =>
+iw phy / iwinfo / netdev display). 991 pins the cfg80211 regulatory ceiling so
+handle_channel() does not re-clamp 2.4G back to 24. This patch (992) drives the
+FINAL value that ath9k_hw_apply_txpower() hands to eep_ops->set_txpower() — i.e.
+the number programmed into the hardware power register — to >= 60 half-dB
+(30.0 dBm) on the 2.4 GHz band, so the chip itself is pushed to 30 (maximal
+Level A; "as hard as stock allows"). Capped at MAX_COMBINED_POWER.
+
+Minimal hunk: only the most stable context lines are used (the new_pwr min_t
+line above, and the blank line + set_txpower call below) so quilt's context
+match survives backports line-number drift at this function.
+
+Marker (post-compile, dmesg at radio bring-up): KT412-30DBM-FINAL-NETDEV-POWER.
+
+ART/EEPROM/caldata are NEVER written. Conducted RF above the PA saturation is
+clipped; the register reads 30 but radiated power does not exceed PA physics.
+
+--- a/drivers/net/wireless/ath/ath9k/hw.c
++++ b/drivers/net/wireless/ath/ath9k/hw.c
+@@ -2999,4 +2999,10 @@
+ 	new_pwr = min_t(int, chan_pwr, reg->power_limit);
+
++	if (channel->band == NL80211_BAND_2GHZ) {
++		new_pwr = max_t(int, new_pwr, 60);
++		new_pwr = min_t(int, new_pwr, MAX_COMBINED_POWER);
++		printk_once(KERN_INFO "KT412-30DBM-FINAL-NETDEV-POWER\n");
++	}
++
+ 	ah->eep_ops->set_txpower(ah, chan, ctl,
+ 				 get_antenna_gain(ah, chan), new_pwr, test);

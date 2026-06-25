@@ -89,6 +89,15 @@ jobs:
             echo "PLACED cfg80211 regcap patch in mac80211 backports: $M9/"
             ls -l "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
             echo "regcap source token (expect kt412_lift present):"; grep -c 'kt412_lift' "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            # 992: ath9k hw.c FINAL hardware-power floor. Drives the value handed to
+            # eep_ops->set_txpower() (the number written to the chip's power register)
+            # to >=60 half-dB (30.0 dBm) on 2.4G, capped at MAX_COMBINED_POWER -> pushes
+            # the hardware itself to 30 (maximal Level A). Minimal stable-context hunk so
+            # quilt applies despite backports line drift at ath9k_hw_apply_txpower().
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/992-kt412-ath9k-2g-netdev-floor.patch" "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
+            echo "PLACED ath9k hw.c final-power floor patch in mac80211 backports: $M9/"
+            ls -l "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
+            echo "final-power source marker (expect KT412-30DBM-FINAL-NETDEV-POWER present):"; grep -c 'KT412-30DBM-FINAL-NETDEV-POWER' "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
           fi
 
       - name: Update & install feeds
@@ -310,6 +319,15 @@ jobs:
             echo "regcap call-sites compiled=$RN (expect >=6: helper def + every handle_channel path)"
             [ "$RN" -ge 6 ] || { echo "FATAL: cfg80211 regcap (991) did NOT apply -> cfg80211 would re-clamp 2.4G to 24"; exit 1; }
             echo "REGCAP PATCH COMPILED INTO cfg80211 OK (reg.c kt412_lift x$RN -> 2.4G ceiling pinned 30 at every regdomain apply)"
+            echo "=== confirm ath9k final-power floor (992) landed in the COMPILED backports hw.c (NON-FATAL) ==="
+            HWC="$(find build_dir -path '*ath9k/hw.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$HWC" ] || HWC="$(find build_dir -path '*backports*/drivers/net/wireless/ath/ath9k/hw.c' 2>/dev/null | head -1)"
+            echo "compiled ath9k hw.c source: ${HWC:-<not found>}"
+            if [ -n "$HWC" ] && grep -q 'KT412-30DBM-FINAL-NETDEV-POWER' "$HWC" 2>/dev/null; then
+              echo "FINAL-POWER FLOOR (992) COMPILED INTO kmod-ath9k OK (hw.c ath9k_hw_apply_txpower -> 2.4G new_pwr floored to 60 half-dB=30.0)"
+            else
+              echo "WARNING: ath9k final-power floor (992) marker NOT found in compiled hw.c (NON-FATAL: if 992 failed to apply the build would have aborted at compile; 990+991 already drive the displayed/netdev numbers to 30)"
+            fi
             echo "HONEST NOTE: this proves the patch is in the COMPILED ath9k source. Real applied"
             echo "power MUST still be verified on the device with:"
             echo "  sh /root/kt412-power-trace.sh  (expect dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower=30)"
