@@ -84,8 +84,15 @@ async function loadDash(){
     $('#d_mem').innerHTML=pct+'<small>%</small>'; $('#d_membar').style.width=pct+'%';
     $('#d_memsub').textContent=human(used)+' / '+human(s.mem_total);
     setGauge('g_mem',pct,pct+'%');
-    const loadv=(+s.load/65536)||0, lp=s.ncpu?Math.min(100,loadv/(+s.ncpu)*100):loadv*100;
-    setGauge('g_load',lp,loadv.toFixed(2));
+    const loadv=(+s.load/65536)||0;
+    // real CPU utilization % from /proc/stat jiffie diff across polls (load avg sits near 0 on idle)
+    let cpuPct=0;
+    if(_cpuTotalPrev>0 && +s.cpu_total>_cpuTotalPrev){
+      const dTotal=(+s.cpu_total)-_cpuTotalPrev, dIdle=(+s.cpu_idle)-_cpuIdlePrev;
+      if(dTotal>0) cpuPct=Math.max(0,Math.min(100,Math.round(100*(1-dIdle/dTotal))));
+    }
+    _cpuIdlePrev=+s.cpu_idle||0; _cpuTotalPrev=+s.cpu_total||0;
+    setGauge('g_load',cpuPct,cpuPct+'%');
     if(s.fs_total&&+s.fs_total>0){ const sp=Math.round(+s.fs_used/+s.fs_total*100);
       setGauge('g_store',sp,sp+'%'); $('#d_storage').textContent='التخزين: '+human(+s.fs_used*1024)+' / '+human(+s.fs_total*1024); }
     $('#d_up').textContent='⏱ '+dur(s.uptime);
@@ -102,8 +109,19 @@ async function loadDash(){
   if(p&&p.ok){ $('#d_links').innerHTML=(p.ports||[]).map(x=>`<div class="kv"><span class="k">${esc(x.name)}</span>`+
     `<span class="v">${x.link==='up'?(x.speed?x.speed+' Mbps':'متصل'):'مفصول'}</span></div>`).join('')||'<div class="sub">—</div>';
     const act=(p.ports||[]).filter(x=>x.link==='up').length; const tp=$('#t_ports'); if(tp)tp.textContent=act; }
-  const c=await call({op:'clients'});
-  if(c&&c.ok){ $('#d_clients').textContent=(c.clients||[]).length; const tc=$('#t_clients'); if(tc)tc.textContent=(c.clients||[]).length; }
+  const c=await call({op:'devices'});
+  if(c&&c.ok){ const ds=c.devices||[];
+    $('#d_clients').textContent=ds.length; const tc=$('#t_clients'); if(tc)tc.textContent=ds.length;
+    const t2=$('#t_clients2'); if(t2)t2.textContent=ds.length;
+    const dc=$('#d_devlist');
+    if(dc) dc.innerHTML = ds.length ? ds.slice(0,8).map(x=>{
+      const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'سلكي');
+      const sig=(String(x.kind).indexOf('wifi')>=0&&x.signal)?' · '+esc(x.signal)+'dBm'+(x.dist?' ('+esc(x.dist)+')':''):'';
+      return `<div class="kv"><span class="k">${esc(x.name||'جهاز')} <span class="badge ok">${band}</span></span>`+
+             `<span class="v">${esc(x.ip||'—')}${sig}</span></div>`;
+    }).join('') + (ds.length>8?`<div class="sub" style="margin-top:4px">+${ds.length-8} المزيد…</div>`:'')
+      : '<div class="sub">لا أجهزة متصلة</div>';
+  }
   const tr=await call({op:'traffic'});
   if(tr&&tr.ok){ const dev=window._wanDev; const wi=(tr.ifaces||[]).find(x=>x.if===dev);
     if(wi) $('#d_wanusage').innerHTML=`<div class="kv"><span class="k">↓ تنزيل</span><span class="v">${human(wi.rx)}</span></div>`+
@@ -353,7 +371,9 @@ async function loadScan(){
   $('#scanBox').innerHTML='<div class="sub">جارٍ الفحص… (~10 ثوانٍ)</div>'; $('#chanBars').innerHTML='';
   const r=await call({op:'scan'});
   if(!(r&&r.ok)){ $('#scanBox').innerHTML='<div class="sub">تعذّر الفحص</div>'; return; }
-  const nets=(r.nets||[]).slice().sort((a,b)=>(+b.sig||-999)-(+a.sig||-999));
+  // dedupe by BSSID (virtual APs on the same phy show up once) so the congestion bars match LuCI
+  const seen={}; const nets=(r.nets||[]).filter(n=>{ const k=n.bssid||((n.essid||'')+'/'+n.ch); if(seen[k])return false; seen[k]=1; return true; })
+    .sort((a,b)=>(+b.sig||-999)-(+a.sig||-999));
   $('#scanBox').innerHTML = nets.length? nets.map(n=>
     `<div class="kv"><span class="k">${esc(n.essid||'(مخفية)')} <span class="badge ok">قناة ${esc(n.ch)}</span></span>`+
     `<span class="v">${esc(n.sig)} dBm · ${esc(n.enc||'')}</span></div>`).join('')
@@ -395,6 +415,46 @@ async function loadQuick(){
     const t=$('#qs_tx'), v=$('#qs_txv'); if(t&&rd&&rd.requested){ t.value=Math.max(0,Math.min(30,+rd.requested||30)); if(v)v.textContent=t.value; } }
   const l=await call({op:'lan'});
   if(l&&l.ok&&l.ip){ const e=$('#qs_lan'); if(e&&!e.value)e.placeholder=l.ip; }
+  // device-mode toggling: show PPPoE fields or the Station scan-picker
+  const ms=$('#qs_mode');
+  if(ms){ const toggle=()=>{
+      const pr=$('#qs_pppoe_row'); if(pr)pr.style.display = ms.value==='pppoe'?'flex':'none';
+      const sr=$('#qs_sta_row');  if(sr)sr.style.display  = ms.value==='station'?'block':'none';
+    }; ms.onchange=toggle; toggle(); }
+  // populate the station radio picker
+  const rad=$('#qs_sta_radio');
+  if(rad){ const r=await call({op:'wifi_radios'});
+    rad.innerHTML=((r&&r.ok)?(r.radios||[]):[]).map(x=>
+      `<option value="${esc(x.radio)}">${esc(x.radio)} · ${esc(x.band==='5g'?'5GHz':'2.4GHz')} (${esc(x.ssid||'—')})</option>`).join('')||'<option value="">—</option>'; }
+  const sb=$('#qsScanBtn');  if(sb) sb.onclick=qsStationScan;
+  const ap=$('#qsStaApply'); if(ap) ap.onclick=qsStationApply;
+}
+async function qsStationScan(){
+  const radio=$('#qs_sta_radio').value;
+  if(!radio){ toast('اختر الراديو أولاً',false); return; }
+  const box=$('#qsScanList'), btn=$('#qsScanBtn');
+  box.innerHTML='<div class="sub">جارٍ الفحص… (~10 ثوانٍ)</div>'; btn.disabled=true;
+  const r=await call({op:'wscan',radio});
+  btn.disabled=false;
+  if(!(r&&r.ok)){ box.innerHTML='<div class="sub">تعذّر الفحص</div>'; return; }
+  const nets=(r.nets||[]).filter(n=>n.essid).sort((a,b)=>(+b.sig||-999)-(+a.sig||-999));
+  box.innerHTML = nets.length ? nets.map(n=>{
+    const open=/none|open/i.test(n.enc||'');
+    return `<div class="kv qsNet" data-ssid="${esc(n.essid)}" data-bssid="${esc(n.bssid||'')}" data-open="${open?1:0}" style="cursor:pointer">`+
+      `<span class="k">${esc(n.essid)} <span class="sub">${esc(n.bssid||'')}</span></span>`+
+      `<span class="v"><span class="badge ok">قناة ${esc(n.ch)}</span> ${esc(n.sig)}dBm · ${open?'مفتوحة':esc((n.enc||'').slice(0,12))}</span></div>`;
+  }).join('') : '<div class="sub">لا شبكات مجاورة</div>';
+  $$('#qsScanList .qsNet').forEach(el=>el.onclick=()=>{
+    $('#qs_sta_ssid').value=el.dataset.ssid; $('#qs_sta_bssid').value=el.dataset.bssid;
+    if(el.dataset.open==='1') $('#qs_sta_key').value=''; $('#qs_sta_key').focus();
+    $$('#qsScanList .qsNet').forEach(x=>x.style.background=''); el.style.background='rgba(124,58,18,.25)';
+  });
+}
+async function qsStationApply(){
+  const radio=$('#qs_sta_radio').value, ssid=$('#qs_sta_ssid').value.trim();
+  if(!radio||!ssid){ toast('اختر شبكة من القائمة أولاً',false); return; }
+  const r=await safeApply(()=>call({act:'station_uplink',radio,ssid,bssid:$('#qs_sta_bssid').value,key:$('#qs_sta_key').value},true));
+  toast(r&&r.ok?(r.msg||'طُبّق — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
 }
 async function loadPower(){
   const r=await call({op:'power'});
@@ -664,16 +724,26 @@ const PANE_LOAD={
 let curPane='dash';
 function renderSidebar(){
   let h='';
-  MENU.forEach(m=>{ h+=`<div class="side-cat">${esc(m.cat)}</div>`;
-    m.items.forEach(it=>{ h+=`<button class="side-item" data-pane="${it.id}"><span class="si">${it.i}</span> ${esc(it.name)}</button>`; }); });
+  MENU.forEach((m,gi)=>{
+    h+=`<div class="side-group" data-g="${gi}">`+
+       `<button class="side-cat" data-g="${gi}" aria-expanded="true"><span class="cat-t">${esc(m.cat)}</span><span class="cat-caret">▾</span></button>`+
+       `<div class="side-items">`;
+    m.items.forEach(it=>{ h+=`<button class="side-item" data-pane="${it.id}"><span class="si">${it.i}</span><span class="sn">${esc(it.name)}</span></button>`; });
+    h+=`</div></div>`;
+  });
   $('#sideNav').innerHTML=h;
   $$('#sideNav .side-item').forEach(b=>b.onclick=()=>{ selectPane(b.dataset.pane); closeDrawer(); });
+  $$('#sideNav .side-cat').forEach(c=>c.onclick=()=>{
+    const g=c.closest('.side-group'); const collapsed=g.classList.toggle('collapsed');
+    c.setAttribute('aria-expanded', collapsed?'false':'true');
+  });
 }
 function selectPane(id){
   curPane=id;
   let title=id; MENU.forEach(m=>m.items.forEach(it=>{ if(it.id===id)title=it.name; }));
   const pt=$('#pageTitle'); if(pt)pt.textContent=title;
   $$('#sideNav .side-item').forEach(b=>b.classList.toggle('active',b.dataset.pane===id));
+  const ai=$('#sideNav .side-item.active'); if(ai){ const g=ai.closest('.side-group'); if(g)g.classList.remove('collapsed'); }
   $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==id));
   const fn=PANE_LOAD[id]; if(fn)fn();
   if(id==='dash')setTimeout(drawChart,60);
@@ -684,6 +754,7 @@ function closeDrawer(){ $('#side').classList.remove('open'); $('#scrim').classLi
 function setGauge(id,pct,text){ const g=$('#'+id); if(!g)return; pct=Math.max(0,Math.min(100,pct||0));
   g.style.setProperty('--p',pct); const s=g.querySelector('span'); if(s)s.textContent=(text!=null?text:Math.round(pct)+'%'); }
 const HIST=44; let dlH=[], ulH=[];
+let _cpuIdlePrev=0, _cpuTotalPrev=0;
 function drawChart(){
   const cv=$('#trafChart'); if(!cv||!cv.offsetWidth)return;
   const ctx=cv.getContext('2d'); const W=cv.width=cv.offsetWidth, H=cv.height=130;
@@ -772,13 +843,16 @@ $('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();
 $('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
   dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#lanApply').onclick=applyLan;
-$('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim(); if(!vid){toast('اكتب رقم VLAN',false);return;}
+$('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim();
+  if(!vid||+vid<2||+vid>4094){toast('اكتب رقم VLAN بين 2 و 4094',false);return;}
   const gv=(id,d)=>{ const e=$(id); return e?e.value:d; };
-  // simple mode: bridge = routes with LAN (inter); vlan = isolated, internet-only.
+  // simple mode: just a number -> isolated internet-only VLAN + DHCP. Advanced pane overrides.
   const mode=gv('#vlanMode','vlan');
   const routing = mode==='bridge' ? 'inter' : gv('#vlanRouting','internet');
   const nat = mode==='bridge' ? 'on' : gv('#vlanNat','on');
-  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:gv('#vlanIp',''),dhcp:($('#vlanDhcp')&&$('#vlanDhcp').checked)?1:0,
+  // sane default: DHCP ON when the checkbox is absent/unchecked-by-default isn't desired
+  const dhcp = $('#vlanDhcp') ? ($('#vlanDhcp').checked?1:0) : 1;
+  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:gv('#vlanIp',''),dhcp,
     routing,allow_vids:gv('#vlanAllow',''),nat,
     dns_mode:gv('#vlanDns','auto'),dns1:gv('#vlanDns1',''),dns2:gv('#vlanDns2','')},true));
   toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };

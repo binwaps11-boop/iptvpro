@@ -73,6 +73,10 @@
       <div class="card"><h3>🔗 سرعة الارتباط (Link)</h3><div id="d_links"><div class="sub">جارٍ التحميل…</div></div></div>
       <div class="card"><h3>📶 الواي‑فاي</h3><div id="d_wifi"><div class="sub">جارٍ التحميل…</div></div></div>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h3>📱 الأجهزة المتصلة <span class="badge ok" id="t_clients2">0</span></h3>
+      <div id="d_devlist"><div class="sub">جارٍ التحميل…</div></div>
+    </div>
     <div class="hide"><span id="d_mem"></span><i id="d_membar"></i><span id="d_load"></span><span id="d_speed"></span><span id="d_speed_sub"></span><span id="d_clients"></span></div>
   </section>
 
@@ -91,6 +95,21 @@
       <div class="row" id="qs_pppoe_row" style="margin-top:6px;display:none">
         <div><label class="f">👤 مستخدم PPPoE</label><input id="qs_pu" class="t" placeholder="username"></div>
         <div><label class="f">🔒 كلمة مرور PPPoE</label><input id="qs_pp" class="t" placeholder="password"></div>
+      </div>
+      <!-- STATION uplink: scan nearby APs, pick one, enter its password -->
+      <div id="qs_sta_row" style="margin-top:6px;display:none">
+        <div class="row">
+          <div><label class="f">📻 الراديو المستخدم للاتصال</label><select id="qs_sta_radio" class="t"></select></div>
+          <div style="display:flex;align-items:flex-end"><button class="btn sec" id="qsScanBtn" type="button" style="width:100%">🔍 فحص الشبكات المجاورة</button></div>
+        </div>
+        <div id="qsScanList" style="margin-top:8px;max-height:34vh;overflow:auto"></div>
+        <div class="row" style="margin-top:6px">
+          <div><label class="f">📡 شبكة الاتصال العلوية (SSID)</label><input id="qs_sta_ssid" class="t" placeholder="اختر من القائمة أو اكتب"></div>
+          <div><label class="f">🔒 كلمة مرور الشبكة العلوية</label><input id="qs_sta_key" class="t" placeholder="••••••••"></div>
+        </div>
+        <input id="qs_sta_bssid" type="hidden">
+        <button class="btn" id="qsStaApply" type="button" style="margin-top:10px">⚡ اتصال كعميل (Station — Safe Apply)</button>
+        <div class="sub" style="margin-top:6px">يجعل الراديو عميلاً متصلاً بالشبكة المختارة ويجسّرها مع الشبكة المحلية (relayd) — الأجهزة تأخذ إنترنت الشبكة العلوية.</div>
       </div>
       <div class="row" style="margin-top:6px">
         <div><label class="f">📶 اسم الواي‑فاي (SSID)</label><input id="qs_ssid" class="t" placeholder="KT412"></div>
@@ -204,17 +223,21 @@
       <div class="note">اختر الوضع واكتب رقم الـVLAN فقط، ثم «إضافة». كل تغيير عبر <b>Safe Apply</b> (رجوع تلقائي خلال 80ث). VLAN 1 = الإدارة (محمي).</div>
       <div id="vlanList"><div class="sub">جارٍ التحميل…</div></div>
       <h4 style="margin:14px 0 6px">إضافة VLAN</h4>
-      <div class="row">
-        <div><label class="f">الوضع</label><select id="vlanMode" class="t">
-          <option value="vlan">VLAN (موسوم — معزول، إنترنت فقط)</option>
-          <option value="bridge">عادي / Bridge (مع الشبكة المحلية)</option></select></div>
-        <div><label class="f">رقم VLAN (2–4094)</label><input id="vlanVid" class="t" placeholder="مثال: 10"></div>
+      <div class="row" style="align-items:flex-end;gap:10px">
+        <div style="flex:1"><label class="f">رقم VLAN (2–4094)</label>
+          <input id="vlanVid" class="t" type="number" min="2" max="4094" placeholder="مثال: 10"></div>
+        <button class="btn" id="vlanAdd" style="white-space:nowrap">➕ إضافة VLAN</button>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt2);margin-top:8px"><input type="checkbox" id="vlanDhcp" checked> خادم DHCP لهذا الـVLAN</label>
-      <button class="btn" id="vlanAdd" style="margin-top:10px">➕ إضافة (Safe Apply)</button>
+      <div class="sub" style="margin-top:6px">اكتب الرقم فقط واضغط «إضافة» — يُنشأ VLAN معزول (إنترنت فقط) مع DHCP تلقائياً على 192.168.&lt;الرقم&gt;.1 · Safe Apply.</div>
 
       <details style="margin-top:14px">
-        <summary style="cursor:pointer;color:var(--accent3);font-weight:700;font-size:13px">⚙️ خيارات متقدمة (اختياري — توجيه · NAT · DNS · ربط منافذ/SSID · استيراد/تصدير)</summary>
+        <summary style="cursor:pointer;color:var(--accent3);font-weight:700;font-size:13px">⚙️ خيارات متقدمة (اختياري — الوضع · توجيه · NAT · DNS · ربط منافذ/SSID · استيراد/تصدير)</summary>
+        <div class="row" style="margin-top:8px">
+          <div><label class="f">الوضع</label><select id="vlanMode" class="t">
+            <option value="vlan">VLAN (موسوم — معزول، إنترنت فقط)</option>
+            <option value="bridge">عادي / Bridge (مع الشبكة المحلية)</option></select></div>
+          <div><label class="f" style="display:flex;align-items:center;gap:8px;margin-top:24px"><input type="checkbox" id="vlanDhcp" checked> خادم DHCP لهذا الـVLAN</label></div>
+        </div>
         <div style="margin-top:12px">
           <div class="row">
             <div><label class="f">IP (اختياري)</label><input id="vlanIp" class="t" placeholder="192.168.10.1"></div>

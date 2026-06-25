@@ -53,5 +53,7 @@ CONFIG_PACKAGE_wireguard-tools=y
 CONFIG_PACKAGE_kmod-wireguard=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_traceroute=y
+# relayd: pseudo-bridge for Station/WISP uplink (flat L2 wwan<->lan in the dashboard)
+CONFIG_PACKAGE_relayd=y
 CONFIG_KERNEL_IKCONFIG=y
 CONFIG_KERNEL_IKCONFIG_PROC=y

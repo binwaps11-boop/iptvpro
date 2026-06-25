@@ -299,12 +299,15 @@ if [ -n "$ACT" ]; then
 			# reset mode-specific options first
 			uci -q delete wireless.$ifsec.wds
 			uci -q delete wireless.$ifsec.mesh_id
+			uci -q delete wireless.$ifsec.mesh_fwding
 			case "$mode" in
 				mesh)
 					uci set wireless.$ifsec.mode='mesh'
 					uci set wireless.$ifsec.mesh_id="${ssid:-kt412-mesh}"
+					uci set wireless.$ifsec.mesh_fwding='1'
+					uci set wireless.$ifsec.network='lan'   # bridge the mesh into LAN so peers pass traffic
 					uci -q delete wireless.$ifsec.ssid
-					if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='sae'; uci set wireless.$ifsec.key="$key"
+					if [ -n "$key" ] && [ "${#key}" -ge 8 ]; then uci set wireless.$ifsec.encryption='sae'; uci set wireless.$ifsec.key="$key"
 					else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi;;
 				sta)
 					uci set wireless.$ifsec.mode='sta'
@@ -329,6 +332,37 @@ if [ -n "$ACT" ]; then
 			uci -q delete wireless.$radio.disabled
 			uci commit wireless; wifi reload >/dev/null 2>&1
 			printf '{"ok":true,"msg":"Wi-Fi updated (%s)"}\n' "$mode";;
+		station_uplink)   # WISP/repeater: chosen radio -> sta client locked to a scanned AP, bridged to LAN via relayd
+			radio="$(sani_word "$(getp radio)")"
+			ssid="$(getp ssid)"; key="$(getp key)"               # raw: keys may contain spaces/&/"
+			bssid="$(getp bssid | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"
+			[ -n "$radio" ] && [ -n "$ssid" ] || fail "radio_ssid_required"
+			ifsec="$(wifi_iface_for "$radio")"; [ -n "$ifsec" ] || fail "radio_not_found"
+			# 1) make the radio iface a station on its own 'wwan' network, locked to the picked BSSID
+			uci -q delete wireless.$ifsec.wds; uci -q delete wireless.$ifsec.mesh_id; uci -q delete wireless.$ifsec.mesh_fwding
+			uci set wireless.$ifsec.mode='sta'
+			uci set wireless.$ifsec.network='wwan'
+			uci set wireless.$ifsec.ssid="$ssid"
+			[ -n "$bssid" ] && uci set wireless.$ifsec.bssid="$bssid" || uci -q delete wireless.$ifsec.bssid
+			if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='psk2'; uci set wireless.$ifsec.key="$key"
+			else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi
+			uci -q delete wireless.$radio.disabled
+			# 2) wwan = DHCP client on the uplink AP
+			uci set network.wwan=interface; uci set network.wwan.proto='dhcp'
+			# 3) relayd pseudo-bridge wwan <-> lan (one flat L2 so LAN clients share the uplink)
+			uci -q delete network.wwanbridge
+			uci set network.wwanbridge=interface; uci set network.wwanbridge.proto='relay'
+			uci set network.wwanbridge.network='lan wwan'
+			uci set network.wwanbridge.ipaddr="$(uci -q get network.lan.ipaddr)"
+			# 4) firewall: put wwan in the wan zone so traffic is allowed out
+			zi=0; while uci -q get firewall.@zone[$zi] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@zone[$zi].name)" = "wan" ]; then
+					uci -q del_list firewall.@zone[$zi].network='wwan'
+					uci -q add_list firewall.@zone[$zi].network='wwan'; fi
+				zi=$((zi+1)); done
+			uci commit
+			wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Station uplink -> %s (relayd bridge to LAN)"}\n' "$(json_esc "$ssid")";;
 		wifi_toggle)
 			radio="$(sani_word "$(getp radio)")"; on="$(getp on | tr -cd '01')"
 			[ -n "$radio" ] || fail "no_radio"
@@ -818,11 +852,14 @@ case "$OP" in
 		mt="$(gv "$INF" '@.memory.total')"; mf="$(gv "$INF" '@.memory.free')"
 		mb="$(gv "$INF" '@.memory.buffered')"
 		ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ -n "$ncpu" ] || ncpu=1
+		# raw CPU jiffies for true-utilization diffing on the client (busybox-safe, no arrays)
+		set -- $(awk '/^cpu /{i=$5+$6; t=0; for(n=2;n<=NF;n++)t+=$n; print i, t; exit}' /proc/stat 2>/dev/null)
+		cpu_idle="${1:-0}"; cpu_total="${2:-0}"
 		ovl="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $2","$3}')"; [ -n "$ovl" ] || ovl="$(df -k / 2>/dev/null | awk 'NR==2{print $2","$3}')"
 		fs_total="${ovl%,*}"; fs_used="${ovl#*,}"
-		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s}\n' \
+		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s,"cpu_idle":%s,"cpu_total":%s}\n' \
 			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \
-			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}";;
+			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}" "${cpu_idle:-0}" "${cpu_total:-0}";;
 	wan)
 		S="$(ubus call network.interface.wan status 2>/dev/null)"
 		gv(){ printf '%s' "$S" | jsonfilter -e "$1" 2>/dev/null; }
@@ -993,23 +1030,52 @@ case "$OP" in
 	scan)
 		out=""; first=1
 		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
-			cells="$(iwinfo "$dev" scan 2>/dev/null | awk '
+			# scanning while the AP radio is busy often returns a thin list -> retry once
+			raw="$(iwinfo "$dev" scan 2>/dev/null)"
+			[ -z "$raw" ] && raw="$(iwinfo "$dev" scan 2>/dev/null)"
+			cells="$(printf '%s\n' "$raw" | awk '
 				BEGIN{RS="Cell ";n=0}
 				NR>1{
-					essid="";ch="";sig="";enc="";
+					essid="";ch="";sig="";enc="";bssid="";
 					m=split($0,L,"\n");
 					for(i=1;i<=m;i++){
-						if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
+						if(L[i] ~ /Address:/){t=L[i];sub(/.*Address: /,"",t);sub(/[^0-9A-Fa-f:].*/,"",t);bssid=t}
+						else if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
 						else if(L[i] ~ /Channel:/){t=L[i];sub(/.*Channel: /,"",t);sub(/[^0-9].*/,"",t);ch=t}
 						else if(L[i] ~ /Signal:/){t=L[i];sub(/.*Signal: /,"",t);sub(/ .*/,"",t);sig=t}
-						else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);sig=sig;enc=t}
+						else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);enc=t}
 					}
 					gsub(/[\\"]/,"",essid); gsub(/[\\"]/,"",enc); gsub(/\r/,"",enc);
-					if(ch!=""){ printf "%s{\"essid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,ch,sig,substr(enc,1,24) }
+					if(ch!=""){ printf "%s{\"essid\":\"%s\",\"bssid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,bssid,ch,sig,substr(enc,1,24) }
 				}')"
 			[ -n "$cells" ] && { [ "$first" -eq 1 ] || out="$out,"; first=0; out="$out$cells"; }
 		done
 		printf '{"ok":true,"nets":[%s]}\n' "$out";;
+	wscan)   # scan on ONE radio's iface (for the Station uplink picker); returns {ssid,bssid,ch,sig,enc}
+		radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || fail "no_radio"
+		dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+		if [ -z "$dev" ]; then
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+		fi
+		[ -n "$dev" ] || fail "no_iface"
+		raw="$(iwinfo "$dev" scan 2>/dev/null)"; [ -z "$raw" ] && raw="$(iwinfo "$dev" scan 2>/dev/null)"
+		cells="$(printf '%s\n' "$raw" | awk '
+			BEGIN{RS="Cell ";n=0}
+			NR>1{
+				essid="";bssid="";ch="";sig="";enc="";
+				m=split($0,L,"\n");
+				for(i=1;i<=m;i++){
+					if(L[i] ~ /Address:/){t=L[i];sub(/.*Address: /,"",t);sub(/[^0-9A-Fa-f:].*/,"",t);bssid=t}
+					else if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
+					else if(L[i] ~ /Channel:/){t=L[i];sub(/.*Channel: /,"",t);sub(/[^0-9].*/,"",t);ch=t}
+					else if(L[i] ~ /Signal:/){t=L[i];sub(/.*Signal: /,"",t);sub(/ .*/,"",t);sig=t}
+					else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);enc=t}
+				}
+				gsub(/[\\"]/,"",essid); gsub(/[\\"]/,"",enc); gsub(/\r/,"",enc);
+				if(ch!=""){ printf "%s{\"essid\":\"%s\",\"bssid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,bssid,ch,sig,substr(enc,1,24) }
+			}')"
+		printf '{"ok":true,"nets":[%s]}\n' "$cells";;
 	super_status)
 		dn=false; [ -f /tmp/kt412-sc-done ] && dn=true
 		rep="$(ls -t /tmp/kt412-super-check-*/report.txt 2>/dev/null | head -1)"
