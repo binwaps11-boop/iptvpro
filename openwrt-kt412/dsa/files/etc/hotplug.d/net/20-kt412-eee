@@ -1,0 +1,13 @@
+#!/bin/sh
+# Disable EEE (Energy-Efficient Ethernet) on the DSA switch ports. EEE
+# low-power idle negotiation on qca8k is a common cause of gigabit link
+# flap (Down -> 10M -> 1G) with some cables/peers. Read-only to the switch
+# otherwise. Best-effort: ethtool may not expose EEE on every DSA port.
+case "$INTERFACE$DEVICENAME$DEVICE" in
+  *lan1*|*lan2*|*lan3*|*lan4*|*wan*) : ;;
+  *) [ "$ACTION" = add ] || exit 0 ;;
+esac
+for p in lan1 lan2 lan3 lan4 wan; do
+  [ -e "/sys/class/net/$p" ] && ethtool --set-eee "$p" eee off >/dev/null 2>&1
+done
+exit 0

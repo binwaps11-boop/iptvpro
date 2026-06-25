@@ -100,6 +100,13 @@ jobs:
           grep -q '^CONFIG_ATH_USER_REGD=y' .config \
             && echo "ATH_USER_REGD ON (EEPROM/regdomain power cap bypassed)" \
             || { echo "FATAL: CONFIG_ATH_USER_REGD not enabled -> regdomain could cap 2.4G to 24"; exit 1; }
+          # Official LuCI must survive defconfig (full OpenWrt admin UI + real backend).
+          grep -q '^CONFIG_PACKAGE_luci=y' .config \
+            && echo "LUCI ON (official OpenWrt admin: all sections, real backend)" \
+            || { echo "FATAL: luci not selected -> official sections would be missing"; exit 1; }
+          for p in luci-mod-network luci-mod-status luci-mod-system luci-app-firewall; do
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config && echo "LUCI MODULE OK: $p" || echo "WARN: $p not explicitly selected (may come via luci dep)"
+          done
 
       - name: "Add files overlay (dashboard + variant power default)"
         run: |

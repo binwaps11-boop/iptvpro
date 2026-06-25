@@ -13,7 +13,10 @@ ifc_of(){ ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$1.in
 # "wedged" (its AP iface doesn't exist yet) and gets bounced (wifi down/up) -> the
 # signal appears late or flaps. Skip ALL radio recovery until the device has settled.
 UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$UP" in ''|*[!0-9]*) UP=999;; esac
-WIFI_GRACE=150
+# ath10k 5G firmware loads ~35s after boot. Grace must clear that (so we don't
+# bounce a still-loading radio) but be short enough to recover a 5G that failed
+# "hostapd: Failed to open phy0" reasonably fast on every reboot.
+WIFI_GRACE=90
 
 # ---------- 1) Per-radio WiFi health (conservative: only real wedges) ----------
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
@@ -52,25 +55,12 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 	fi
 done
 
-# ---------- 2) DSA LAN/WAN port health (NOT the eth0/eth1 conduit) ----------
-for p in lan1 lan2 lan3 lan4 wan; do
-	[ -e "/sys/class/net/$p" ] || continue
-	[ "$(cat /sys/class/net/$p/carrier 2>/dev/null)" = "1" ] || { rm -f "$ST/po_$p" "$ST/pf_$p"; continue; }
-	rx="$(cat /sys/class/net/$p/statistics/rx_bytes 2>/dev/null)"; tx="$(cat /sys/class/net/$p/statistics/tx_bytes 2>/dev/null)"
-	prev="$(cat "$ST/po_$p" 2>/dev/null)"; echo "$rx $tx" > "$ST/po_$p"
-	[ -n "$prev" ] || continue
-	set -- $prev
-	if [ "$rx" = "$1" ] && [ "$tx" = "$2" ]; then
-		n=$(( $(cat "$ST/pf_$p" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ST/pf_$p"
-		if [ "$n" -ge 3 ]; then           # ~6 min carrier-up but zero traffic both ways
-			log "port $p frozen -> bounce link"
-			ip link set "$p" down 2>/dev/null; sleep 1; ip link set "$p" up 2>/dev/null
-			rm -f "$ST/pf_$p"
-		fi
-	else
-		rm -f "$ST/pf_$p"
-	fi
-done
+# ---------- 2) DSA port health: DISABLED (was bouncing idle-but-healthy ports) ----------
+# Old logic bounced any carrier-up port with no traffic for ~6 min. But an idle
+# connected device (a PC asleep, a TV on standby) legitimately sends zero bytes,
+# so this produced false "port frozen -> bounce" events and link flap on lan3.
+# Zero traffic is NOT a fault. Port recovery is left to the qca8k driver + the
+# kernel hardware watchdog; we never bounce a DSA port on a traffic heuristic.
 
 # ---------- 3) conntrack near full -> drop UDP entries (safe) ----------
 cmax="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 16384)"
