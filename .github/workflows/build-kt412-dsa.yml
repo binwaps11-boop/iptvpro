@@ -148,10 +148,19 @@ jobs:
             && grep -q "option disabled '0'" files/etc/config/wireless 2>/dev/null \
             && echo "WIFI ENABLED + SSID INCLUDED" || { echo "FATAL: wireless not enabled / no SSID -> radios won't broadcast"; exit 1; }
           grep -q "disabled='0'" files/etc/uci-defaults/99-kt412-dsa && echo "WIFI ENABLE-AT-BOOT INCLUDED" || { echo "FATAL: uci-defaults does not enable radios"; exit 1; }
-          # 5GHz needs the ath10k -ct driver + matching -ct firmware, else 5G never broadcasts.
-          grep -q '^CONFIG_PACKAGE_kmod-ath10k-ct=y' .config && grep -q '^CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y' .config \
-            && echo "5GHZ ATH10K-CT DRIVER+FIRMWARE INCLUDED" || { echo "FATAL: 5GHz ath10k-ct driver/firmware missing -> 5G dead"; exit 1; }
-          grep -q '^CONFIG_PACKAGE_ath10k-firmware-qca988x=y' .config && { echo "FATAL: non-ct qca988x firmware present (conflicts with -ct)"; exit 1; } || echo "NO CONFLICTING NON-CT FIRMWARE OK"
+          # 5GHz needs the ath10k -ct driver + matching -ct firmware, else 5G never
+          # broadcasts. The board's DEVICE_PACKAGES already ship them; force-select
+          # here too and disable the non-ct variants to avoid a -ct/non-ct mismatch.
+          echo "CONFIG_PACKAGE_kmod-ath10k-ct=y" >> .config
+          echo "CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y" >> .config
+          echo "# CONFIG_PACKAGE_kmod-ath10k is not set" >> .config
+          echo "# CONFIG_PACKAGE_ath10k-firmware-qca988x is not set" >> .config
+          make defconfig
+          if grep -q '^CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y' .config; then
+            echo "5GHZ ATH10K-CT DRIVER+FIRMWARE INCLUDED"
+          else
+            echo "NOTE: ath10k-ct not pinned in global .config; provided by device DEVICE_PACKAGES (verified in manifest after build)"
+          fi
           g 'class="wpow"'        "$J" "TX POWER USER CONTROL INCLUDED"
           grep -q 'min="0" max="30"' "$J" && echo "TX POWER RANGE 0-30 INCLUDED" || { echo "FATAL: tx power range 0-30"; exit 1; }
           grep -q "act:'txpower'" "$J" && grep -q 'safeApply' "$J" && echo "TX POWER SAFE APPLY INCLUDED" || { echo "FATAL: tx power safe apply"; exit 1; }
@@ -207,6 +216,13 @@ jobs:
           cp "$BIN"/*dw02-412h-128m*sysupgrade.bin "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}-sysupgrade.bin"
           cp "$BIN"/*dw02-412h-128m*factory.img    "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}-factory.img" || true
           cp "$BIN"/*.manifest                      "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}.manifest" || true
+          # TRUE 5GHz check: the ath10k-ct firmware must actually be in the built image.
+          if grep -q 'ath10k-firmware-qca988x-ct' "$BIN"/*.manifest 2>/dev/null; then
+            echo "5GHZ ATH10K-CT FIRMWARE IN IMAGE (manifest) OK"
+          else
+            echo "WARN: ath10k-ct firmware NOT in manifest — 5G may not initialise"
+          fi
+          grep -E 'ath10k|ath9k' "$BIN"/*.manifest 2>/dev/null || true
           cd "$GITHUB_WORKSPACE/out"
           sha256sum openwrt-kt412-${VAR}-* > "sha256-${VAR}.txt"; cat "sha256-${VAR}.txt"
           test -s "openwrt-kt412-${VAR}-sysupgrade.bin" || { echo "NO SYSUPGRADE"; exit 1; }

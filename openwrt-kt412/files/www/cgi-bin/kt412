@@ -1160,14 +1160,18 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 		[ -f /tmp/dhcp.leases ] && awk '{print tolower($2)"\t"$3"\t"$4}' /tmp/dhcp.leases >"$L" 2>/dev/null
 		# ARP/neighbour table (every L2 device on the bridge): mac<TAB>dev<TAB>ip
 		ip neigh show 2>/dev/null | awk '/lladdr/{print tolower($5)"\t"$3"\t"$1}' >"$N" 2>/dev/null
-		# WiFi stations:  mac<TAB>signal<TAB>rxrate<TAB>txrate<TAB>band
+		# WiFi stations:  mac<TAB>sig<TAB>rxrate<TAB>txrate<TAB>band<TAB>conn(sec)<TAB>bytes(rx+tx)
 		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
 			bnd=2g; iwinfo "$i" info 2>/dev/null | grep -qi '5\.[0-9]* GHz' && bnd=5g
-			iwinfo "$i" assoclist 2>/dev/null | awk -v b="$bnd" '
-				function emit(){ if(mac!="") print tolower(mac)"\t"sig"\t"rx"\t"tx"\t"b; mac="";rx="";tx="" }
-				/^[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f]/ { emit(); mac=$1; sig=$2 }
-				/RX:/ { for(j=1;j<=NF;j++) if($j=="RX:") rx=$(j+1) }
-				/TX:/ { for(j=1;j<=NF;j++) if($j=="TX:") tx=$(j+1) }
+			iw dev "$i" station dump 2>/dev/null | awk -v b="$bnd" '
+				function emit(){ if(mac!="") print mac"\t"sig"\t"rxr"\t"txr"\t"b"\t"conn"\t"(rxb+txb); mac="";sig="";rxr="";txr="";conn="";rxb=0;txb=0 }
+				/^Station /{ emit(); mac=tolower($2) }
+				/signal:/{ sig=$2 }
+				/rx bytes:/{ rxb=$3 }
+				/tx bytes:/{ txb=$3 }
+				/rx bitrate:/{ rxr=$3 }
+				/tx bitrate:/{ txr=$3 }
+				/connected time:/{ conn=$3 }
 				END{ emit() }' >>"$S" 2>/dev/null
 		done
 		macs="$( { cut -f1 "$L"; cut -f1 "$S"; cut -f1 "$N"; } 2>/dev/null | sort -u | grep -E '^[0-9a-f:]{17}$' )"
@@ -1178,14 +1182,17 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 			dev="$(awk -F'\t' -v m="$m" '$1==m{print $2;exit}' "$N")"
 			sig="$(awk -F'\t' -v m="$m" '$1==m{print $2;exit}' "$S")"; rxr="$(awk -F'\t' -v m="$m" '$1==m{print $3;exit}' "$S")"
 			txr="$(awk -F'\t' -v m="$m" '$1==m{print $4;exit}' "$S")"; band="$(awk -F'\t' -v m="$m" '$1==m{print $5;exit}' "$S")"
+			conn="$(awk -F'\t' -v m="$m" '$1==m{print $6;exit}' "$S")"; byt="$(awk -F'\t' -v m="$m" '$1==m{print $7;exit}' "$S")"
 			kind="lan"; [ -n "$band" ] && kind="wifi$band"
 			case "$nm" in ''|'*') nm="";; esac
 			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s","kind":"%s","signal":"%s","rxrate":"%s","txrate":"%s","dev":"%s"}' \
-				"$m" "$(json_esc "$ip")" "$(json_esc "$nm")" "$kind" "$(json_esc "$sig")" "$(json_esc "$rxr")" "$(json_esc "$txr")" "$(json_esc "$dev")")"
+			out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s","kind":"%s","signal":"%s","rxrate":"%s","txrate":"%s","dev":"%s","conn":"%s","bytes":"%s"}' \
+				"$m" "$(json_esc "$ip")" "$(json_esc "$nm")" "$kind" "$(json_esc "$sig")" "$(json_esc "$rxr")" "$(json_esc "$txr")" "$(json_esc "$dev")" "$(json_esc "${conn:-}")" "${byt:-0}")"
 		done
+		b24="$(awk -F'\t' '$5=="2g"{s+=$7}END{printf "%.0f", s+0}' "$S" 2>/dev/null)"
+		b5="$(awk -F'\t' '$5=="5g"{s+=$7}END{printf "%.0f", s+0}' "$S" 2>/dev/null)"
 		rm -f "$L" "$S" "$N"
-		printf '{"ok":true,"devices":[%s]}\n' "$out";;
+		printf '{"ok":true,"band24":%s,"band5":%s,"devices":[%s]}\n' "${b24:-0}" "${b5:-0}" "$out";;
 
 	*)
 		fail "unknown_op";;

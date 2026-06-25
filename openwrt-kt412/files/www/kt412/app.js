@@ -715,8 +715,13 @@ function sigInfo(sig){
 async function loadDevices(){
   const r=await call({op:'devices'});
   const ds=(r&&r.ok)?(r.devices||[]):[];
-  if(!ds.length){ $('#devicesBox').innerHTML='<div class="sub">لا أجهزة على الجسر حالياً</div>'; return; }
-  $('#devicesBox').innerHTML=ds.map(x=>{
+  const fmtT=s=>{ s=+s||0; if(!s)return''; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h?(h+'س '+m+'د'):(m+'د'); };
+  let head='';
+  if(r&&r.ok) head=`<div class="ctrlrow" style="margin-bottom:10px"><div class="ci">📊</div>`+
+    `<div class="cm"><b>استهلاك الباند (هذه الجلسة)</b><div class="sub">📶 2.4G: ${human(+r.band24||0)} &nbsp;·&nbsp; 📡 5G: ${human(+r.band5||0)}</div></div>`+
+    `<div class="cr"><span class="badge ok">${ds.length} جهاز</span></div></div>`;
+  if(!ds.length){ $('#devicesBox').innerHTML=head+'<div class="sub">لا أجهزة على الجسر حالياً</div>'; return; }
+  $('#devicesBox').innerHTML=head+ds.map(x=>{
     const wifi=String(x.kind).indexOf('wifi')>=0; const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'');
     const ic=wifi?'<div class="dic w">📶</div>':'<div class="dic l">🔌</div>';
     let right='';
@@ -726,8 +731,10 @@ async function loadDevices(){
         `<span class="sub">${esc(x.signal)}dBm</span>`; }
     else right='<span class="badge ok">سلكي</span>';
     const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">↓${esc(x.rxrate||'?')} ↑${esc(x.txrate||'?')} Mb</span>`:'';
+    const usage=(+x.bytes)?`<span class="sub">⬇⬆ ${human(+x.bytes)}</span>`:'';
+    const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
     return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
-      `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''}</div></div>`+
+      `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
       `<div class="dright">${rate}${right}<button class="btn-ghost devblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:3px 8px">حظر</button></div></div>`;
   }).join('');
   $$('#devicesBox .devblk').forEach(b=>b.onclick=async()=>{ if(!confirm('حظر '+b.dataset.mac+'؟'))return;
