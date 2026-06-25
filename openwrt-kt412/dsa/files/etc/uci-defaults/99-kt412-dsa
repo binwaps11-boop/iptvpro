@@ -21,21 +21,41 @@ uci -q commit dhcp
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/* 2>/dev/null
 
-# --- request max Tx power (30) by default on every radio (DSA wireless is
-#     auto-generated on first boot). Real 2.4GHz output stays hardware-capped. ---
+# --- WIRELESS: make sure BOTH radios are ENABLED and broadcasting an SSID. ---
+# A static /etc/config/wireless ships in the image (enabled + SSID). If for any
+# reason it is missing, generate one from detected hardware first.
+uci -q show wireless 2>/dev/null | grep -q '=wifi-device' || { wifi config >/dev/null 2>&1; }
+i=0
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 	b="$(uci -q get wireless.$r.band)"
-	# Safe default: 5G = real 30, 2.4G = clean calibrated 24 (raise to Max/Extreme from UI)
+	uci -q set wireless.$r.disabled='0'          # ENABLE the radio (key fix: was off -> no broadcast)
+	uci -q set wireless.$r.country='US'
+	uci -q set wireless.$r.cell_density='0'
+	# Safe default: 5G = real 30, 2.4G = clean calibrated 24 (raise to 30/Extreme from UI)
 	if [ "$b" = "5g" ]; then
 		uci -q set wireless.$r.txpower='30'; uci -q set wireless.$r.htmode='VHT80'
+		[ -n "$(uci -q get wireless.$r.channel)" ] || uci -q set wireless.$r.channel='149'
+		ss='KT412-5G'
 	else
 		uci -q set wireless.$r.txpower='24'
-		# HT40 (+noscan) on 2.4G = max link rate (~150-300 vs 72-144 on HT20)
 		uci -q set wireless.$r.htmode='HT40'; uci -q set wireless.$r.noscan='1'
+		[ -n "$(uci -q get wireless.$r.channel)" ] || uci -q set wireless.$r.channel='11'
+		ss='KT412'
 	fi
-	uci -q set wireless.$r.country='US'
+	# ensure an AP interface (SSID + WPA2) is bound to this radio
+	ifc="$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.device=['\"]\?$r['\"]\?\$/\1/p" | head -1)"
+	[ -n "$ifc" ] || { ifc="ktwifi$i"; uci -q set wireless.$ifc='wifi-iface'; }
+	uci -q set wireless.$ifc.device="$r"
+	uci -q set wireless.$ifc.network='lan'
+	uci -q set wireless.$ifc.mode='ap'
+	[ -n "$(uci -q get wireless.$ifc.ssid)" ] || uci -q set wireless.$ifc.ssid="$ss"
+	uci -q set wireless.$ifc.encryption='psk2'
+	[ -n "$(uci -q get wireless.$ifc.key)" ] || uci -q set wireless.$ifc.key='ChangeMe12345'
+	i=$((i+1))
 done
 uci -q commit wireless
+# bring the radios up now (first boot) so SSIDs appear without waiting for a reload
+wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1
 
 # --- NO web terminal (ttyd removed): the custom dashboard is the only UI ---
 /etc/init.d/ttyd disable 2>/dev/null; /etc/init.d/ttyd stop 2>/dev/null
