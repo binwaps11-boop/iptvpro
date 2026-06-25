@@ -3,8 +3,10 @@
 # device boots (no first-boot reload delay; uci-defaults no longer rewrites this).
 # 2.4G = ath9k (radio0) HT20 (20 MHz, stable / less interference, many devices).
 # 5G   = ath10k-ct (radio1) VHT80. Non-DFS ch 11 & 149. Country US.
-# Roaming (802.11k/v/r) + WMM + keep-distant-clients baked in here.
-# Extreme variant: the build bumps radio0 txpower 24 -> 30. CHANGE THE KEY.
+# Roaming (802.11k/v) + WMM + keep-distant-clients baked in here.
+# OPEN network (no password) on both bands by request. 802.11r (FT) removed
+# because Fast Transition needs a PSK/key; 11k + 11v roaming stay enabled.
+# Extreme variant: the build bumps radio0 txpower 24 -> 30.
 #
 config wifi-device 'radio0'
 	option type 'mac80211'
@@ -23,17 +25,12 @@ config wifi-iface 'default_radio0'
 	option network 'lan'
 	option mode 'ap'
 	option ssid 'KT412'
-	option encryption 'psk2'
-	option key 'ChangeMe12345'
+	option encryption 'none'
 	option wmm '1'
 	option disassoc_low_ack '0'
 	option ieee80211k '1'
 	option ieee80211v '1'
 	option bss_transition '1'
-	option ieee80211r '1'
-	option ft_psk_generate_local '1'
-	option ft_over_ds '0'
-	option mobility_domain '4153'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
@@ -52,14 +49,9 @@ config wifi-iface 'default_radio1'
 	option network 'lan'
 	option mode 'ap'
 	option ssid 'KT412-5G'
-	option encryption 'psk2'
-	option key 'ChangeMe12345'
+	option encryption 'none'
 	option wmm '1'
 	option disassoc_low_ack '0'
 	option ieee80211k '1'
 	option ieee80211v '1'
 	option bss_transition '1'
-	option ieee80211r '1'
-	option ft_psk_generate_local '1'
-	option ft_over_ds '0'
-	option mobility_domain '4153'

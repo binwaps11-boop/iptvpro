@@ -3,7 +3,7 @@
 # (br-lan over lan1-4 + wan), so we ONLY set the management IP here.
 # LuCI is removed AND no web terminal (ttyd): the custom Arabic dashboard is
 # the ONLY web UI, covering OpenWrt/LuCI core functions with a real backend.
-uci -q set network.lan.ipaddr='192.168.100.1'
+uci -q set network.lan.ipaddr='192.168.1.1'
 uci -q set network.lan.netmask='255.255.255.0'
 uci -q set system.@system[0].hostname='KT412-DSA'
 uci -q commit
@@ -11,7 +11,7 @@ uci -q commit
 # --- DHCP SERVER OFF BY DEFAULT ---------------------------------------------
 # The device ships with its DHCP server DISABLED (ignore=1) so it never hands
 # out IPs and can't conflict / loop with an upstream router's DHCP. Mgmt IP
-# (192.168.100.1) stays reachable by setting a static IP on your PC, or enable
+# (192.168.1.1) stays reachable by setting a static IP on your PC, or enable
 # DHCP from the dashboard: الشبكة > LAN > خادم DHCP (زر اختياري).
 uci -q set dhcp.lan.ignore='1'
 uci -q set dhcp.lan.dhcpv6='disabled'
