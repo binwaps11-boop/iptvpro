@@ -460,45 +460,64 @@ async function qsStationApply(){
   toast(r&&r.ok?(r.msg||'طُبّق — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
 }
 async function loadPower(){
+  const box=$('#powerBox'); if(box&&!box.innerHTML.trim())box.innerHTML='<div class="sub">قراءة حيّة من النظام…</div>';
   const r=await call({op:'power'});
-  if(!(r&&r.ok)){ $('#powerBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
+  if(!(r&&r.ok)){ box.innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
   const pv=x=>{ x=(x==null?'':String(x)); return (x===''||x==='?')?'—':x; };
-  $('#powerBox').innerHTML=(r.radios||[]).map(rd=>{
-    const is5=rd.band==='5g'; const req=Math.max(0,Math.min(30,+rd.requested||0));
-    const nd=pv(rd.netdev), ap=pv(rd.applied);
-    const match = (ap!=='—' && String(ap)===String(req)); // applied == requested ?
-    return `<div class="card" data-radio="${esc(rd.radio)}" data-req="${req}" style="margin-top:14px;background:rgba(255,255,255,.04)">
-      <h3>${is5?'📡 5GHz · radio1':'📶 2.4GHz · radio0'} <span class="badge ok">${esc(rd.radio)}</span></h3>
-      <div class="kv"><span class="k">Requested Power (uci)</span><span class="v" data-f="req">${esc(rd.requested)} dBm</span></div>
-      <div class="kv"><span class="k">Applied / Driver (iwinfo)</span><span class="v"><span class="badge ${match?'ok':'warn'}" data-f="ap">${pv(rd.applied)} dBm</span></span></div>
-      <div class="kv"><span class="k">PHY Power (iw phy)</span><span class="v"><span class="badge ${pv(rd.phy_limit)==='30'?'ok':'warn'}" data-f="phy">${pv(rd.phy_limit)} dBm</span></span></div>
-      <div class="kv"><span class="k">DebugFS user_power</span><span class="v" data-f="up">${pv(rd.user_power)}</span></div>
-      <div class="kv"><span class="k">DebugFS netdev txpower</span><span class="v"><span class="badge ${nd==='30'||(nd!=='—'&&match)?'ok':'warn'}" data-f="nd">${nd}</span></span></div>
-      <label class="f">TX Power: <b class="wpowval">${req}</b> dBm <span class="sub">(0 – 30 · الأقصى 30)</span></label>
+  box.innerHTML=(r.radios||[]).map(rd=>{
+    const is5=rd.band==='5g'; const title=is5?'📡 5GHz':'📶 2.4GHz';
+    const phy=(rd.phy!=null&&rd.phy!=='')?(' · phy'+esc(rd.phy)):'';
+    const sub=`${esc(rd.chip||'')}${phy}${rd.iface?(' · '+esc(rd.iface)):''} · ${esc(rd.radio)}`;
+    const req=Math.max(0,Math.min(30,+rd.requested||0));
+    // radio not up -> show the REAL reason, not "-"
+    if(rd.status&&rd.status!=='up'){
+      return `<div class="card pwcard" data-radio="${esc(rd.radio)}" style="margin-top:14px">
+        <h3>${title} <span class="badge ${rd.status==='disabled'?'warn':'bad'}">${rd.status==='disabled'?'معطّل':'غير متصل'}</span></h3>
+        <div class="sub">${sub}</div>
+        <div class="kv"><span class="k">الطلب (uci)</span><span class="v">${esc(rd.requested)} dBm</span></div>
+        <div class="kv"><span class="k">السبب</span><span class="v" style="color:var(--bad)">${esc(rd.reason||'غير جاهز')}</span></div>
+        <div class="sub" style="margin-top:6px">${is5?'يتعافى 5GHz تلقائياً خلال ~90ث بعد الإقلاع. اضغط «تحقّق الآن».':'فعّل الراديو من الإعدادات السريعة.'}</div>
+        <button class="btn sm sec pwverify" style="margin-top:8px">تحقّق الآن</button>
+      </div>`;
+    }
+    const ap=pv(rd.applied), lim=pv(rd.phy_limit), nd=pv(rd.netdev), upp=pv(rd.user_power);
+    const aggN=+rd.chains||2;
+    const aggNote=(ap!=='—'&&lim!=='—'&&(+ap)>(+lim))
+      ? `<div class="sub pwnote">ℹ️ iwinfo=${esc(ap)} = مجموع ${aggN} سلاسل إرسال (≈ +${aggN>=3?'5':'3'}dB). القيمة لكل سلسلة = ${esc(lim)} dBm وهي المطابِقة لـ iw phy و debugfs netdev. ليست خطأ.</div>` : '';
+    return `<div class="card pwcard" data-radio="${esc(rd.radio)}" data-req="${req}" style="margin-top:14px">
+      <h3>${title} <span class="badge ok">متصل</span></h3>
+      <div class="sub">${sub}</div>
+      <div class="kv"><span class="k">الطلب (uci)</span><span class="v">${esc(rd.requested)} dBm</span></div>
+      <div class="kv"><span class="k">المُطبَّق · iwinfo</span><span class="v"><span class="badge ${(+ap)>=(+lim)?'ok':'warn'}">${ap} dBm</span></span></div>
+      ${aggNote}
+      <div class="kv"><span class="k">PHY · iw phy</span><span class="v"><span class="badge ${lim==='30'?'ok':'warn'}">${lim} dBm</span></span></div>
+      <div class="kv"><span class="k">DebugFS user_power</span><span class="v">${upp}</span></div>
+      <div class="kv"><span class="k">DebugFS netdev txpower</span><span class="v"><span class="badge ${nd==='30'?'ok':'warn'}">${nd} dBm</span></span></div>
+      <label class="f">TX Power: <b class="wpowval">${req}</b> dBm <span class="sub">(0 – 30)</span></label>
       <input type="range" class="wpow" min="0" max="30" step="1" value="${req}" style="width:100%">
       <div class="row" style="margin-top:8px">
         <button class="btn sm pwapply">تطبيق آمن (Safe Apply)</button>
         <button class="btn sm sec pwverify">تحقّق الآن</button>
       </div>
-      ${is5?'':'<div class="sub" style="margin-top:6px">⚠ على 2.4GHz: الرقم البرمجي يصل 30، لكن RF النظيف الحقيقي ≈25–26 (غير مُقاس). راجع POWER-REPORT.</div>'}
+      ${is5?'':'<div class="sub pwnote">⚠ 2.4GHz: الرقم البرمجي 30، لكن RF النظيف الحقيقي ≈25–26 dBm (غير مُقاس). راجع RF_CHAIN_ANALYSIS.txt</div>'}
     </div>`;
   }).join('')||'<div class="sub">لا راديوهات</div>';
-  $$('#powerBox .card').forEach(card=>{
+  $$('#powerBox .pwcard').forEach(card=>{
     const sl=card.querySelector('.wpow'), val=card.querySelector('.wpowval');
     if(sl&&val) sl.oninput=()=>{ val.textContent=sl.value; };
     const apply=card.querySelector('.pwapply');
     if(apply) apply.onclick=async()=>{
       const dbm=sl?sl.value:'30';
-      if(+dbm>=27 && card.dataset.radio.indexOf('1')<0){ if(!confirm('على 2.4GHz: '+dbm+' dBm = رقم برمجي قد يقصّ الـRF (غير نظيف مخبريًا). متابعة؟'))return; }
+      const is24=card.querySelector('h3') && card.querySelector('h3').textContent.indexOf('2.4')>=0;
+      if(+dbm>=27 && is24){ if(!confirm('على 2.4GHz: '+dbm+' dBm = رقم برمجي قد يقصّ الـRF (غير نظيف مخبريًا). متابعة؟'))return; }
       apply.innerHTML='<span class="spin"></span>';
-      // Safe Apply: arm rollback + countdown; auto-revert in 80s unless confirmed
       const r=await safeApply(()=>call({act:'txpower',radio:card.dataset.radio,dbm},true));
       if(r&&r.ok) toast(`طُبّق ${r.requested}dBm — المُطبَّق (iwinfo) ${r.actual}dBm. أكّد خلال 80ث وإلا رجوع تلقائي.`,true);
       else toast('فشل: '+((r&&r.error)||''),false);
       setTimeout(loadPower,2000);
     };
     const ver=card.querySelector('.pwverify');
-    if(ver) ver.onclick=()=>loadPower();
+    if(ver) ver.onclick=()=>{ ver.innerHTML='<span class="spin"></span> فحص حيّ…'; loadPower(); };
   });
 }
 

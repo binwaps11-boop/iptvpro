@@ -330,3 +330,39 @@ input[type=range]::-moz-range-thumb{width:18px;height:18px;border:0;border-radiu
 .actions .btn,.actions .btn.sm{margin-top:0}
 .actions .grow{flex:1}
 .actions .hint{font-size:11.5px;color:var(--muted)}
+
+/* ============================================================
+   Power card readability + mobile responsiveness (RTL-safe)
+   ============================================================ */
+.pwcard .kv{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:7px 0;border-bottom:1px solid var(--stroke,rgba(255,255,255,.07))}
+.pwcard .kv .k{color:var(--txt2);font-size:13px;flex:1;min-width:120px}
+.pwcard .kv .v{font-weight:700;font-size:13px;text-align:end;white-space:normal;word-break:break-word}
+.pwcard h3{font-size:15px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pwcard .sub{font-size:12px;line-height:1.6;word-break:break-word}
+.pwnote{margin-top:6px;padding:8px 10px;border-radius:10px;background:rgba(176,124,255,.10);
+  border:1px solid var(--stroke,rgba(255,255,255,.08));font-size:12px;line-height:1.7}
+
+/* --- Mobile (phones): larger text, no clipping, stacked, RTL correct --- */
+@media (max-width:560px){
+  html{font-size:16px}
+  .card,.pwcard,.section{padding:14px;border-radius:16px}
+  .card h3,.pwcard h3,.section .sec-head h3{font-size:15px}
+  .kv{flex-wrap:wrap;gap:4px 10px}
+  .kv .k{min-width:0;flex:1 1 55%}
+  .kv .v{flex:0 0 auto;text-align:end;white-space:normal;word-break:break-word}
+  .grid.cols-2,.grid.cols-4,.grid.cols-3{grid-template-columns:1fr !important}
+  .row{flex-wrap:wrap;gap:8px}
+  .row>div{flex:1 1 100%;min-width:0}
+  input.t,select.t,textarea.t{font-size:16px;padding:11px 12px}   /* 16px stops iOS zoom */
+  .btn,.btn.sm{font-size:14px;padding:10px 14px}
+  .dev{flex-wrap:wrap;gap:6px}
+  .dmeta{font-size:11.5px;word-break:break-word}
+  .side{width:84vw}
+  .t .tn,.tile .tn{font-size:20px}
+  /* never clip text on the right in RTL */
+  .k,.v,.sub,.dname,.dmeta,.tl{overflow-wrap:anywhere}
+}
+@media (max-width:380px){
+  .grid.cols-4{grid-template-columns:1fr 1fr !important}
+}

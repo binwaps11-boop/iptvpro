@@ -1013,18 +1013,28 @@ case "$OP" in
 		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 			idx="$(printf '%s' "$r" | tr -cd '0-9')"
 			band="$(uci -q get wireless.$r.band)"; req="$(uci -q get wireless.$r.txpower)"
-			# resolve the LIVE ap iface + its REAL phy via ubus (phy index != radio index on this board)
+			dis="$(uci -q get wireless.$r.disabled)"
+			# resolve the LIVE ap iface + its REAL phy from the system (phy index != radio index)
 			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
 			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
-			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
-			ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
-			lim="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
-			up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/ath10k/*user* /sys/kernel/debug/ieee80211/phy$phyn/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
-			[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/user_power 2>/dev/null | tr -cd '0-9')"
-			nd="$(cat /sys/kernel/debug/ieee80211/phy$phyn/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
+			status="up"; reason=""; phyn=""; ap=""; lim=""; up=""; nd=""; chains=""
+			if [ "$dis" = "1" ]; then status="disabled"; reason="الراديو معطّل (disabled=1)"
+			elif [ -z "$dev" ] || [ ! -e "/sys/class/net/$dev" ]; then status="down"; reason="الواجهة غير جاهزة: phy لم يفتح / hostapd فشل / firmware قيد التحميل"
+			else
+				phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+				ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+				lim="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
+				up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/ath10k/*user* /sys/kernel/debug/ieee80211/phy$phyn/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
+				[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/user_power 2>/dev/null | tr -cd '0-9')"
+				nd="$(cat /sys/kernel/debug/ieee80211/phy$phyn/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
+				# active TX chain mask (0x3 = 2 chains) for the iwinfo-aggregate explanation
+				m="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*Configured Antennas: TX \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)"
+				case "$m" in 0x7|0x3f) chains=3;; 0x3) chains=2;; 0x1|0x2|0x4) chains=1;; *) chains="";; esac
+			fi
+			chip="QCA9880"; [ "$band" = "2g" ] && chip="QCA9550"
 			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"radio":"%s","band":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s","netdev":"%s"}' \
-				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")" "$(json_esc "${nd:-?}")")"
+			out="$out$(printf '{"radio":"%s","band":"%s","phy":"%s","iface":"%s","chip":"%s","chains":"%s","status":"%s","reason":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s","netdev":"%s"}' \
+				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$phyn")" "$(json_esc "$dev")" "$chip" "$(json_esc "$chains")" "$status" "$(json_esc "$reason")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")" "$(json_esc "${nd:-?}")")"
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
 	scan)
