@@ -8,9 +8,18 @@ ST=/tmp/smartap-wd; mkdir -p "$ST"
 log(){ logger -t smartap-wd "$1"; }
 ifc_of(){ ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$1.interfaces[0].ifname" 2>/dev/null; }
 
+# Boot grace: WiFi bring-up (especially the ath10k 5G firmware load) takes ~60-90s
+# after boot. If the watchdog acts before that, a still-initialising radio looks
+# "wedged" (its AP iface doesn't exist yet) and gets bounced (wifi down/up) -> the
+# signal appears late or flaps. Skip ALL radio recovery until the device has settled.
+UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$UP" in ''|*[!0-9]*) UP=999;; esac
+WIFI_GRACE=150
+
 # ---------- 1) Per-radio WiFi health (conservative: only real wedges) ----------
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 	[ "$(uci -q get wireless.$r.disabled)" = "1" ] && { rm -f "$ST/fail_$r"; continue; }
+	# don't touch radios while they're still coming up after boot
+	[ "$UP" -lt "$WIFI_GRACE" ] && { rm -f "$ST/fail_$r"; continue; }
 	ifc="$(ifc_of "$r")"
 	bad=0
 	# wedged = the AP iface that SHOULD exist is gone, or its PHY no longer answers
