@@ -1,113 +1,120 @@
 KT412 (Dongwon DW02-412H) — lift the FINAL applied/advertised 2.4G power cap to 30.0 dBm.
 
-WHY THE EXISTING 990 PATCH IS NOT ENOUGH
-----------------------------------------
-990-kt412-ath9k-2g-30dbm.patch only rewrites the ath9k EEPROM *per-rate target*
-table (targetPowerValT2[], minCtlPower). That table is the driver's own internal
-target — it is NOT the value mac80211 advertises and NOT the value the HW is
-finally told to use. The number you read in:
+WHY 990 ALONE IS NOT ENOUGH
+---------------------------
+990 only rewrites ath9k's internal EEPROM per-rate target table
+(targetPowerValT2[], minCtlPower). That is NOT what mac80211 advertises and
+NOT the value finally programmed. The number read by:
 
-    debugfs .../netdev:phy1-ap0/txpower      (== local->hw.conf.power_level)
-    iwinfo phy1-ap0  Tx-Power
-    iw phy phy1 info  (per-channel dBm)
+    debugfs .../netdev:phy1-ap0/txpower   (== sdata->vif.bss_conf.txpower)
+    iwinfo phy1-ap0 Tx-Power              (== local->hw.conf.power_level)
+    iw phy phy1 info per-channel dBm      (== chan->max_power / max_reg_power)
 
-all come from ONE place: mac80211 hw.conf.power_level, which is seeded by
-ieee80211_chandef_max_power() == chan->max_power, and chan->max_power is set by
-cfg80211 from the active regdomain rule's max_eirp. That is your 24 (5G: 23).
+all derive from cfg80211's chan->max_power, which cfg80211 sets from the active
+regdomain rule's max_eirp (24 on 2.4G). __ieee80211_recalc_txpower() does
+  power = ieee80211_chandef_max_power(&def);   (returns chan->max_power)
+  power = min(power, user_power_level);          (user 30 LOSES vs 24)
+  vif.bss_conf.txpower = power;
+and ieee80211_hw_conf_chan() seeds hw.conf.power_level the same way. So the cap
+is chan->max_power in cfg80211, and user_power_level=30 can never win.
 
-EXACT CLAMP (verified against mainline source):
-  net/wireless/reg.c : handle_channel_single_rule()
-      chan->max_reg_power = (int) MBM_TO_DBM(power_rule->max_eirp);   <-- = 24
-      chan->max_power     = min(chan->orig_mpwr, chan->max_reg_power);<-- final 24
-  include/net/cfg80211.h : ieee80211_chandef_max_power() returns chan->max_power
-  net/mac80211/main.c : ieee80211_calc_hw_conf_chan()
-      power = ieee80211_chandef_max_power(&chandef);   <-- seeds 24
-      power = min(local->user_power_level, power);      <-- user_power=30 LOSES
-      power = min(power, sdata->vif.bss_conf.txpower);
-      local->hw.conf.power_level = power;               <-- 24 surfaces here
-  net/mac80211/cfg.c : ieee80211_get_tx_power()
-      *dbm = local->hw.conf.power_level;                <-- iwinfo/iw read this
+WHY THE PATH MATTERS (verified against the kernel ath9k actually runs)
+---------------------------------------------------------------------
+ath9k ALWAYS sets REGULATORY_STRICT_REG | REGULATORY_CUSTOM_REG and calls
+wiphy_apply_custom_regulatory() (drivers/net/wireless/ath/regd.c
+ath_regd_init_wiphy). So chan->max_power is computed in net/wireless/reg.c by
+THREE different functions depending on the apply path, and ALL must be patched:
 
-So the cap is chan->max_power in cfg80211, NOT targetPowerValT2. CONFIG_ATH_USER_REGD
-only relaxes ath's NO_IR/strict flags; it never raises max_eirp/max_reg_power.
+  1) handle_channel_custom()        -- runs on wiphy_apply_custom_regulatory()
+                                       (this is ath9k's primary path)
+  2) handle_channel_single_rule()   -- runs on a later country hint; note its
+                                       REGULATORY_STRICT_REG early-return sets
+                                       max_power/orig_mpwr and RETURNS, so it
+                                       must be lifted there too
+  3) handle_channel_adjacent_rules()-- runs for band-edge channels (1, 11..14)
 
-FIX
----
-Force chan->max_power / max_reg_power / orig_mpwr to >= 60 dBm-derived ceiling
-for 2.4 GHz channels right AFTER cfg80211 computes them. Because every downstream
-consumer (mac80211 power_level, ath9k_hw_apply_txpower channel->max_power*2) reads
-these fields, debugfs netdev txpower, iwinfo, and iw phy then all read 30.0 dBm.
-A second hunk in ath9k hw.c guarantees the value actually programmed to the PA on
-2.4 GHz follows 30 even if reg->power_limit is lower.
+Patching only one (as an earlier draft did) leaves the active 24 in place.
 
-ART / EEPROM / caldata are NEVER written — this only edits in-RAM struct fields
-that cfg80211 itself recomputes; nothing is persisted to flash.
+ART / EEPROM / caldata are NEVER written — only in-RAM cfg80211 struct fields
+that cfg80211 recomputes; nothing persisted to flash.
 
-Marker: KT412-30dbm-regcap
+Marker: KT412-30dbm-regcap  (build gate: >=1 occurrence post-compile)
 
 --- a/net/wireless/reg.c
 +++ b/net/wireless/reg.c
-@@ -1,3 +1,9 @@
-+/* KT412-30dbm-regcap: force 2.4GHz regulatory power ceiling to 30 dBm.
-+ * KT412_2G_DBM is the dBm ceiling we advertise/apply on the 2.4 GHz band.
-+ * Channels are matched by frequency (2400..2500 MHz) so it is band-only.
-+ */
-+#define KT412_2G_DBM 30
-+
- // SPDX-License-Identifier: GPL-2.0
- /*
-  * Copyright 2002-2005, Instant802 Networks, Inc.
-@@ -1,6 +1,21 @@
- 	chan->max_reg_power = (int) MBM_TO_DBM(power_rule->max_eirp);
+@@ -53,6 +53,18 @@
+ #include "rdev-ops.h"
+ #include "nl80211.h"
 
-+	/* KT412-30dbm-regcap: lift the 2.4GHz EIRP ceiling. This is the value
-+	 * mac80211 turns into hw.conf.power_level (== netdev txpower / iwinfo /
-+	 * iw phy). Match the 2.4GHz band by center frequency so we never touch
-+	 * 5GHz here. Bump max_reg_power AND orig_mpwr so the min() below can
-+	 * never pull it back to the regdb 24. */
-+	if (chan->center_freq >= 2400 && chan->center_freq <= 2500) {
-+		if (chan->max_reg_power < KT412_2G_DBM)
-+			chan->max_reg_power = KT412_2G_DBM;
-+		if (chan->orig_mpwr < KT412_2G_DBM)
-+			chan->orig_mpwr = KT412_2G_DBM;
-+	}
++/* KT412-30dbm-regcap: force the 2.4 GHz regulatory EIRP ceiling to 30 dBm.
++ * This is the value cfg80211 turns into chan->max_power, which mac80211 turns
++ * into vif.bss_conf.txpower (== debugfs netdev txpower) and hw.conf.power_level
++ * (== iwinfo). Matched by center freq so 5 GHz is untouched. */
++#define KT412_2G_DBM 30
++static inline void kt412_lift_2g(struct ieee80211_channel *chan)
++{
++	if (chan->center_freq < 2400 || chan->center_freq > 2500)
++		return;
++	if (chan->max_reg_power < KT412_2G_DBM)
++		chan->max_reg_power = KT412_2G_DBM;
++	if (chan->orig_mpwr && chan->orig_mpwr < KT412_2G_DBM)
++		chan->orig_mpwr = KT412_2G_DBM;
++	if (chan->max_power < KT412_2G_DBM)
++		chan->max_power = KT412_2G_DBM;
++}
 +
- 	if (chan->flags & IEEE80211_CHAN_RADAR) {
- 		if (reg_rule->dfs_cac_ms)
- 			chan->dfs_cac_ms = reg_rule->dfs_cac_ms;
- 		else
-@@ -1,6 +1,12 @@
+ /*
+  * Grace period we give before making sure all current interfaces reside on
+  * channels allowed by the current regulatory domain.
+@@ -1789,6 +1801,7 @@ static void handle_channel_single_rule(struct wiphy *wiphy,
+ 		chan->max_reg_power = chan->max_power = chan->orig_mpwr =
+ 			(int) MBM_TO_DBM(power_rule->max_eirp);
+
++		kt412_lift_2g(chan); /* KT412-30dbm-regcap (STRICT early-return path) */
+ 		if (chan->flags & IEEE80211_CHAN_RADAR) {
+ 			chan->dfs_cac_ms = IEEE80211_DFS_MIN_CAC_TIME_MS;
+ 			if (reg_rule->dfs_cac_ms)
+@@ -1826,6 +1839,7 @@ static void handle_channel_single_rule(struct wiphy *wiphy,
+ 					      chan->max_reg_power);
  	} else
  		chan->max_power = chan->max_reg_power;
-+
-+	/* KT412-30dbm-regcap: pin the FINAL 2.4GHz chan->max_power to the
-+	 * ceiling after the regdb min() above, so ieee80211_chandef_max_power()
-+	 * (and thus hw.conf.power_level reported by debugfs/iwinfo/iw) = 30. */
-+	if (chan->center_freq >= 2400 && chan->center_freq <= 2500 &&
-+	    chan->max_power < KT412_2G_DBM)
-+		chan->max_power = KT412_2G_DBM;
++	kt412_lift_2g(chan); /* KT412-30dbm-regcap (single-rule normal path) */
  }
 
- static void handle_channel(struct wiphy *wiphy,
+ static void handle_channel_adjacent_rules(struct wiphy *wiphy,
+@@ -1923,6 +1937,7 @@ static void handle_channel_adjacent_rules(struct wiphy *wiphy,
+ 	} else {
+ 		chan->max_power = chan->max_reg_power;
+ 	}
++	kt412_lift_2g(chan); /* KT412-30dbm-regcap (adjacent-rules path) */
+ }
+
+ /* Note that right now we assume the desired channel bandwidth
+@@ -2542,6 +2557,7 @@ static void handle_channel_custom(struct wiphy *wiphy,
+ 	}
+
+ 	chan->max_power = chan->max_reg_power;
++	kt412_lift_2g(chan); /* KT412-30dbm-regcap (custom-regd path = ath9k primary) */
+ }
+
+ static void handle_band_custom(struct wiphy *wiphy,
 --- a/drivers/net/wireless/ath/ath9k/hw.c
 +++ b/drivers/net/wireless/ath/ath9k/hw.c
-@@ -1,6 +1,17 @@
+@@ -2966,6 +2966,16 @@ void ath9k_hw_apply_txpower(struct ath_hw *ah, struct ath9k_channel *chan,
  	channel = chan->chan;
  	chan_pwr = min_t(int, channel->max_power * 2, MAX_COMBINED_POWER);
  	new_pwr = min_t(int, chan_pwr, reg->power_limit);
-
-+	/* KT412-30dbm-regcap: on 2.4GHz, force the value actually programmed to
-+	 * the PA up to 30.0 dBm (= 60 half-dB) regardless of reg->power_limit,
-+	 * so the applied power follows the requested 30. channel->max_power is
-+	 * already lifted to 30 by the cfg80211 reg.c hunk, so this mainly
-+	 * defeats a low reg->power_limit. ART/EEPROM are not touched. */
++
++	/* KT412-30dbm-regcap: on 2.4 GHz force the value programmed to the PA up
++	 * to 30.0 dBm (= 60 half-dB) regardless of reg->power_limit. channel->max_power
++	 * is already lifted to 30 by the cfg80211 reg.c hunk; this also defeats a low
++	 * reg->power_limit. Units are half-dB; MAX_COMBINED_POWER (254) is the ceiling. */
 +	if (channel->band == NL80211_BAND_2GHZ) {
 +		if (new_pwr < 2 * 30)
 +			new_pwr = 2 * 30;
 +		if (new_pwr > MAX_COMBINED_POWER)
 +			new_pwr = MAX_COMBINED_POWER;
 +	}
-+
+
  	ah->eep_ops->set_txpower(ah, chan, ctl,
  				 get_antenna_gain(ah, chan), new_pwr, test);
- }
