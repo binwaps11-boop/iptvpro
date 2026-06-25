@@ -90,6 +90,11 @@ jobs:
           cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" .config
           make defconfig
           grep -i 'dw02-412h' .config || { echo "DEVICE NOT IN CONFIG"; exit 1; }
+          # regdomain layer: ATH_USER_REGD must survive defconfig, else cfg80211
+          # could clamp 2.4G back to ~24 and undo the forced 30. Gate it.
+          grep -q '^CONFIG_ATH_USER_REGD=y' .config \
+            && echo "ATH_USER_REGD ON (EEPROM/regdomain power cap bypassed)" \
+            || { echo "FATAL: CONFIG_ATH_USER_REGD not enabled -> regdomain could cap 2.4G to 24"; exit 1; }
 
       - name: "Add files overlay (dashboard + variant power default)"
         run: |

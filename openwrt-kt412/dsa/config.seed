@@ -21,6 +21,9 @@ CONFIG_PACKAGE_dnsmasq-full=y
 CONFIG_PACKAGE_odhcpd-ipv6only=y
 CONFIG_PACKAGE_wireless-regdb=y
 CONFIG_PACKAGE_kmod-ath9k=y
+# Ignore the EEPROM-burned (Korean) regdomain so cfg80211 cannot pull 2.4G
+# channel max_reg_power back down to ~24 and undo the forced 30 dBm ceiling.
+CONFIG_ATH_USER_REGD=y
 CONFIG_PACKAGE_kmod-mac80211=y
 CONFIG_PACKAGE_kmod-cfg80211=y
 CONFIG_PACKAGE_kmod-bridge=y
