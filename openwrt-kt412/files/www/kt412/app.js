@@ -848,9 +848,10 @@ function devRow(x){
   const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">معدل الوصلة RX/TX: ${esc(x.rxrate||'?')}/${esc(x.txrate||'?')} Mbps</span>`:'';
   // AP rx = client upload, AP tx = client download
   const usage=(+x.bytes)?`<span class="sub">⬇ تحميل ${human(+x.tx_bytes||0)} · ⬆ رفع ${human(+x.rx_bytes||0)}</span>`:'';
+  const live=(wifi&&((+x.dl_bps||0)+(+x.ul_bps||0)>0))?`<span class="sub">⚡ الآن ↓${human(+x.dl_bps||0)}/ث ↑${human(+x.ul_bps||0)}/ث</span>`:'';
   const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
   return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
-    `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
+    `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage} ${live}</div></div>`+
     `<div class="dright">${rate}${right}<button class="btn-ghost devblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:3px 8px">حظر</button></div></div>`;
 }
 async function loadDevices(){
@@ -1007,8 +1008,10 @@ if($('#qs_mode')) $('#qs_mode').onchange=()=>{ const p=$('#qs_pppoe_row'); if(p)
 if($('#qsApply')) $('#qsApply').onclick=async()=>{
   const v=id=>{ const e=$(id); return e?e.value:''; };
   const open=$('#qs_open')&&$('#qs_open').checked?1:0;
+  const ck=id=>$(id)&&$(id).checked?1:0;
   const r=await safeApply(()=>call({act:'quick_setup',mode:v('#qs_mode'),ssid:v('#qs_ssid'),pass:v('#qs_pass'),open,
     country:v('#qs_country'),txpower:v('#qs_tx'),lan_ip:v('#qs_lan'),ch24:v('#qs_ch24'),ch5:v('#qs_ch5'),
+    ht24:v('#qs_ht24'),ht5:v('#qs_ht5'),hidden:ck('#qs_hidden'),en24:ck('#qs_en24'),en5:ck('#qs_en5'),
     pppoe_user:v('#qs_pu'),pppoe_pass:v('#qs_pp')},true));
   const vlan=v('#qs_vlan').trim();
   if(r&&r.ok&&vlan) await call({act:'vlan_add',vid:vlan,routing:'internet',nat:'on',dns_mode:'auto'},true);

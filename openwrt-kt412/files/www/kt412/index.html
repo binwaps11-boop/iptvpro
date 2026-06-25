@@ -124,6 +124,17 @@
         <div><label class="f">📡 قناة 5G</label><select id="qs_ch5" class="t"><option value="">بلا تغيير</option><option>36</option><option>40</option><option>44</option><option>48</option><option>149</option><option>153</option><option>157</option><option>161</option></select></div>
       </div>
       <div class="row" style="margin-top:6px">
+        <div><label class="f">📐 عرض قناة 2.4G</label><select id="qs_ht24" class="t"><option value="">بلا تغيير</option><option value="HT20">20MHz (HT20)</option><option value="HT40">40MHz (HT40)</option></select></div>
+        <div><label class="f">📐 عرض قناة 5G</label><select id="qs_ht5" class="t"><option value="">بلا تغيير</option><option value="VHT20">20MHz</option><option value="VHT40">40MHz</option><option value="VHT80">80MHz (VHT80)</option></select></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="qs_hidden"> 🙈 إخفاء اسم الشبكة (Hide SSID)</label></div>
+        <div style="display:flex;gap:14px;align-items:center">
+          <label class="f" style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="qs_en24" checked> تفعيل 2.4G</label>
+          <label class="f" style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" id="qs_en5" checked> تفعيل 5G</label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:6px">
         <div><label class="f">📡 قوة الإرسال: <b id="qs_txv">30</b> dBm (0–30)</label>
           <input type="range" id="qs_tx" min="0" max="30" step="1" value="30" style="width:100%"></div>
         <div><label class="f">🖥️ IP الإدارة (LAN)</label><input id="qs_lan" class="t" placeholder="192.168.100.1"></div>
