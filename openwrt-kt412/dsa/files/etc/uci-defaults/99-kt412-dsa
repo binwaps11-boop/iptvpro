@@ -1,8 +1,8 @@
 #!/bin/sh
 # KT412 DSA build first-boot defaults. DSA generates its own network config
 # (br-lan over lan1-4 + wan), so we ONLY set the management IP here.
-# LuCI is removed; the custom purple dashboard is the only web UI, with the
-# ttyd web terminal (:7681) for advanced access.
+# LuCI is removed AND no web terminal (ttyd): the custom Arabic dashboard is
+# the ONLY web UI, covering OpenWrt/LuCI core functions with a real backend.
 uci -q set network.lan.ipaddr='192.168.100.1'
 uci -q set network.lan.netmask='255.255.255.0'
 uci -q set system.@system[0].hostname='KT412-DSA'
@@ -37,16 +37,8 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 done
 uci -q commit wireless
 
-# --- ttyd web terminal (advanced access) on port 7681 ---
-if ! uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
-	uci -q add ttyd ttyd >/dev/null
-fi
-uci -q set ttyd.@ttyd[0].port='7681'
-uci -q set ttyd.@ttyd[0].command='/bin/login'
-uci -q delete ttyd.@ttyd[0].interface 2>/dev/null
-uci -q commit ttyd
-/etc/init.d/ttyd enable 2>/dev/null
-/etc/init.d/ttyd restart 2>/dev/null
+# --- NO web terminal (ttyd removed): the custom dashboard is the only UI ---
+/etc/init.d/ttyd disable 2>/dev/null; /etc/init.d/ttyd stop 2>/dev/null
 
 # --- performance + stability: software flow offload + packet steering ---
 uci -q set firewall.@defaults[0].flow_offloading='1'

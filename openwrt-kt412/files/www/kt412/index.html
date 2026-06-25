@@ -44,8 +44,8 @@
   <section data-pane="dash">
     <div class="grid cols-4">
       <div class="card"><h3>النظام</h3><div class="stat" id="d_model">—</div><div class="sub" id="d_rel">—</div></div>
-      <div class="card"><h3>مدة التشغيل</h3><div class="stat" id="d_up">—</div><div class="sub" id="d_load">الحِمل: —</div></div>
-      <div class="card"><h3>الذاكرة</h3><div class="stat" id="d_mem">—</div><div class="bar"><i id="d_membar" style="width:0"></i></div><div class="sub" id="d_memsub">—</div></div>
+      <div class="card"><h3>مدة التشغيل</h3><div class="stat" id="d_up">—</div><div class="sub" id="d_load">الحِمل: —</div><div class="sub" id="d_cpu"></div></div>
+      <div class="card"><h3>الذاكرة</h3><div class="stat" id="d_mem">—</div><div class="bar"><i id="d_membar" style="width:0"></i></div><div class="sub" id="d_memsub">—</div><div class="sub" id="d_storage">التخزين: —</div></div>
       <div class="card"><h3>الإنترنت</h3><div class="stat" id="d_wan">—</div><div class="sub" id="d_wanip">—</div></div>
     </div>
     <div class="grid cols-2" style="margin-top:16px">
@@ -126,6 +126,11 @@
       </div>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>الواجهات — Interfaces (link · RX/TX · MTU · MAC)</h3>
+      <div class="sub">حالة كل واجهة، مع تفعيل/تعطيل وتعديل MTU (عبر Safe Apply).</div>
+      <div id="ifaceList" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
       <h3>مدير VLAN المتقدم — VLAN Manager</h3>
       <div class="note">VLAN اختياري. كل تعديل يمرّ عبر <b>Safe Apply</b> (يرجع تلقائياً خلال 80ث إن انقطع الوصول). VLAN 1 = الإدارة (محمي، لا يُحذف).</div>
       <div id="vlanList"><div class="sub">جارٍ التحميل…</div></div>
@@ -191,8 +196,10 @@
   <!-- CLIENTS -->
   <section data-pane="clients" class="hide">
     <div class="card">
-      <h3>الأجهزة المتصلة (DHCP)</h3>
+      <h3>الأجهزة المتصلة (DHCP) — حظر/سماح</h3>
       <div id="clientsBox"><div class="sub">جارٍ التحميل…</div></div>
+      <h4 style="margin:14px 0 6px">الأجهزة المحظورة</h4>
+      <div id="blockedBox"><div class="sub">لا أجهزة محظورة.</div></div>
       <button class="btn sec sm" id="clRefresh" style="margin-top:12px">تحديث</button>
     </div>
   </section>
@@ -223,8 +230,15 @@
         <button data-l="sys" class="active">سجل النظام</button>
         <button data-l="ker">سجل النواة</button>
       </div>
+      <div class="row" style="margin-top:10px">
+        <div><label class="f">تصفية حسب الخدمة</label><select id="logFilter" class="t"><option value="">الكل</option><option value="wifi">WiFi</option><option value="firewall">Firewall</option><option value="dhcp">DHCP</option><option value="pppoe">PPPoE</option></select></div>
+        <div><label class="f">بحث في السجل</label><input id="logSearch" class="t" placeholder="اكتب كلمة للتصفية..."></div>
+      </div>
       <pre id="logBox" style="margin-top:12px;max-height:60vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:12px;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">جارٍ التحميل…</pre>
-      <button class="btn sec sm" id="logRefresh" style="margin-top:10px">تحديث</button>
+      <div class="row" style="margin-top:10px">
+        <div><button class="btn sec sm" id="logRefresh" style="width:100%">تحديث</button></div>
+        <div><button class="btn sec sm" id="logDownload" style="width:100%">تنزيل السجل</button></div>
+      </div>
     </div>
     <div class="card" style="margin-top:16px">
       <h3>التقارير والفحوصات — Reports &amp; Tests</h3>
@@ -302,6 +316,12 @@
         <button class="btn sec sm" id="routeAdd">إضافة مسار</button>
       </div>
     </div>
+    <div class="card" style="margin-top:16px">
+      <h3>مناطق الجدار الناري — Firewall Zones (NAT/Masquerade)</h3>
+      <div class="sub">المناطق وقواعد التمرير. زر Masq يفعّل/يوقف NAT لكل منطقة.</div>
+      <div id="zoneList" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div>
+      <button class="btn sec sm" id="fwRestart" style="margin-top:10px">إعادة تشغيل الجدار الناري</button>
+    </div>
   </section>
 
   <!-- SERVICES: guest wifi / upnp / adblock / ddns / init services -->
@@ -359,6 +379,9 @@
         </div>
         <button class="btn sec sm" id="diagRun">تشغيل</button>
         <pre id="diagBox" class="hide" style="margin-top:10px;max-height:40vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)"></pre>
+        <h4 style="margin:14px 0 6px">اختبار سرعة الإنترنت (تنزيل)</h4>
+        <button class="btn sec sm" id="speedBtn">ابدأ اختبار السرعة</button>
+        <div class="stat" id="speedRes" style="font-size:22px;margin-top:8px">—</div>
       </div>
       <div class="card">
         <h3>مدير الحزم — Packages</h3>
@@ -418,7 +441,7 @@
         <input id="s_pw1" class="t" type="password" placeholder="••••••••">
         <label class="f">تأكيد كلمة المرور</label>
         <input id="s_pw2" class="t" type="password" placeholder="••••••••">
-        <div class="note">عيّن كلمة مرور قوية لتأمين الدخول للوحة التحكم والطرفية.</div>
+        <div class="note">عيّن كلمة مرور قوية لتأمين الدخول للوحة التحكم.</div>
         <button class="btn" id="pwApply">تغيير كلمة المرور</button>
       </div>
       <div class="card">
@@ -429,6 +452,12 @@
         <label class="f" style="margin-top:14px">المنطقة الزمنية (TZ)</label>
         <input id="s_tz" class="t" placeholder="UTC أو Asia/Riyadh،... ">
         <button class="btn sm sec" id="tzApply" style="margin-top:8px">حفظ المنطقة</button>
+        <label class="f" style="margin-top:14px">خوادم الوقت (NTP)</label>
+        <div class="row">
+          <div><input id="s_ntp1" class="t" placeholder="0.openwrt.pool.ntp.org"></div>
+          <div><input id="s_ntp2" class="t" placeholder="time.cloudflare.com"></div>
+        </div>
+        <button class="btn sm sec" id="ntpApply" style="margin-top:8px">حفظ NTP</button>
       </div>
       <div class="card">
         <h3>منطقة الخطر</h3>

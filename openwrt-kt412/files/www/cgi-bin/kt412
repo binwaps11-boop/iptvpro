@@ -657,6 +657,66 @@ if [ -n "$ACT" ]; then
 			tar xzf /tmp/kt-restore.tgz -C / 2>/dev/null && { uci commit; for s in network dhcp firewall wireless system; do /etc/init.d/$s reload >/dev/null 2>&1; done; printf '{"ok":true,"msg":"تمت استعادة الإعدادات (نسخة احتياطية محفوظة)"}\n'; } || fail "restore_failed"
 			rm -f /tmp/kt-restore.tgz;;
 
+		# ===================== INTERFACES (enable/disable + MTU) =====================
+		iface_toggle)
+			ifc="$(sani_word "$(getp iface)")"; on="$(getp on | tr -cd '01')"; [ -n "$ifc" ] || fail "no_iface"
+			if [ "$on" = "0" ]; then uci -q set network.$ifc.disabled='1'; ifdown "$ifc" >/dev/null 2>&1
+			else uci -q delete network.$ifc.disabled; ifup "$ifc" >/dev/null 2>&1; fi
+			uci commit network
+			printf '{"ok":true,"msg":"%s: %s"}\n' "$(json_esc "$ifc")" "$( [ "$on" = "0" ] && echo معطّل || echo مفعّل )";;
+		iface_mtu)
+			ifc="$(sani_word "$(getp iface)")"; mtu="$(sani_int "$(getp mtu)")"
+			[ -n "$ifc" ] && [ -n "$mtu" ] || fail "iface_mtu_required"
+			uci set network.$ifc.mtu="$mtu"; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"MTU %s = %s"}\n' "$(json_esc "$ifc")" "$mtu";;
+
+		# ===================== FIREWALL zones / masquerade / restart =====================
+		fw_masq)
+			z="$(sani_word "$(getp zone)")"; on="$(getp on | tr -cd '01')"; [ -n "$z" ] || fail "no_zone"
+			i=0; sec=""
+			while uci -q get firewall.@zone[$i] >/dev/null 2>&1; do [ "$(uci -q get firewall.@zone[$i].name)" = "$z" ] && sec="@zone[$i]"; i=$((i+1)); done
+			[ -n "$sec" ] || fail "zone_not_found"
+			uci set firewall.$sec.masq="${on:-0}"; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"masquerade %s: %s"}\n' "$(json_esc "$z")" "${on:-0}";;
+		fw_restart)
+			/etc/init.d/firewall restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"أُعيد تشغيل الجدار الناري"}\n';;
+
+		# ===================== CLIENT block / unblock (by MAC) =====================
+		client_block)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="blk_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci set firewall.$id=rule; uci set firewall.$id.name="kt-block-$mac"
+			uci set firewall.$id.src='lan'; uci set firewall.$id.src_mac="$mac"
+			uci set firewall.$id.dest='*'; uci set firewall.$id.target='REJECT'
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُظر %s من الإنترنت"}\n' "$(json_esc "$mac")";;
+		client_unblock)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="blk_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci -q delete firewall.$id; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"رُفع الحظر عن %s"}\n' "$(json_esc "$mac")";;
+
+		# ===================== NTP servers =====================
+		ntp_set)
+			s1="$(printf '%s' "$(getp ntp1)" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+			s2="$(printf '%s' "$(getp ntp2)" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+			uci -q get system.ntp >/dev/null 2>&1 || uci set system.ntp=timeserver
+			uci -q delete system.ntp.server
+			[ -n "$s1" ] && uci add_list system.ntp.server="$s1"
+			[ -n "$s2" ] && uci add_list system.ntp.server="$s2"
+			uci set system.ntp.enabled='1'; uci set system.ntp.enable_server='0'
+			uci commit system; /etc/init.d/sysntpd restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"خوادم NTP محدّثة"}\n';;
+
+		# ===================== DSA: choose WAN port =====================
+		wan_port)
+			pt="$(sani_word "$(getp port)")"; [ -n "$pt" ] || fail "no_port"
+			[ -e "/sys/class/net/$pt" ] || fail "port_not_found"
+			uci set network.wan.device="$pt"; uci -q set network.wan6.device="$pt"; uci commit network
+			/etc/init.d/network reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"منفذ WAN = %s"}\n' "$(json_esc "$pt")";;
+
 		*) fail "unknown_action";;
 	esac
 	exit 0
@@ -673,9 +733,12 @@ case "$OP" in
 		up="$(gv "$INF" '@.uptime')"; l1="$(gv "$INF" '@.load[0]')"
 		mt="$(gv "$INF" '@.memory.total')"; mf="$(gv "$INF" '@.memory.free')"
 		mb="$(gv "$INF" '@.memory.buffered')"
-		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s}\n' \
+		ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ -n "$ncpu" ] || ncpu=1
+		ovl="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $2","$3}')"; [ -n "$ovl" ] || ovl="$(df -k / 2>/dev/null | awk 'NR==2{print $2","$3}')"
+		fs_total="${ovl%,*}"; fs_used="${ovl#*,}"
+		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s}\n' \
 			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \
-			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}";;
+			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}";;
 	wan)
 		S="$(ubus call network.interface.wan status 2>/dev/null)"
 		gv(){ printf '%s' "$S" | jsonfilter -e "$1" 2>/dev/null; }
@@ -806,10 +869,21 @@ case "$OP" in
 		rel="$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)"
 		rootpw="$(awk -F: '/^root:/{print $2}' /etc/shadow 2>/dev/null)"
 		hp=true; case "$rootpw" in ''|'!'|'*'|'!*') hp=false;; esac
-		printf '{"ok":true,"host":"%s","tz":"%s","time":"%s","release":"%s","has_password":%s}\n' \
-			"$(json_esc "$host")" "$(json_esc "$tz")" "$(json_esc "$now")" "$(json_esc "$rel")" "$hp";;
+		ntp="$(uci -q get system.ntp.server | tr '\n' ' ')"
+		printf '{"ok":true,"host":"%s","tz":"%s","time":"%s","release":"%s","has_password":%s,"ntp":"%s"}\n' \
+			"$(json_esc "$host")" "$(json_esc "$tz")" "$(json_esc "$now")" "$(json_esc "$rel")" "$hp" "$(json_esc "$ntp")";;
 	logs)
-		sys="$(logread 2>/dev/null | tail -n 160 | base64 2>/dev/null | tr -d '\n')"
+		# optional service filter: wifi|firewall|dhcp|pppoe (grep on logread)
+		flt="$(getp filter | tr -cd 'a-z]|[')"
+		case "$flt" in
+			wifi)     pat='hostapd\|wlan\|ath9k\|ath10k\|wpa\|80211';;
+			firewall) pat='firewall\|nft\|DROP\|REJECT';;
+			dhcp)     pat='dnsmasq\|DHCP\|dhcp';;
+			pppoe)    pat='ppp\|pppoe\|pppd\|chat';;
+			*)        pat='';;
+		esac
+		if [ -n "$pat" ]; then sys="$(logread 2>/dev/null | grep -i "$pat" | tail -n 160 | base64 2>/dev/null | tr -d '\n')"
+		else sys="$(logread 2>/dev/null | tail -n 160 | base64 2>/dev/null | tr -d '\n')"; fi
 		ker="$(dmesg 2>/dev/null | tail -n 100 | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"sys":"%s","ker":"%s"}\n' "$sys" "$ker";;
 	power)
@@ -923,7 +997,7 @@ case "$OP" in
 		printf '{"ok":true,"routes":[%s]}\n' "$out";;
 	svc_list)
 		out=""; first=1
-		for s in dnsmasq firewall network odhcpd uhttpd ttyd cron dropbear sqm mwan3 ddns miniupnpd adblock nlbwmon banip; do
+		for s in dnsmasq firewall network odhcpd uhttpd cron dropbear sqm mwan3 ddns miniupnpd adblock nlbwmon sysntpd; do
 			[ -x "/etc/init.d/$s" ] || continue
 			en=false; /etc/init.d/$s enabled 2>/dev/null && en=true
 			rn=false; pgrep -f "$s" >/dev/null 2>&1 && rn=true
@@ -977,6 +1051,53 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 	usage)
 		b="$( (nlbw -c show 2>/dev/null | head -30 || echo 'nlbwmon لم يجمع بيانات بعد') | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"out":"%s"}\n' "$b";;
+
+	# ===================== INTERFACES overview =====================
+	ifaces)
+		out=""; first=1
+		for s in $(uci show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=interface/\1/p'); do
+			case "$s" in loopback) continue;; esac
+			dev="$(uci -q get network.$s.device)"
+			[ -n "$dev" ] || dev="$(ubus call network.interface.$s status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+			proto="$(uci -q get network.$s.proto)"; mtu="$(cat /sys/class/net/$dev/mtu 2>/dev/null)"
+			mac="$(cat /sys/class/net/$dev/address 2>/dev/null)"; oper="$(cat /sys/class/net/$dev/operstate 2>/dev/null)"
+			rx="$(cat /sys/class/net/$dev/statistics/rx_bytes 2>/dev/null)"; tx="$(cat /sys/class/net/$dev/statistics/tx_bytes 2>/dev/null)"
+			ip="$(ubus call network.interface.$s status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+			dis="$(uci -q get network.$s.disabled)"; en=true; [ "$dis" = "1" ] && en=false
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","device":"%s","proto":"%s","ip":"%s","mtu":"%s","mac":"%s","link":"%s","rx":"%s","tx":"%s","enabled":%s}' "$(json_esc "$s")" "$(json_esc "$dev")" "$(json_esc "$proto")" "$(json_esc "$ip")" "$(json_esc "$mtu")" "$(json_esc "$mac")" "$(json_esc "$oper")" "${rx:-0}" "${tx:-0}" "$en")"
+		done
+		printf '{"ok":true,"ifaces":[%s]}\n' "$out";;
+
+	# ===================== FIREWALL zones =====================
+	fw_zones)
+		out=""; first=1; i=0
+		while uci -q get firewall.@zone[$i] >/dev/null 2>&1; do
+			nm="$(uci -q get firewall.@zone[$i].name)"; inp="$(uci -q get firewall.@zone[$i].input)"
+			fwd="$(uci -q get firewall.@zone[$i].forward)"; outp="$(uci -q get firewall.@zone[$i].output)"
+			mq="$(uci -q get firewall.@zone[$i].masq)"; net="$(uci -q get firewall.@zone[$i].network | tr '\n' ' ')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","input":"%s","output":"%s","forward":"%s","masq":"%s","network":"%s"}' "$(json_esc "$nm")" "$(json_esc "$inp")" "$(json_esc "$outp")" "$(json_esc "$fwd")" "$(json_esc "${mq:-0}")" "$(json_esc "$net")")"
+			i=$((i+1))
+		done
+		printf '{"ok":true,"zones":[%s]}\n' "$out";;
+
+	# ===================== BLOCKED clients =====================
+	blocklist)
+		out=""; first=1
+		for s in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(blk_[^.=]*\)=rule/\1/p'); do
+			mac="$(uci -q get firewall.$s.src_mac)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"mac":"%s"}' "$(json_esc "$mac")")"
+		done
+		printf '{"ok":true,"blocked":[%s]}\n' "$out";;
+
+	# ===================== SPEED TEST (download) =====================
+	speedtest)
+		url="http://speedtest.tele2.net/10MB.zip"
+		sp="$(curl -s -m25 -o /dev/null -w '%{speed_download}' "$url" 2>/dev/null)"
+		[ -n "$sp" ] && [ "$sp" != "0" ] || { wget -q -O /dev/null "$url" 2>/dev/null; sp=0; }
+		printf '{"ok":true,"bps":"%s"}\n' "${sp:-0}";;
 
 	*)
 		fail "unknown_op";;

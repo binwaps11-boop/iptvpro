@@ -109,15 +109,45 @@ jobs:
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
-          grep -q 'vlan_add'          "$C" && echo "VLAN MANAGER INCLUDED"        || { echo "FATAL: VLAN manager missing"; exit 1; }
-          grep -q 'KT412-VLAN-INTER'  "$C" && echo "VLAN INTER-VLAN INCLUDED"      || { echo "FATAL: inter-vlan missing"; exit 1; }
-          grep -q 'KT412-VLAN-DNS'    "$C" && echo "VLAN DNS PER VLAN INCLUDED"    || { echo "FATAL: vlan dns missing"; exit 1; }
-          grep -q 'KT412-VLAN-NAT'    "$C" && echo "VLAN NAT PER VLAN INCLUDED"    || { echo "FATAL: vlan nat missing"; exit 1; }
-          grep -q 'vlan_import' "$C" && grep -q 'vlan_export' "$C" && echo "VLAN IMPORT EXPORT INCLUDED" || { echo "FATAL: vlan import/export missing"; exit 1; }
-          grep -q 'safe_arm'          "$C" && echo "SAFE APPLY INCLUDED"           || { echo "FATAL: Safe Apply missing"; exit 1; }
-          grep -q 'safe_restore'      "$C" && echo "SAFE APPLY ROLLBACK INCLUDED"  || { echo "FATAL: rollback missing"; exit 1; }
-          test -s files/root/kt412-super-check.sh && echo "SUPER CHECK INCLUDED"   || { echo "FATAL: super-check missing"; exit 1; }
-          test -s files/root/POWER-REPORT.txt && test -s files/root/RF-SOLUTION.txt && test -s files/root/kt412-report.sh && echo "REPORTS INCLUDED" || { echo "FATAL: reports missing"; exit 1; }
+          H=files/www/kt412/index.html
+          S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"
+          g(){ grep -q "$1" "$2" && echo "$3" || { echo "FATAL: missing $3"; exit 1; }; }
+          # --- OpenWrt/LuCI core UI coverage (custom dashboard, real backend) ---
+          g 'data-pane="dash"'      "$H" "OPENWRT UI DASHBOARD INCLUDED"
+          g 'op=.\?ifaces\|ifaces)' "$C" "OPENWRT UI INTERFACES INCLUDED"
+          g 'data-pane="wifi"'      "$H" "OPENWRT UI WIRELESS INCLUDED"
+          g 'dns_set'               "$C" "OPENWRT UI DHCP DNS INCLUDED"
+          g 'fw_forward'            "$C" "OPENWRT UI FIREWALL INCLUDED"
+          g 'fw_dmz'                "$C" "OPENWRT UI NAT PORT FORWARD INCLUDED"
+          g 'route_add'             "$C" "OPENWRT UI ROUTES INCLUDED"
+          g 'vlan_add'              "$C" "OPENWRT UI VLAN MANAGER INCLUDED"
+          g 'data-pane="ports"'     "$H" "OPENWRT UI DSA PORTS INCLUDED"
+          g 'data-pane="clients"'   "$H" "OPENWRT UI CLIENTS INCLUDED"
+          g 'data-pane="logs"'      "$H" "OPENWRT UI LOGS INCLUDED"
+          g 'diag)'                 "$C" "OPENWRT UI DIAGNOSTICS INCLUDED"
+          g 'backup_make'           "$C" "OPENWRT UI BACKUP RESTORE INCLUDED"
+          # --- VLAN advanced sub-features ---
+          g 'KT412-VLAN-INTER' "$C" "VLAN INTER-VLAN INCLUDED"
+          g 'KT412-VLAN-DNS'   "$C" "VLAN DNS PER VLAN INCLUDED"
+          g 'KT412-VLAN-NAT'   "$C" "VLAN NAT PER VLAN INCLUDED"
+          grep -q 'vlan_import' "$C" && grep -q 'vlan_export' "$C" && echo "VLAN IMPORT EXPORT INCLUDED" || { echo "FATAL: vlan import/export"; exit 1; }
+          # --- Safe Apply + reports ---
+          g 'safe_arm'     "$C" "SAFE APPLY INCLUDED"
+          g 'safe_restore' "$C" "SAFE APPLY ROLLBACK INCLUDED"
+          test -s files/root/kt412-super-check.sh && echo "SUPER CHECK INCLUDED" || { echo "FATAL: super-check"; exit 1; }
+          test -s files/root/POWER-REPORT.txt && echo "POWER REPORT INCLUDED" || { echo "FATAL: power report"; exit 1; }
+          test -s files/root/RF-SOLUTION.txt && echo "RF SOLUTION INCLUDED"   || { echo "FATAL: rf solution"; exit 1; }
+          # --- required OpenWrt packages present in config.seed ---
+          MISS=""
+          for p in uhttpd rpcd firewall4 nftables dnsmasq-full odhcpd-ipv6only ppp ppp-mod-pppoe \
+                   iw iwinfo wpad-mbedtls wireless-regdb kmod-ath9k kmod-mac80211 kmod-cfg80211 \
+                   kmod-nft-core kmod-nft-nat kmod-bridge ip-full ethtool curl ca-bundle jsonfilter jshn; do
+            grep -q "CONFIG_PACKAGE_${p}=y" "$S" || MISS="$MISS $p"
+          done
+          [ -z "$MISS" ] && echo "REQUIRED OPENWRT PACKAGES INCLUDED" || { echo "FATAL: missing packages:$MISS"; exit 1; }
+          # --- no Terminal / no LuCI shipped ---
+          grep -q 'CONFIG_PACKAGE_ttyd=y' "$S" && { echo "FATAL: ttyd terminal present"; exit 1; } || echo "NO TERMINAL OK"
+          grep -q 'CONFIG_PACKAGE_luci=y' "$S" && { echo "FATAL: luci present"; exit 1; } || echo "NO LUCI OK"
           echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"
 
       - name: Download sources

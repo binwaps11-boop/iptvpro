@@ -55,6 +55,8 @@ async function loadDash(){
     const pct=s.mem_total>0?Math.round(used/s.mem_total*100):0;
     $('#d_mem').innerHTML=pct+'<small>%</small>'; $('#d_membar').style.width=pct+'%';
     $('#d_memsub').textContent=human(used)+' / '+human(s.mem_total);
+    if(s.fs_total&&+s.fs_total>0)$('#d_storage').textContent='التخزين: '+human(+s.fs_used*1024)+' / '+human(+s.fs_total*1024);
+    if(s.ncpu)$('#d_cpu').textContent='المعالج: '+s.ncpu+' نواة';
   }
   const w=await call({op:'wan'});
   if(w&&w.ok){ const up=w.up===true||w.up==='true';
@@ -263,8 +265,11 @@ async function loadClients(){
   const c=r.clients||[];
   $('#clientsBox').innerHTML = c.length? c.map(x=>
     `<div class="kv"><span class="k">${esc(x.name&&x.name!=='*'?x.name:'جهاز')}<br><span class="sub">${esc(x.mac)}</span></span>`+
-    `<span class="v">${esc(x.ip)}</span></div>`).join('')
+    `<span class="v">${esc(x.ip)} <button class="btn-ghost blkb" data-mac="${esc(x.mac)}" style="font-size:11px;padding:2px 8px">حظر</button></span></div>`).join('')
     : '<div class="sub">لا أجهزة مؤجَّرة حالياً</div>';
+  $$('#clientsBox .blkb').forEach(b=>b.onclick=async()=>{ if(!confirm('حظر '+b.dataset.mac+' من الإنترنت؟'))return;
+    const r=await call({act:'client_block',mac:b.dataset.mac},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadBlocked,800); });
+  loadBlocked();
 }
 
 /* ---------- PORTS ---------- */
@@ -331,8 +336,14 @@ async function loadHealth(){
 /* ---------- LOGS ---------- */
 async function loadLogs(){
   $('#logBox').textContent='جارٍ التحميل…';
-  const r=await call({op:'logs'}); if(!(r&&r.ok)){ $('#logBox').textContent='تعذّر التحميل'; return; }
-  $('#logBox').textContent=b64dec(logKind==='ker'?r.ker:r.sys)||'(فارغ)';
+  const r=await call({op:'logs',filter:($('#logFilter')?$('#logFilter').value:'')});
+  if(!(r&&r.ok)){ $('#logBox').textContent='تعذّر التحميل'; return; }
+  window._logRaw=b64dec(logKind==='ker'?r.ker:r.sys)||'(فارغ)'; renderLog();
+}
+function renderLog(){
+  let txt=window._logRaw||''; const q=($('#logSearch')?$('#logSearch').value:'').trim();
+  if(q) txt=txt.split('\n').filter(l=>l.toLowerCase().indexOf(q.toLowerCase())>=0).join('\n')||'(لا نتائج)';
+  $('#logBox').textContent=txt;
 }
 
 /* ---------- POWER CONTROL ---------- */
@@ -384,6 +395,7 @@ async function loadSystem(){
     `<div class="kv"><span class="k">المنطقة</span><span class="v">${esc(s.tz||'UTC')}</span></div>`+
     `<div class="kv"><span class="k">كلمة المرور</span><span class="v">${hp?'<span class="badge ok">مضبوطة</span>':'<span class="badge warn">غير مضبوطة!</span>'}</span></div>`;
   $('#s_host').value=s.host||''; $('#s_tz').value=s.tz||'';
+  const nt=(s.ntp||'').trim().split(/\s+/); if($('#s_ntp1'))$('#s_ntp1').value=nt[0]||''; if($('#s_ntp2'))$('#s_ntp2').value=nt[1]||'';
 }
 
 /* ---------- Safe Apply / auto-rollback ---------- */
@@ -449,6 +461,51 @@ async function loadRoutes(){
     : '<div class="sub">لا مسارات.</div>';
   $$('#routeList .rtdel').forEach(b=>b.onclick=async()=>{ const x=await call({act:'route_del',target:b.dataset.t},true);
     toast(x&&x.ok?'حُذف':'فشل',x&&x.ok); setTimeout(loadRoutes,800); });
+}
+
+/* ---------- INTERFACES overview (enable/disable + MTU) ---------- */
+async function loadInterfaces(){
+  const r=await call({op:'ifaces'});
+  const ifs=(r&&r.ok)?(r.ifaces||[]):[];
+  $('#ifaceList').innerHTML = ifs.length? ifs.map(x=>{
+    const up=x.link==='up'; const en=x.enabled===true||x.enabled==='true';
+    return `<div class="kv" style="flex-wrap:wrap"><span class="k">${esc(x.name)} <span class="sub">${esc(x.device||'')} · ${esc(x.proto||'')} · ${esc(x.ip||'—')}</span><br>`+
+      `<span class="sub">MTU ${esc(x.mtu||'—')} · MAC ${esc(x.mac||'—')} · ↓${human(+x.rx)} ↑${human(+x.tx)}</span></span>`+
+      `<span class="v" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">`+
+      (up?'<span class="badge ok">up</span>':'<span class="badge bad">down</span>')+
+      `<input class="t ifmtu" data-if="${esc(x.name)}" value="${esc(x.mtu||'1500')}" style="width:70px;padding:5px 7px;font-size:12px">`+
+      `<button class="btn-ghost ifmtub" data-if="${esc(x.name)}" style="font-size:11px;padding:3px 8px">MTU</button>`+
+      `<button class="btn-ghost iftgl" data-if="${esc(x.name)}" data-on="${en?'0':'1'}" style="font-size:11px;padding:3px 8px">${en?'تعطيل':'تفعيل'}</button>`+
+      `</span></div>`;
+  }).join('') : '<div class="sub">—</div>';
+  $$('#ifaceList .iftgl').forEach(b=>b.onclick=async()=>{ const r=await safeApply(()=>call({act:'iface_toggle',iface:b.dataset.if,on:b.dataset.on},true));
+    toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadInterfaces,1500); });
+  $$('#ifaceList .ifmtub').forEach(b=>b.onclick=async()=>{ const inp=document.querySelector('.ifmtu[data-if="'+b.dataset.if+'"]');
+    const r=await safeApply(()=>call({act:'iface_mtu',iface:b.dataset.if,mtu:inp?inp.value:''},true)); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); });
+}
+
+/* ---------- FIREWALL zones (masquerade/NAT + restart) ---------- */
+async function loadZones(){
+  const r=await call({op:'fw_zones'});
+  const zs=(r&&r.ok)?(r.zones||[]):[];
+  $('#zoneList').innerHTML = zs.length? zs.map(z=>{
+    const masq=z.masq==='1'||z.masq===1||z.masq===true;
+    return `<div class="kv" style="flex-wrap:wrap"><span class="k">${esc(z.name)} <span class="sub">in:${esc(z.input)} out:${esc(z.output)} fwd:${esc(z.forward)} · ${esc(z.network||'')}</span></span>`+
+      `<span class="v"><button class="btn-ghost zmasq" data-z="${esc(z.name)}" data-on="${masq?'0':'1'}" style="font-size:11px;padding:3px 8px">${masq?'NAT ✓':'NAT ✕'}</button></span></div>`;
+  }).join('') : '<div class="sub">—</div>';
+  $$('#zoneList .zmasq').forEach(b=>b.onclick=async()=>{ const r=await safeApply(()=>call({act:'fw_masq',zone:b.dataset.z,on:b.dataset.on},true));
+    toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadZones,1200); });
+}
+
+/* ---------- BLOCKED clients ---------- */
+async function loadBlocked(){
+  const r=await call({op:'blocklist'});
+  const bs=(r&&r.ok)?(r.blocked||[]):[];
+  $('#blockedBox').innerHTML = bs.length? bs.map(x=>
+    `<div class="kv"><span class="k">${esc(x.mac)}</span><span class="v"><button class="btn-ghost unblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:2px 8px">رفع الحظر</button></span></div>`).join('')
+    : '<div class="sub">لا أجهزة محظورة.</div>';
+  $$('#blockedBox .unblk').forEach(b=>b.onclick=async()=>{ const r=await call({act:'client_unblock',mac:b.dataset.mac},true);
+    toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(()=>{loadBlocked();loadClients();},800); });
 }
 
 /* ---------- SERVICES (guest / upnp / adblock / ddns / init) ---------- */
@@ -529,7 +586,7 @@ function switchTab(tab){
   $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',panes.indexOf(s.dataset.pane)<0));
   if(panes.indexOf('dash')>=0)loadDash();
-  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); loadVlan(); }
+  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); loadVlan(); loadInterfaces(); }
   if(panes.indexOf('ports')>=0)loadPorts();
   if(panes.indexOf('clients')>=0)loadClients();
   if(panes.indexOf('wifi')>=0)loadWifi();
@@ -537,7 +594,7 @@ function switchTab(tab){
   if(panes.indexOf('health')>=0)loadHealth();
   if(panes.indexOf('logs')>=0)loadLogs();
   if(panes.indexOf('system')>=0){ loadSystem(); loadCron(); }
-  if(panes.indexOf('firewall')>=0){ loadFw(); loadDns(); loadLeases(); loadRoutes(); }
+  if(panes.indexOf('firewall')>=0){ loadFw(); loadDns(); loadLeases(); loadRoutes(); loadZones(); }
   if(panes.indexOf('services')>=0){ loadSvcStates(); loadSvcList(); }
   if(panes.indexOf('monitor')>=0)loadMonitor();
 }
@@ -660,7 +717,17 @@ $('#ddnsApply').onclick=async()=>{ const r=await call({act:'ddns_set',provider:$
 
 /* ---------- wire up: tools (diag + packages) ---------- */
 $('#diagRun').onclick=runDiag;
+$('#speedBtn').onclick=async()=>{ const el=$('#speedRes'); el.textContent='جارٍ القياس… (~15ث)'; const b=$('#speedBtn'); b.disabled=true;
+  const r=await call({op:'speedtest'}); b.disabled=false;
+  if(r&&r.ok&&+r.bps>0){ el.innerHTML=(+r.bps*8/1e6).toFixed(1)+'<small> Mbps ↓</small>'; } else el.textContent='تعذّر القياس'; };
 $('#monRefresh').onclick=loadMonitor;
+/* interfaces / firewall zones / ntp / logs filter+search+download */
+$('#ntpApply').onclick=async()=>{ const r=await call({act:'ntp_set',ntp1:$('#s_ntp1').value,ntp2:$('#s_ntp2').value},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#fwRestart').onclick=async()=>{ const r=await call({act:'fw_restart'},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };
+$('#logFilter').addEventListener('change',loadLogs);
+$('#logSearch').addEventListener('input',renderLog);
+$('#logDownload').onclick=()=>{ const t=window._logRaw||$('#logBox').textContent||''; const a=document.createElement('a');
+  a.href='data:text/plain;charset=utf-8,'+encodeURIComponent(t); a.download='kt412-log.txt'; document.body.appendChild(a); a.click(); a.remove(); };
 $('#pkgRefresh').onclick=loadPkgs;
 $('#pkg_search').addEventListener('input',renderPkgs);
 $('#pkgInstall').onclick=async()=>{ const n=$('#pkg_name').value.trim(); if(!n){toast('اكتب اسم الحزمة',false);return;}
