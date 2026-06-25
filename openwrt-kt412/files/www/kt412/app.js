@@ -362,17 +362,18 @@ function renderLog(){
 async function loadPower(){
   const r=await call({op:'power'});
   if(!(r&&r.ok)){ $('#powerBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
+  const pv=x=>{ x=(x==null?'':String(x)); return (x===''||x==='?')?'—':x; };
   $('#powerBox').innerHTML=(r.radios||[]).map(rd=>{
     const is5=rd.band==='5g'; const req=Math.max(0,Math.min(30,+rd.requested||0));
-    const nd=rd.netdev, ap=rd.applied;
-    const match = (String(ap)===String(req)); // applied == requested ?
+    const nd=pv(rd.netdev), ap=pv(rd.applied);
+    const match = (ap!=='—' && String(ap)===String(req)); // applied == requested ?
     return `<div class="card" data-radio="${esc(rd.radio)}" data-req="${req}" style="margin-top:14px;background:rgba(255,255,255,.04)">
-      <h3>${is5?'📡 5GHz · radio'+(is5?'1':'0'):'📶 2.4GHz · radio0'} <span class="badge ok">${esc(rd.radio)}</span></h3>
+      <h3>${is5?'📡 5GHz · radio1':'📶 2.4GHz · radio0'} <span class="badge ok">${esc(rd.radio)}</span></h3>
       <div class="kv"><span class="k">Requested Power (uci)</span><span class="v" data-f="req">${esc(rd.requested)} dBm</span></div>
-      <div class="kv"><span class="k">Applied / Driver (iwinfo)</span><span class="v"><span class="badge ${match?'ok':'warn'}" data-f="ap">${esc(rd.applied)} dBm</span></span></div>
-      <div class="kv"><span class="k">PHY Power (iw phy)</span><span class="v" data-f="phy">${esc(rd.phy_limit)} dBm</span></div>
-      <div class="kv"><span class="k">DebugFS user_power</span><span class="v" data-f="up">${esc(rd.user_power)}</span></div>
-      <div class="kv"><span class="k">DebugFS netdev txpower</span><span class="v"><span class="badge ${String(nd)==='30'||match?'ok':'warn'}" data-f="nd">${esc(rd.netdev)}</span></span></div>
+      <div class="kv"><span class="k">Applied / Driver (iwinfo)</span><span class="v"><span class="badge ${match?'ok':'warn'}" data-f="ap">${pv(rd.applied)} dBm</span></span></div>
+      <div class="kv"><span class="k">PHY Power (iw phy)</span><span class="v"><span class="badge ${pv(rd.phy_limit)==='30'?'ok':'warn'}" data-f="phy">${pv(rd.phy_limit)} dBm</span></span></div>
+      <div class="kv"><span class="k">DebugFS user_power</span><span class="v" data-f="up">${pv(rd.user_power)}</span></div>
+      <div class="kv"><span class="k">DebugFS netdev txpower</span><span class="v"><span class="badge ${nd==='30'||(nd!=='—'&&match)?'ok':'warn'}" data-f="nd">${nd}</span></span></div>
       <label class="f">TX Power: <b class="wpowval">${req}</b> dBm <span class="sub">(0 – 30 · الأقصى 30)</span></label>
       <input type="range" class="wpow" min="0" max="30" step="1" value="${req}" style="width:100%">
       <div class="row" style="margin-top:8px">
@@ -720,10 +721,15 @@ $('#wanVlanBtn').onclick=async()=>{const v=$('#w_vlan').value.trim();
 $('#dhcpSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
   dhcpOn=b.dataset.d; $$('#dhcpSeg button').forEach(x=>x.classList.toggle('active',x===b));});
 $('#lanApply').onclick=applyLan;
-$('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim(); if(!vid){toast('اكتب VLAN ID',false);return;}
-  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:$('#vlanIp').value,dhcp:$('#vlanDhcp').checked?1:0,
-    routing:$('#vlanRouting').value,allow_vids:$('#vlanAllow').value,nat:$('#vlanNat').value,
-    dns_mode:$('#vlanDns').value,dns1:$('#vlanDns1').value,dns2:$('#vlanDns2').value},true));
+$('#vlanAdd').onclick=async()=>{ const vid=$('#vlanVid').value.trim(); if(!vid){toast('اكتب رقم VLAN',false);return;}
+  const gv=(id,d)=>{ const e=$(id); return e?e.value:d; };
+  // simple mode: bridge = routes with LAN (inter); vlan = isolated, internet-only.
+  const mode=gv('#vlanMode','vlan');
+  const routing = mode==='bridge' ? 'inter' : gv('#vlanRouting','internet');
+  const nat = mode==='bridge' ? 'on' : gv('#vlanNat','on');
+  const r=await safeApply(()=>call({act:'vlan_add',vid,ip:gv('#vlanIp',''),dhcp:($('#vlanDhcp')&&$('#vlanDhcp').checked)?1:0,
+    routing,allow_vids:gv('#vlanAllow',''),nat,
+    dns_mode:gv('#vlanDns','auto'),dns1:gv('#vlanDns1',''),dns2:gv('#vlanDns2','')},true));
   toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok); if(r&&r.ok)setTimeout(loadVlan,1800); };
 $('#vlanImport').onclick=async()=>{ const d=$('#vlanImportData').value.trim(); if(!d){toast('ألصق الإعداد',false);return;}
   let b64; try{ b64=btoa(unescape(encodeURIComponent(d))); }catch(e){ toast('نص غير صالح',false); return; }

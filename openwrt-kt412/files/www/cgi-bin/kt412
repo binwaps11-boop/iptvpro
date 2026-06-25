@@ -890,6 +890,7 @@ case "$OP" in
 		ker="$(dmesg 2>/dev/null | tail -n 100 | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"sys":"%s","ker":"%s"}\n' "$sys" "$ker";;
 	power)
+		mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
 		out=""; first=1
 		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 			idx="$(printf '%s' "$r" | tr -cd '0-9')"
