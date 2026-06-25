@@ -478,14 +478,26 @@ if [ -n "$ACT" ]; then
 			dn="$(sani_int "$(getp down)")"; up="$(sani_int "$(getp up)")"
 			sec="$(uci show sqm 2>/dev/null | sed -n 's/^sqm\.\([^.=]*\)=queue/\1/p' | head -1)"
 			[ -n "$sec" ] || sec="wan"
+			# shape on the real WAN egress (pppoe-wan if PPPoE, else wan device)
+			wif="$(uci -q get network.wan.device)"; [ "$(uci -q get network.wan.proto)" = "pppoe" ] && wif="pppoe-wan"
+			[ -n "$wif" ] || wif="eth0"
 			uci set sqm.$sec=queue
-			uci set sqm.$sec.interface="$(uci -q get network.wan.device || echo eth0)"
+			uci set sqm.$sec.interface="$wif"
 			[ -n "$dn" ] && uci set sqm.$sec.download="$dn"
 			[ -n "$up" ] && uci set sqm.$sec.upload="$up"
+			uci set sqm.$sec.qdisc='cake'
+			uci set sqm.$sec.script='piece_of_cake.qos'
+			uci set sqm.$sec.linklayer='ethernet'; uci set sqm.$sec.overhead='44'
+			uci set sqm.$sec.qdisc_advanced='1'; uci set sqm.$sec.egress_ecn='NOECN'; uci set sqm.$sec.ingress_ecn='ECN'
 			uci set sqm.$sec.enabled="${en:-0}"
 			uci commit sqm
+			# CRITICAL: software flow-offload BYPASSES the qdisc -> cake shapes nothing.
+			# Turn flow_offloading OFF while SQM is enabled, back ON when disabled.
+			if [ "$en" = "1" ]; then uci -q set firewall.@defaults[0].flow_offloading='0'
+			else uci -q set firewall.@defaults[0].flow_offloading='1'; fi
+			uci -q commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
 			/etc/init.d/sqm enable >/dev/null 2>&1; /etc/init.d/sqm restart >/dev/null 2>&1
-			printf '{"ok":true,"msg":"SQM updated"}\n';;
+			printf '{"ok":true,"msg":"SQM %s (cake على %s)"}\n' "$([ "$en" = 1 ] && echo مُفعّل || echo معطّل)" "$wif";;
 		sys_hostname)
 			h="$(sani_word "$(getp hostname)")"; [ -n "$h" ] || fail "no_hostname"
 			uci set system.@system[0].hostname="$h"; uci commit system

@@ -177,6 +177,19 @@
       <div id="ifaceList" style="margin-top:10px"><div class="sub">جارٍ التحميل…</div></div>
     </div>
     <div class="card" style="margin-top:16px">
+      <h3>🚀 تحسين البنج تحت الحمل — SQM / Cake</h3>
+      <div class="note">يخفض البنج ويمنع التقطيع أثناء التنزيل/الرفع. اضبط السرعتين بـ~90% من سرعتك الحقيقية. <b>يُطفئ flow‑offload تلقائيًا</b> عند التفعيل (وإلا cake لا يعمل).</div>
+      <div class="row">
+        <div><label class="f">⬇️ تنزيل (Mbit/s)</label><input id="sqm_dn" class="t" placeholder="مثال: 90"></div>
+        <div><label class="f">⬆️ رفع (Mbit/s)</label><input id="sqm_up" class="t" placeholder="مثال: 18"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><button class="btn" id="sqmOn" style="width:100%">تفعيل SQM (بنج منخفض)</button></div>
+        <div><button class="btn sec" id="sqmOff" style="width:100%">إيقاف</button></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
       <h3>🔀 VLAN — مبسّط</h3>
       <div class="note">اختر الوضع واكتب رقم الـVLAN فقط، ثم «إضافة». كل تغيير عبر <b>Safe Apply</b> (رجوع تلقائي خلال 80ث). VLAN 1 = الإدارة (محمي).</div>
       <div id="vlanList"><div class="sub">جارٍ التحميل…</div></div>

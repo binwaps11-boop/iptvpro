@@ -97,6 +97,7 @@ uci -q commit wireless
 if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
 	cat >> /etc/sysctl.conf <<'SYS'
 # kt412-tune
+net.core.default_qdisc=fq_codel
 net.netfilter.nf_conntrack_max=16384
 net.netfilter.nf_conntrack_tcp_timeout_established=7200
 net.netfilter.nf_conntrack_tcp_timeout_time_wait=30

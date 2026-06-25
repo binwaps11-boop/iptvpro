@@ -863,6 +863,10 @@ $('#monRefresh').onclick=loadMonitor;
 $('#menuToggle').onclick=openDrawer;
 $('#scrim').onclick=closeDrawer;
 $('#devRefresh').onclick=loadDevices;
+if($('#sqmOn')) $('#sqmOn').onclick=async()=>{ const r=await call({act:'sqm',enabled:1,down:$('#sqm_dn').value,up:$('#sqm_up').value},true);
+  toast(r&&r.ok?(r.msg||'تم تفعيل SQM'):'فشل',r&&r.ok); };
+if($('#sqmOff')) $('#sqmOff').onclick=async()=>{ const r=await call({act:'sqm',enabled:0,down:$('#sqm_dn').value,up:$('#sqm_up').value},true);
+  toast(r&&r.ok?(r.msg||'تم إيقاف SQM'):'فشل',r&&r.ok); };
 if($('#qs_tx')) $('#qs_tx').oninput=()=>{ const v=$('#qs_txv'); if(v)v.textContent=$('#qs_tx').value; };
 if($('#qs_mode')) $('#qs_mode').onchange=()=>{ const p=$('#qs_pppoe_row'); if(p)p.style.display=($('#qs_mode').value==='pppoe')?'flex':'none'; };
 if($('#qsApply')) $('#qsApply').onclick=async()=>{
