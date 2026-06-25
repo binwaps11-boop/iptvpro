@@ -1,0 +1,35 @@
+==========================================================================
+KT412 — DSA_RESULT (template; filled by /root/kt412-dsa-check.sh)
+Run:  sh /root/kt412-dsa-check.sh   -> overwrites this with live values.
+Read-only. swconfig is never used. qca8k official DSA driver.
+==========================================================================
+
+EXPECTED (acceptance):
+  dsa_core loaded            [ ]
+  tag_qca loaded             [ ]
+  qca8k loaded               [ ]
+  swconfig NOT found         [ ]
+  DSA: tree 0 setup          [ ]
+  lan1-lan4 master br-lan    [ ]
+  wan separate (own port)    [ ]
+  lan3 stable (no flap loop) [ ]   <- watchdog port-bounce REMOVED; EEE off
+  VLAN Manager (LuCI) works  [ ]   <- Network>Interfaces>Bridge VLAN
+  bridge vlan show populated [ ]   <- only after you enable a VLAN (vlan_filtering=1)
+
+ABOUT "qca8k mdio.0:00: No ports node specified in device tree!"
+  This is the qca8k INTERNAL-MDIO (switch PHY management bus) warning, NOT the
+  DSA ports node. Proof it is benign: lan1-4 and wan DO enumerate as DSA ports
+  and bridge correctly (see ip -d link / bridge link in the check output). The
+  external DSA `ports`/`ethernet-ports` node is present and correct (PR #21837);
+  only the optional internal-PHY `mdio` child is absent, so qca8k logs the
+  notice and uses defaults. The board DTS used by THIS build is shipped at
+  /etc/kt412-dts.txt for exact, safe review before any DTS change — we do NOT
+  blind-edit the DTS, because a wrong ports node breaks the working DSA.
+
+DTS / network changes in this build:
+  - DTS: only the upstream PR #21837 DTS (+ a one-line semicolon fix in the
+    workflow). The real file is captured at /etc/kt412-dts.txt.
+  - network defaults: DSA-generated from board.json (lan1-4 -> br-lan, wan
+    separate). VLANs are added as official `config bridge-vlan` via LuCI.
+  - qca8k driver: NOT modified.
+==========================================================================

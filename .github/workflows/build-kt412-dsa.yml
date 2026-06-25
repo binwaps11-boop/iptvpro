@@ -115,6 +115,15 @@ jobs:
           mkdir -p ./files/www ./files/root
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/root/." ./files/root/ 2>/dev/null || true
+          # Capture the ACTUAL board DTS (PR #21837 version) into the image + log so the
+          # qca8k switch/ports/mdio nodes can be reviewed precisely before any DTS edit.
+          mkdir -p files/etc
+          { echo "# KT412 captured board DTS (PR #21837). Generated at build time.";
+            n=0; for f in target/linux/ath79/dts/qca9558_dongwon_dw02-412h*.dts target/linux/ath79/dts/qca9558_dongwon_dw02-412h*.dtsi; do
+              [ -f "$f" ] && { echo "### $f"; cat "$f"; echo; n=$((n+1)); }
+            done; [ "$n" = 0 ] && echo "# (no matching DTS file found at target/linux/ath79/dts/)"; } > files/etc/kt412-dts.txt 2>/dev/null
+          echo "=== board DTS: switch / ports / mdio nodes (for DSA review) ==="
+          grep -nEi 'switch|qca8k|ports|ethernet-ports|port@|mdio|label|phy-mode|cpu' files/etc/kt412-dts.txt | head -80 || echo "(DTS not found at expected path)"
           chmod +x files/etc/uci-defaults/* || true
           chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
@@ -148,9 +157,9 @@ jobs:
           echo "=== /etc/kt412-kernel-config.txt ==="; cat files/etc/kt412-kernel-config.txt
           # --- REQUIRED diagnostic/RF files must be in the image (user acceptance list) ---
           echo "=== REQUIRED FILES GATE ==="
-          for f in etc/kt412-build-info etc/kt412-kernel-config.txt \
-                   root/kt412-power-trace.sh root/kt412-rf-report.sh root/kt412-cpu-check.sh \
-                   root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt root/CPU_FIX_REPORT.txt; do
+          for f in etc/kt412-build-info etc/kt412-kernel-config.txt etc/kt412-dts.txt \
+                   root/kt412-power-trace.sh root/kt412-rf-report.sh root/kt412-cpu-check.sh root/kt412-dsa-check.sh \
+                   root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt root/CPU_FIX_REPORT.txt root/DSA_RESULT.txt; do
             test -s "files/$f" && echo "INCLUDED: /$f" || { echo "FATAL: missing /$f in image"; exit 1; }
           done
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
