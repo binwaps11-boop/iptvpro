@@ -44,7 +44,7 @@ case "$ACT" in
 		force="$(getq force | tr -cd '01')"
 		OPT="-n"; [ "$keep" = "1" ] && OPT=""
 		[ "$force" = "1" ] && OPT="$OPT -F"
-		printf '{"ok":true,"msg":"flashing — device reboots in ~3 min, reconnect at 192.168.100.1"}\n'
+		printf '{"ok":true,"msg":"flashing — device reboots in ~3 min, reconnect at 192.168.1.1"}\n'
 		# detach so the response is delivered before the box reboots
 		(sleep 1; sysupgrade $OPT "$IMG") >/dev/null 2>&1 &
 		;;

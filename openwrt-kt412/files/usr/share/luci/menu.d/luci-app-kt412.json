@@ -1,0 +1,45 @@
+{
+	"admin/kt412": {
+		"title": "Smart AP",
+		"order": 5,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412" ]
+		}
+	},
+	"admin/kt412/devices": {
+		"title": "الأجهزة",
+		"order": 1,
+		"action": {
+			"type": "view",
+			"path": "kt412/devices"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412" ]
+		}
+	},
+	"admin/kt412/quick": {
+		"title": "إعدادات سريعة",
+		"order": 2,
+		"action": {
+			"type": "view",
+			"path": "kt412/quick"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412" ]
+		}
+	},
+	"admin/kt412/status": {
+		"title": "الحالة و Mesh",
+		"order": 3,
+		"action": {
+			"type": "view",
+			"path": "kt412/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412" ]
+		}
+	}
+}

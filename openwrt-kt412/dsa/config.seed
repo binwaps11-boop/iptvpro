@@ -6,10 +6,18 @@ CONFIG_PACKAGE_uhttpd-mod-ubus=y
 CONFIG_PACKAGE_rpcd=y
 CONFIG_PACKAGE_rpcd-mod-file=y
 CONFIG_PACKAGE_rpcd-mod-iwinfo=y
-# --- Official LuCI (full OpenWrt admin: every section, real backend) ---
-# Kept ALONGSIDE the custom Smart AP dashboard. LuCI lives at /cgi-bin/luci;
-# Smart AP stays the landing page. Gives Network/Wireless/Firewall/DHCP-DNS/
-# System/Software/Backup/Diagnostics/DSA + Bridge-VLAN-Filtering for free.
+# --- Official LuCI = the ONE AND ONLY web UI ---
+# Single unified interface: official LuCI is the BASE, re-skinned with the
+# custom purple-glass design via an overlay CSS (/www/luci-static/bootstrap/
+# kt412-theme.css, @import-ed into luci-theme-bootstrap on every page by
+# /etc/uci-defaults/40-kt412-luci-theme). The Smart AP dashboard features ship
+# as LuCI views under a "Smart AP" menu group (menu.d/acl.d + resources/view/
+# kt412/*.js) that reuse the existing /cgi-bin/kt412 backend. The standalone
+# Arabic dashboard site is removed; / redirects to /cgi-bin/luci. Default
+# landing stays the standard OpenWrt Status page (themed).
+# luci-theme-bootstrap is the selected/default theme (mediaurlbase) — the
+# re-skin is an overlay CSS layered on top of it, NOT a separate theme package
+# (more robust: no header/footer template to track LuCI layout changes).
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-base=y
 CONFIG_PACKAGE_luci-compat=y
@@ -22,6 +30,9 @@ CONFIG_PACKAGE_luci-app-package-manager=y
 CONFIG_PACKAGE_luci-proto-ppp=y
 CONFIG_PACKAGE_luci-proto-ipv6=y
 CONFIG_PACKAGE_luci-theme-bootstrap=y
+# Arabic translation for the LuCI chrome (menus/labels). Best-effort: the custom
+# CSS already forces RTL; if this package is unavailable the UI stays English-RTL.
+CONFIG_PACKAGE_luci-i18n-base-ar=y
 CONFIG_PACKAGE_rpcd-mod-rrdns=y
 CONFIG_PACKAGE_iwinfo=y
 CONFIG_PACKAGE_iw=y

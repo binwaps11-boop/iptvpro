@@ -59,6 +59,11 @@ jobs:
           cd openwrt
           git fetch origin pull/21837/head:dsa
           git checkout dsa
+          # Pin to the audited PR #21837 head commit for reproducibility (the PR ref
+          # is a moving third-party branch that can be force-pushed). Fall back to the
+          # branch tip if the pinned commit is ever gone, so the build still runs.
+          PIN=cd4969767bbc
+          if git cat-file -e "${PIN}^{commit}" 2>/dev/null; then git checkout "$PIN"; echo "PINNED PR #21837 @ $PIN"; else echo "WARN: pinned $PIN not found; using branch tip"; fi
           echo "HEAD: $(git log --oneline -1)"
           DTSI="target/linux/ath79/dts/qca9558_dongwon_dw02-412h.dtsi"
           if grep -q 'linux,default-trigger = "phy1tpt"$' "$DTSI"; then
@@ -129,9 +134,16 @@ jobs:
         run: |
           cd openwrt
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/files" ./files
-          mkdir -p ./files/www ./files/root
+          mkdir -p ./files/www ./files/root ./files/usr ./files/etc/uci-defaults
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/root/." ./files/root/ 2>/dev/null || true
+          # LuCI app (menu.d + acl.d) for the in-LuCI "Smart AP" views, and the
+          # LuCI re-skin uci-default. These live under /usr/share and /etc and were
+          # NOT covered by the www/root copies above — add them explicitly so the
+          # single unified LuCI UI (themed + Smart AP menu) ships in the image.
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/usr/." ./files/usr/
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/uci-defaults/40-kt412-luci-theme" ./files/etc/uci-defaults/40-kt412-luci-theme
+          chmod 0755 files/etc/uci-defaults/40-kt412-luci-theme || true
           # Capture the ACTUAL board DTS (PR #21837 version) into the image + log so the
           # qca8k switch/ports/mdio nodes can be reviewed precisely before any DTS edit.
           mkdir -p files/etc
@@ -211,28 +223,40 @@ jobs:
           grep -q 'soc=QCA9558' files/etc/kt412-build-info && echo "GATE: soc=QCA9558 OK" || { echo "FATAL: soc field missing"; exit 1; }
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
-          H=files/www/kt412/index.html
-          J=files/www/kt412/app.js
           S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"
           g(){ grep -q "$1" "$2" && echo "$3" || { echo "FATAL: missing $3"; exit 1; }; }
-          # --- OpenWrt/LuCI core UI coverage (custom dashboard, real backend) ---
-          g 'data-pane="dash"'      "$H" "OPENWRT UI DASHBOARD INCLUDED"
-          g 'op=.\?ifaces\|ifaces)' "$C" "OPENWRT UI INTERFACES INCLUDED"
-          g 'data-pane="wifi"'      "$H" "OPENWRT UI WIRELESS INCLUDED"
-          g 'dns_set'               "$C" "OPENWRT UI DHCP DNS INCLUDED"
-          g 'fw_forward'            "$C" "OPENWRT UI FIREWALL INCLUDED"
-          g 'fw_dmz'                "$C" "OPENWRT UI NAT PORT FORWARD INCLUDED"
-          g 'route_add'             "$C" "OPENWRT UI ROUTES INCLUDED"
-          g 'vlan_add'              "$C" "OPENWRT UI VLAN MANAGER INCLUDED"
-          g 'data-pane="ports"'     "$H" "OPENWRT UI DSA PORTS INCLUDED"
-          g 'data-pane="clients"'   "$H" "OPENWRT UI CLIENTS INCLUDED"
-          g 'data-pane="quick"'     "$H" "QUICK SETTINGS INCLUDED"
-          g 'data-pane="smartap"'   "$H" "SMART AP HEALTH PANE INCLUDED"
-          g 'selfheal)'           "$C" "SELF-HEAL STATUS BACKEND INCLUDED"
-          g 'quick_setup)'          "$C" "QUICK SETUP BACKEND INCLUDED"
-          g 'data-pane="logs"'      "$H" "OPENWRT UI LOGS INCLUDED"
-          g 'diag)'                 "$C" "OPENWRT UI DIAGNOSTICS INCLUDED"
-          g 'backup_make'           "$C" "OPENWRT UI BACKUP RESTORE INCLUDED"
+          # --- SINGLE UNIFIED UI = official LuCI (one interface only) ---
+          # 1) the standalone Arabic dashboard site is GONE (no second UI)
+          [ ! -e files/www/kt412/index.html ] && [ ! -e files/www/kt412/app.js ] \
+            && echo "SINGLE-UI: standalone dashboard removed OK" \
+            || { echo "FATAL: standalone dashboard still present -> two UIs"; exit 1; }
+          # 2) www/index.html now redirects to LuCI (not /kt412/)
+          grep -q 'url=/cgi-bin/luci' files/www/index.html \
+            && ! grep -q 'url=/kt412/' files/www/index.html \
+            && echo "SINGLE-UI: entry redirects to LuCI OK" \
+            || { echo "FATAL: entry page not redirecting to LuCI"; exit 1; }
+          # 3) LuCI re-skin (theme on every page) shipped + import wired at boot
+          test -s files/www/luci-static/bootstrap/kt412-theme.css && echo "LUCI THEME CSS INCLUDED" || { echo "FATAL: kt412 LuCI theme css missing"; exit 1; }
+          grep -q 'kt412-theme.css' files/etc/uci-defaults/40-kt412-luci-theme && echo "LUCI THEME IMPORT WIRED INCLUDED" || { echo "FATAL: theme @import uci-default missing"; exit 1; }
+          # 4) Smart AP LuCI app: menu.d + acl.d + the 3 client views (no power page)
+          test -s files/usr/share/luci/menu.d/luci-app-kt412.json && echo "LUCI MENU.D INCLUDED" || { echo "FATAL: kt412 menu.d missing"; exit 1; }
+          test -s files/usr/share/rpcd/acl.d/luci-app-kt412.json && echo "LUCI ACL.D INCLUDED" || { echo "FATAL: kt412 acl.d missing"; exit 1; }
+          for V in devices quick status; do
+            test -s "files/www/luci-static/resources/view/kt412/$V.js" && echo "LUCI VIEW INCLUDED: $V" || { echo "FATAL: kt412 view $V.js missing"; exit 1; }
+          done
+          # no duplicate custom power page (txpower lives only in LuCI Wireless)
+          [ ! -e files/www/luci-static/resources/view/kt412/power.js ] && echo "SINGLE-UI: no duplicate custom power page OK" || { echo "FATAL: custom power page must be removed (use LuCI Wireless)"; exit 1; }
+          # 5) backend (reused as the data source for the views) still complete
+          g 'op=.\?ifaces\|ifaces)' "$C" "BACKEND INTERFACES INCLUDED"
+          g 'dns_set'               "$C" "BACKEND DHCP DNS INCLUDED"
+          g 'fw_forward'            "$C" "BACKEND FIREWALL INCLUDED"
+          g 'fw_dmz'                "$C" "BACKEND NAT PORT FORWARD INCLUDED"
+          g 'route_add'             "$C" "BACKEND ROUTES INCLUDED"
+          g 'vlan_add'              "$C" "BACKEND VLAN MANAGER INCLUDED"
+          g 'selfheal)'             "$C" "BACKEND SELF-HEAL STATUS INCLUDED"
+          g 'quick_setup)'          "$C" "BACKEND QUICK SETUP INCLUDED"
+          g 'diag)'                 "$C" "BACKEND DIAGNOSTICS INCLUDED"
+          g 'backup_make'           "$C" "BACKEND BACKUP RESTORE INCLUDED"
           # --- VLAN advanced sub-features ---
           g 'KT412-VLAN-INTER' "$C" "VLAN INTER-VLAN INCLUDED"
           g 'KT412-VLAN-DNS'   "$C" "VLAN DNS PER VLAN INCLUDED"
@@ -241,7 +265,6 @@ jobs:
           # --- Safe Apply + reports ---
           g 'safe_arm'     "$C" "SAFE APPLY INCLUDED"
           g 'safe_restore' "$C" "SAFE APPLY ROLLBACK INCLUDED"
-          # --- TX Power user control (0-30 slider per radio, Safe Apply) ---
           # --- WiFi must ship ENABLED with an SSID (else radios don't broadcast) ---
           grep -q "option ssid" files/etc/config/wireless 2>/dev/null \
             && grep -q "option disabled '0'" files/etc/config/wireless 2>/dev/null \
@@ -264,9 +287,11 @@ jobs:
           else
             echo "NOTE: ath10k-ct not pinned in global .config; provided by device DEVICE_PACKAGES (verified in manifest after build)"
           fi
-          g 'class="wpow"'        "$J" "TX POWER USER CONTROL INCLUDED"
-          grep -q 'min="0" max="30"' "$J" && echo "TX POWER RANGE 0-30 INCLUDED" || { echo "FATAL: tx power range 0-30"; exit 1; }
-          grep -q "act:'txpower'" "$J" && grep -q 'safeApply' "$J" && echo "TX POWER SAFE APPLY INCLUDED" || { echo "FATAL: tx power safe apply"; exit 1; }
+          # TX power is now adjusted ONLY in LuCI's native Network > Wireless page
+          # (no duplicate custom slider). Gate on the LuCI wireless module instead.
+          grep -q '^CONFIG_PACKAGE_luci-mod-network=y' "$S" \
+            && echo "TX POWER VIA LUCI WIRELESS (luci-mod-network) INCLUDED" \
+            || { echo "FATAL: luci-mod-network missing -> no native Wireless/txpower UI"; exit 1; }
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
             grep -q "option txpower '30'" files/etc/config/wireless && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
           else

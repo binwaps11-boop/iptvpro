@@ -56,6 +56,28 @@ if [ "$OP" = "login" ]; then
 	exit 0
 fi
 
+# ---------- adopt (bootstrap from an existing LuCI session, no password) ------
+# The Smart AP pages now live INSIDE LuCI. A LuCI page already runs under an
+# authenticated ubus session (its sysauth cookie). Instead of asking for the
+# root password again, the LuCI view passes its own session id here once; we
+# verify it is a REAL privileged session (must hold uci write access — only a
+# logged-in LuCI admin session does) and then mark it kt412ok=1 so the same id
+# works as the token for every later op. Additive: does not change any existing
+# behavior or the password-based login above.
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	[ -n "$SID" ] || fail "no_token"
+	# must be a valid session that can write uci (real authenticated LuCI admin)
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
 # ---------- everything else requires a valid session ----------
 TOK="$(sani_hex "$(getp token)")"
 [ -n "$TOK" ] || fail "no_token"
@@ -135,7 +157,7 @@ if [ -n "$ACT" ]; then
 			case "$mode" in
 				ap)
 					# dumb AP / switch: bridge WAN port into LAN, DHCP server off,
-					# keep mgmt 192.168.100.1 so access is never lost. PPPoE stays WAN-only.
+					# keep mgmt 192.168.1.1 so access is never lost. PPPoE stays WAN-only.
 					if [ -n "$brsec" ] && [ -n "$wandev" ]; then
 						uci -q del_list network.$brsec.ports="$wandev"
 						uci -q add_list network.$brsec.ports="$wandev"
@@ -147,7 +169,7 @@ if [ -n "$ACT" ]; then
 					uci -q set dhcp.lan.ignore='1'
 					uci commit
 					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-					printf '{"ok":true,"msg":"Access Point: كل المنافذ موصولة، DHCP معطّل، الإدارة تبقى 192.168.100.1"}\n';;
+					printf '{"ok":true,"msg":"Access Point: كل المنافذ موصولة، DHCP معطّل، الإدارة تبقى 192.168.1.1"}\n';;
 				router)
 					if [ -n "$brsec" ] && [ -n "$wandev" ]; then uci -q del_list network.$brsec.ports="$wandev"; fi
 					if [ -n "$wandev" ]; then

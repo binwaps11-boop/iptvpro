@@ -1,0 +1,189 @@
+/* ============================================================================
+   KT412 / Smart AP — LuCI re-skin (purple glassmorphism, RTL Arabic-friendly)
+   Overlay-only theme: this file is @import-ed into luci-theme-bootstrap's
+   cascade.css on every LuCI page (see /etc/uci-defaults/40-kt412-luci-theme),
+   so EVERY LuCI page inherits the custom look. Palette/cards/gradients are
+   ported from /www/kt412/style.css. Append-only overrides — non-destructive.
+   ============================================================================ */
+:root{
+  --kt-bg0:#0c0220; --kt-bg1:#1a0838; --kt-bg2:#2a0e55;
+  --kt-glass:rgba(255,255,255,.06); --kt-glass-strong:rgba(255,255,255,.10);
+  --kt-stroke:rgba(176,140,255,.28); --kt-stroke-strong:rgba(176,140,255,.5);
+  --kt-txt:#efe9ff; --kt-txt2:#b9aee6; --kt-muted:#8d80b8;
+  --kt-accent:#b07cff; --kt-accent2:#7c4dff; --kt-accent3:#d2a8ff;
+  --kt-ok:#54e3ad; --kt-warn:#ffcf5a; --kt-bad:#ff6b8a;
+  --kt-shadow:0 10px 40px rgba(70,18,140,.45);
+}
+
+/* ---- global page: dark purple gradient + Arabic RTL ---- */
+html,body{
+  direction:rtl; text-align:right;
+  background:var(--kt-bg0)!important; color:var(--kt-txt)!important;
+  font-family:'Segoe UI',Tahoma,system-ui,-apple-system,'Noto Sans Arabic',sans-serif!important;
+}
+body{
+  background-image:
+    radial-gradient(900px 600px at 12% -10%, #3a1170 0%, transparent 55%),
+    radial-gradient(800px 600px at 110% 10%, #5713a0 0%, transparent 50%),
+    radial-gradient(700px 700px at 50% 120%, #240a52 0%, transparent 55%),
+    linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 55%,var(--kt-bg0))!important;
+  background-attachment:fixed!important;
+}
+#maincontent,.container,.main,.main-left,.main-right{background:transparent!important;color:var(--kt-txt)!important}
+a{color:var(--kt-accent3)}
+a:hover{color:var(--kt-accent)}
+h1,h2,h3,h4,h5,legend{color:var(--kt-txt)!important}
+
+/* ---- top header / navigation bar ---- */
+header,.header,#header,.navbar,#topmenu,.main > .loading{
+  background:linear-gradient(180deg,rgba(34,14,68,.92),rgba(16,5,38,.96))!important;
+  border-color:var(--kt-stroke)!important;color:var(--kt-txt)!important
+}
+.navbar,.navbar a,header a,.fill a,.brand,.navbar-brand{color:var(--kt-txt)!important}
+.navbar-nav>li>a:hover,.nav>li>a:hover{background:var(--kt-glass-strong)!important;color:#fff!important}
+
+/* ---- left sidebar menu (mobile/desktop) ---- */
+.main-left,#mainmenu,.sidenav,.nav-sidebar{
+  background:linear-gradient(180deg,rgba(34,14,68,.92),rgba(16,5,38,.96))!important;
+  border-inline-end:1px solid var(--kt-stroke)!important
+}
+.main-left a,.nav-sidebar a,#mainmenu a{color:var(--kt-txt2)!important}
+.main-left a:hover,.nav-sidebar a:hover{background:var(--kt-glass)!important;color:var(--kt-txt)!important}
+.main-left .active>a,.nav-sidebar .active>a,li.active>a{
+  background:linear-gradient(135deg,var(--kt-accent2),var(--kt-accent))!important;color:#fff!important;
+  box-shadow:0 6px 18px rgba(124,77,255,.45)!important;border-radius:11px
+}
+
+/* ---- content cards / CBI sections / fieldsets ---- */
+.cbi-section,.cbi-map,fieldset,.panel,.well,.table,.cbi-section-node,
+.node-main, .alert-message{
+  background:var(--kt-glass)!important;border:1px solid var(--kt-stroke)!important;
+  border-radius:20px!important;box-shadow:var(--kt-shadow)!important;color:var(--kt-txt)!important;
+  -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)
+}
+.cbi-section h3,.cbi-map h2,legend,.panel-title{color:var(--kt-txt)!important}
+.cbi-section-descr,.cbi-value-description,.cbi-map-descr,small,.text-muted{color:var(--kt-muted)!important}
+.cbi-value{border-color:var(--kt-stroke)!important}
+
+/* ---- tables ---- */
+table,.table,.cbi-section-table{color:var(--kt-txt)!important;background:transparent!important}
+th,.th{color:var(--kt-txt2)!important;border-color:var(--kt-stroke)!important;background:rgba(255,255,255,.03)!important}
+td,.td{border-color:rgba(176,140,255,.15)!important}
+tr:hover td{background:rgba(255,255,255,.04)!important}
+
+/* ---- inputs / selects / textareas ---- */
+input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
+  background:rgba(10,3,26,.45)!important;color:var(--kt-txt)!important;
+  border:1px solid var(--kt-stroke)!important;border-radius:12px!important
+}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(176,124,255,.18)!important;outline:none
+}
+
+/* ---- buttons ---- */
+.btn,.cbi-button,button,input[type=submit],input[type=button]{
+  border-radius:12px!important;font-weight:700!important;border:1px solid var(--kt-stroke)!important;
+  background:var(--kt-glass-strong)!important;color:var(--kt-txt)!important;transition:.16s
+}
+.btn:hover,.cbi-button:hover,button:hover{background:var(--kt-glass)!important;border-color:var(--kt-stroke-strong)!important}
+.cbi-button-save,.cbi-button-apply,.cbi-button-positive,.btn.cbi-button-action,
+input[type=submit]{
+  background:linear-gradient(135deg,var(--kt-accent2),var(--kt-accent))!important;color:#fff!important;
+  border-color:transparent!important;box-shadow:0 8px 22px rgba(124,77,255,.4)!important
+}
+.cbi-button-remove,.cbi-button-reset,.cbi-button-negative,.btn.danger{
+  background:linear-gradient(135deg,#c0306a,#ff6b8a)!important;color:#fff!important;border-color:transparent!important
+}
+
+/* ---- alerts / notices ---- */
+.alert-message.warning,.notice{background:rgba(255,207,90,.10)!important;border-color:rgba(255,207,90,.35)!important;color:var(--kt-warn)!important}
+.alert-message.error,.error{background:rgba(255,107,138,.10)!important;border-color:rgba(255,107,138,.4)!important;color:var(--kt-bad)!important}
+.alert-message.success{background:rgba(84,227,173,.10)!important;border-color:rgba(84,227,173,.4)!important;color:var(--kt-ok)!important}
+
+/* ---- LuCI status indicators ---- */
+.label,.badge{border-radius:999px!important}
+.cbi-tooltip,.tooltip-inner{background:rgba(20,8,44,.95)!important;color:var(--kt-txt)!important;border:1px solid var(--kt-stroke-strong)!important}
+
+/* ============================================================================
+   KT412 view widgets (used by /luci-static/resources/view/kt412/*.js)
+   ============================================================================ */
+.kt-grid{display:grid;gap:16px;margin-bottom:16px}
+.kt-cols-2{grid-template-columns:repeat(2,1fr)}
+.kt-cols-3{grid-template-columns:repeat(3,1fr)}
+.kt-cols-4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:760px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr 1fr}}
+@media(max-width:480px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr}}
+.kt-card{background:var(--kt-glass);border:1px solid var(--kt-stroke);border-radius:20px;padding:18px;
+  -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);box-shadow:var(--kt-shadow);position:relative;overflow:hidden}
+.kt-card::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--kt-accent3),transparent);opacity:.6}
+.kt-card h3{font-size:14px;color:var(--kt-txt);font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.kt-kv{display:flex;justify-content:space-between;gap:10px;padding:8px 0;
+  border-bottom:1px dashed rgba(176,140,255,.15);font-size:13.5px}
+.kt-kv:last-child{border-bottom:0}
+.kt-kv .k{color:var(--kt-txt2)}
+.kt-kv .v{font-weight:700;text-align:start;word-break:break-all}
+.kt-sub{font-size:12.5px;color:var(--kt-muted);margin-top:5px}
+.kt-badge{font-size:11.5px;padding:3px 9px;border-radius:999px;font-weight:700}
+.kt-badge.ok{background:rgba(84,227,173,.16);color:var(--kt-ok)}
+.kt-badge.bad{background:rgba(255,107,138,.16);color:var(--kt-bad)}
+.kt-badge.warn{background:rgba(255,207,90,.16);color:var(--kt-warn)}
+
+/* stat tiles */
+.kt-tile{border-radius:18px;padding:16px 14px;text-align:center;color:#fff;
+  border:1px solid rgba(255,255,255,.14);box-shadow:0 8px 22px rgba(0,0,0,.25)}
+.kt-tile .ti{font-size:20px}.kt-tile .tn{font-size:30px;font-weight:800;line-height:1.15}.kt-tile .tl{font-size:12px;opacity:.95}
+.kt-t-blue{background:linear-gradient(135deg,#3b5bdb,#5c7cfa)}
+.kt-t-green{background:linear-gradient(135deg,#0ca678,#37d39b)}
+.kt-t-cyan{background:linear-gradient(135deg,#1098ad,#3bc9db)}
+.kt-t-orange{background:linear-gradient(135deg,#e8590c,#ff922b)}
+
+/* circular gauges */
+.kt-gcard{text-align:center;display:flex;flex-direction:column;align-items:center;gap:7px;padding-top:20px}
+.kt-gauge{position:relative;width:108px;height:108px;border-radius:50%;display:grid;place-items:center;
+  background:conic-gradient(var(--gc,var(--kt-accent)) calc(var(--p,0)*3.6deg),rgba(255,255,255,.08) 0)}
+.kt-gauge::before{content:"";position:absolute;width:80px;height:80px;border-radius:50%;
+  background:#1a0838;box-shadow:inset 0 0 12px rgba(0,0,0,.4)}
+.kt-gauge span{position:relative;font-size:21px;font-weight:800;color:var(--kt-txt)}
+.kt-glabel{font-size:13px;color:var(--kt-txt2);font-weight:700}
+
+/* device rows */
+.kt-dev{display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:14px;
+  background:rgba(255,255,255,.04);border:1px solid var(--kt-stroke);margin-bottom:8px;flex-wrap:wrap}
+.kt-dev .dic{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-size:19px;flex:0 0 40px;background:rgba(124,77,255,.18)}
+.kt-dev .dmain{flex:1;min-width:130px}
+.kt-dev .dname{font-weight:700;font-size:14px}
+.kt-dev .dmeta{font-size:11.5px;color:var(--kt-muted);margin-top:2px}
+.kt-sigbar{width:84px;height:7px;border-radius:5px;background:rgba(255,255,255,.1);overflow:hidden}
+.kt-sigbar>i{display:block;height:100%;border-radius:5px;transition:width .4s}
+
+/* power / range controls */
+.kt-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.kt-pwcard{margin-top:14px}
+.kt-pwcard .kt-kv .k{flex:1;min-width:120px}
+input[type=range].wpow,input[type=range].kt-range{-webkit-appearance:none;appearance:none;height:6px;border-radius:5px;
+  background:rgba(255,255,255,.14)!important;outline:none;border:0!important;width:100%}
+input[type=range].wpow::-webkit-slider-thumb,input[type=range].kt-range::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;
+  background:linear-gradient(135deg,var(--kt-accent3),var(--kt-accent));cursor:pointer;box-shadow:0 2px 8px rgba(124,77,255,.6)}
+input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-thumb{
+  width:18px;height:18px;border:0;border-radius:50%;background:linear-gradient(135deg,var(--kt-accent3),var(--kt-accent));cursor:pointer}
+.kt-pwval{font-weight:800;font-size:18px;color:var(--kt-accent3)}
+
+/* primary action button used by views */
+.kt-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;border:0;border-radius:12px;
+  cursor:pointer;font-size:14px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--kt-accent2),var(--kt-accent));
+  box-shadow:0 8px 22px rgba(124,77,255,.4);transition:.16s}
+.kt-btn:hover{transform:translateY(-1px);box-shadow:0 12px 28px rgba(124,77,255,.55)}
+.kt-btn.sec{background:var(--kt-glass-strong);border:1px solid var(--kt-stroke);box-shadow:none}
+.kt-field label,.kt-field .kt-flabel{display:block;margin:11px 0 5px;font-size:12.5px;color:var(--kt-txt2);font-weight:600}
+.kt-field input,.kt-field select{width:100%}
+.kt-note{font-size:12px;color:var(--kt-warn);background:rgba(255,207,90,.08);border:1px solid rgba(255,207,90,.25);
+  padding:9px 12px;border-radius:11px;margin:10px 0;line-height:1.6}
+
+/* mobile */
+@media(max-width:560px){
+  .kt-card,.kt-pwcard{padding:14px;border-radius:16px}
+  .kt-grid.kt-cols-2,.kt-grid.kt-cols-3,.kt-grid.kt-cols-4{grid-template-columns:1fr!important}
+  .kt-tile .tn{font-size:22px}
+}
