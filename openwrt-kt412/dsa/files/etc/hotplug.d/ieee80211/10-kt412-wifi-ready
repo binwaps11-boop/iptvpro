@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fix the 5G boot race: ath10k (QCA988x) firmware loads ~35s after boot. If
+# netifd starts hostapd on phy0 before that, you get
+#   hostapd: Failed to open phy phy0   +   BRIDGE_NOT_ALLOWED
+# and the 5G AP never comes up. When a phy registers (firmware ready), bring up
+# ONLY the radio whose AP iface is still missing (healthy radios untouched).
+[ "$ACTION" = add ] || exit 0
+case "$DEVPATH" in *ieee80211*) ;; *) exit 0 ;; esac
+UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$UP" in ''|*[!0-9]*) UP=0;; esac
+[ "$UP" -lt 220 ] || exit 0            # only during the boot window
+[ -f /tmp/.kt412-wifiready ] && exit 0; : > /tmp/.kt412-wifiready   # debounce multi-phy
+(
+  sleep 5
+  for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+    [ "$(uci -q get wireless.$r.disabled)" = "1" ] && continue
+    ifc="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+    if [ -z "$ifc" ] || [ ! -e "/sys/class/net/$ifc" ]; then
+      logger -t kt412-wifiready "radio $r AP iface missing after firmware load -> wifi up $r"
+      wifi up "$r" >/dev/null 2>&1
+    fi
+  done
+) &
+exit 0
