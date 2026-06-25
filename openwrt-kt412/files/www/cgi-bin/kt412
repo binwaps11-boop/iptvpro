@@ -449,9 +449,14 @@ if [ -n "$ACT" ]; then
 			case "$mode" in safe) d=24;; max) d=26;; extreme) d=30;; *) d=24; mode=safe;; esac
 			uci set wireless.$radio.txpower="$d"; uci commit wireless
 			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
-			iw phy "phy${idx:-0}" set txpower fixed "$((d*100))" >/dev/null 2>&1
+			# resolve the REAL phy via ubus (phy index != radio index on this board)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			iw phy "phy${phyn:-0}" set txpower fixed "$((d*100))" >/dev/null 2>&1
 			wifi reload >/dev/null 2>&1
-			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
 			ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
 			printf '{"ok":true,"mode":"%s","requested":%s,"applied":%s}\n' "$mode" "$d" "${ap:-0}";;
 		lan_set)
@@ -625,6 +630,8 @@ if [ -n "$ACT" ]; then
 			b="$(getp body)"; txt="$(printf '%s' "$b" | base64 -d 2>/dev/null)"
 			mkdir -p /etc/crontabs
 			printf '%s\n' "$txt" > /etc/crontabs/root
+			# never let a user crontab edit delete the Smart AP self-heal watchdog line
+			grep -q 'smartap-wd' /etc/crontabs/root || echo '*/2 * * * * /root/smartap-watchdog.sh # smartap-wd' >> /etc/crontabs/root
 			/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
 			printf '{"ok":true,"msg":"تم حفظ المهام المجدولة"}\n';;
 
@@ -636,6 +643,14 @@ if [ -n "$ACT" ]; then
 			printf '{"ok":true,"msg":"تثبيت %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;
 		pkg_remove)
 			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
+			# NEVER remove packages whose loss bricks the dashboard or a radio (no UI recovery)
+			case "$nm" in
+				uhttpd|uhttpd-mod-ubus|libuhttpd*|rpcd|rpcd-mod-*|ubus*|ubusd|libubox*|uci|libuci*|netifd|procd*|\
+				busybox|dropbear|mtd|fwtool|jsonfilter|libjson*|\
+				kmod-ath9k|kmod-ath10k-ct|ath10k-firmware-*|kmod-mac80211|kmod-cfg80211|wpad*|hostapd*|wireless-regdb|\
+				kmod-nft-*|nftables|firewall4|dnsmasq*|odhcpd*|kmod-qca8k*|kmod-mdio*)
+					fail "protected_pkg";;
+			esac
 			out="$( (apk del "$nm" 2>&1 || opkg remove "$nm" 2>&1) | tail -8 )"
 			b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
 			printf '{"ok":true,"msg":"إزالة %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;

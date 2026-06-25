@@ -76,12 +76,19 @@ uci -q commit network
 dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"
 [ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='1500'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
 
-# --- WiFi stability under load (don't drop clients, max airtime fairness) ---
+# --- WiFi range/roaming/capacity: keep distant clients, fast roaming, QoS ---
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
-	uci -q set wireless.$r.disassoc_low_ack='0'   # keep weaker clients instead of kicking
+	uci -q set wireless.$r.disassoc_low_ack='0'    # keep weak/distant clients instead of kicking
+	uci -q set wireless.$r.wmm='1'                 # WMM/QoS = airtime priority (smooth under load)
+	uci -q set wireless.$r.ieee80211k='1'          # neighbor reports (client picks best AP/band)
+	uci -q set wireless.$r.ieee80211v='1'; uci -q set wireless.$r.bss_transition='1'
+	uci -q set wireless.$r.wnm_sleep_mode='1'
+	uci -q set wireless.$r.ieee80211r='1'          # fast roaming (FT)
+	uci -q set wireless.$r.ft_psk_generate_local='1'; uci -q set wireless.$r.ft_over_ds='0'
+	uci -q set wireless.$r.mobility_domain='4153'
 done
 for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
-	uci -q set wireless.$r.cell_density='0'        # widest range, tolerant of distant clients
+	uci -q set wireless.$r.cell_density='0'         # widest range, tolerant of distant clients
 done
 uci -q commit wireless
 
