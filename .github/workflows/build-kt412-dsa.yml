@@ -148,6 +148,10 @@ jobs:
             && grep -q "option disabled '0'" files/etc/config/wireless 2>/dev/null \
             && echo "WIFI ENABLED + SSID INCLUDED" || { echo "FATAL: wireless not enabled / no SSID -> radios won't broadcast"; exit 1; }
           grep -q "disabled='0'" files/etc/uci-defaults/99-kt412-dsa && echo "WIFI ENABLE-AT-BOOT INCLUDED" || { echo "FATAL: uci-defaults does not enable radios"; exit 1; }
+          # Smart AP stability: self-heal watchdog + ath9k nohwcrypt + watchdog cron
+          test -s files/root/smartap-watchdog.sh && echo "SMART SELF-HEAL WATCHDOG INCLUDED" || { echo "FATAL: self-heal watchdog missing"; exit 1; }
+          grep -q 'nohwcrypt=1' files/etc/modules.d/ath9k 2>/dev/null && echo "ATH9K NOHWCRYPT STABILITY INCLUDED" || { echo "FATAL: ath9k nohwcrypt missing"; exit 1; }
+          grep -q 'smartap-wd' files/etc/uci-defaults/99-kt412-dsa && echo "SELF-HEAL CRON INCLUDED" || { echo "FATAL: self-heal cron missing"; exit 1; }
           # 5GHz needs the ath10k -ct driver + matching -ct firmware, else 5G never
           # broadcasts. The board's DEVICE_PACKAGES already ship them; force-select
           # here too and disable the non-ct variants to avoid a -ct/non-ct mismatch.

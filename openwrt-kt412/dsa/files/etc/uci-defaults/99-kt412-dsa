@@ -90,7 +90,7 @@ uci -q commit wireless
 if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
 	cat >> /etc/sysctl.conf <<'SYS'
 # kt412-tune
-net.netfilter.nf_conntrack_max=49152
+net.netfilter.nf_conntrack_max=16384
 net.netfilter.nf_conntrack_tcp_timeout_established=7200
 net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait=30
@@ -116,18 +116,24 @@ SYS
 fi
 sysctl -p >/dev/null 2>&1
 # enlarge conntrack hash buckets (=max/4) to keep lookups O(1) under load
-echo 12288 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+echo 4096 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
 
-# --- watchdogs: hardware /dev/watchdog (procd) + service auto-restart ---
+# --- Smart AP self-heal watchdog (cron every 2 min): soft-recovers wedged WiFi
+#     radios (ath10k goes WEDGED after 4 self-restarts) + stuck DSA ports +
+#     conntrack/memory, WITHOUT rebooting. The procd HW /dev/watchdog (30s) stays
+#     the ONLY reboot path, for true kernel hangs — no naive load-reboot cron. ---
+chmod 0755 /root/smartap-watchdog.sh 2>/dev/null
 mkdir -p /etc/crontabs
-if ! grep -q 'kt412-wd' /etc/crontabs/root 2>/dev/null; then
-	echo '*/2 * * * * for s in dnsmasq uhttpd rpcd network; do pgrep -x "$s" >/dev/null 2>&1 || pgrep -f "$s" >/dev/null 2>&1 || /etc/init.d/"$s" restart; done # kt412-wd' >> /etc/crontabs/root
-fi
-# load-watchdog: if load stays critically high (near hang), reboot cleanly rather than freeze
-if ! grep -q 'kt412-loadwd' /etc/crontabs/root 2>/dev/null; then
-	echo '*/3 * * * * L=$(cut -d. -f1 /proc/loadavg); [ "${L:-0}" -ge 25 ] && logger -t kt412 "load $L critical -> reboot" && reboot # kt412-loadwd' >> /etc/crontabs/root
+sed -i '/kt412-wd/d;/kt412-loadwd/d' /etc/crontabs/root 2>/dev/null
+if ! grep -q 'smartap-wd' /etc/crontabs/root 2>/dev/null; then
+	echo '*/2 * * * * /root/smartap-watchdog.sh # smartap-wd' >> /etc/crontabs/root
 fi
 /etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
+
+# --- logging to RAM only (protect flash; keep crash history for the watchdog) ---
+uci -q set system.@system[0].log_buffer_size='64'
+uci -q set system.@system[0].cronloglevel='8'
+uci -q commit system
 
 /etc/init.d/rpcd restart 2>/dev/null
 /etc/init.d/uhttpd restart 2>/dev/null
