@@ -1257,44 +1257,50 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 
 	# ===================== UNIFIED DEVICES (bridge: DHCP + ARP + WiFi) =====================
 	devices)
+		# CPU: serve a 5s cache so rapid/multiple refreshes don't re-fork. The whole
+		# merge is ONE awk pass (no per-MAC subprocess loop) to keep the single core idle.
+		C=/tmp/kt_devices.json
+		if [ -f "$C" ]; then a=$(( $(date +%s) - $(stat -c %Y "$C" 2>/dev/null || echo 0) )); [ "$a" -ge 0 ] && [ "$a" -lt 5 ] && { cat "$C"; exit 0; }; fi
 		L=/tmp/kt_l.$$; S=/tmp/kt_s.$$; N=/tmp/kt_n.$$; : >"$L"; : >"$S"; : >"$N"
-		# DHCP leases:  mac<TAB>ip<TAB>name
 		[ -f /tmp/dhcp.leases ] && awk '{print tolower($2)"\t"$3"\t"$4}' /tmp/dhcp.leases >"$L" 2>/dev/null
-		# ARP/neighbour table (every L2 device on the bridge): mac<TAB>dev<TAB>ip
 		ip neigh show 2>/dev/null | awk '/lladdr/{print tolower($5)"\t"$3"\t"$1}' >"$N" 2>/dev/null
-		# WiFi stations:  mac<TAB>sig<TAB>rxrate<TAB>txrate<TAB>band<TAB>conn(sec)<TAB>bytes(rx+tx)
+		# WiFi stations (authoritative for "online"): mac sig rxr txr band conn bytes
 		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
 			bnd=2g; iwinfo "$i" info 2>/dev/null | grep -qi '5\.[0-9]* GHz' && bnd=5g
 			iw dev "$i" station dump 2>/dev/null | awk -v b="$bnd" '
 				function emit(){ if(mac!="") print mac"\t"sig"\t"rxr"\t"txr"\t"b"\t"conn"\t"(rxb+txb); mac="";sig="";rxr="";txr="";conn="";rxb=0;txb=0 }
 				/^Station /{ emit(); mac=tolower($2) }
-				/signal:/{ sig=$2 }
-				/rx bytes:/{ rxb=$3 }
-				/tx bytes:/{ txb=$3 }
-				/rx bitrate:/{ rxr=$3 }
-				/tx bitrate:/{ txr=$3 }
-				/connected time:/{ conn=$3 }
+				/signal:/{ sig=$2 } /rx bytes:/{ rxb=$3 } /tx bytes:/{ txb=$3 }
+				/rx bitrate:/{ rxr=$3 } /tx bitrate:/{ txr=$3 } /connected time:/{ conn=$3 }
 				END{ emit() }' >>"$S" 2>/dev/null
 		done
-		macs="$( { cut -f1 "$L"; cut -f1 "$S"; cut -f1 "$N"; } 2>/dev/null | sort -u | grep -E '^[0-9a-f:]{17}$' )"
-		out=""; first=1
-		for m in $macs; do
-			ip="$(awk -F'\t' -v m="$m" '$1==m{print $2;exit}' "$L")"; nm="$(awk -F'\t' -v m="$m" '$1==m{print $3;exit}' "$L")"
-			[ -n "$ip" ] || ip="$(awk -F'\t' -v m="$m" '$1==m{print $3;exit}' "$N")"
-			dev="$(awk -F'\t' -v m="$m" '$1==m{print $2;exit}' "$N")"
-			sig="$(awk -F'\t' -v m="$m" '$1==m{print $2;exit}' "$S")"; rxr="$(awk -F'\t' -v m="$m" '$1==m{print $3;exit}' "$S")"
-			txr="$(awk -F'\t' -v m="$m" '$1==m{print $4;exit}' "$S")"; band="$(awk -F'\t' -v m="$m" '$1==m{print $5;exit}' "$S")"
-			conn="$(awk -F'\t' -v m="$m" '$1==m{print $6;exit}' "$S")"; byt="$(awk -F'\t' -v m="$m" '$1==m{print $7;exit}' "$S")"
-			kind="lan"; [ -n "$band" ] && kind="wifi$band"
-			case "$nm" in ''|'*') nm="";; esac
-			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s","kind":"%s","signal":"%s","rxrate":"%s","txrate":"%s","dev":"%s","conn":"%s","bytes":"%s"}' \
-				"$m" "$(json_esc "$ip")" "$(json_esc "$nm")" "$kind" "$(json_esc "$sig")" "$(json_esc "$rxr")" "$(json_esc "$txr")" "$(json_esc "$dev")" "$(json_esc "${conn:-}")" "${byt:-0}")"
-		done
-		b24="$(awk -F'\t' '$5=="2g"{s+=$7}END{printf "%.0f", s+0}' "$S" 2>/dev/null)"
-		b5="$(awk -F'\t' '$5=="5g"{s+=$7}END{printf "%.0f", s+0}' "$S" 2>/dev/null)"
+		# Single awk merges leases+neigh+stations -> JSON, with online/sigpct/dist.
+		awk -F'\t' -v Lf="$L" -v Sf="$S" -v Nf="$N" '
+			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+			FILENAME==Lf { m=$1; ip[m]=$2; nm[m]=$3; seen[m]=1; next }
+			FILENAME==Sf { m=$1; sig[m]=$2; rxr[m]=$3; txr[m]=$4; bnd[m]=$5; conn[m]=$6; byt[m]=$7; sta[m]=1; seen[m]=1; next }
+			FILENAME==Nf { m=$1; ndev[m]=$2; if(ip[m]=="")ip[m]=$3; seen[m]=1; next }
+			END {
+				out=""; first=1; b24=0; b5=0;
+				for(m in seen){
+					if(m !~ /^[0-9a-f:][0-9a-f:]+$/ || length(m)!=17) continue;
+					online = (m in sta)?1:0;
+					if(m in sta){ kind=(bnd[m]=="5g")?"wifi5g":"wifi2g"; if(bnd[m]=="5g")b5+=byt[m]; else b24+=byt[m]; }
+					else kind="lan";
+					name=nm[m]; if(name=="*")name="";
+					s=sig[m]+0; pct=0; dist="";
+					if(online && sig[m]!=""){
+						pct=2*(s+100); if(pct>100)pct=100; if(pct<0)pct=0;
+						if(s>=-50)dist="قريب جداً"; else if(s>=-60)dist="قريب";
+						else if(s>=-70)dist="متوسط"; else if(s>=-80)dist="بعيد"; else dist="ضعيف جداً";
+					}
+					sep=(first?"":","); first=0;
+					out=out sep "{\"mac\":\"" m "\",\"ip\":\"" jesc(ip[m]) "\",\"name\":\"" jesc(name) "\",\"kind\":\"" kind "\",\"online\":" online ",\"signal\":\"" jesc(sig[m]) "\",\"sigpct\":" pct ",\"dist\":\"" dist "\",\"rxrate\":\"" jesc(rxr[m]) "\",\"txrate\":\"" jesc(txr[m]) "\",\"dev\":\"" jesc(ndev[m]) "\",\"conn\":\"" jesc(conn[m]) "\",\"bytes\":\"" (byt[m]+0) "\"}";
+				}
+				printf "{\"ok\":true,\"band24\":%d,\"band5\":%d,\"devices\":[%s]}\n", b24, b5, out;
+			}' "$L" "$S" "$N" > "$C" 2>/dev/null
 		rm -f "$L" "$S" "$N"
-		printf '{"ok":true,"band24":%s,"band5":%s,"devices":[%s]}\n' "${b24:-0}" "${b5:-0}" "$out";;
+		cat "$C";;
 
 	# ===================== SMART AP HEALTH / SELF-HEAL (read-only) =====================
 	selfheal)

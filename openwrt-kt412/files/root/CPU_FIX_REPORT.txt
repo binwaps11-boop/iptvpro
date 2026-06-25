@@ -1,0 +1,48 @@
+==========================================================================
+KT412 — CPU 100% ANALYSIS & FIX (QCA9558, single core ~720 MHz)
+Run /root/kt412-cpu-check.sh on the device to fill the live "after" numbers.
+==========================================================================
+
+CPU before fix ........... up to 100% (sustained) reported
+CPU after fix (target) ... idle <25% · UI open <40% · with clients <60%
+Top CPU process .......... fill from: top -bn1 | head -40   (typically one of:
+                           the CGI 'kt412' backend during a refresh, ksoftirqd
+                           (wifi/irq), or ath10k_pci during a firmware restart)
+
+CAUSES IDENTIFIED
+  1) Dashboard backend fork-storm. The op=devices handler used to fork ~7 awk
+     processes PER connected MAC on every refresh, plus per-iface iwinfo/iw.
+     With many devices that is dozens of exec()s each cycle on one slow core.
+  2) Polling too frequent for a single core (3s base, heavy ops every 12s).
+  3) ath10k "SWBA overrun on vdev 0" -> "Cannot communicate with firmware,
+     attempting restart". Under CPU contention the host can't refill 5G beacons
+     in time, the CT firmware restarts, which itself spikes CPU and drops 5G —
+     a feedback loop with cause (1)/(2).
+
+FIXES APPLIED (this build)
+  UI polling interval ...... 5s base; heavy refreshes (dashboard + devices)
+                             every 10s. NO per-second polling.
+  devices backend .......... rewritten to a SINGLE awk pass (no per-MAC fork
+                             loop) AND cached in /tmp/kt_devices.json for 5s, so
+                             rapid/multiple refreshes reuse the result.
+  WiFi scan loop status .... OFF by default. Channel scan + station-scan run
+                             ONLY on a manual button press, never in a loop.
+  Background scripts ....... NONE auto-run. kt412-super-check.sh, kt412-power-
+                             trace.sh, kt412-rf-report.sh, kt412-cpu-check.sh
+                             run only when YOU invoke them. Not in cron/boot.
+  survey/iwinfo loops ...... none; no `iw survey`/`iw station dump` on a fast
+                             timer. station dump runs at most once per 10s
+                             behind the 5s cache.
+  self-heal watchdog ....... every 2 min only, with a 150s boot grace (does not
+                             bounce radios while they are still coming up).
+  ath10k errors ............ SWBA overrun is mitigated indirectly: freeing the
+                             core lets the host service beacons in time. If it
+                             still recurs it is a known QCA988x ath10k-ct
+                             firmware issue; the driver self-recovers ("device
+                             successfully recovered") without a reboot.
+
+ACCEPTANCE (after flashing, run and confirm)
+  top -bn1 | head -30     -> no single process pegged at ~100% continuously
+  cat /proc/loadavg       -> 1-min load well under the core count over time
+  ps w                    -> no runaway loop
+==========================================================================

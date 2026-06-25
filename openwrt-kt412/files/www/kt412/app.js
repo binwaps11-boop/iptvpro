@@ -111,15 +111,18 @@ async function loadDash(){
     const act=(p.ports||[]).filter(x=>x.link==='up').length; const tp=$('#t_ports'); if(tp)tp.textContent=act; }
   const c=await call({op:'devices'});
   if(c&&c.ok){ const ds=c.devices||[];
-    $('#d_clients').textContent=ds.length; const tc=$('#t_clients'); if(tc)tc.textContent=ds.length;
-    const t2=$('#t_clients2'); if(t2)t2.textContent=ds.length;
+    const online=ds.filter(d=>+d.online===1);           // online = present in station dump (authoritative)
+    const n24=online.filter(d=>d.kind==='wifi2g').length, n5=online.filter(d=>d.kind==='wifi5g').length;
+    $('#d_clients').textContent=online.length; const tc=$('#t_clients'); if(tc)tc.textContent=online.length;
+    const t2=$('#t_clients2'); if(t2)t2.textContent=online.length;
+    const a=$('#t_w24'),b=$('#t_w5'); if(a)a.textContent=n24; if(b)b.textContent=n5;
     const dc=$('#d_devlist');
-    if(dc) dc.innerHTML = ds.length ? ds.slice(0,8).map(x=>{
+    if(dc) dc.innerHTML = online.length ? online.slice(0,8).map(x=>{
       const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'سلكي');
       const sig=(String(x.kind).indexOf('wifi')>=0&&x.signal)?' · '+esc(x.signal)+'dBm'+(x.dist?' ('+esc(x.dist)+')':''):'';
       return `<div class="kv"><span class="k">${esc(x.name||'جهاز')} <span class="badge ok">${band}</span></span>`+
              `<span class="v">${esc(x.ip||'—')}${sig}</span></div>`;
-    }).join('') + (ds.length>8?`<div class="sub" style="margin-top:4px">+${ds.length-8} المزيد…</div>`:'')
+    }).join('') + (online.length>8?`<div class="sub" style="margin-top:4px">+${online.length-8} المزيد…</div>`:'')
       : '<div class="sub">لا أجهزة متصلة</div>';
   }
   const tr=await call({op:'traffic'});
@@ -769,12 +772,13 @@ function drawChart(){
   plot(dlH,'#3bc9db','rgba(59,201,219,.13)'); plot(ulH,'#ff6ba6','rgba(255,107,166,.13)');
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
-  // 3s cadence (lighter on the single-core CPU than 2s); heavy refreshes spaced out.
-  if(curPane==='dash'){ loadSpeed(); if(tick%4===0)loadDash(); }
-  else if(curPane==='net'||curPane==='ports'){ loadPortRates(); }
-  else if(curPane==='clients'&&tick%4===0){ loadDevices(); }
+  // 5s base cadence; heavy refreshes every 10s. Single-core QCA9558 -> keep it light:
+  // no per-second polling, no continuous scan/survey/iwinfo loops.
+  if(curPane==='dash'){ loadSpeed(); if(tick%2===0)loadDash(); }
+  else if(curPane==='net'||curPane==='ports'){ if(tick%1===0)loadPortRates(); }
+  else if(curPane==='clients'&&tick%2===0){ loadDevices(); }
   tick++;
-},3000); }
+},5000); }
 /* rich device row: signal -> distance estimate */
 function sigInfo(sig){
   const r=parseInt(sig,10); if(isNaN(r))return null;
@@ -788,31 +792,39 @@ async function loadSmartap(){
   const r=await call({op:'selfheal'}); const b=$('#smartapBox');
   if(b)b.textContent=(r&&r.ok)?b64dec(r.out):'تعذّر التحميل';
 }
+function fmtT(s){ s=+s||0; if(!s)return''; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h?(h+'س '+m+'د'):(m+'د'); }
+function devRow(x){
+  const wifi=String(x.kind).indexOf('wifi')>=0; const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'');
+  const ic=wifi?'<div class="dic w">📶</div>':'<div class="dic l">🔌</div>';
+  let right='';
+  if(wifi && x.signal){ const pct=Math.max(0,Math.min(100,+x.sigpct||0));
+    const col=pct>66?'var(--ok)':(pct>33?'var(--warn)':'var(--bad)');
+    right=`<span class="badge ${pct>66?'ok':(pct>33?'warn':'bad')}">${esc(x.dist||'')} ${pct}%</span>`+
+      `<div class="sigbar"><i style="width:${pct}%;background:${col}"></i></div>`+
+      `<span class="sub">${esc(x.signal)}dBm</span>`; }
+  else right='<span class="badge ok">سلكي</span>';
+  const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">↓${esc(x.rxrate||'?')} ↑${esc(x.txrate||'?')} Mb</span>`:'';
+  const usage=(+x.bytes)?`<span class="sub">⬇⬆ ${human(+x.bytes)}</span>`:'';
+  const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
+  return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
+    `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
+    `<div class="dright">${rate}${right}<button class="btn-ghost devblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:3px 8px">حظر</button></div></div>`;
+}
 async function loadDevices(){
   const r=await call({op:'devices'});
   const ds=(r&&r.ok)?(r.devices||[]):[];
-  const fmtT=s=>{ s=+s||0; if(!s)return''; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h?(h+'س '+m+'د'):(m+'د'); };
+  const online=ds.filter(d=>+d.online===1), seen=ds.filter(d=>+d.online!==1);
   let head='';
   if(r&&r.ok) head=`<div class="ctrlrow" style="margin-bottom:10px"><div class="ci">📊</div>`+
     `<div class="cm"><b>استهلاك الباند (هذه الجلسة)</b><div class="sub">📶 2.4G: ${human(+r.band24||0)} &nbsp;·&nbsp; 📡 5G: ${human(+r.band5||0)}</div></div>`+
-    `<div class="cr"><span class="badge ok">${ds.length} جهاز</span></div></div>`;
-  if(!ds.length){ $('#devicesBox').innerHTML=head+'<div class="sub">لا أجهزة على الجسر حالياً</div>'; return; }
-  $('#devicesBox').innerHTML=head+ds.map(x=>{
-    const wifi=String(x.kind).indexOf('wifi')>=0; const band=x.kind==='wifi5g'?'5G':(x.kind==='wifi2g'?'2.4G':'');
-    const ic=wifi?'<div class="dic w">📶</div>':'<div class="dic l">🔌</div>';
-    let right='';
-    if(wifi && x.signal){ const s=sigInfo(x.signal);
-      if(s) right=`<span class="badge ${s.cls}">${s.lbl} ${s.dist}م</span>`+
-        `<div class="sigbar"><i style="width:${s.pct}%;background:${s.col}"></i></div>`+
-        `<span class="sub">${esc(x.signal)}dBm</span>`; }
-    else right='<span class="badge ok">سلكي</span>';
-    const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">↓${esc(x.rxrate||'?')} ↑${esc(x.txrate||'?')} Mb</span>`:'';
-    const usage=(+x.bytes)?`<span class="sub">⬇⬆ ${human(+x.bytes)}</span>`:'';
-    const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
-    return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
-      `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
-      `<div class="dright">${rate}${right}<button class="btn-ghost devblk" data-mac="${esc(x.mac)}" style="font-size:11px;padding:3px 8px">حظر</button></div></div>`;
-  }).join('');
+    `<div class="cr"><span class="badge ok">${online.length} متصل</span></div></div>`;
+  let body=`<div class="sub" style="margin:6px 0 4px;font-weight:700;color:var(--ok)">● متصل الآن (${online.length})</div>`;
+  body += online.length ? online.map(devRow).join('') : '<div class="sub">لا أجهزة متصلة الآن</div>';
+  if(seen.length){
+    body += `<div class="sub" style="margin:12px 0 4px;font-weight:700;color:var(--muted)">○ شوهدت مؤخراً / غير متصلة (${seen.length})</div>`;
+    body += seen.map(devRow).join('');
+  }
+  $('#devicesBox').innerHTML=head+body;
   $$('#devicesBox .devblk').forEach(b=>b.onclick=async()=>{ if(!confirm('حظر '+b.dataset.mac+'؟'))return;
     const r=await call({act:'client_block',mac:b.dataset.mac},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); setTimeout(loadDevices,800); });
 }

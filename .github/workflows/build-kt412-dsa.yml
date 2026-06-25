@@ -142,8 +142,8 @@ jobs:
           # --- REQUIRED diagnostic/RF files must be in the image (user acceptance list) ---
           echo "=== REQUIRED FILES GATE ==="
           for f in etc/kt412-build-info etc/kt412-kernel-config.txt \
-                   root/kt412-power-trace.sh root/kt412-rf-report.sh \
-                   root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt; do
+                   root/kt412-power-trace.sh root/kt412-rf-report.sh root/kt412-cpu-check.sh \
+                   root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt root/CPU_FIX_REPORT.txt; do
             test -s "files/$f" && echo "INCLUDED: /$f" || { echo "FATAL: missing /$f in image"; exit 1; }
           done
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
