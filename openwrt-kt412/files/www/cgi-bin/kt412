@@ -347,6 +347,30 @@ if [ -n "$ACT" ]; then
 			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
 			actp="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
 			printf '{"ok":true,"requested":%s,"actual":%s}\n' "${dbm:-0}" "${actp:-0}";;
+		quick_setup)   # one-shot device setup: SSID + pass + country + txpower + LAN IP
+			ssid="$(getp ssid)"; pass="$(getp pass)"; ctry="$(sani_word "$(getp country)")"
+			tp="$(sani_int "$(getp txpower)")"; lip="$(sani_ip "$(getp lan_ip)")"
+			if [ -n "$tp" ]; then [ "$tp" -gt 30 ] 2>/dev/null && tp=30; [ "$tp" -lt 0 ] 2>/dev/null && tp=0; fi
+			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+				uci -q set wireless.$r.disabled='0'
+				[ -n "$ctry" ] && uci -q set wireless.$r.country="$ctry"
+				[ -n "$tp" ] && uci -q set wireless.$r.txpower="$tp"
+			done
+			for i in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+				dv="$(uci -q get wireless.$i.device)"; bd="$(uci -q get wireless.$dv.band)"
+				if [ -n "$ssid" ]; then
+					if [ "$bd" = "5g" ]; then uci -q set wireless.$i.ssid="${ssid}-5G"; else uci -q set wireless.$i.ssid="$ssid"; fi
+				fi
+				if [ -n "$pass" ] && [ "${#pass}" -ge 8 ]; then
+					uci -q set wireless.$i.encryption='psk2'; uci -q set wireless.$i.key="$pass"
+				fi
+			done
+			uci -q commit wireless
+			[ -n "$lip" ] && { uci -q set network.lan.ipaddr="$lip"; uci -q commit network; }
+			wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
+			msg="تم تطبيق الإعداد السريع"
+			[ -n "$pass" ] && [ "${#pass}" -lt 8 ] && msg="طُبّق — لكن كلمة المرور تجاهلت (يجب 8 أحرف+)"
+			printf '{"ok":true,"msg":"%s"}\n' "$msg";;
 		wifi_restart)
 			wifi reload >/dev/null 2>&1; printf '{"ok":true,"msg":"Wi-Fi restarted"}\n';;
 		wifi_optimize)

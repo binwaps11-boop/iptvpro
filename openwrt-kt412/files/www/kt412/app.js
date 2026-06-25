@@ -359,6 +359,15 @@ function renderLog(){
 }
 
 /* ---------- POWER CONTROL ---------- */
+/* ---------- QUICK SETUP ---------- */
+async function loadQuick(){
+  // prefill txpower (from 2.4G radio) + LAN ip placeholder from current config
+  const p=await call({op:'power'});
+  if(p&&p.ok&&p.radios&&p.radios.length){ const rd=p.radios.find(x=>x.band!=='5g')||p.radios[0];
+    const t=$('#qs_tx'), v=$('#qs_txv'); if(t&&rd&&rd.requested){ t.value=Math.max(0,Math.min(30,+rd.requested||30)); if(v)v.textContent=t.value; } }
+  const l=await call({op:'lan'});
+  if(l&&l.ok&&l.ip){ const e=$('#qs_lan'); if(e&&!e.value)e.placeholder=l.ip; }
+}
 async function loadPower(){
   const r=await call({op:'power'});
   if(!(r&&r.ok)){ $('#powerBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
@@ -593,6 +602,7 @@ async function loadMonitor(){
 /* ---------- nav (LuCI-style: category -> submenu -> single page) ---------- */
 const MENU=[
   {cat:'الحالة', items:[
+    {id:'quick',name:'إعدادات سريعة',i:'⚡'},
     {id:'dash',name:'نظرة عامة',i:'▦'},
     {id:'monitor',name:'الاتصالات والمراقبة',i:'📊'},
     {id:'health',name:'فحص الاتصال',i:'🩺'},
@@ -615,6 +625,7 @@ const MENU=[
   ]},
 ];
 const PANE_LOAD={
+  quick:loadQuick,
   dash:loadDash, monitor:loadMonitor, health:loadHealth, clients:()=>{loadClients();loadDevices();}, logs:loadLogs,
   net:()=>{loadWan();loadLan();loadNetMode();loadVlan();loadInterfaces();},
   wifi:loadWifi, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
@@ -817,6 +828,12 @@ $('#monRefresh').onclick=loadMonitor;
 $('#menuToggle').onclick=openDrawer;
 $('#scrim').onclick=closeDrawer;
 $('#devRefresh').onclick=loadDevices;
+if($('#qs_tx')) $('#qs_tx').oninput=()=>{ const v=$('#qs_txv'); if(v)v.textContent=$('#qs_tx').value; };
+if($('#qsApply')) $('#qsApply').onclick=async()=>{
+  const r=await safeApply(()=>call({act:'quick_setup',ssid:$('#qs_ssid').value,pass:$('#qs_pass').value,
+    country:$('#qs_country').value,txpower:$('#qs_tx').value,lan_ip:$('#qs_lan').value},true));
+  toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
+};
 window.addEventListener('resize',()=>{ if(curPane==='dash')drawChart(); });
 /* interfaces / firewall zones / ntp / logs filter+search+download */
 $('#ntpApply').onclick=async()=>{ const r=await call({act:'ntp_set',ntp1:$('#s_ntp1').value,ntp2:$('#s_ntp2').value},true); toast(r&&r.ok?(r.msg||'تم'):'فشل',r&&r.ok); };

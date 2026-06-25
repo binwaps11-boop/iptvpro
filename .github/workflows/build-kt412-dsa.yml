@@ -129,6 +129,8 @@ jobs:
           g 'vlan_add'              "$C" "OPENWRT UI VLAN MANAGER INCLUDED"
           g 'data-pane="ports"'     "$H" "OPENWRT UI DSA PORTS INCLUDED"
           g 'data-pane="clients"'   "$H" "OPENWRT UI CLIENTS INCLUDED"
+          g 'data-pane="quick"'     "$H" "QUICK SETTINGS INCLUDED"
+          g 'quick_setup)'          "$C" "QUICK SETUP BACKEND INCLUDED"
           g 'data-pane="logs"'      "$H" "OPENWRT UI LOGS INCLUDED"
           g 'diag)'                 "$C" "OPENWRT UI DIAGNOSTICS INCLUDED"
           g 'backup_make'           "$C" "OPENWRT UI BACKUP RESTORE INCLUDED"

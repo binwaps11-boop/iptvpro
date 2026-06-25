@@ -72,6 +72,29 @@
     <div class="hide"><span id="d_mem"></span><i id="d_membar"></i><span id="d_load"></span><span id="d_speed"></span><span id="d_speed_sub"></span><span id="d_clients"></span></div>
   </section>
 
+  <!-- QUICK SETUP -->
+  <section data-pane="quick" class="hide">
+    <div class="card">
+      <h3>⚡ إعدادات سريعة — Quick Setup</h3>
+      <div class="note">اضبط جهازك بضغطة واحدة. كل تغيير يمرّ عبر <b>Safe Apply</b> (رجوع تلقائي خلال 80ث إن انقطع الوصول).</div>
+      <div class="row">
+        <div><label class="f">📶 اسم الواي‑فاي (SSID)</label><input id="qs_ssid" class="t" placeholder="KT412"></div>
+        <div><label class="f">🔑 كلمة المرور (8 أحرف فأكثر)</label><input id="qs_pass" class="t" placeholder="اتركها فارغة للإبقاء على الحالية"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">🌍 الدولة</label><input id="qs_country" class="t" value="US" placeholder="US"></div>
+        <div><label class="f">📡 قوة الإرسال: <b id="qs_txv">30</b> dBm (0–30)</label>
+          <input type="range" id="qs_tx" min="0" max="30" step="1" value="30" style="width:100%"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">🖥️ IP الإدارة (LAN)</label><input id="qs_lan" class="t" placeholder="192.168.100.1"></div>
+        <div></div>
+      </div>
+      <button class="btn" id="qsApply" style="margin-top:12px">⚡ تطبيق سريع (Safe Apply)</button>
+      <div class="sub" style="margin-top:8px">يطبّق الاسم وكلمة المرور على الراديوين (5G يأخذ نفس الاسم + لاحقة ‎-5G‎)، ويفعّلهما، ويضبط الدولة والطاقة وIP الإدارة.</div>
+    </div>
+  </section>
+
   <!-- NETWORK (WAN + VLAN + LAN) -->
   <section data-pane="net" class="hide">
     <div class="card" style="margin-bottom:16px">
