@@ -24,8 +24,20 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 	# don't touch radios while they're still coming up after boot
 	[ "$UP" -lt "$WIFI_GRACE" ] && { rm -f "$ST/fail_$r"; continue; }
 	ifc="$(ifc_of "$r")"
+	# FALLBACK: ubus 'network.wireless status' can momentarily return an empty
+	# ifname during a reconfig, which used to make a perfectly healthy radio look
+	# wedged (seen as 'radio radio0 (no-iface) wedged' while phy1-ap0 was UP) and
+	# get bounced. If ubus didn't resolve, find a LIVE AP iface for this radio's
+	# band via iwinfo before deciding anything.
+	if [ -z "$ifc" ] || [ ! -e "/sys/class/net/$ifc" ]; then
+		band="$(uci -q get wireless.$r.band)"
+		for d in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			b=2g; iwinfo "$d" info 2>/dev/null | grep -qi '5\.[0-9]* GHz' && b=5g
+			[ "$b" = "$band" ] && [ -e "/sys/class/net/$d" ] && { ifc="$d"; break; }
+		done
+	fi
 	bad=0
-	# wedged = the AP iface that SHOULD exist is gone, or its PHY no longer answers
+	# wedged = genuinely NO AP iface for this radio (ubus AND iwinfo agree), or its PHY no longer answers
 	if [ -z "$ifc" ] || [ ! -e "/sys/class/net/$ifc" ]; then bad=1
 	elif ! iw dev "$ifc" info >/dev/null 2>&1; then bad=1; fi
 	fcf="$ST/fail_$r"
