@@ -154,10 +154,10 @@ if [ -n "$ACT" ]; then
 						[ -n "$cur" ] && uci -q set network.lan.ifname="$(echo "$cur" | sed "s/ *$wandev//")"
 					fi
 					uci -q delete network.wan.disabled; uci -q delete network.wan.auto
-					uci -q delete dhcp.lan.ignore
+					# DHCP stays as-is (off by default); control it from LAN > خادم DHCP.
 					uci commit
 					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; ifup wan >/dev/null 2>&1
-					printf '{"ok":true,"msg":"Router: WAN إنترنت + LAN DHCP + NAT"}\n';;
+					printf '{"ok":true,"msg":"Router: WAN إنترنت + NAT (DHCP حسب الزر في LAN)"}\n';;
 				*) fail "bad_mode";;
 			esac;;
 		vlan_add)
@@ -516,8 +516,10 @@ case "$OP" in
 		printf '{"ok":true,"ip":"%s","mask":"%s","dhcp":%s,"start":"%s","limit":"%s","lease":"%s"}\n' \
 			"$(json_esc "$ip")" "$(json_esc "$mask")" "$dh" "$(json_esc "${st:-100}")" "$(json_esc "${lim:-150}")" "$(json_esc "${lt:-12h}")";;
 	netmode)
-		dis="$(uci -q get network.wan.disabled)"; ign="$(uci -q get dhcp.lan.ignore)"
-		mode="router"; { [ "$dis" = "1" ] || [ "$ign" = "1" ]; } && mode="ap"
+		dis="$(uci -q get network.wan.disabled)"
+		# AP = WAN bridged into LAN. DHCP on/off is an INDEPENDENT toggle now
+		# (off by default), so it no longer flips the detected mode.
+		mode="router"; [ "$dis" = "1" ] && mode="ap"
 		printf '{"ok":true,"mode":"%s"}\n' "$mode";;
 	wifi)
 		out=""; first=1

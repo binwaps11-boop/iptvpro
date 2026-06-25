@@ -25,12 +25,12 @@ config dhcp 'lan'
 	option start '100'
 	option limit '150'
 	option leasetime '12h'
+	# DHCP server OFF by default: never hands out IPs (no conflict/loop with an
+	# upstream router). Enable from the dashboard: LAN > خادم DHCP (optional).
+	option ignore '1'
 	option dhcpv4 'server'
-	option dhcpv6 'server'
-	option ra 'server'
-	option ra_slaac '1'
-	list ra_flags 'managed-config'
-	list ra_flags 'other-config'
+	option dhcpv6 'disabled'
+	option ra 'disabled'
 
 config dhcp 'wan'
 	option interface 'wan'

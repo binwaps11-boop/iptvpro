@@ -77,9 +77,11 @@
         <button data-m="ap">نقطة وصول (Access Point)</button>
       </div>
       <div class="note">
-        <b>Router:</b> WAN هو مدخل الإنترنت (DHCP/PPPoE/Static) + NAT + خادم DHCP على LAN. ·
-        <b>Access Point:</b> كل المنافذ (LAN+WAN) في جسر واحد، DHCP معطّل، وتتصل بأي منفذ.
-        الإدارة تبقى على <b>192.168.100.1</b> في الوضعين (لا تفقد الوصول). PPPoE يبقى على WAN فقط.
+        <b>Router:</b> WAN هو مدخل الإنترنت (DHCP/PPPoE/Static) + NAT. ·
+        <b>Access Point:</b> كل المنافذ (LAN+WAN) في جسر واحد وتتصل بأي منفذ.
+        <b>خادم DHCP مُعطَّل افتراضيًا</b> (لا يصرف IP — يمنع التعارض/اللوب مع راوتر آخر)؛
+        فعّله عند الحاجة من <b>LAN ▸ خادم DHCP</b>. الإدارة تبقى على <b>192.168.100.1</b>
+        في الوضعين (لا تفقد الوصول). PPPoE يبقى على WAN فقط.
       </div>
       <button class="btn" id="netModeApply">تطبيق وضع الجهاز</button>
     </div>

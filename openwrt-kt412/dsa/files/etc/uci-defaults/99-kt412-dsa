@@ -8,6 +8,16 @@ uci -q set network.lan.netmask='255.255.255.0'
 uci -q set system.@system[0].hostname='KT412-DSA'
 uci -q commit
 
+# --- DHCP SERVER OFF BY DEFAULT ---------------------------------------------
+# The device ships with its DHCP server DISABLED (ignore=1) so it never hands
+# out IPs and can't conflict / loop with an upstream router's DHCP. Mgmt IP
+# (192.168.100.1) stays reachable by setting a static IP on your PC, or enable
+# DHCP from the dashboard: الشبكة > LAN > خادم DHCP (زر اختياري).
+uci -q set dhcp.lan.ignore='1'
+uci -q set dhcp.lan.dhcpv6='disabled'
+uci -q set dhcp.lan.ra='disabled'
+uci -q commit dhcp
+
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/* 2>/dev/null
 
