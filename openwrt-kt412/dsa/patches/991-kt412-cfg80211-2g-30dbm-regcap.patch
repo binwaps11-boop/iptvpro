@@ -94,17 +94,3 @@
  }
  
  static void handle_band_custom(struct wiphy *wiphy,
---- a/drivers/net/wireless/ath/ath9k/hw.c
-+++ b/drivers/net/wireless/ath/ath9k/hw.c
-@@ -2966,6 +2966,11 @@
- 	channel = chan->chan;
- 	chan_pwr = min_t(int, channel->max_power * 2, MAX_COMBINED_POWER);
- 	new_pwr = min_t(int, chan_pwr, reg->power_limit);
-+	if (channel->band == NL80211_BAND_2GHZ) {
-+		new_pwr = max_t(int, new_pwr, 60);
-+		new_pwr = min_t(int, new_pwr, MAX_COMBINED_POWER);
-+		printk_once(KERN_INFO "KT412-30DBM-FINAL-NETDEV-POWER\n");
-+	}
- 
- 	ah->eep_ops->set_txpower(ah, chan, ctl,
- 				 get_antenna_gain(ah, chan), new_pwr, test);

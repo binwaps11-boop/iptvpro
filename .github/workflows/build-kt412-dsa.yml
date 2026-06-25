@@ -79,9 +79,16 @@ jobs:
             echo "PLACED ath9k 30dBm patch in mac80211 backports: $M9/"
             ls -l "$M9/990-kt412-ath9k-2g-30dbm.patch"
             echo "source markers (expect 2):"; grep -c 'KT412-30dbm' "$M9/990-kt412-ath9k-2g-30dbm.patch"
-            # NOTE: cfg80211 reg.c patch (991) is NOT needed — the US regdomain already
-            # permits 30 dBm on 2.4G (2400-2472 @ 30); the 24 cap was purely the ath9k
-            # EEPROM target-power path, which 990 lifts. Dropping 991 reduces risk.
+            # 991: cfg80211 reg.c lift. REQUIRED after all. 990 raised the ath9k EEPROM
+            # target path, but cfg80211 handle_channel() re-clamps chan->max_power =
+            # min(orig_mpwr, max_reg_power) every time a regdomain is applied (boot /
+            # country IE / iw reg set) and pulled 2.4G back to 24 AFTER 990 ran -> that
+            # is why iw phy / iwinfo / netdev txpower kept showing 24. 991 forces the
+            # cfg80211 regulatory ceiling to >=30 on every 2.4G channel at every path.
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/991-kt412-cfg80211-2g-30dbm-regcap.patch" "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            echo "PLACED cfg80211 regcap patch in mac80211 backports: $M9/"
+            ls -l "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            echo "regcap source token (expect kt412_lift present):"; grep -c 'kt412_lift' "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
           fi
 
       - name: Update & install feeds
@@ -294,6 +301,15 @@ jobs:
             [ "$N" = "2" ] || { echo "FATAL: 30dBm patch did NOT apply to the backports ath9k -> bin would still be 24"; exit 1; }
             grep -q 'targetPowerValT2\[_k\] = 60' "$EEP" || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
             echo "POWER PATCH COMPILED INTO kmod-ath9k OK (backports ar9003_eeprom.c, markers=2, ceiling=60 half-dB=30.0)"
+            echo "=== confirm cfg80211 regcap (991) landed in the COMPILED backports reg.c ==="
+            REG="$(find build_dir -path '*net/wireless/reg.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$REG" ] || REG="$(find build_dir -path '*backports*/net/wireless/reg.c' 2>/dev/null | head -1)"
+            echo "compiled cfg80211 source: ${REG:-<not found>}"
+            [ -n "$REG" ] || { echo "FATAL: could not locate the backports reg.c to verify"; exit 1; }
+            RN="$(grep -c 'kt412_lift' "$REG" 2>/dev/null || echo 0)"
+            echo "regcap call-sites compiled=$RN (expect >=6: helper def + every handle_channel path)"
+            [ "$RN" -ge 6 ] || { echo "FATAL: cfg80211 regcap (991) did NOT apply -> cfg80211 would re-clamp 2.4G to 24"; exit 1; }
+            echo "REGCAP PATCH COMPILED INTO cfg80211 OK (reg.c kt412_lift x$RN -> 2.4G ceiling pinned 30 at every regdomain apply)"
             echo "HONEST NOTE: this proves the patch is in the COMPILED ath9k source. Real applied"
             echo "power MUST still be verified on the device with:"
             echo "  sh /root/kt412-power-trace.sh  (expect dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower=30)"
