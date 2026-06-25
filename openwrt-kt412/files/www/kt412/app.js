@@ -85,13 +85,8 @@ async function loadDash(){
     $('#d_memsub').textContent=human(used)+' / '+human(s.mem_total);
     setGauge('g_mem',pct,pct+'%');
     const loadv=(+s.load/65536)||0;
-    // real CPU utilization % from /proc/stat jiffie diff across polls (load avg sits near 0 on idle)
-    let cpuPct=0;
-    if(_cpuTotalPrev>0 && +s.cpu_total>_cpuTotalPrev){
-      const dTotal=(+s.cpu_total)-_cpuTotalPrev, dIdle=(+s.cpu_idle)-_cpuIdlePrev;
-      if(dTotal>0) cpuPct=Math.max(0,Math.min(100,Math.round(100*(1-dIdle/dTotal))));
-    }
-    _cpuIdlePrev=+s.cpu_idle||0; _cpuTotalPrev=+s.cpu_total||0;
+    // CPU% comes READY from the backend (server-side /proc/stat delta) — reliable.
+    const cpuPct=Math.max(0,Math.min(100,Math.round(+s.cpu_pct||0)));
     setGauge('g_load',cpuPct,cpuPct+'%');
     if(s.fs_total&&+s.fs_total>0){ const sp=Math.round(+s.fs_used/+s.fs_total*100);
       setGauge('g_store',sp,sp+'%'); $('#d_storage').textContent='التخزين: '+human(+s.fs_used*1024)+' / '+human(+s.fs_total*1024); }
