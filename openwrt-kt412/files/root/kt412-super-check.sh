@@ -61,6 +61,15 @@ else
 fi
 echo "  => 'real RF/EIRP 30' is claimed ONLY with a meter reading or a stated EIRP calculation."
 
+echo; echo "## ===== TX POWER USER CONTROL (UI 0-30 slider) ====="
+J=/www/kt412/app.js
+grep -q 'class="wpow"' "$J" 2>/dev/null && echo "UI slider present        : PASS" || echo "UI slider present        : FAIL"
+grep -q 'min="0" max="30"' "$J" 2>/dev/null && echo "UI range 0-30            : PASS" || echo "UI range 0-30            : FAIL"
+grep -q "act:'txpower'" "$J" 2>/dev/null && grep -q 'safeApply' "$J" 2>/dev/null && echo "UI Safe Apply wired      : PASS" || echo "UI Safe Apply wired      : FAIL"
+echo "Current uci txpower      : radio0(2.4G)=$(uci -q get wireless.radio0.txpower)  radio1(5G)=$(uci -q get wireless.radio1.txpower)"
+echo "Applied (iwinfo)         : 2.4G=$(iwinfo phy1-ap0 info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p')  5G=$(iwinfo phy0-ap0 info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p')"
+echo "Note: select any 0-30 from the dashboard (الشبكة>قوة الإرسال); applied value must match the selected value (subject to the chip's clean ceiling on 2.4G)."
+
 echo; echo "## CLIENTS / signal / bitrate"
 for i in phy0-ap0 phy1-ap0; do echo "[$i]"; iwinfo "$i" assoclist 2>/dev/null; done
 

@@ -363,36 +363,41 @@ async function loadPower(){
   const r=await call({op:'power'});
   if(!(r&&r.ok)){ $('#powerBox').innerHTML='<div class="sub">تعذّر التحميل</div>'; return; }
   $('#powerBox').innerHTML=(r.radios||[]).map(rd=>{
-    const is5=rd.band==='5g'; const ap=+rd.applied||0;
-    const cls = ap>=30?'bad':(ap>=27?'warn':'ok');
-    const lbl = (!is5 && ap>=27)?'<span class="badge bad">software-reported (bypass)</span>'
-              : (ap>=27?'<span class="badge ok">حقيقي</span>':'<span class="badge ok">نظيف</span>');
-    return `<div class="card" data-radio="${esc(rd.radio)}" style="margin-top:14px;background:rgba(255,255,255,.04)">
-      <h3>${is5?'📡 5GHz':'📶 2.4GHz'} <span class="badge ok">${esc(rd.radio)}</span></h3>
-      <div class="kv"><span class="k">Requested (uci)</span><span class="v">${esc(rd.requested)} dBm</span></div>
-      <div class="kv"><span class="k">Driver Applied (iwinfo)</span><span class="v"><span class="badge ${cls}">${esc(rd.applied)} dBm</span> ${lbl}</span></div>
-      <div class="kv"><span class="k">PHY Limit (iw phy)</span><span class="v">${esc(rd.phy_limit)} dBm</span></div>
-      <div class="kv"><span class="k">user_power (debugfs)</span><span class="v">${esc(rd.user_power)}</span></div>
-      <label class="f">الوضع:</label>
-      <div class="seg pwseg">
-        <button data-m="safe">Safe (24)</button>
-        <button data-m="max">Max (26)</button>
-        <button data-m="extreme">Extreme (30)${is5?'':' ⚠'}</button>
+    const is5=rd.band==='5g'; const req=Math.max(0,Math.min(30,+rd.requested||0));
+    const nd=rd.netdev, ap=rd.applied;
+    const match = (String(ap)===String(req)); // applied == requested ?
+    return `<div class="card" data-radio="${esc(rd.radio)}" data-req="${req}" style="margin-top:14px;background:rgba(255,255,255,.04)">
+      <h3>${is5?'📡 5GHz · radio'+(is5?'1':'0'):'📶 2.4GHz · radio0'} <span class="badge ok">${esc(rd.radio)}</span></h3>
+      <div class="kv"><span class="k">Requested Power (uci)</span><span class="v" data-f="req">${esc(rd.requested)} dBm</span></div>
+      <div class="kv"><span class="k">Applied / Driver (iwinfo)</span><span class="v"><span class="badge ${match?'ok':'warn'}" data-f="ap">${esc(rd.applied)} dBm</span></span></div>
+      <div class="kv"><span class="k">PHY Power (iw phy)</span><span class="v" data-f="phy">${esc(rd.phy_limit)} dBm</span></div>
+      <div class="kv"><span class="k">DebugFS user_power</span><span class="v" data-f="up">${esc(rd.user_power)}</span></div>
+      <div class="kv"><span class="k">DebugFS netdev txpower</span><span class="v"><span class="badge ${String(nd)==='30'||match?'ok':'warn'}" data-f="nd">${esc(rd.netdev)}</span></span></div>
+      <label class="f">TX Power: <b class="wpowval">${req}</b> dBm <span class="sub">(0 – 30 · الأقصى 30)</span></label>
+      <input type="range" class="wpow" min="0" max="30" step="1" value="${req}" style="width:100%">
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm pwapply">تطبيق آمن (Safe Apply)</button>
+        <button class="btn sm sec pwverify">تحقّق الآن</button>
       </div>
+      ${is5?'':'<div class="sub" style="margin-top:6px">⚠ على 2.4GHz: الرقم البرمجي يصل 30، لكن RF النظيف الحقيقي ≈25–26 (غير مُقاس). راجع POWER-REPORT.</div>'}
     </div>`;
   }).join('')||'<div class="sub">لا راديوهات</div>';
   $$('#powerBox .card').forEach(card=>{
-    card.querySelectorAll('.pwseg button').forEach(b=>{ b.onclick=async()=>{
-      const m=b.dataset.m;
-      if(m==='extreme' && card.dataset.radio.indexOf('1')<0){ // 2.4G radio0 -> warn
-      }
-      if(m==='extreme'){ if(!confirm('Extreme = رقم برمجي مقصوص (driver bypass)، ليس RF نظيفاً حقيقياً، وقد يضغط الـ PA. متابعة؟'))return; }
-      b.innerHTML='<span class="spin"></span>';
-      const r=await call({act:'power_profile',radio:card.dataset.radio,mode:m},true);
-      if(r.ok) toast(`الوضع ${m} · المطلوب ${r.requested} والمُطبَّق (iwinfo) ${r.applied}dBm`,true);
-      else toast('فشل: '+(r.error||''),false);
-      setTimeout(loadPower,1800);
-    };});
+    const sl=card.querySelector('.wpow'), val=card.querySelector('.wpowval');
+    if(sl&&val) sl.oninput=()=>{ val.textContent=sl.value; };
+    const apply=card.querySelector('.pwapply');
+    if(apply) apply.onclick=async()=>{
+      const dbm=sl?sl.value:'30';
+      if(+dbm>=27 && card.dataset.radio.indexOf('1')<0){ if(!confirm('على 2.4GHz: '+dbm+' dBm = رقم برمجي قد يقصّ الـRF (غير نظيف مخبريًا). متابعة؟'))return; }
+      apply.innerHTML='<span class="spin"></span>';
+      // Safe Apply: arm rollback + countdown; auto-revert in 80s unless confirmed
+      const r=await safeApply(()=>call({act:'txpower',radio:card.dataset.radio,dbm},true));
+      if(r&&r.ok) toast(`طُبّق ${r.requested}dBm — المُطبَّق (iwinfo) ${r.actual}dBm. أكّد خلال 80ث وإلا رجوع تلقائي.`,true);
+      else toast('فشل: '+((r&&r.error)||''),false);
+      setTimeout(loadPower,2000);
+    };
+    const ver=card.querySelector('.pwverify');
+    if(ver) ver.onclick=()=>loadPower();
   });
 }
 

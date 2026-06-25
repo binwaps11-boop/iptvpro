@@ -337,6 +337,9 @@ if [ -n "$ACT" ]; then
 		txpower)
 			radio="$(sani_word "$(getp radio)")"; dbm="$(sani_int "$(getp dbm)")"
 			[ -n "$radio" ] && [ -n "$dbm" ] || fail "missing_params"
+			# clamp to the allowed range 0..30 (Max allowed = 30, Min = 0)
+			[ "$dbm" -gt 30 ] 2>/dev/null && dbm=30
+			[ "$dbm" -lt 0 ] 2>/dev/null && dbm=0
 			uci set wireless.$radio.txpower="$dbm"; uci commit wireless
 			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
 			iw phy "phy${idx:-0}" set txpower fixed "$((dbm*100))" >/dev/null 2>&1
@@ -895,9 +898,11 @@ case "$OP" in
 			ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
 			lim="$(iw phy "phy$idx" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
 			up="$(cat /sys/kernel/debug/ieee80211/phy$idx/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
+			[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$idx/user_power 2>/dev/null | tr -cd '0-9')"
+			nd="$(cat /sys/kernel/debug/ieee80211/phy$idx/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
 			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"radio":"%s","band":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s"}' \
-				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")")"
+			out="$out$(printf '{"radio":"%s","band":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s","netdev":"%s"}' \
+				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")" "$(json_esc "${nd:-?}")")"
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
 	scan)

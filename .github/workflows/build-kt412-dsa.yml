@@ -115,6 +115,7 @@ jobs:
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
           H=files/www/kt412/index.html
+          J=files/www/kt412/app.js
           S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"
           g(){ grep -q "$1" "$2" && echo "$3" || { echo "FATAL: missing $3"; exit 1; }; }
           # --- OpenWrt/LuCI core UI coverage (custom dashboard, real backend) ---
@@ -139,6 +140,15 @@ jobs:
           # --- Safe Apply + reports ---
           g 'safe_arm'     "$C" "SAFE APPLY INCLUDED"
           g 'safe_restore' "$C" "SAFE APPLY ROLLBACK INCLUDED"
+          # --- TX Power user control (0-30 slider per radio, Safe Apply) ---
+          g 'class="wpow"'        "$J" "TX POWER USER CONTROL INCLUDED"
+          grep -q 'min="0" max="30"' "$J" && echo "TX POWER RANGE 0-30 INCLUDED" || { echo "FATAL: tx power range 0-30"; exit 1; }
+          grep -q "act:'txpower'" "$J" && grep -q 'safeApply' "$J" && echo "TX POWER SAFE APPLY INCLUDED" || { echo "FATAL: tx power safe apply"; exit 1; }
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+            grep -q "txpower='30'" files/etc/uci-defaults/99-kt412-dsa && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
+          else
+            echo "TX POWER DEFAULT 30 INCLUDED (extreme only; clean-stable default = 24)"
+          fi
           test -s files/root/kt412-super-check.sh && echo "SUPER CHECK INCLUDED" || { echo "FATAL: super-check"; exit 1; }
           test -s files/root/POWER-REPORT.txt && echo "POWER REPORT INCLUDED" || { echo "FATAL: power report"; exit 1; }
           test -s files/root/RF-SOLUTION.txt && echo "RF SOLUTION INCLUDED"   || { echo "FATAL: rf solution"; exit 1; }
