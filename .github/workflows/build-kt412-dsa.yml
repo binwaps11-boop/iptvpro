@@ -227,9 +227,9 @@ jobs:
             grep -q "CONFIG_PACKAGE_${p}=y" "$S" || MISS="$MISS $p"
           done
           [ -z "$MISS" ] && echo "REQUIRED OPENWRT PACKAGES INCLUDED" || { echo "FATAL: missing packages:$MISS"; exit 1; }
-          # --- no Terminal / no LuCI shipped ---
+          # --- no Terminal (security); LuCI is now REQUIRED (official admin UI) ---
           grep -q 'CONFIG_PACKAGE_ttyd=y' "$S" && { echo "FATAL: ttyd terminal present"; exit 1; } || echo "NO TERMINAL OK"
-          grep -q 'CONFIG_PACKAGE_luci=y' "$S" && { echo "FATAL: luci present"; exit 1; } || echo "NO LUCI OK"
+          grep -q 'CONFIG_PACKAGE_luci=y' "$S" && echo "LUCI REQUIRED OK (official admin UI included)" || { echo "FATAL: luci missing -> official sections absent"; exit 1; }
           echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"
 
       - name: Download sources
