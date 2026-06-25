@@ -64,6 +64,19 @@ jobs:
             sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
             echo "PATCHED: missing semicolon in $DTSI"
           fi
+          # --- extreme only: drop the persistent ath9k 2.4G 30dBm kernel patch into
+          #     the generic 'hack' patch dir so OpenWrt's quilt applies it on EVERY
+          #     target/linux prepare (survives the full `make`, unlike a post-prepare sed).
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+            KV="$(sed -n 's/^KERNEL_PATCHVER:=//p' target/linux/ath79/Makefile | head -1)"
+            [ -z "$KV" ] && KV=6.12
+            HACK="target/linux/generic/hack-${KV}"
+            mkdir -p "$HACK"
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" "$HACK/"
+            echo "PLACED power patch in $HACK/ (kernel $KV)"
+            ls -l "$HACK/990-kt412-ath9k-2g-30dbm.patch"
+            grep -c 'KT412-30dbm' "$HACK/990-kt412-ath9k-2g-30dbm.patch"
+          fi
 
       - name: Update & install feeds
         run: |
@@ -111,34 +124,6 @@ jobs:
         run: |
           cd openwrt
           make -j$(nproc) download || make -j1 download
-
-      - name: "Patch ath9k 2.4G ceiling -> 30.0 dBm (extreme only) - MUST apply"
-        if: matrix.variant == 'system-30dbm-extreme-full'
-        run: |
-          cd openwrt
-          echo "=== build tools + toolchain so the kernel source extracts ==="
-          make -j$(nproc) tools/install    || make -j1 tools/install
-          make -j$(nproc) toolchain/install || make -j1 toolchain/install
-          make -j$(nproc) target/linux/prepare || make -j1 V=s target/linux/prepare
-          EEP="$(find build_dir -path '*ath9k/ar9003_eeprom.c' 2>/dev/null | head -1)"
-          if [ -z "$EEP" ]; then echo "FATAL: ar9003_eeprom.c not found"; exit 1; fi
-          echo "Found: $EEP"; cp "$EEP" "$EEP.orig"
-          # 1) ignore the CTL edge clamp on 2.4G target power
-          sed -i 's/minCtlPower = (u8)min(twiceMaxEdgePower, scaledPower);/minCtlPower = scaledPower; \/* KT412-30dbm *\//' "$EEP"
-          # 2) set 2.4G per-rate target CEILING to exactly 60 half-dB (= 30.0 dBm) so
-          #    iw phy shows 30.0 on ch 1/6/11 and uci txpower up to 30 is applied.
-          sed -i 's/\(regulatory->max_power_level = 0;\)/{ int _k; for (_k = 0; _k < ar9300RateSize; _k++) if (targetPowerValT2[_k] < 60) targetPowerValT2[_k] = 60; } \/* KT412-30dbm *\/ \1/' "$EEP"
-          M="$(grep -c 'KT412-30dbm' "$EEP")"
-          echo "--- power-patch markers (need 2): $M ---"; diff "$EEP.orig" "$EEP" || true
-          echo "markers=$M"
-          if [ "$M" != "2" ]; then echo "FATAL: power patch not applied (markers=$M)"; exit 1; fi
-          # verify the forced ceiling is exactly 60 half-dB = 30.0 dBm (band-wide -> all channels)
-          grep -q 'targetPowerValT2\[_k\] = 60' "$EEP" || { echo "FATAL: ceiling is not 30.0 dBm (60 half-dB)"; exit 1; }
-          echo "POWER PATCH APPLIED OK"
-          echo "KT412 2.4G 30DBM ALL CHANNELS GATE PASSED"
-          # band-wide ceiling => every 2.4G channel advertises 30.0 dBm (compile-time guarantee;
-          # runtime per-channel + RF is verified on-device via /root/kt412-report.sh)
-          for ch in 1 2 3 4 5 6 7 8 9 10 11; do echo "CH$ch=30 PASS"; done
 
       - name: Build
         run: |
