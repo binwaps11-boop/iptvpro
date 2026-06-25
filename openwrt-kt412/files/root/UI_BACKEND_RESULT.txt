@@ -1,0 +1,4 @@
+KT412 UI_BACKEND_RESULT (template) — run /root/kt412-ui-check.sh to fill.
+Official LuCI at /cgi-bin/luci (all sections, real backend) + Smart AP dashboard
+(landing page). Every dashboard control maps to a real op/act in /www/cgi-bin/kt412.
+Snapshot uses apk (not opkg) — Software managed via LuCI package-manager.

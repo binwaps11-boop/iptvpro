@@ -392,6 +392,7 @@ if [ -n "$ACT" ]; then
 			tp="$(sani_int "$(getp txpower)")"; lip="$(sani_ip "$(getp lan_ip)")"
 			qmode="$(getp mode | tr -cd 'a-z')"; pu="$(getp pppoe_user)"; pp="$(getp pppoe_pass)"
 			ch24="$(sani_int "$(getp ch24)")"; ch5="$(sani_int "$(getp ch5)")"
+			openw="$(getp open | tr -cd '01')"
 			if [ -n "$tp" ]; then [ "$tp" -gt 30 ] 2>/dev/null && tp=30; [ "$tp" -lt 0 ] 2>/dev/null && tp=0; fi
 			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 				uci -q set wireless.$r.disabled='0'
@@ -406,7 +407,10 @@ if [ -n "$ACT" ]; then
 				if [ -n "$ssid" ]; then
 					if [ "$bd" = "5g" ]; then uci -q set wireless.$i.ssid="${ssid}-5G"; else uci -q set wireless.$i.ssid="$ssid"; fi
 				fi
-				if [ -n "$pass" ] && [ "${#pass}" -ge 8 ]; then
+				if [ "$openw" = "1" ]; then
+					# open network: NEVER leave WPA with an empty key (that breaks hostapd)
+					uci -q set wireless.$i.encryption='none'; uci -q delete wireless.$i.key
+				elif [ -n "$pass" ] && [ "${#pass}" -ge 8 ]; then
 					uci -q set wireless.$i.encryption='psk2'; uci -q set wireless.$i.key="$pass"
 				fi
 			done
@@ -922,33 +926,19 @@ case "$OP" in
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
 	ports)
+		# DSA build (PR #21837): swconfig does NOT exist. Enumerate the qca8k DSA ports
+		# from sysfs only (wan standalone + lan1-4 in br-lan).
 		out=""; first=1
-		raw="$(swconfig dev switch0 show 2>/dev/null)"
-		if [ -n "$raw" ]; then
-			while IFS= read -r line; do
-				case "$line" in
-					*"link: port:"*)
-						pn="$(printf '%s' "$line" | sed -n 's/.*port:\([0-9]*\).*/\1/p')"
-						st=down; case "$line" in *"link:up"*) st=up;; esac
-						sp="$(printf '%s' "$line" | sed -n 's/.*speed:\([0-9]*\)baseT.*/\1/p')"
-						[ "$first" -eq 1 ] || out="$out,"; first=0
-						out="$out$(printf '{"name":"port%s","link":"%s","speed":%s}' "${pn:-0}" "$st" "${sp:-0}")"
-						;;
-				esac
-			done <<-EOF
-			$raw
-			EOF
-		fi
-		if [ -z "$out" ]; then
-			for p in wan lan1 lan2 lan3 lan4; do
-				[ -e "/sys/class/net/$p" ] || continue
-				st="$(cat /sys/class/net/$p/operstate 2>/dev/null)"
-				sp="$(cat /sys/class/net/$p/speed 2>/dev/null)"; case "$sp" in ''|*[!0-9]*) sp=0;; esac
-				lk=down; [ "$st" = "up" ] && lk=up
-				[ "$first" -eq 1 ] || out="$out,"; first=0
-				out="$out$(printf '{"name":"%s","link":"%s","speed":%s}' "$p" "$lk" "${sp:-0}")"
-			done
-		fi
+		for p in wan lan1 lan2 lan3 lan4; do
+			[ -e "/sys/class/net/$p" ] || continue
+			st="$(cat /sys/class/net/$p/operstate 2>/dev/null)"
+			sp="$(cat /sys/class/net/$p/speed 2>/dev/null)"; case "$sp" in ''|*[!0-9]*) sp=0;; esac
+			dx="$(cat /sys/class/net/$p/duplex 2>/dev/null)"
+			mst="$(readlink /sys/class/net/$p/master 2>/dev/null | sed 's#.*/##')"
+			lk=down; [ "$st" = "up" ] && lk=up
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","link":"%s","speed":%s,"duplex":"%s","master":"%s"}' "$p" "$lk" "${sp:-0}" "$(json_esc "$dx")" "$(json_esc "${mst:-}")")"
+		done
 		printf '{"ok":true,"ports":[%s]}\n' "$out";;
 	clients)
 		out=""; first=1
@@ -961,13 +951,18 @@ case "$OP" in
 		fi
 		printf '{"ok":true,"clients":[%s]}\n' "$out";;
 	health)
+		# CPU: ping is the heaviest recurring CGI on the 720MHz core. Cache 15s and use
+		# a single probe so the 10s dashboard timer hits the cache on most ticks.
+		HC=/tmp/kt_health.json
+		if [ -f "$HC" ]; then ha=$(( $(date +%s) - $(stat -c %Y "$HC" 2>/dev/null || echo 0) )); [ "$ha" -ge 0 ] && [ "$ha" -lt 15 ] && { cat "$HC"; exit 0; }; fi
 		pl(){ printf '%s' "$1" | sed -n 's/.*, \([0-9]*\)% packet loss.*/\1/p' | head -1; }
 		rt(){ printf '%s' "$1" | sed -n 's#.* = [0-9.]*/\([0-9.]*\)/.*#\1#p' | head -1; }
-		a="$(ping -c2 -W1 1.1.1.1 2>/dev/null)"; b="$(ping -c2 -W1 8.8.8.8 2>/dev/null)"
+		a="$(ping -c1 -W1 1.1.1.1 2>/dev/null)"; b="$(ping -c1 -W1 8.8.8.8 2>/dev/null)"
 		la="$(pl "$a")"; ra="$(rt "$a")"; lb="$(pl "$b")"; rb="$(rt "$b")"
 		mw="$(mwan3 status 2>/dev/null | grep -c 'is online')"
 		printf '{"ok":true,"cf":{"loss":%s,"rtt":%s},"goog":{"loss":%s,"rtt":%s},"mwan_online":%s}\n' \
-			"${la:-100}" "${ra:-0}" "${lb:-100}" "${rb:-0}" "${mw:-0}";;
+			"${la:-100}" "${ra:-0}" "${lb:-100}" "${rb:-0}" "${mw:-0}" > "$HC.$$" 2>/dev/null
+		mv -f "$HC.$$" "$HC" 2>/dev/null; cat "$HC";;
 	traffic)
 		out=""; first=1
 		while IFS= read -r line; do
@@ -1308,8 +1303,9 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 					out=out sep "{\"mac\":\"" m "\",\"ip\":\"" jesc(ip[m]) "\",\"name\":\"" jesc(name) "\",\"kind\":\"" kind "\",\"online\":" online ",\"signal\":\"" jesc(sig[m]) "\",\"sigpct\":" pct ",\"dist\":\"" dist "\",\"rxrate\":\"" jesc(rxr[m]) "\",\"txrate\":\"" jesc(txr[m]) "\",\"dev\":\"" jesc(ndev[m]) "\",\"conn\":\"" jesc(conn[m]) "\",\"bytes\":\"" (byt[m]+0) "\"}";
 				}
 				printf "{\"ok\":true,\"band24\":%d,\"band5\":%d,\"devices\":[%s]}\n", b24, b5, out;
-			}' "$L" "$S" "$N" > "$C" 2>/dev/null
-		rm -f "$L" "$S" "$N"
+			}' "$L" "$S" "$N" > "$C.$$" 2>/dev/null
+		mv -f "$C.$$" "$C" 2>/dev/null
+		rm -f "$L" "$S" "$N" "$C.$$"
 		cat "$C";;
 
 	# ===================== SMART AP HEALTH / SELF-HEAL (read-only) =====================

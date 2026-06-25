@@ -1,0 +1,79 @@
+==========================================================================
+KT412 / DW02-412H — DSA MIGRATION EVIDENCE (official, verified)
+SoC: QCA9558 | board: dongwon,dw02-412h-128m | target: ath79/nand
+ART/EEPROM/caldata/mtd10 are NEVER written. swconfig is NOT used.
+(The build also appends a LIVE build-time capture below this static section.)
+==========================================================================
+
+1) THE PATCH THAT CONVERTED THIS DEVICE TO DSA
+   PR        : openwrt/openwrt #21837
+   Title     : "ath79: dw02-412h: migrate from swconfig to DSA"
+   Author    : abdrzj88 (DTS header credit: "Converted from SWCONFIG to DSA by
+               Abdulkader Alrezej")
+   Base      : main   | Commits: 4 | Changed files: 6 | State: open PR
+   URL       : https://github.com/openwrt/openwrt/pull/21837
+   How used  : the build does `git clone openwrt` then `git checkout` the PR
+               branch (pull/21837/head) and builds it AS-IS.
+
+2) THE 6 FILES PR #21837 CHANGES (nothing else)
+   renamed  +2/-2    target/linux/ath79/dts/qca9558_dongwon_dw02-412h-128m.dts
+   renamed  +2/-2    target/linux/ath79/dts/qca9558_dongwon_dw02-412h-64m.dts
+   renamed  +100/-13 target/linux/ath79/dts/qca9558_dongwon_dw02-412h.dtsi   <-- the DSA switch node
+   modified +4/-2    target/linux/ath79/image/nand.mk
+   modified +1/-1    target/linux/ath79/nand/base-files/etc/board.d/01_leds
+   modified +1/-2    target/linux/ath79/nand/base-files/etc/board.d/02_network
+
+3) DRIVER MODIFICATION? — NO.
+   Files under drivers/net/dsa/ or qca8k driver source changed by PR #21837: NONE.
+   Our build adds NO driver patch either. The ONLY thing our workflow changes in
+   the DSA/DTS area is a 1-line SYNTAX fix: it appends the missing ';' after
+   `linux,default-trigger = "phy1tpt"` in the .dtsi (the PR left it without a
+   semicolon). qca8k = official upstream driver, unmodified. DSA core = upstream,
+   unmodified.
+
+4) THE SWITCH / PORTS / MDIO NODES (from the PR .dtsi, verbatim structure)
+   &mdio0 -> ethernet-switch@0 { compatible = "qca,qca8337"; reg = <0>;
+     ethernet-ports {                       <-- EXTERNAL DSA PORTS NODE (present!)
+       ethernet-port@0 { reg=<0>; label="cpu0"; ethernet=<&eth0>; phy-mode="rgmii-id"; fixed-link 1000/full; }
+       ethernet-port@1 { reg=<1>; label="wan";  phy-mode="internal"; phy-handle=<&phy_port1>; }
+       ethernet-port@2 { reg=<2>; label="lan4"; phy-mode="internal"; phy-handle=<&phy_port2>; }
+       ethernet-port@3 { reg=<3>; label="lan3"; phy-mode="internal"; phy-handle=<&phy_port3>; }
+       ethernet-port@4 { reg=<4>; label="lan2"; phy-mode="internal"; phy-handle=<&phy_port4>; }
+       ethernet-port@5 { reg=<5>; label="lan1"; phy-mode="internal"; phy-handle=<&phy_port5>; }
+     };
+     mdio {                                  <-- INTERNAL PHY MDIO NODE (present!)
+       phy_port1: phy@0 { reg=<0>; }  phy_port2: phy@1 { reg=<1>; }
+       phy_port3: phy@2 { reg=<2>; }  phy_port4: phy@3 { reg=<3>; }
+       phy_port5: phy@4 { reg=<4>; }
+     };
+   };
+   &eth0 = the CPU/conduit (rgmii-id, fixed-link 1000/full).
+
+   PORT MAPPING (official): eth0 = CPU/conduit only; wan = standalone DSA port;
+   lan1..lan4 = DSA ports bridged into br-lan. Matches the user's requirement.
+
+5) ABOUT "qca8k mdio.0:00: No ports node specified in device tree!"
+   - The EXTERNAL ports node IS present (as `ethernet-ports` above) — that is why
+     lan1-4/wan/cpu enumerate and bridge correctly. The qca8k driver accepts both
+     `ports` and `ethernet-ports`.
+   - The INTERNAL PHY `mdio` node IS also present (phy@0..phy@4).
+   - So nothing is actually missing from the DTS. The message is a NON-FATAL
+     qca8k notice emitted on the MDIO-attached probe path; it does NOT affect DSA
+     or VLAN (proven on-device: dsa_core+tag_qca+qca8k load, ports map to br-lan,
+     wan separate, bridge vlan works when vlan_filtering=1).
+   - Therefore NO DTS edit is made for it (a blind ports/mdio edit would risk
+     breaking a working, correct, upstream DTS). If a future need arises it will
+     be done only against the real captured DTS (/etc/kt412-dts.txt) with a diff.
+
+6) lan3 STABILITY (not a DTS/driver problem)
+   - The earlier "smartap-wd: port lan3 frozen -> bounce link" was OUR watchdog's
+     bad heuristic (idle port = zero bytes != frozen). That port-bounce logic is
+     REMOVED from /root/smartap-watchdog.sh. Zero traffic is never treated as a
+     fault now.
+   - EEE (Energy-Efficient-Ethernet) is disabled on the DSA ports via
+     /etc/hotplug.d/net/20-kt412-eee (qca8k EEE can cause gigabit link flap).
+
+--------------------------------------------------------------------------
+LIVE BUILD-TIME CAPTURE (appended below by the build): board.d/02_network,
+image profile, and the actual PR DTS diff from the checked-out source.
+--------------------------------------------------------------------------

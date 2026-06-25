@@ -30,6 +30,7 @@
     <div class="side-brand"><div class="logo">SA</div><div class="brand"><b>Smart AP</b><span>DW02‑412H</span></div></div>
     <nav id="sideNav"></nav>
     <div class="side-foot">
+      <a class="btn-ghost" href="/cgi-bin/luci" target="_blank" rel="noopener" id="luciLink" style="display:block;text-align:center;margin-bottom:8px">⚙️ الإعدادات المتقدمة (LuCI الرسمي)</a>
       <span class="pill"><span id="netDot" class="dot"></span><span id="netTxt">الإنترنت</span></span>
       <button class="btn-ghost" id="logoutBtn">خروج</button>
     </div>
@@ -114,6 +115,9 @@
       <div class="row" style="margin-top:6px">
         <div><label class="f">📶 اسم الواي‑فاي (SSID)</label><input id="qs_ssid" class="t" placeholder="KT412"></div>
         <div><label class="f">🔑 كلمة المرور (8 أحرف+)</label><input id="qs_pass" class="t" placeholder="اتركها فارغة للإبقاء"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="qs_open"> 🔓 شبكة مفتوحة (بدون كلمة مرور)</label></div>
       </div>
       <div class="row" style="margin-top:6px">
         <div><label class="f">📻 قناة 2.4G</label><select id="qs_ch24" class="t"><option value="">بلا تغيير</option><option>1</option><option>6</option><option>11</option></select></div>

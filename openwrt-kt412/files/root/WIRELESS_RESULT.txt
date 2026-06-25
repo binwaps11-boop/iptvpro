@@ -1,0 +1,3 @@
+KT412 WIRELESS_RESULT (template) — run /root/kt412-wireless-check.sh to fill.
+Expect: 2.4G KT412 + 5G KT412-5G broadcasting; phy0 no 'Failed to open'/BRIDGE_NOT_ALLOWED;
+modes AP/STA/Mesh/AP+WDS supported via /etc/config/wireless; client scan via op=wscan.

@@ -822,8 +822,8 @@ function devRow(x){
       `<div class="sigbar"><i style="width:${pct}%;background:${col}"></i></div>`+
       `<span class="sub">${esc(x.signal)}dBm</span>`; }
   else right='<span class="badge ok">سلكي</span>';
-  const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">↓${esc(x.rxrate||'?')} ↑${esc(x.txrate||'?')} Mb</span>`:'';
-  const usage=(+x.bytes)?`<span class="sub">⬇⬆ ${human(+x.bytes)}</span>`:'';
+  const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">معدل الوصلة RX/TX: ${esc(x.rxrate||'?')}/${esc(x.txrate||'?')} Mbps</span>`:'';
+  const usage=(+x.bytes)?`<span class="sub">استهلاك (إجمالي): ${human(+x.bytes)}</span>`:'';
   const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
   return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
     `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
@@ -982,7 +982,8 @@ if($('#qs_tx')) $('#qs_tx').oninput=()=>{ const v=$('#qs_txv'); if(v)v.textConte
 if($('#qs_mode')) $('#qs_mode').onchange=()=>{ const p=$('#qs_pppoe_row'); if(p)p.style.display=($('#qs_mode').value==='pppoe')?'flex':'none'; };
 if($('#qsApply')) $('#qsApply').onclick=async()=>{
   const v=id=>{ const e=$(id); return e?e.value:''; };
-  const r=await safeApply(()=>call({act:'quick_setup',mode:v('#qs_mode'),ssid:v('#qs_ssid'),pass:v('#qs_pass'),
+  const open=$('#qs_open')&&$('#qs_open').checked?1:0;
+  const r=await safeApply(()=>call({act:'quick_setup',mode:v('#qs_mode'),ssid:v('#qs_ssid'),pass:v('#qs_pass'),open,
     country:v('#qs_country'),txpower:v('#qs_tx'),lan_ip:v('#qs_lan'),ch24:v('#qs_ch24'),ch5:v('#qs_ch5'),
     pppoe_user:v('#qs_pu'),pppoe_pass:v('#qs_pp')},true));
   const vlan=v('#qs_vlan').trim();
