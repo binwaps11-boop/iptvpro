@@ -259,3 +259,34 @@ pre,textarea.t,#logBox,#reportBox{max-width:100%;box-sizing:border-box}
   .topbar h2{font-size:18px}
   .gauge{width:96px;height:96px}.gauge::before{width:70px;height:70px}
 }
+
+/* ============================================================
+   Pro toggle switches + Overview quick-controls + range sliders
+   ============================================================ */
+.switch{position:relative;display:inline-block;width:46px;height:26px;flex:0 0 46px}
+.switch input{opacity:0;width:0;height:0;position:absolute}
+.switch .sl{position:absolute;inset:0;cursor:pointer;background:rgba(255,255,255,.14);border:1px solid var(--stroke);
+  border-radius:999px;transition:.2s}
+.switch .sl::before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;
+  transition:.2s;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.switch input:checked + .sl{background:linear-gradient(135deg,var(--accent2),var(--accent));border-color:transparent}
+.switch input:checked + .sl::before{transform:translateX(20px)}
+[dir=rtl] .switch input:checked + .sl::before{transform:translateX(-20px)}
+[dir=rtl] .switch .sl::before{left:auto;right:3px}
+
+.ctrlrow{display:flex;align-items:center;gap:12px;padding:12px;border-radius:14px;background:rgba(255,255,255,.04);
+  border:1px solid var(--stroke);margin-bottom:10px;flex-wrap:wrap}
+.ctrlrow .ci{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:18px;flex:0 0 38px;
+  background:rgba(124,77,255,.18)}
+.ctrlrow .cm{flex:1;min-width:120px}
+.ctrlrow .cm b{font-size:14px}
+.ctrlrow .cm .sub{margin-top:1px}
+.ctrlrow .cr{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+input[type=range]{-webkit-appearance:none;appearance:none;height:6px;border-radius:5px;
+  background:rgba(255,255,255,.14);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent3),var(--accent));cursor:pointer;box-shadow:0 2px 8px rgba(124,77,255,.6)}
+input[type=range]::-moz-range-thumb{width:18px;height:18px;border:0;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent3),var(--accent));cursor:pointer}
+.pwrwrap{display:flex;align-items:center;gap:8px}
+.pwrwrap b{min-width:42px;text-align:center;font-size:13px}

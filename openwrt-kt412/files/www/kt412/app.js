@@ -46,7 +46,35 @@ function dur(s){ s=+s||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600)
   if(d>0)return d+'ي '+h+'س'; if(h>0)return h+'س '+m+'د'; return m+'د'; }
 
 /* ---------- dashboard ---------- */
+async function renderControls(){
+  const box=$('#quickControls'); if(!box)return;
+  const r=await call({op:'wifi_radios'});
+  const rs=(r&&r.ok)?(r.radios||[]):[];
+  if(!rs.length){ box.innerHTML='<div class="sub">لا راديوهات</div>'; return; }
+  box.innerHTML=rs.map(rd=>{
+    const is5=rd.band==='5g'; const en=(rd.enabled===true||rd.enabled==='true');
+    const tp=Math.max(0,Math.min(30,+rd.txpower||30));
+    return `<div class="ctrlrow" data-radio="${esc(rd.radio)}">
+      <div class="ci">${is5?'📡':'📶'}</div>
+      <div class="cm"><b>${is5?'الواي‑فاي 5GHz':'الواي‑فاي 2.4GHz'}</b><div class="sub">${esc(rd.ssid||'—')} · قناة ${esc(rd.channel||'auto')}</div></div>
+      <div class="cr">
+        <div class="pwrwrap"><span class="sub">الطاقة</span><input type="range" class="cpw" min="0" max="30" step="1" value="${tp}" style="width:110px"><b class="cpwv">${tp}</b></div>
+        <label class="switch"><input type="checkbox" class="csw" ${en?'checked':''}><span class="sl"></span></label>
+      </div></div>`;
+  }).join('');
+  $$('#quickControls .ctrlrow').forEach(row=>{
+    const radio=row.dataset.radio;
+    const sw=row.querySelector('.csw');
+    if(sw) sw.onchange=async()=>{ const r=await call({act:'wifi_toggle',radio,on:sw.checked?1:0},true);
+      toast(r&&r.ok?(sw.checked?'تم تشغيل الراديو':'تم إيقاف الراديو'):'فشل',r&&r.ok); };
+    const pw=row.querySelector('.cpw'), pv=row.querySelector('.cpwv');
+    if(pw){ pw.oninput=()=>{ if(pv)pv.textContent=pw.value; };
+      pw.onchange=async()=>{ const r=await call({act:'txpower',radio,dbm:pw.value},true);
+        toast(r&&r.ok?('الطاقة '+(r.requested||pw.value)+'dBm · مطبّق '+(r.actual||'?')):'فشل',r&&r.ok); }; }
+  });
+}
 async function loadDash(){
+  renderControls();
   const s=await call({op:'summary'});
   if(s&&s.ok){
     $('#d_model').textContent=s.model||'KT412'; $('#d_rel').textContent=s.release||'';
@@ -829,9 +857,14 @@ $('#menuToggle').onclick=openDrawer;
 $('#scrim').onclick=closeDrawer;
 $('#devRefresh').onclick=loadDevices;
 if($('#qs_tx')) $('#qs_tx').oninput=()=>{ const v=$('#qs_txv'); if(v)v.textContent=$('#qs_tx').value; };
+if($('#qs_mode')) $('#qs_mode').onchange=()=>{ const p=$('#qs_pppoe_row'); if(p)p.style.display=($('#qs_mode').value==='pppoe')?'flex':'none'; };
 if($('#qsApply')) $('#qsApply').onclick=async()=>{
-  const r=await safeApply(()=>call({act:'quick_setup',ssid:$('#qs_ssid').value,pass:$('#qs_pass').value,
-    country:$('#qs_country').value,txpower:$('#qs_tx').value,lan_ip:$('#qs_lan').value},true));
+  const v=id=>{ const e=$(id); return e?e.value:''; };
+  const r=await safeApply(()=>call({act:'quick_setup',mode:v('#qs_mode'),ssid:v('#qs_ssid'),pass:v('#qs_pass'),
+    country:v('#qs_country'),txpower:v('#qs_tx'),lan_ip:v('#qs_lan'),ch24:v('#qs_ch24'),ch5:v('#qs_ch5'),
+    pppoe_user:v('#qs_pu'),pppoe_pass:v('#qs_pp')},true));
+  const vlan=v('#qs_vlan').trim();
+  if(r&&r.ok&&vlan) await call({act:'vlan_add',vid:vlan,routing:'internet',nat:'on',dns_mode:'auto'},true);
   toast(r&&r.ok?(r.msg||'تم — أكّد خلال 80ث'):('فشل: '+((r&&r.error)||'')),r&&r.ok);
 };
 window.addEventListener('resize',()=>{ if(curPane==='dash')drawChart(); });

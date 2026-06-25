@@ -40,6 +40,10 @@
 
   <!-- DASHBOARD -->
   <section data-pane="dash">
+    <div class="card" style="margin-bottom:16px">
+      <h3>🎛️ تحكّم سريع — Quick Controls</h3>
+      <div id="quickControls"><div class="sub">جارٍ التحميل…</div></div>
+    </div>
     <div class="grid cols-4">
       <div class="card gcard"><div class="gauge" id="g_load" style="--p:0;--gc:var(--c-cyan)"><span>—</span></div><div class="glabel">المعالج / الحِمل</div><div class="sub" id="d_cpu">—</div></div>
       <div class="card gcard"><div class="gauge" id="g_mem" style="--p:0;--gc:var(--c-purple)"><span>—</span></div><div class="glabel">الذاكرة (RAM)</div><div class="sub" id="d_memsub">—</div></div>
@@ -78,16 +82,31 @@
       <h3>⚡ إعدادات سريعة — Quick Setup</h3>
       <div class="note">اضبط جهازك بضغطة واحدة. كل تغيير يمرّ عبر <b>Safe Apply</b> (رجوع تلقائي خلال 80ث إن انقطع الوصول).</div>
       <div class="row">
-        <div><label class="f">📶 اسم الواي‑فاي (SSID)</label><input id="qs_ssid" class="t" placeholder="KT412"></div>
-        <div><label class="f">🔑 كلمة المرور (8 أحرف فأكثر)</label><input id="qs_pass" class="t" placeholder="اتركها فارغة للإبقاء على الحالية"></div>
+        <div><label class="f">⚙️ وضع الجهاز</label><select id="qs_mode" class="t">
+          <option value="access">Access / راوتر (AP)</option>
+          <option value="pppoe">PPPoE Client (خلف مودم)</option>
+          <option value="station">Station (يتصل بواي‑فاي علوي)</option></select></div>
+        <div><label class="f">🌍 الدولة</label><input id="qs_country" class="t" value="US" placeholder="US"></div>
+      </div>
+      <div class="row" id="qs_pppoe_row" style="margin-top:6px;display:none">
+        <div><label class="f">👤 مستخدم PPPoE</label><input id="qs_pu" class="t" placeholder="username"></div>
+        <div><label class="f">🔒 كلمة مرور PPPoE</label><input id="qs_pp" class="t" placeholder="password"></div>
       </div>
       <div class="row" style="margin-top:6px">
-        <div><label class="f">🌍 الدولة</label><input id="qs_country" class="t" value="US" placeholder="US"></div>
+        <div><label class="f">📶 اسم الواي‑فاي (SSID)</label><input id="qs_ssid" class="t" placeholder="KT412"></div>
+        <div><label class="f">🔑 كلمة المرور (8 أحرف+)</label><input id="qs_pass" class="t" placeholder="اتركها فارغة للإبقاء"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div><label class="f">📻 قناة 2.4G</label><select id="qs_ch24" class="t"><option value="">بلا تغيير</option><option>1</option><option>6</option><option>11</option></select></div>
+        <div><label class="f">📡 قناة 5G</label><select id="qs_ch5" class="t"><option value="">بلا تغيير</option><option>36</option><option>40</option><option>44</option><option>48</option><option>149</option><option>153</option><option>157</option><option>161</option></select></div>
+      </div>
+      <div class="row" style="margin-top:6px">
         <div><label class="f">📡 قوة الإرسال: <b id="qs_txv">30</b> dBm (0–30)</label>
           <input type="range" id="qs_tx" min="0" max="30" step="1" value="30" style="width:100%"></div>
+        <div><label class="f">🖥️ IP الإدارة (LAN)</label><input id="qs_lan" class="t" placeholder="192.168.100.1"></div>
       </div>
       <div class="row" style="margin-top:6px">
-        <div><label class="f">🖥️ IP الإدارة (LAN)</label><input id="qs_lan" class="t" placeholder="192.168.100.1"></div>
+        <div><label class="f">🔀 VLAN (اختياري — رقم فقط)</label><input id="qs_vlan" class="t" placeholder="مثال: 10"></div>
         <div></div>
       </div>
       <button class="btn" id="qsApply" style="margin-top:12px">⚡ تطبيق سريع (Safe Apply)</button>

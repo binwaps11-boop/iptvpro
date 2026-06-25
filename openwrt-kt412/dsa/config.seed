@@ -21,6 +21,11 @@ CONFIG_PACKAGE_dnsmasq-full=y
 CONFIG_PACKAGE_odhcpd-ipv6only=y
 CONFIG_PACKAGE_wireless-regdb=y
 CONFIG_PACKAGE_kmod-ath9k=y
+# 5GHz radio = PCIe QCA9882 (QCA988x). MUST use the -ct (Candela) driver AND the
+# matching -ct firmware; mixing -ct/non-ct = "firmware load failed -2" and 5G never
+# comes up. Without these the 5GHz radio has no driver at all (was missing).
+CONFIG_PACKAGE_kmod-ath10k-ct=y
+CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y
 # Ignore the EEPROM-burned (Korean) regdomain so cfg80211 cannot pull 2.4G
 # channel max_reg_power back down to ~24 and undo the forced 30 dBm ceiling.
 CONFIG_ATH_USER_REGD=y
