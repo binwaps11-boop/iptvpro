@@ -78,7 +78,7 @@ jobs:
             grep -c 'KT412-30dbm' "$HACK/990-kt412-ath9k-2g-30dbm.patch"
             cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/991-kt412-cfg80211-2g-30dbm-regcap.patch" "$HACK/"
             echo "PLACED cfg80211 regcap patch (lifts chan->max_power 24->30 = the real netdev cap)"
-            grep -c 'KT412-30dbm-regcap' "$HACK/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            grep -c 'KT412-30DBM-REGCAP' "$HACK/991-kt412-cfg80211-2g-30dbm-regcap.patch"
           fi
 
       - name: Update & install feeds
@@ -221,7 +221,7 @@ jobs:
             echo "markers=$N"
             [ "$N" = "2" ] || { echo "FATAL: bin would NOT have the power patch"; exit 1; }
             grep -q 'targetPowerValT2\[_k\] = 60' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
-            if grep -rq 'kt412_lift_2g' build_dir/target-*/linux-*/linux-*/net/wireless/reg.c 2>/dev/null; then echo "REGCAP PATCH APPLIED OK (cfg80211 chan->max_power lifted to 30 on 2.4G)"; else echo "FATAL: regcap patch did NOT apply -> cfg80211 still caps 2.4G to 24"; exit 1; fi
+            if grep -rq 'kt412_lift' build_dir/target-*/linux-*/linux-*/net/wireless/reg.c 2>/dev/null; then echo "REGCAP PATCH APPLIED OK (cfg80211 chan->max_power lifted to 30 on 2.4G)"; else echo "FATAL: regcap patch did NOT apply -> cfg80211 still caps 2.4G to 24"; exit 1; fi
             echo "POWER PATCH COMPILED-IN OK (source markers=2, ceiling=60 half-dB=30.0)"
             echo "HONEST NOTE: this proves the patch is in the SOURCE only. It is NOT a post-flash"
             echo "device reading. Real applied power MUST be verified on the device with:"
