@@ -1,0 +1,34 @@
+#!/bin/sh
+# KT412 CPU / performance tune (runs once on first boot, then self-deletes).
+# Goal: less CPU WORK per packet so the single-core QCA9557 (720MHz MIPS) keeps
+# more headroom => higher sustained throughput and a lower idle/loaded CPU.
+# NOTE: this SoC has a fixed clock (no cpufreq) — performance comes from cutting
+# work, not from changing CPU frequency.
+
+# 1) Software flow offloading ON — established/NAT flows bypass the netfilter
+#    fast-path, which is by far the biggest CPU saver for routed traffic.
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'   # no HW offload on ath79
+
+# 2) Disable automatic conntrack ALG helpers (FTP/SIP/PPTP/...). They add
+#    per-packet CPU and aren't needed for offloaded flows. Recommended on routers.
+uci -q set firewall.@defaults[0].auto_helper='0'
+uci -q commit firewall
+
+# 3) Quieter kernel console logging => fewer log interrupts / CPU on noisy events.
+uci -q set system.@system[0].conloglevel='4'
+uci -q commit system
+
+# 4) nlbwmon (per-device usage accounting, if installed): keep it, but write less
+#    often to cut periodic CPU + flash wear.
+if uci -q get nlbwmon.@nlbwmon[0] >/dev/null 2>&1; then
+	uci -q set nlbwmon.@nlbwmon[0].commit_interval='24h'
+	uci -q set nlbwmon.@nlbwmon[0].refresh_interval='60s'
+	uci -q commit nlbwmon
+	/etc/init.d/nlbwmon restart 2>/dev/null
+fi
+
+# Apply firewall (re-reads offload + helper settings).
+/etc/init.d/firewall restart 2>/dev/null
+
+exit 0

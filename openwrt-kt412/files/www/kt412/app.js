@@ -652,11 +652,12 @@ function drawChart(){
   plot(dlH,'#3bc9db','rgba(59,201,219,.13)'); plot(ulH,'#ff6ba6','rgba(255,107,166,.13)');
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
-  if(curPane==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
+  // 3s cadence (lighter on the single-core CPU than 2s); heavy refreshes spaced out.
+  if(curPane==='dash'){ loadSpeed(); if(tick%4===0)loadDash(); }
   else if(curPane==='net'||curPane==='ports'){ loadPortRates(); }
   else if(curPane==='clients'&&tick%4===0){ loadDevices(); }
   tick++;
-},2000); }
+},3000); }
 /* rich device row: signal -> distance estimate */
 function sigInfo(sig){
   const r=parseInt(sig,10); if(isNaN(r))return null;

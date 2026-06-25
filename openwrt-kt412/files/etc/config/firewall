@@ -8,6 +8,9 @@ config defaults
 	option forward 'REJECT'
 	# Software flow offloading: stable on ath79, big CPU saving. (HW offload not available on QCA9557.)
 	option flow_offloading '1'
+	option flow_offloading_hw '0'
+	# Disable automatic conntrack ALG helpers (FTP/SIP/...) — per-packet CPU saver.
+	option auto_helper '0'
 
 config zone
 	option name 'lan'
