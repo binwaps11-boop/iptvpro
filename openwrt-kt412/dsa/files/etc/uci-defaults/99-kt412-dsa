@@ -48,26 +48,67 @@ uci -q commit ttyd
 /etc/init.d/ttyd enable 2>/dev/null
 /etc/init.d/ttyd restart 2>/dev/null
 
-# --- performance + stability tuning (same as stable build) ---
+# --- performance + stability: software flow offload + packet steering ---
 uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].synflood_protect='1'   # don't hang under SYN flood
 uci -q commit firewall
+uci -q set network.@globals[0].packet_steering='1' 2>/dev/null || { uci -q add network globals >/dev/null 2>&1; uci -q set network.@globals[0].packet_steering='1'; }
+uci -q commit network
+
+# --- DNS for many clients: bigger cache + more parallel forwards ---
+dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"
+[ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='1500'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
+
+# --- WiFi stability under load (don't drop clients, max airtime fairness) ---
+for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+	uci -q set wireless.$r.disassoc_low_ack='0'   # keep weaker clients instead of kicking
+done
+for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+	uci -q set wireless.$r.cell_density='0'        # widest range, tolerant of distant clients
+done
+uci -q commit wireless
+
+# --- kernel tuning: high connection count + anti-hang (recycle conntrack fast,
+#     guard memory so the box never OOM-locks; panic->reboot, never freeze) ---
 if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
 	cat >> /etc/sysctl.conf <<'SYS'
 # kt412-tune
-net.netfilter.nf_conntrack_max=16384
-net.ipv4.tcp_fin_timeout=30
+net.netfilter.nf_conntrack_max=49152
+net.netfilter.nf_conntrack_tcp_timeout_established=7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait=30
+net.netfilter.nf_conntrack_udp_timeout=30
+net.netfilter.nf_conntrack_udp_timeout_stream=60
+net.netfilter.nf_conntrack_generic_timeout=120
+net.ipv4.tcp_fin_timeout=20
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_max_syn_backlog=2048
+net.ipv4.tcp_fastopen=3
+net.core.somaxconn=2048
 net.core.rmem_max=4194304
 net.core.wmem_max=4194304
-net.core.netdev_max_backlog=2000
-net.ipv4.tcp_fastopen=3
+net.core.netdev_max_backlog=3000
+fs.file-max=32768
+vm.min_free_kbytes=8192
+vm.panic_on_oom=0
 kernel.panic=10
 kernel.panic_on_oops=1
+kernel.hung_task_panic=0
 SYS
 fi
 sysctl -p >/dev/null 2>&1
+# enlarge conntrack hash buckets (=max/4) to keep lookups O(1) under load
+echo 12288 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+
+# --- watchdogs: hardware /dev/watchdog (procd) + service auto-restart ---
 mkdir -p /etc/crontabs
 if ! grep -q 'kt412-wd' /etc/crontabs/root 2>/dev/null; then
-	echo '*/2 * * * * for s in dnsmasq uhttpd rpcd; do pgrep -x "$s" >/dev/null || /etc/init.d/"$s" restart; done # kt412-wd' >> /etc/crontabs/root
+	echo '*/2 * * * * for s in dnsmasq uhttpd rpcd network; do pgrep -x "$s" >/dev/null 2>&1 || pgrep -f "$s" >/dev/null 2>&1 || /etc/init.d/"$s" restart; done # kt412-wd' >> /etc/crontabs/root
+fi
+# load-watchdog: if load stays critically high (near hang), reboot cleanly rather than freeze
+if ! grep -q 'kt412-loadwd' /etc/crontabs/root 2>/dev/null; then
+	echo '*/3 * * * * L=$(cut -d. -f1 /proc/loadavg); [ "${L:-0}" -ge 25 ] && logger -t kt412 "load $L critical -> reboot" && reboot # kt412-loadwd' >> /etc/crontabs/root
 fi
 /etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
 

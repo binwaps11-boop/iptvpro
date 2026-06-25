@@ -951,6 +951,33 @@ case "$OP" in
 	backup_make)
 		b="$(tar czf - -C / etc/config 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"data":"%s"}\n' "$b";;
+
+	# ===================== LIVE MONITOR (LuCI Status parity) =====================
+	conns)
+		cnt="$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
+		mx="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+		lst="$(awk '{p="";s="";d="";for(i=1;i<=NF;i++){if($i ~ /^(tcp|udp|icmp)$/&&p=="")p=$i;if($i ~ /^src=/&&s=="")s=substr($i,5);if($i ~ /^dst=/&&d=="")d=substr($i,5)} if(s!=""&&d!="")print p" "s" -> "d}' /proc/net/nf_conntrack 2>/dev/null | sort | uniq -c | sort -rn | head -25)"
+		b="$(printf '%s' "$lst" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"count":"%s","max":"%s","top":"%s"}\n' "${cnt:-0}" "${mx:-0}" "$b";;
+	routes)
+		b="$( { echo '== IPv4 =='; ip route 2>/dev/null; echo; echo '== IPv6 =='; ip -6 route 2>/dev/null | head -20; } | head -60 | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	stations)
+		txt=""
+		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			txt="$txt== $i ==
+$(iwinfo "$i" assoclist 2>/dev/null)
+"
+		done
+		b="$(printf '%s' "$txt" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	procs)
+		b="$( (top -bn1 2>/dev/null | head -24 || ps w 2>/dev/null | head -24) | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	usage)
+		b="$( (nlbw -c show 2>/dev/null | head -30 || echo 'nlbwmon لم يجمع بيانات بعد') | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+
 	*)
 		fail "unknown_op";;
 esac

@@ -502,13 +502,26 @@ function renderPkgs(){
 /* ---------- CRON ---------- */
 async function loadCron(){ const r=await call({op:'cron_get'}); if(r&&r.ok)$('#cronBox').value=b64dec(r.body); }
 
+/* ---------- LIVE MONITOR ---------- */
+async function loadMonitor(){
+  const c=await call({op:'conns'});
+  if(c&&c.ok){ const cnt=+c.count||0, mx=+c.max||1; const pct=Math.min(100,Math.round(cnt/mx*100));
+    $('#mon_conn').innerHTML=cnt+'<small> اتصال نشط</small>'; $('#mon_connbar').style.width=pct+'%';
+    $('#mon_connsub').textContent=cnt+' / '+mx+' ('+pct+'%)';
+    $('#mon_conntop').textContent=b64dec(c.top)||'—'; }
+  const s=await call({op:'stations'}); if(s&&s.ok)$('#mon_sta').textContent=b64dec(s.out)||'لا أجهزة لاسلكية';
+  const u=await call({op:'usage'}); if(u&&u.ok)$('#mon_usage').textContent=b64dec(u.out)||'—';
+  const p=await call({op:'procs'}); if(p&&p.ok)$('#mon_procs').textContent=b64dec(p.out)||'—';
+  const r=await call({op:'routes'}); if(r&&r.ok)$('#mon_routes').textContent=b64dec(r.out)||'—';
+}
+
 /* ---------- nav + loop ---------- */
 // fewer menus: each nav tab groups several related panes
 const TABS={
   dash:['dash'],
   net:['net','ports','clients','firewall','services'],
   wifi:['wifi','power'],
-  diag:['health','logs','tools'],
+  diag:['health','logs','tools','monitor'],
   system:['system']
 };
 function switchTab(tab){
@@ -526,6 +539,7 @@ function switchTab(tab){
   if(panes.indexOf('system')>=0){ loadSystem(); loadCron(); }
   if(panes.indexOf('firewall')>=0){ loadFw(); loadDns(); loadLeases(); loadRoutes(); }
   if(panes.indexOf('services')>=0){ loadSvcStates(); loadSvcList(); }
+  if(panes.indexOf('monitor')>=0)loadMonitor();
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
   const a=document.querySelector('#nav button.active'); if(!a)return;
@@ -646,6 +660,7 @@ $('#ddnsApply').onclick=async()=>{ const r=await call({act:'ddns_set',provider:$
 
 /* ---------- wire up: tools (diag + packages) ---------- */
 $('#diagRun').onclick=runDiag;
+$('#monRefresh').onclick=loadMonitor;
 $('#pkgRefresh').onclick=loadPkgs;
 $('#pkg_search').addEventListener('input',renderPkgs);
 $('#pkgInstall').onclick=async()=>{ const n=$('#pkg_name').value.trim(); if(!n){toast('اكتب اسم الحزمة',false);return;}

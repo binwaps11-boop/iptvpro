@@ -36,7 +36,7 @@
     <button data-tab="dash" class="active"><span class="i">▦</span> الرئيسية</button>
     <button data-tab="net"><span class="i">🌐</span> الشبكة · جدار ناري · خدمات</button>
     <button data-tab="wifi"><span class="i">📶</span> الواي‑فاي والقوة</button>
-    <button data-tab="diag"><span class="i">🩺</span> التشخيص · السجلّات · أدوات</button>
+    <button data-tab="diag"><span class="i">🩺</span> التشخيص · المراقبة · أدوات</button>
     <button data-tab="system"><span class="i">⚙</span> النظام</button>
   </div>
 
@@ -373,6 +373,36 @@
         <div id="pkgBox" style="margin-top:10px;max-height:40vh;overflow:auto"><div class="sub">اضغط «تحديث القائمة» لعرض الحزم المثبّتة.</div></div>
       </div>
     </div>
+  </section>
+
+  <!-- MONITOR (live status) -->
+  <section data-pane="monitor" class="hide">
+    <div class="card" style="margin-bottom:16px">
+      <h3>الاتصالات النشطة — Connections</h3>
+      <div class="stat" id="mon_conn">—</div>
+      <div class="bar"><i id="mon_connbar" style="width:0"></i></div>
+      <div class="sub" id="mon_connsub">— / —</div>
+      <pre id="mon_conntop" style="margin-top:10px;max-height:34vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">—</pre>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>الأجهزة اللاسلكية (إشارة/سرعة) — Stations</h3>
+        <pre id="mon_sta" style="max-height:38vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">—</pre>
+      </div>
+      <div class="card">
+        <h3>استهلاك كل جهاز — Per‑device Usage</h3>
+        <pre id="mon_usage" style="max-height:38vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">—</pre>
+      </div>
+      <div class="card">
+        <h3>العمليات — Processes (top)</h3>
+        <pre id="mon_procs" style="max-height:38vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11px;white-space:pre;overflow-x:auto;color:var(--txt2)">—</pre>
+      </div>
+      <div class="card">
+        <h3>جدول التوجيه — Routes</h3>
+        <pre id="mon_routes" style="max-height:38vh;overflow:auto;background:rgba(10,3,26,.5);border:1px solid var(--stroke);border-radius:12px;padding:10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--txt2)">—</pre>
+      </div>
+    </div>
+    <button class="btn sec" id="monRefresh" style="margin-top:14px">تحديث المراقبة</button>
   </section>
 
   <!-- SYSTEM -->

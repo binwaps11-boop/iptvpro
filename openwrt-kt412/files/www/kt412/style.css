@@ -134,3 +134,39 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 @keyframes sp{to{transform:rotate(360deg)}}
 .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:26px}
 .foot a{color:var(--accent3);text-decoration:none}
+
+/* ===== Mobile polish (consistent on phones, like official OpenWrt) ===== */
+*{-webkit-tap-highlight-color:rgba(176,124,255,.2)}
+html{-webkit-text-size-adjust:100%}
+body{overflow-x:hidden}
+.kv{flex-wrap:wrap;gap:4px}
+pre,textarea.t,#logBox,#reportBox{max-width:100%;box-sizing:border-box}
+@media(max-width:760px){
+  .wrap{padding:12px 11px 70px}
+  /* sticky scrollable tab bar like LuCI */
+  .nav{position:sticky;top:8px;z-index:40;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;
+       scrollbar-width:none;gap:5px;padding:6px}
+  .nav::-webkit-scrollbar{display:none}
+  .nav button{flex:0 0 auto;min-width:auto;white-space:nowrap;padding:10px 13px;font-size:12.5px}
+  .card{padding:15px;border-radius:16px}
+  .top{gap:10px}
+  .brand b{font-size:15px}
+  .stat{font-size:24px}
+}
+@media(max-width:480px){
+  .wrap{padding:10px 9px 72px}
+  .row{gap:8px}
+  .row>div{min-width:100%}            /* every field full-width = no cramped inputs */
+  .seg{flex-wrap:wrap}
+  .seg button{min-width:30%;padding:9px 6px;font-size:12px}
+  input.t,select.t{font-size:16px;padding:12px}   /* 16px stops iOS zoom-on-focus */
+  .btn{width:100%;padding:13px 18px}               /* full-width, easy tap targets */
+  .btn.sm{width:auto}
+  .btn-ghost{padding:9px 12px}
+  .ports{gap:8px}
+  .port{min-width:72px}
+  .card h3{flex-wrap:wrap}
+  #safeBanner{font-size:12.5px;padding:10px 8px}
+  #safeBanner .btn{width:auto;margin-top:6px}
+  .top .brand span{font-size:11px}
+}
