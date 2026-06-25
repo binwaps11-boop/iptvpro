@@ -53,6 +53,13 @@ body{
 .nav button .i{font-size:15px}
 .nav button:hover{color:var(--txt);background:rgba(255,255,255,.05)}
 .nav button.active{color:#fff;background:linear-gradient(135deg,var(--accent2),var(--accent));box-shadow:0 6px 18px rgba(124,77,255,.45)}
+/* LuCI-style submenu (second level) */
+.subnav{display:flex;gap:5px;flex-wrap:wrap;margin:-8px 0 18px;padding:5px 6px;background:rgba(255,255,255,.04);
+  border:1px solid var(--stroke);border-radius:13px}
+.subnav button{border:0;background:transparent;color:var(--txt2);padding:8px 14px;border-radius:9px;cursor:pointer;
+  font-size:12.5px;font-weight:600;transition:.15s}
+.subnav button:hover{color:var(--txt);background:rgba(255,255,255,.05)}
+.subnav button.active{color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent3));box-shadow:0 4px 14px rgba(176,124,255,.35)}
 
 /* Cards / glass */
 .grid{display:grid;gap:16px}
@@ -148,6 +155,9 @@ pre,textarea.t,#logBox,#reportBox{max-width:100%;box-sizing:border-box}
        scrollbar-width:none;gap:5px;padding:6px}
   .nav::-webkit-scrollbar{display:none}
   .nav button{flex:0 0 auto;min-width:auto;white-space:nowrap;padding:10px 13px;font-size:12.5px}
+  .subnav{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .subnav::-webkit-scrollbar{display:none}
+  .subnav button{flex:0 0 auto;white-space:nowrap}
   .card{padding:15px;border-radius:16px}
   .top{gap:10px}
   .brand b{font-size:15px}

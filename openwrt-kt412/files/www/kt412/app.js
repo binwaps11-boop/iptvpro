@@ -38,7 +38,7 @@ async function doLogin(){
 }
 function logout(){ TOKEN=''; sessionStorage.removeItem('kt412tok'); if(timer)clearInterval(timer);
   $('#app').classList.add('hide'); $('#login').classList.remove('hide'); $('#pw').value=''; }
-function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); switchTab('dash'); startLoop(); }
+function showApp(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); renderCats(); selectCat(0); startLoop(); }
 
 /* ---------- helpers ---------- */
 function human(b){ b=+b||0; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(b<10&&i>0?1:0)+' '+u[i]; }
@@ -572,37 +572,59 @@ async function loadMonitor(){
   const r=await call({op:'routes'}); if(r&&r.ok)$('#mon_routes').textContent=b64dec(r.out)||'—';
 }
 
-/* ---------- nav + loop ---------- */
-// fewer menus: each nav tab groups several related panes
-const TABS={
-  dash:['dash'],
-  net:['net','ports','clients','firewall','services'],
-  wifi:['wifi','power'],
-  diag:['health','logs','tools','monitor'],
-  system:['system']
+/* ---------- nav (LuCI-style: category -> submenu -> single page) ---------- */
+const MENU=[
+  {cat:'الحالة', icon:'▦', items:[
+    {id:'dash',name:'نظرة عامة'},
+    {id:'monitor',name:'الاتصالات والمراقبة'},
+    {id:'health',name:'فحص الاتصال'},
+    {id:'clients',name:'الأجهزة/الإيجارات'},
+    {id:'logs',name:'السجلّات'},
+  ]},
+  {cat:'الشبكة', icon:'🌐', items:[
+    {id:'net',name:'الواجهات'},
+    {id:'wifi',name:'اللاسلكي'},
+    {id:'firewall',name:'الجدار الناري · DNS · المسارات'},
+    {id:'ports',name:'منافذ DSA'},
+  ]},
+  {cat:'الخدمات', icon:'🧩', items:[
+    {id:'services',name:'الخدمات والضيوف'},
+    {id:'power',name:'قوة الإرسال'},
+  ]},
+  {cat:'النظام', icon:'⚙', items:[
+    {id:'system',name:'النظام · النسخ · الترقية'},
+    {id:'tools',name:'الأدوات · التشخيص · الحِزم'},
+  ]},
+];
+const PANE_LOAD={
+  dash:loadDash, monitor:loadMonitor, health:loadHealth, clients:loadClients, logs:loadLogs,
+  net:()=>{loadWan();loadLan();loadNetMode();loadVlan();loadInterfaces();},
+  wifi:loadWifi, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
+  services:()=>{loadSvcStates();loadSvcList();}, power:loadPower,
+  system:()=>{loadSystem();loadCron();}, tools:()=>{},
 };
-function switchTab(tab){
-  const panes=TABS[tab]||[tab];
-  $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
-  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',panes.indexOf(s.dataset.pane)<0));
-  if(panes.indexOf('dash')>=0)loadDash();
-  if(panes.indexOf('net')>=0){ loadWan(); loadLan(); loadNetMode(); loadVlan(); loadInterfaces(); }
-  if(panes.indexOf('ports')>=0)loadPorts();
-  if(panes.indexOf('clients')>=0)loadClients();
-  if(panes.indexOf('wifi')>=0)loadWifi();
-  if(panes.indexOf('power')>=0)loadPower();
-  if(panes.indexOf('health')>=0)loadHealth();
-  if(panes.indexOf('logs')>=0)loadLogs();
-  if(panes.indexOf('system')>=0){ loadSystem(); loadCron(); }
-  if(panes.indexOf('firewall')>=0){ loadFw(); loadDns(); loadLeases(); loadRoutes(); loadZones(); }
-  if(panes.indexOf('services')>=0){ loadSvcStates(); loadSvcList(); }
-  if(panes.indexOf('monitor')>=0)loadMonitor();
+let curCat=0, curPane='dash';
+function renderCats(){
+  $('#catNav').innerHTML=MENU.map((m,i)=>`<button data-ci="${i}"><span class="i">${m.icon}</span> ${esc(m.cat)}</button>`).join('');
+  $$('#catNav button').forEach(b=>b.onclick=()=>selectCat(+b.dataset.ci));
+}
+function selectCat(i){
+  curCat=i;
+  $$('#catNav button').forEach(b=>b.classList.toggle('active',+b.dataset.ci===i));
+  const items=MENU[i].items;
+  $('#subNav').innerHTML=items.map(it=>`<button data-pane="${it.id}">${esc(it.name)}</button>`).join('');
+  $$('#subNav button').forEach(b=>b.onclick=()=>selectPane(b.dataset.pane));
+  selectPane(items[0].id);
+}
+function selectPane(id){
+  curPane=id;
+  $$('#subNav button').forEach(b=>b.classList.toggle('active',b.dataset.pane===id));
+  $$('section[data-pane]').forEach(s=>s.classList.toggle('hide',s.dataset.pane!==id));
+  const fn=PANE_LOAD[id]; if(fn)fn();
 }
 function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterval(()=>{
-  const a=document.querySelector('#nav button.active'); if(!a)return;
-  const t=a.dataset.tab;
-  if(t==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
-  else if(t==='net'){ loadPortRates(); }
+  if(curPane==='dash'){ loadSpeed(); if(tick%3===0)loadDash(); }
+  else if(curPane==='net'||curPane==='ports'){ loadPortRates(); }
   tick++;
 },2000); }
 
@@ -610,7 +632,6 @@ function startLoop(){ if(timer)clearInterval(timer); let tick=0; timer=setInterv
 $('#loginBtn').onclick=doLogin;
 $('#pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 $('#logoutBtn').onclick=logout;
-$('#nav').addEventListener('click',e=>{const b=e.target.closest('button');if(b)switchTab(b.dataset.tab);});
 $('#wanSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
   wanMode=b.dataset.m; $$('#wanSeg button').forEach(x=>x.classList.toggle('active',x===b)); $('#wanForm').innerHTML=wanFormHtml(wanMode);});
 $('#netModeSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
