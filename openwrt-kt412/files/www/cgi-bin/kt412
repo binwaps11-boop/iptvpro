@@ -83,10 +83,11 @@ if [ -n "$ACT" ]; then
 			uci commit network; ifup wan >/dev/null 2>&1
 			printf '{"ok":true,"msg":"WAN -> DHCP"}\n';;
 		wan_pppoe)
-			u="$(sani "$(getp user)")"; p="$(sani "$(getp pass)")"
+			u="$(getp user)"; p="$(getp pass)"   # raw (NOT sani) so & ? " in passwords survive
 			uci set network.wan.proto='pppoe'
 			uci set network.wan.username="$u"; uci set network.wan.password="$p"
 			uci set network.wan.ipv6='auto'
+			uci set network.wan.mtu='1492'   # PPPoE MTU clamp (avoid large-packet blackhole)
 			uci commit network; ifup wan >/dev/null 2>&1
 			printf '{"ok":true,"msg":"WAN -> PPPoE (%s)"}\n' "$(json_esc "$u")";;
 		wan_static)
@@ -342,9 +343,14 @@ if [ -n "$ACT" ]; then
 			[ "$dbm" -lt 0 ] 2>/dev/null && dbm=0
 			uci set wireless.$radio.txpower="$dbm"; uci commit wireless
 			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
-			iw phy "phy${idx:-0}" set txpower fixed "$((dbm*100))" >/dev/null 2>&1
+			# resolve the REAL phy + live iface via ubus (phy index != radio index here)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			iw phy "phy${phyn:-0}" set txpower fixed "$((dbm*100))" >/dev/null 2>&1
 			wifi reload >/dev/null 2>&1
-			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
 			actp="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
 			printf '{"ok":true,"requested":%s,"actual":%s}\n' "${dbm:-0}" "${actp:-0}";;
 		quick_setup)   # one-shot device setup: mode + SSID + pass + country + txpower + channels + LAN IP
@@ -404,7 +410,7 @@ if [ -n "$ACT" ]; then
 			band="$(uci -q get wireless.$radio.band)"
 			# 2.4G: evaluate ALL channels 1..11 weighted by adjacent overlap (+-2);
 			# 5G: exact non-DFS channels.
-			if [ "$band" = "5g" ]; then cand="36 40 44 48 149 153 157 161 165"; ov=0; else cand="1 2 3 4 5 6 7 8 9 10 11"; ov=2; fi
+			if [ "$band" = "5g" ]; then cand="36 40 44 48 149 153 157 161"; ov=0; else cand="1 2 3 4 5 6 7 8 9 10 11"; ov=2; fi
 			counts="$(iwinfo "$dev" scan 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
 			best=""; bestn=999999
 			for c in $cand; do
@@ -943,12 +949,15 @@ case "$OP" in
 		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
 			idx="$(printf '%s' "$r" | tr -cd '0-9')"
 			band="$(uci -q get wireless.$r.band)"; req="$(uci -q get wireless.$r.txpower)"
-			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			# resolve the LIVE ap iface + its REAL phy via ubus (phy index != radio index on this board)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
 			ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
-			lim="$(iw phy "phy$idx" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
-			up="$(cat /sys/kernel/debug/ieee80211/phy$idx/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
-			[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$idx/user_power 2>/dev/null | tr -cd '0-9')"
-			nd="$(cat /sys/kernel/debug/ieee80211/phy$idx/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
+			lim="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
+			up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/ath10k/*user* /sys/kernel/debug/ieee80211/phy$phyn/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
+			[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/user_power 2>/dev/null | tr -cd '0-9')"
+			nd="$(cat /sys/kernel/debug/ieee80211/phy$phyn/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
 			[ "$first" -eq 1 ] || out="$out,"; first=0
 			out="$out$(printf '{"radio":"%s","band":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s","netdev":"%s"}' \
 				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")" "$(json_esc "${nd:-?}")")"
