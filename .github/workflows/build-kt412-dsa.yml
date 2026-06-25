@@ -64,21 +64,23 @@ jobs:
             sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
             echo "PATCHED: missing semicolon in $DTSI"
           fi
-          # --- extreme only: drop the persistent ath9k 2.4G 30dBm kernel patch into
-          #     the generic 'hack' patch dir so OpenWrt's quilt applies it on EVERY
-          #     target/linux prepare (survives the full `make`, unlike a post-prepare sed).
+          # --- extreme only: ath9k 2.4G 30dBm patch.
+          #     CRITICAL: ath9k/ath10k/cfg80211 are built from the mac80211 *backports*
+          #     package, NOT the in-tree kernel. Patching target/linux/generic/hack-* does
+          #     NOTHING (that ath9k is never compiled) -> earlier builds showed 24 dBm with
+          #     zero dmesg markers. The patch MUST go in the mac80211 package's ath9k patch
+          #     dir so quilt applies it to the source that actually becomes kmod-ath9k.
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
-            KV="$(sed -n 's/^KERNEL_PATCHVER:=//p' target/linux/ath79/Makefile | head -1)"
-            [ -z "$KV" ] && KV=6.12
-            HACK="target/linux/generic/hack-${KV}"
-            mkdir -p "$HACK"
-            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" "$HACK/"
-            echo "PLACED power patch in $HACK/ (kernel $KV)"
-            ls -l "$HACK/990-kt412-ath9k-2g-30dbm.patch"
-            grep -c 'KT412-30dbm' "$HACK/990-kt412-ath9k-2g-30dbm.patch"
-            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/991-kt412-cfg80211-2g-30dbm-regcap.patch" "$HACK/"
-            echo "PLACED cfg80211 regcap patch (lifts chan->max_power 24->30 = the real netdev cap)"
-            grep -c 'KT412-30DBM-REGCAP' "$HACK/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            M9="package/kernel/mac80211/patches/ath9k"
+            [ -d "$M9" ] || M9="package/kernel/mac80211/patches"   # fallback: flat patches dir
+            mkdir -p "$M9"
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            echo "PLACED ath9k 30dBm patch in mac80211 backports: $M9/"
+            ls -l "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            echo "source markers (expect 2):"; grep -c 'KT412-30dbm' "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            # NOTE: cfg80211 reg.c patch (991) is NOT needed — the US regdomain already
+            # permits 30 dBm on 2.4G (2400-2472 @ 30); the 24 cap was purely the ath9k
+            # EEPROM target-power path, which 990 lifts. Dropping 991 reduces risk.
           fi
 
       - name: Update & install feeds
@@ -216,16 +218,23 @@ jobs:
           cd openwrt
           make -j$(nproc) || (echo '=== retry verbose ==='; make -j1 V=s 2>&1 | tail -200; exit 1)
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
-            echo "=== confirm patched source compiled (must be 2) ==="
-            N="$(grep -c 'KT412-30dbm' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c 2>/dev/null || echo 0)"
+            echo "=== confirm patch landed in the COMPILED backports ath9k (not the unused in-tree one) ==="
+            # ath9k is built from the mac80211 backports tree. Find the ar9003_eeprom.c
+            # that ACTUALLY compiled into kmod-ath9k (under a backports*/ or mac80211*/ dir).
+            EEP="$(find build_dir -path '*ath9k/ar9003_eeprom.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$EEP" ] || EEP="$(find build_dir -path '*backports*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c' 2>/dev/null | head -1)"
+            echo "compiled ath9k source: ${EEP:-<not found>}"
+            [ -n "$EEP" ] || { echo "FATAL: could not locate the backports ath9k source to verify"; exit 1; }
+            N="$(grep -c 'KT412-30dbm' "$EEP" 2>/dev/null || echo 0)"
             echo "markers=$N"
-            [ "$N" = "2" ] || { echo "FATAL: bin would NOT have the power patch"; exit 1; }
-            grep -q 'targetPowerValT2\[_k\] = 60' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
-            if grep -rq 'kt412_lift' build_dir/target-*/linux-*/linux-*/net/wireless/reg.c 2>/dev/null; then echo "REGCAP PATCH APPLIED OK (cfg80211 chan->max_power lifted to 30 on 2.4G)"; else echo "FATAL: regcap patch did NOT apply -> cfg80211 still caps 2.4G to 24"; exit 1; fi
-            echo "POWER PATCH COMPILED-IN OK (source markers=2, ceiling=60 half-dB=30.0)"
-            echo "HONEST NOTE: this proves the patch is in the SOURCE only. It is NOT a post-flash"
-            echo "device reading. Real applied power MUST be verified on the device with:"
-            echo "  sh /root/kt412-power-trace.sh   (check dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower)"
+            [ "$N" = "2" ] || { echo "FATAL: 30dBm patch did NOT apply to the backports ath9k -> bin would still be 24"; exit 1; }
+            grep -q 'targetPowerValT2\[_k\] = 60' "$EEP" || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
+            HWC="$(find build_dir -path '*ath9k/hw.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            if [ -n "$HWC" ] && grep -q 'KT412-30DBM-FINAL-NETDEV-POWER' "$HWC"; then echo "NETDEV FLOOR PATCH APPLIED OK (hw.c)"; else echo "FATAL: hw.c netdev-floor patch did NOT apply"; exit 1; fi
+            echo "POWER PATCH COMPILED INTO kmod-ath9k OK (backports ar9003_eeprom.c + hw.c, markers=2)"
+            echo "HONEST NOTE: this proves the patch is in the COMPILED ath9k source. Real applied"
+            echo "power MUST still be verified on the device with:"
+            echo "  sh /root/kt412-power-trace.sh  (expect dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower=30)"
             echo "markers=2"
           fi
 
