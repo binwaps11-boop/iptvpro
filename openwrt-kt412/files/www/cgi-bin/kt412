@@ -1002,6 +1002,41 @@ case "$OP" in
 		else sys="$(logread 2>/dev/null | tail -n 160 | base64 2>/dev/null | tr -d '\n')"; fi
 		ker="$(dmesg 2>/dev/null | tail -n 100 | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"sys":"%s","ker":"%s"}\n' "$sys" "$ker";;
+	chanlist)
+		# real available channels per radio from `iw phy` (excludes disabled; flags DFS/radar)
+		out=""; first=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			idx="$(printf '%s' "$r" | tr -cd '0-9')"; band="$(uci -q get wireless.$r.band)"
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			chans="$(iw phy "phy$phyn" info 2>/dev/null | awk '
+				/MHz \[/ {
+					line=$0; ch=line; sub(/.*\[/,"",ch); sub(/\].*/,"",ch);
+					if (ch ~ /^[0-9]+$/) {
+						dis=(line ~ /disabled/)?1:0; dfs=(line ~ /radar|DFS/)?1:0;
+						if (!dis) printf "%s{\"ch\":\"%s\",\"dfs\":%d}", (n++?",":""), ch, dfs;
+					}
+				}')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"radio":"%s","band":"%s","phy":"%s","channels":[%s]}' "$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$phyn")" "$chans")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	mesh_status)
+		# live 802.11s mesh status: peers + signal + rates + mpaths, per mesh iface
+		out=""; first=1
+		for i in $(iw dev 2>/dev/null | sed -n 's/.*Interface \(.*\)/\1/p'); do
+			iw dev "$i" info 2>/dev/null | grep -qi 'type mesh' || continue
+			mid="$(iw dev "$i" info 2>/dev/null | sed -n 's/.*mesh id \(.*\)/\1/p' | head -1)"
+			peers="$(iw dev "$i" station dump 2>/dev/null | awk '
+				function emit(){ if(mac!="") printf "%s{\"mac\":\"%s\",\"signal\":\"%s\",\"rxrate\":\"%s\",\"txrate\":\"%s\"}", (n++?",":""), mac, sig, rxr, txr; mac="";sig="";rxr="";txr="" }
+				/^Station /{ emit(); mac=tolower($2) }
+				/signal:/{ sig=$2 } /rx bitrate:/{ rxr=$3 } /tx bitrate:/{ txr=$3 }
+				END{ emit() }')"
+			pc="$(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"iface":"%s","mesh_id":"%s","peer_count":%s,"peers":[%s]}' "$(json_esc "$i")" "$(json_esc "$mid")" "${pc:-0}" "$peers")"
+		done
+		printf '{"ok":true,"mesh":[%s]}\n' "$out";;
 	power)
 		mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
 		out=""; first=1
@@ -1273,7 +1308,7 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
 			bnd=2g; iwinfo "$i" info 2>/dev/null | grep -qi '5\.[0-9]* GHz' && bnd=5g
 			iw dev "$i" station dump 2>/dev/null | awk -v b="$bnd" '
-				function emit(){ if(mac!="") print mac"\t"sig"\t"rxr"\t"txr"\t"b"\t"conn"\t"(rxb+txb); mac="";sig="";rxr="";txr="";conn="";rxb=0;txb=0 }
+				function emit(){ if(mac!="") print mac"\t"sig"\t"rxr"\t"txr"\t"b"\t"conn"\t"rxb"\t"txb; mac="";sig="";rxr="";txr="";conn="";rxb=0;txb=0 }
 				/^Station /{ emit(); mac=tolower($2) }
 				/signal:/{ sig=$2 } /rx bytes:/{ rxb=$3 } /tx bytes:/{ txb=$3 }
 				/rx bitrate:/{ rxr=$3 } /tx bitrate:/{ txr=$3 } /connected time:/{ conn=$3 }
@@ -1283,7 +1318,7 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 		awk -F'\t' -v Lf="$L" -v Sf="$S" -v Nf="$N" '
 			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
 			FILENAME==Lf { m=$1; ip[m]=$2; nm[m]=$3; seen[m]=1; next }
-			FILENAME==Sf { m=$1; sig[m]=$2; rxr[m]=$3; txr[m]=$4; bnd[m]=$5; conn[m]=$6; byt[m]=$7; sta[m]=1; seen[m]=1; next }
+			FILENAME==Sf { m=$1; sig[m]=$2; rxr[m]=$3; txr[m]=$4; bnd[m]=$5; conn[m]=$6; rxb[m]=$7+0; txb[m]=$8+0; byt[m]=$7+$8; sta[m]=1; seen[m]=1; next }
 			FILENAME==Nf { m=$1; ndev[m]=$2; if(ip[m]=="")ip[m]=$3; seen[m]=1; next }
 			END {
 				out=""; first=1; b24=0; b5=0;
@@ -1300,7 +1335,7 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 						else if(s>=-70)dist="متوسط"; else if(s>=-80)dist="بعيد"; else dist="ضعيف جداً";
 					}
 					sep=(first?"":","); first=0;
-					out=out sep "{\"mac\":\"" m "\",\"ip\":\"" jesc(ip[m]) "\",\"name\":\"" jesc(name) "\",\"kind\":\"" kind "\",\"online\":" online ",\"signal\":\"" jesc(sig[m]) "\",\"sigpct\":" pct ",\"dist\":\"" dist "\",\"rxrate\":\"" jesc(rxr[m]) "\",\"txrate\":\"" jesc(txr[m]) "\",\"dev\":\"" jesc(ndev[m]) "\",\"conn\":\"" jesc(conn[m]) "\",\"bytes\":\"" (byt[m]+0) "\"}";
+					out=out sep "{\"mac\":\"" m "\",\"ip\":\"" jesc(ip[m]) "\",\"name\":\"" jesc(name) "\",\"kind\":\"" kind "\",\"online\":" online ",\"signal\":\"" jesc(sig[m]) "\",\"sigpct\":" pct ",\"dist\":\"" dist "\",\"rxrate\":\"" jesc(rxr[m]) "\",\"txrate\":\"" jesc(txr[m]) "\",\"dev\":\"" jesc(ndev[m]) "\",\"conn\":\"" jesc(conn[m]) "\",\"rx_bytes\":\"" (rxb[m]+0) "\",\"tx_bytes\":\"" (txb[m]+0) "\",\"bytes\":\"" (byt[m]+0) "\"}";
 				}
 				printf "{\"ok\":true,\"band24\":%d,\"band5\":%d,\"devices\":[%s]}\n", b24, b5, out;
 			}' "$L" "$S" "$N" > "$C.$$" 2>/dev/null

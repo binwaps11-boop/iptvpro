@@ -369,6 +369,24 @@ async function loadPortRates(){
   lastPort=m; lastPortTs=ts;
 }
 
+/* ---------- MESH status (802.11s) ---------- */
+async function loadMeshStatus(){
+  const box=$('#meshBox'), card=$('#meshCard'); if(!box)return;
+  const r=await call({op:'mesh_status'});
+  const ms=(r&&r.ok)?(r.mesh||[]):[];
+  if(!ms.length){ if(card)card.style.display='none'; box.innerHTML='<div class="sub">لا توجد واجهة Mesh نشطة (الوضع AP حالياً)</div>'; return; }
+  if(card)card.style.display='';
+  box.innerHTML=ms.map(m=>{
+    const peers=(m.peers||[]).map(p=>{
+      const pct=Math.max(0,Math.min(100,2*((+p.signal||-100)+100)));
+      return `<div class="kv"><span class="k">${esc(p.mac)}</span>`+
+        `<span class="v">${esc(p.signal||'?')}dBm · ↓${esc(p.rxrate||'?')}/↑${esc(p.txrate||'?')} Mbps</span></div>`;
+    }).join('')||'<div class="sub">لا أقران (peers) متصلين</div>';
+    return `<div class="kv"><span class="k">Mesh ID</span><span class="v"><b>${esc(m.mesh_id||'—')}</b> · ${esc(m.iface)}</span></div>`+
+      `<div class="kv"><span class="k">عدد الأقران</span><span class="v"><span class="badge ${+m.peer_count>0?'ok':'warn'}">${esc(m.peer_count)}</span></span></div>`+peers;
+  }).join('');
+}
+
 /* ---------- NEIGHBORS / scan ---------- */
 async function loadScan(){
   $('#scanBox').innerHTML='<div class="sub">جارٍ الفحص… (~10 ثوانٍ)</div>'; $('#chanBars').innerHTML='';
@@ -431,6 +449,16 @@ async function loadQuick(){
       `<option value="${esc(x.radio)}">${esc(x.radio)} · ${esc(x.band==='5g'?'5GHz':'2.4GHz')} (${esc(x.ssid||'—')})</option>`).join('')||'<option value="">—</option>'; }
   const sb=$('#qsScanBtn');  if(sb) sb.onclick=qsStationScan;
   const ap=$('#qsStaApply'); if(ap) ap.onclick=qsStationApply;
+  // populate channel dropdowns from REAL available channels (iw phy), not a fixed list
+  const cl=await call({op:'chanlist'});
+  if(cl&&cl.ok){
+    const fill=(sel,band,cur)=>{ const e=$(sel); if(!e)return;
+      const rd=(cl.radios||[]).find(x=>x.band===band); if(!rd)return;
+      const opts=['<option value="">بلا تغيير (تلقائي)</option>'].concat((rd.channels||[]).map(c=>
+        `<option value="${esc(c.ch)}"${String(cur)===String(c.ch)?' selected':''}>${esc(c.ch)}${+c.dfs?' (DFS ⚠)':''}</option>`));
+      e.innerHTML=opts.join(''); };
+    fill('#qs_ch24','2g'); fill('#qs_ch5','5g');
+  }
 }
 async function qsStationScan(){
   const radio=$('#qs_sta_radio').value;
@@ -739,7 +767,7 @@ const PANE_LOAD={
   quick:loadQuick,
   dash:loadDash, monitor:loadMonitor, health:loadHealth, smartap:loadSmartap, clients:()=>{loadClients();loadDevices();}, logs:loadLogs,
   net:()=>{loadWan();loadLan();loadNetMode();loadVlan();loadInterfaces();},
-  wifi:loadWifi, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
+  wifi:()=>{loadWifi();loadMeshStatus();}, firewall:()=>{loadFw();loadDns();loadLeases();loadRoutes();loadZones();}, ports:loadPorts,
   services:()=>{loadSvcStates();loadSvcList();}, power:loadPower,
   system:()=>{loadSystem();loadCron();}, tools:()=>{},
 };
@@ -823,7 +851,8 @@ function devRow(x){
       `<span class="sub">${esc(x.signal)}dBm</span>`; }
   else right='<span class="badge ok">سلكي</span>';
   const rate=wifi&&(x.rxrate||x.txrate)?`<span class="sub">معدل الوصلة RX/TX: ${esc(x.rxrate||'?')}/${esc(x.txrate||'?')} Mbps</span>`:'';
-  const usage=(+x.bytes)?`<span class="sub">استهلاك (إجمالي): ${human(+x.bytes)}</span>`:'';
+  // AP rx = client upload, AP tx = client download
+  const usage=(+x.bytes)?`<span class="sub">⬇ تحميل ${human(+x.tx_bytes||0)} · ⬆ رفع ${human(+x.rx_bytes||0)}</span>`:'';
   const t=fmtT(x.conn), tt=t?`<span class="sub">⏱ ${t}</span>`:'';
   return `<div class="dev">${ic}<div class="dmain"><div class="dname">${esc(x.name||'جهاز')} ${band?'<span class="badge ok">'+band+'</span>':''}</div>`+
     `<div class="dmeta">${esc(x.ip||'—')} · ${esc(x.mac)}${x.dev?' · '+esc(x.dev):''} ${tt} ${usage}</div></div>`+
