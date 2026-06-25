@@ -1,18 +1,17 @@
 #
-# KT412 DSA Wi-Fi — shipped ENABLED with SSIDs so both radios broadcast on
-# first boot (the auto-generated config ships radios DISABLED with no SSID).
-# 2.4G = ath9k (QCA9550) radio0/phy1 ; 5G = ath10k (QCA9880) radio1/phy0.
-# Non-DFS channels (11 & 149) -> no radar disconnects. Country US.
-# The Extreme variant raises 2.4G txpower to 30 via uci-defaults at boot.
-# CHANGE THE KEY before real use (or from the dashboard: الشبكة > الواي‑فاي).
+# Smart AP Wi-Fi — COMPLETE final config so BOTH radios broadcast the moment the
+# device boots (no first-boot reload delay; uci-defaults no longer rewrites this).
+# 2.4G = ath9k (radio0) HT20 (20 MHz, stable / less interference, many devices).
+# 5G   = ath10k-ct (radio1) VHT80. Non-DFS ch 11 & 149. Country US.
+# Roaming (802.11k/v/r) + WMM + keep-distant-clients baked in here.
+# Extreme variant: the build bumps radio0 txpower 24 -> 30. CHANGE THE KEY.
 #
 config wifi-device 'radio0'
 	option type 'mac80211'
 	option path 'platform/ahb/18100000.wmac'
 	option band '2g'
 	option channel '11'
-	option htmode 'HT40'
-	option noscan '1'
+	option htmode 'HT20'
 	option country 'US'
 	option cell_density '0'
 	option disabled '0'
@@ -25,6 +24,15 @@ config wifi-iface 'default_radio0'
 	option ssid 'KT412'
 	option encryption 'psk2'
 	option key 'ChangeMe12345'
+	option wmm '1'
+	option disassoc_low_ack '0'
+	option ieee80211k '1'
+	option ieee80211v '1'
+	option bss_transition '1'
+	option ieee80211r '1'
+	option ft_psk_generate_local '1'
+	option ft_over_ds '0'
+	option mobility_domain '4153'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
@@ -44,3 +52,12 @@ config wifi-iface 'default_radio1'
 	option ssid 'KT412-5G'
 	option encryption 'psk2'
 	option key 'ChangeMe12345'
+	option wmm '1'
+	option disassoc_low_ack '0'
+	option ieee80211k '1'
+	option ieee80211v '1'
+	option bss_transition '1'
+	option ieee80211r '1'
+	option ft_psk_generate_local '1'
+	option ft_over_ds '0'
+	option mobility_domain '4153'

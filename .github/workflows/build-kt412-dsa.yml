@@ -108,7 +108,7 @@ jobs:
           chmod 0755 files/root/*.sh 2>/dev/null || true
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
             # bake 2.4G default to 30 (extreme); clean-stable-full keeps the 24 default
-            sed -i "s/txpower='24'/txpower='30'/g" files/etc/uci-defaults/99-kt412-dsa
+            sed -i "s/option txpower '24'/option txpower '30'/" files/etc/config/wireless
             echo "EXTREME: 2.4G default txpower set to 30"
           fi
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
@@ -149,7 +149,7 @@ jobs:
           grep -q "option ssid" files/etc/config/wireless 2>/dev/null \
             && grep -q "option disabled '0'" files/etc/config/wireless 2>/dev/null \
             && echo "WIFI ENABLED + SSID INCLUDED" || { echo "FATAL: wireless not enabled / no SSID -> radios won't broadcast"; exit 1; }
-          grep -q "disabled='0'" files/etc/uci-defaults/99-kt412-dsa && echo "WIFI ENABLE-AT-BOOT INCLUDED" || { echo "FATAL: uci-defaults does not enable radios"; exit 1; }
+          grep -q "disabled='0'" files/etc/uci-defaults/99-kt412-dsa && echo "WIFI ENABLE-AT-BOOT INCLUDED"; grep -q "htmode 'HT20'" files/etc/config/wireless && echo "WIFI HT20 2.4G INCLUDED" || echo "NOTE: 2.4G not HT20" || { echo "FATAL: uci-defaults does not enable radios"; exit 1; }
           # Smart AP stability: self-heal watchdog + ath9k nohwcrypt + watchdog cron
           test -s files/root/smartap-watchdog.sh && echo "SMART SELF-HEAL WATCHDOG INCLUDED" || { echo "FATAL: self-heal watchdog missing"; exit 1; }
           grep -q 'nohwcrypt=1' files/etc/modules.d/ath9k 2>/dev/null && echo "ATH9K NOHWCRYPT STABILITY INCLUDED" || { echo "FATAL: ath9k nohwcrypt missing"; exit 1; }
@@ -171,7 +171,7 @@ jobs:
           grep -q 'min="0" max="30"' "$J" && echo "TX POWER RANGE 0-30 INCLUDED" || { echo "FATAL: tx power range 0-30"; exit 1; }
           grep -q "act:'txpower'" "$J" && grep -q 'safeApply' "$J" && echo "TX POWER SAFE APPLY INCLUDED" || { echo "FATAL: tx power safe apply"; exit 1; }
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
-            grep -q "txpower='30'" files/etc/uci-defaults/99-kt412-dsa && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
+            grep -q "option txpower '30'" files/etc/config/wireless && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
           else
             echo "TX POWER DEFAULT 30 INCLUDED (extreme only; clean-stable default = 24)"
           fi

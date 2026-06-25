@@ -21,41 +21,17 @@ uci -q commit dhcp
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/* 2>/dev/null
 
-# --- WIRELESS: make sure BOTH radios are ENABLED and broadcasting an SSID. ---
-# A static /etc/config/wireless ships in the image (enabled + SSID). If for any
-# reason it is missing, generate one from detected hardware first.
-uci -q show wireless 2>/dev/null | grep -q '=wifi-device' || { wifi config >/dev/null 2>&1; }
-i=0
-for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
-	b="$(uci -q get wireless.$r.band)"
-	uci -q set wireless.$r.disabled='0'          # ENABLE the radio (key fix: was off -> no broadcast)
-	uci -q set wireless.$r.country='US'
-	uci -q set wireless.$r.cell_density='0'
-	# Safe default: 5G = real 30, 2.4G = clean calibrated 24 (raise to 30/Extreme from UI)
-	if [ "$b" = "5g" ]; then
-		uci -q set wireless.$r.txpower='30'; uci -q set wireless.$r.htmode='VHT80'
-		[ -n "$(uci -q get wireless.$r.channel)" ] || uci -q set wireless.$r.channel='149'
-		ss='KT412-5G'
-	else
-		uci -q set wireless.$r.txpower='24'
-		uci -q set wireless.$r.htmode='HT40'; uci -q set wireless.$r.noscan='1'
-		[ -n "$(uci -q get wireless.$r.channel)" ] || uci -q set wireless.$r.channel='11'
-		ss='KT412'
-	fi
-	# ensure an AP interface (SSID + WPA2) is bound to this radio
-	ifc="$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.device=['\"]\?$r['\"]\?\$/\1/p" | head -1)"
-	[ -n "$ifc" ] || { ifc="ktwifi$i"; uci -q set wireless.$ifc='wifi-iface'; }
-	uci -q set wireless.$ifc.device="$r"
-	uci -q set wireless.$ifc.network='lan'
-	uci -q set wireless.$ifc.mode='ap'
-	[ -n "$(uci -q get wireless.$ifc.ssid)" ] || uci -q set wireless.$ifc.ssid="$ss"
-	uci -q set wireless.$ifc.encryption='psk2'
-	[ -n "$(uci -q get wireless.$ifc.key)" ] || uci -q set wireless.$ifc.key='ChangeMe12345'
-	i=$((i+1))
-done
-uci -q commit wireless
-# bring the radios up now (first boot) so SSIDs appear without waiting for a reload
-wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1
+# --- WIRELESS: a COMPLETE static /etc/config/wireless ships (both radios enabled,
+#     HT20 2.4G + VHT80 5G + SSID + WPA2 + roaming) so both bands broadcast the
+#     INSTANT the device boots. Do NOT rewrite it here (rewriting + wifi reload
+#     caused the first-boot appearance delay). Only regenerate if it is missing. ---
+if ! uci -q show wireless 2>/dev/null | grep -q '=wifi-device'; then
+	wifi config >/dev/null 2>&1
+	for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		uci -q set wireless.$r.disabled='0'; uci -q set wireless.$r.country='US'
+	done
+	uci -q commit wireless
+fi
 
 # --- NO web terminal (ttyd removed): the custom dashboard is the only UI ---
 /etc/init.d/ttyd disable 2>/dev/null; /etc/init.d/ttyd stop 2>/dev/null
@@ -76,21 +52,7 @@ uci -q commit network
 dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"
 [ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='1500'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
 
-# --- WiFi range/roaming/capacity: keep distant clients, fast roaming, QoS ---
-for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
-	uci -q set wireless.$r.disassoc_low_ack='0'    # keep weak/distant clients instead of kicking
-	uci -q set wireless.$r.wmm='1'                 # WMM/QoS = airtime priority (smooth under load)
-	uci -q set wireless.$r.ieee80211k='1'          # neighbor reports (client picks best AP/band)
-	uci -q set wireless.$r.ieee80211v='1'; uci -q set wireless.$r.bss_transition='1'
-	uci -q set wireless.$r.wnm_sleep_mode='1'
-	uci -q set wireless.$r.ieee80211r='1'          # fast roaming (FT)
-	uci -q set wireless.$r.ft_psk_generate_local='1'; uci -q set wireless.$r.ft_over_ds='0'
-	uci -q set wireless.$r.mobility_domain='4153'
-done
-for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
-	uci -q set wireless.$r.cell_density='0'         # widest range, tolerant of distant clients
-done
-uci -q commit wireless
+# (WiFi range/roaming/QoS are baked into the static /etc/config/wireless.)
 
 # --- kernel tuning: high connection count + anti-hang (recycle conntrack fast,
 #     guard memory so the box never OOM-locks; panic->reboot, never freeze) ---
