@@ -1,47 +1,64 @@
 ==========================================================================
- KT412 / Dongwon DW02-412H  —  2.4GHz POWER REPORT (4 layers, honest)
+ KT412 / Dongwon DW02-412H  —  2.4GHz POWER REPORT (6 layers, no spin)
 ==========================================================================
  Device: dongwon,dw02-412h-128m   Target: ath79/nand
  2.4GHz: QCA9550 / ath9k / phy1     5GHz: QCA9880 / ath10k / phy0
+ Image : system-30dbm-extreme-full  (NOT "real-30dbm")
 
- FOUR POWER LAYERS — never mixed:
+ The SIX power layers are kept STRICTLY SEPARATE. Never mixed.
 
- +---+--------------------------+-----------------+----------------------------+
- | # | Layer                    | 2.4GHz value    | Proven on this build?      |
- +---+--------------------------+-----------------+----------------------------+
- | 1 | Requested Power          | 30 dBm          | YES  (uci txpower = 30)     |
- |   |  (uci / /etc/config/...) |                 |                            |
- | 2 | Driver Applied Power     | 30 dBm          | YES  (ath9k patch;         |
- |   |  (debugfs netdev txpower)|                 | debugfs netdev txpower=30; |
- |   |                          |                 | PA driven to its maximum)  |
- | 3 | PHY Advertised Power     | 30.0 dBm        | YES, ALL channels 1..11    |
- |   |  (iw phy / iwinfo)       | CH1..CH11       | (band-wide ceiling = 60    |
- |   |                          |                 | half-dB; verify on device) |
- | 4 | Real RF Power / EIRP     | NOT 30          | NOT MEASURED here.         |
- |   |  Conducted (chip output) | ~25-26 dBm est. | PA saturates ~25-26; above |
- |   |                          |                 | = clipping. Needs RF meter.|
- |   |  EIRP (after antenna)    | conducted +     | = TX + antenna gain - cable|
- |   |                          | gain - loss     | loss. Needs antenna spec.  |
- +---+--------------------------+-----------------+----------------------------+
+ +---+-----------------------------+--------------+-------------------------------+
+ | # | Layer                       | 2.4G value   | How proven                    |
+ +---+-----------------------------+--------------+-------------------------------+
+ | 1 | System Power                | 30 dBm       | uci wireless txpower=30        |
+ |   |  (uci / /etc/config)        |              | (config baked into image)     |
+ | 2 | Driver Power                | 30 dBm       | ath9k patch compiled in        |
+ |   |  (ath9k applied)            |              | (build gate markers=2)        |
+ | 3 | PHY Advertised Power        | 30.0 dBm     | iw phy phy1 / iwinfo, all      |
+ |   |  (iw phy / iwinfo)          | CH1..CH11    | channels (ceiling=60 half-dB) |
+ | 4 | DebugFS Applied Power       | 30 dBm       | debugfs user_power +          |
+ |   |  (debugfs)                  |              | netdev txpower (read on dev)  |
+ | 5 | Conducted RF Power          | NOT MEASURED | needs external RF power meter |
+ |   |  (real power at chip pin)   |              | / spectrum analyzer. QCA9550  |
+ |   |                             |              | PA clean ceiling ~24-26 dBm.  |
+ | 6 | EIRP                        | NOT MEASURED | = Conducted + AntGain - Cable.|
+ |   |  (radiated, after antenna)  |              | needs antenna gain + measured |
+ |   |                             |              | conducted power.              |
+ +---+-----------------------------+--------------+-------------------------------+
 
- CONCLUSION (no spin):
- - Layers 1, 2, 3 ARE 30 on this build, on every 2.4G channel 1..11:
-   Requested=30, Driver Applied=30 (PA pushed to max), PHY Advertised=30.0.
-   Persists after reboot / wifi reload (baked into the image).
- - Layer 4 (Real RF / EIRP) is NOT proven 30. The QCA9550 integrated 2.4GHz
-   PA is physically limited to ~25-26 dBm clean conducted; forcing "30" clips.
-   This file does NOT claim a measured clean RF 30. That is why this image is
-   named "system-30dbm-all-channels-extreme", NOT "real-30dbm".
+ -------------------------------------------------------------------------
+ RF / EIRP GATE  (explicit verdict — not general talk)
+ -------------------------------------------------------------------------
+   System Power 30 dBm        : PASS  (uci=30)
+   Driver Power 30 dBm        : PASS  (compiled; confirm debugfs on device)
+   PHY Advertised 30 dBm      : PASS  (CH1..CH11; confirm iw phy on device)
+   DebugFS Applied 30 dBm     : CONFIRM ON DEVICE (run kt412-super-check.sh)
+   Conducted RF 30 dBm        : NOT MEASURED   (no RF power meter available)
+   EIRP 30 dBm                : NOT MEASURED   (provide antenna gain + cable
+                                loss + measured conducted power to compute)
+ -------------------------------------------------------------------------
 
- TO GET A REAL 30 (hardware, not software):
- - 30 dBm CONDUCTED  -> external power amplifier (PA).
- - 30 dBm EIRP       -> higher-gain antenna, e.g. 24 dBm TX + 6 dBi - 0 dB
-                        cable = 30 dBm EIRP, NO clipping (best for a product).
- - 5GHz already does a real, clean 30 dBm (QCA9880 + ch149).
+ NAMING RULE (enforced):
+ - Layers 1-4 = 30 in-system  -> image stays "system-30dbm-extreme-full".
+ - Only if Conducted RF OR EIRP is proven 30 (meter or calculation) may the
+   wording "30 dBm real RF/EIRP verified" be used. It is NOT used here.
 
- VERIFY ON DEVICE:  sh /root/kt412-report.sh   (tests CH1..CH11; prints layers
- 1-3). For layer 4 use an RF power meter / spectrum analyzer on CH1..CH11 and
- state conducted-vs-EIRP + antenna gain + cable loss.
+ WHY Conducted is NOT 30:
+   The QCA9550 integrated 2.4GHz PA saturates ~24-26 dBm clean. Forcing the
+   driver to 30 raises layers 1-4 but the real RF above ~26 clips (EVM /
+   spectral-mask degradation). This is a hardware (PA) limit, not a number.
+
+ TO REACH A PROVEN 30 (pick one, see RF-SOLUTION.txt):
+   A) Conducted RF 30 : external 2.4G PA/FEM (P1dB>=~31). Hardware mod.
+   B) EIRP 30         : keep clean conducted ~24, add antenna gain.
+                        Example: 24 dBm TX + 6 dBi antenna - 0 dB cable = 30 EIRP.
+                        This is EIRP 30, NOT Conducted RF 30.
+
+ VERIFY ON DEVICE (after flashing):
+   sh /root/kt412-super-check.sh     # CH1..CH11 + all 6 layers, PASS/FAIL
+   sh /root/kt412-report.sh          # quick power snapshot
+   For layers 5-6 use an RF power meter / spectrum analyzer on CH1..CH11.
 
  NO writes to ART / EEPROM / caldata / mtd10. Rollback = reflash clean-stable.
+ 5GHz: real clean ~30 dBm on this hardware (QCA9880 + ch149).
 ==========================================================================

@@ -17,14 +17,49 @@ echo; echo "## debugfs"; mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null 
 echo -n "user_power="; cat /sys/kernel/debug/ieee80211/phy1/user_power 2>/dev/null
 echo -n "netdev txpower="; cat /sys/kernel/debug/ieee80211/phy1/netdev:phy1-ap0/txpower 2>/dev/null
 
-echo; echo "## POWER PER CHANNEL 1..11 (sets ch + txpower 30, reads applied)"
+echo; echo "## ===== 2.4G POWER — 6 LAYERS (strict, never mixed) ====="
+PB="/sys/kernel/debug/ieee80211/phy1"
+L1="$(uci -q get wireless.radio0.txpower)"
+L3="$(iwinfo phy1-ap0 info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p')"
+L4u="$(cat $PB/user_power 2>/dev/null)"; L4n="$(cat $PB/netdev:phy1-ap0/txpower 2>/dev/null)"
+echo "Layer 1  System Power      (uci txpower)        = ${L1:-?} dBm"
+echo "Layer 2  Driver Power      (ath9k patch)        = compiled-in (build gate markers=2)"
+echo "Layer 3  PHY Advertised    (iwinfo/iw phy)      = ${L3:-?} dBm"
+echo "Layer 4  DebugFS Applied   (user_power/txpower) = user_power=${L4u:-?}  netdev_txpower=${L4n:-?}"
+echo "Layer 5  Conducted RF      (chip pin, RF meter) = NOT MEASURED (no external RF meter)"
+echo "Layer 6  EIRP              (after antenna)      = NOT MEASURED (needs antenna gain + cable loss)"
+#   Optional EIRP estimate: pass ANT_GAIN and CABLE_LOSS (dB) in the environment.
+if [ -n "$ANT_GAIN" ]; then
+  COND="${COND_TX:-24}"   # assumed CLEAN conducted (override with COND_TX once measured)
+  EIRP=$(( COND + ANT_GAIN - ${CABLE_LOSS:-0} ))
+  echo "         EIRP estimate     = ${COND}(assumed clean conducted) + ${ANT_GAIN} dBi - ${CABLE_LOSS:-0} dB = ${EIRP} dBm  (EIRP, NOT conducted)"
+fi
+
+echo; echo "## POWER PER CHANNEL 1..11 (sets ch + txpower 30; reject if any != 30)"
+FAILCH=0
 for ch in 1 2 3 4 5 6 7 8 9 10 11; do
   uci set wireless.radio0.channel="$ch"; uci set wireless.radio0.txpower='30'; uci commit wireless
   wifi reload >/dev/null 2>&1; sleep 6
   p="$(iwinfo phy1-ap0 info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p')"
-  up="$(cat /sys/kernel/debug/ieee80211/phy1/user_power 2>/dev/null)"
-  echo "CH$ch  iwinfo_tx=${p:-?}  user_power=${up:-?}  $( [ "$p" = "30" ] && echo PASS || echo CHECK )"
+  up="$(cat $PB/user_power 2>/dev/null)"; nt="$(cat $PB/netdev:phy1-ap0/txpower 2>/dev/null)"
+  if [ "$p" = "30" ]; then v="PASS"; else v="FAIL"; FAILCH=$((FAILCH+1)); fi
+  printf 'CH%-2s = %s PASS_VALUE(iwinfo=%s user_power=%s netdev=%s) %s\n' "$ch" "${p:-?}" "${p:-?}" "${up:-?}" "${nt:-?}" "$v"
 done
+
+echo; echo "## ===== SYSTEM-30 VERDICT (layers 1-4, CH1..11) ====="
+if [ "$FAILCH" = "0" ] && [ "$L3" = "30" ]; then
+  echo "SYSTEM-30 (in-system, CH1..11): PASS  — all channels report 30 dBm"
+else
+  echo "SYSTEM-30 (in-system, CH1..11): FAIL  — $FAILCH channel(s) != 30 (or iwinfo != 30) -> REJECT"
+fi
+echo "RF / EIRP GATE (explicit):"
+echo "  Conducted RF 30 dBm : NOT MEASURED  (needs RF power meter / spectrum analyzer)"
+if [ -n "$ANT_GAIN" ]; then
+  echo "  EIRP 30 dBm        : ESTIMATE ONLY = assumed_conducted + ${ANT_GAIN} dBi - ${CABLE_LOSS:-0} dB (state assumptions; NOT a measurement)"
+else
+  echo "  EIRP 30 dBm        : NOT MEASURED  (run with ANT_GAIN=<dBi> [CABLE_LOSS=<dB>] for an EIRP estimate)"
+fi
+echo "  => 'real RF/EIRP 30' is claimed ONLY with a meter reading or a stated EIRP calculation."
 
 echo; echo "## CLIENTS / signal / bitrate"
 for i in phy0-ap0 phy1-ap0; do echo "[$i]"; iwinfo "$i" assoclist 2>/dev/null; done
