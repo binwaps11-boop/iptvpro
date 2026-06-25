@@ -15,6 +15,7 @@ on:
     paths:
       - ".github/workflows/build-kt412-dsa.yml"
       - "openwrt-kt412/dsa/**"
+      - "openwrt-kt412/files/**"
 
 permissions:
   contents: write
