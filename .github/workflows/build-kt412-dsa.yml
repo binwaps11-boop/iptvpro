@@ -112,6 +112,18 @@ jobs:
             echo "EXTREME: 2.4G default txpower set to 30"
           fi
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
+          mkdir -p files/etc
+          {
+            echo "commit=${{ github.sha }}"
+            echo "variant=${{ matrix.variant }}"
+            echo "image=openwrt-kt412-${{ matrix.variant }}-sysupgrade.bin"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "target=ath79/nand"
+            echo "board=dongwon_dw02-412h-128m"
+            printf "ath_user_regd="; grep -q "^CONFIG_ATH_USER_REGD=y" .config && echo y || echo n
+            printf "power_patch_sha256="; sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" | cut -d" " -f1
+          } > files/etc/kt412-build-info
+          echo "=== /etc/kt412-build-info ==="; cat files/etc/kt412-build-info
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
           H=files/www/kt412/index.html
@@ -206,9 +218,10 @@ jobs:
             echo "markers=$N"
             [ "$N" = "2" ] || { echo "FATAL: bin would NOT have the power patch"; exit 1; }
             grep -q 'targetPowerValT2\[_k\] = 60' build_dir/target-*/linux-*/linux-*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
-            echo "POWER PATCH APPLIED OK"
-            echo "KT412 2.4G 30DBM ALL CHANNELS GATE PASSED"
-            for ch in 1 2 3 4 5 6 7 8 9 10 11; do echo "CH$ch=30 PASS"; done
+            echo "POWER PATCH COMPILED-IN OK (source markers=2, ceiling=60 half-dB=30.0)"
+            echo "HONEST NOTE: this proves the patch is in the SOURCE only. It is NOT a post-flash"
+            echo "device reading. Real applied power MUST be verified on the device with:"
+            echo "  sh /root/kt412-power-trace.sh   (check dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower)"
             echo "markers=2"
           fi
 
