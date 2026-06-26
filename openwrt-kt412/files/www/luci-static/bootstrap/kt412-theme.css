@@ -42,9 +42,14 @@
   --kt-shadow-lg:0 14px 38px rgba(109,40,217,.14);
 }
 
+/* ---- global box model: prevent any fixed-width container from breaking
+   the mobile layout. EVERYTHING is border-box so width:100% never overflows. */
+*,*::before,*::after{box-sizing:border-box}
+
 /* ---- global page: light lavender base + Arabic RTL ---- */
 html,body{
   direction:rtl; text-align:right;
+  width:100%; max-width:100%; margin:0; overflow-x:hidden;
   background:var(--kt-bg0)!important; color:var(--kt-txt)!important;
   font-family:'Segoe UI',Tahoma,system-ui,-apple-system,'Noto Sans Arabic',sans-serif!important;
 }
@@ -57,6 +62,23 @@ body{
   background-attachment:fixed!important;
 }
 #maincontent,.container,.main,.main-left,.main-right{background:transparent!important;color:var(--kt-txt)!important}
+
+/* ============================================================================
+   RESPONSIVE LAYOUT GUARD — the #1 mobile bug was the page being squeezed into
+   a narrow left column. Force every LuCI structural wrapper to full available
+   width with NO fixed px / min-width, so content fills the phone edge-to-edge.
+   We only touch width/box-model here (never break bootstrap's own collapse).
+   ============================================================================ */
+#maincontent,.container,.main-right,.cbi-map,.cbi-section,
+#view,.main > .container, .container > .row{
+  width:100%!important; max-width:100%!important; min-width:0!important;
+  float:none!important;
+}
+#maincontent{padding:14px!important}
+/* the content column must take ALL remaining space next to the sidebar */
+.main-right{flex:1 1 auto!important}
+/* let the flex main wrap so the sidebar never starves the content column */
+.main{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important}
 a{color:var(--kt-accent)}
 a:hover{color:var(--kt-accent2)}
 h1,h2,h3,h4,h5,legend{color:var(--kt-txt)!important}
@@ -225,27 +247,62 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 }
 
 /* ============================================================================
-   Optional dark-mode-friendly fallback (NOT default). Activates only when the
-   OS prefers dark AND the page hasn't disabled the skin. The default remains
-   the light purple/white theme above.
+   MOBILE-FIRST RESPONSIVE RULES — force a single full-width column on phones.
+   These guarantee the page fills the viewport instead of a narrow left strip,
+   regardless of the device's bootstrap version / RTL float layout.
    ============================================================================ */
+@media (max-width:600px){
+  /* stack the whole shell: sidebar on top (or hidden by LuCI), content full width */
+  .main{flex-direction:column!important}
+  .main-left,.main-right{
+    width:100%!important; max-width:100%!important; flex:1 1 100%!important; float:none!important;
+  }
+  #maincontent,.container{padding:10px!important}
+  /* cards / sections become edge-to-edge with comfortable padding */
+  .cbi-map,.cbi-section,.panel,.well,fieldset,.kt-card,.kt-pwcard{
+    width:100%!important; max-width:100%!important; margin-inline:0!important;
+    padding:14px!important; border-radius:14px!important;
+  }
+  /* CBI rows: label above field, both full width (was a messy side-by-side) */
+  .cbi-value{display:block!important; width:100%!important; padding:6px 0!important}
+  .cbi-value-title{display:block!important; width:auto!important; float:none!important;
+    text-align:right!important; padding:0 0 4px!important; margin:0!important}
+  .cbi-value-field{display:block!important; width:100%!important; margin:0!important; float:none!important}
+  .cbi-value-field input,.cbi-value-field select,.cbi-value-field textarea{width:100%!important}
+  /* keep tables from forcing horizontal scroll off-screen */
+  .table,table{display:block!important; width:100%!important; overflow-x:auto!important}
+  /* header / menu wrap instead of overflowing */
+  header,.navbar,#topmenu{flex-wrap:wrap!important}
+}
+
+/* tablet: gentle padding, still full width */
+@media (max-width:900px){
+  #maincontent,.container{width:100%!important;max-width:100%!important}
+}
+
+/* ============================================================================
+   LIGHT-MODE LOCK. This theme is ALWAYS light (white + purple) by design — the
+   user's phone defaults to OS dark mode, and the previous build flipped the whole
+   palette to near-black here, which was the "black background / unreadable" bug.
+   We now FORCE the light palette even when the OS prefers dark, so the look is
+   identical and high-contrast on every device.
+   ============================================================================ */
+:root{color-scheme:light}
 @media (prefers-color-scheme: dark){
   :root:not([data-mk-skin="off"]){
-    --kt-bg0:#0f0b1e; --kt-bg1:#161031; --kt-bg2:#1d143f;
-    --kt-card:#1a1530; --kt-card2:#211a3c;
-    --kt-glass:#1a1530; --kt-glass-strong:#241c44;
-    --kt-stroke:#2e2752; --kt-stroke-strong:#473c72;
-    --kt-txt:#eef0fb; --kt-txt2:#c3c0db; --kt-muted:#8f8bb0;
-    --kt-accent:#a78bfa; --kt-accent2:#8b5cf6; --kt-accent3:#c4b5fd;
-    --kt-accent-soft:#241c44;
-    --kt-ok:#34d399; --kt-warn:#fbbf24; --kt-bad:#fb7185;
-    --kt-shadow:0 8px 26px rgba(0,0,0,.45);
-    --kt-shadow-lg:0 16px 40px rgba(0,0,0,.55);
+    /* re-assert the LIGHT palette (no dark flip) */
+    --kt-bg0:#f4f2fb; --kt-bg1:#efeafd; --kt-bg2:#e7e0fb;
+    --kt-card:#ffffff; --kt-card2:#faf8ff;
+    --kt-glass:#ffffff; --kt-glass-strong:#f3effd;
+    --kt-stroke:#e6e0f5; --kt-stroke-strong:#cbbef0;
+    --kt-txt:#1f2335; --kt-txt2:#4a4f63; --kt-muted:#7a7f93;
+    --kt-accent:#7c3aed; --kt-accent2:#6d28d9; --kt-accent3:#8b5cf6;
+    --kt-accent-soft:#f1ebfe;
+    --kt-ok:#0f9d6b; --kt-warn:#b7791f; --kt-bad:#dc2647;
+    --kt-shadow:0 6px 22px rgba(109,40,217,.10);
+    --kt-shadow-lg:0 14px 38px rgba(109,40,217,.14);
   }
   :root:not([data-mk-skin="off"]) input,
   :root:not([data-mk-skin="off"]) select,
-  :root:not([data-mk-skin="off"]) textarea{background:#120d26!important}
-  :root:not([data-mk-skin="off"]) .btn,
-  :root:not([data-mk-skin="off"]) .cbi-button,
-  :root:not([data-mk-skin="off"]) button{background:#241c44!important;color:var(--kt-txt)!important}
+  :root:not([data-mk-skin="off"]) textarea{background:#ffffff!important;color:var(--kt-txt)!important}
 }
