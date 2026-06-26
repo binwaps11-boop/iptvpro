@@ -1548,6 +1548,18 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 			printf '{"ok":true,"samples":[]}\n'
 		fi;;
 
+	# ===================== NEIGHBORS: kernel ARP/ND table (ip neigh) =====================
+	neighbors)
+		js="$( { ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null; } | awk '
+			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+			/lladdr/{
+				nip=$1; dev=""; mac=""; st=$NF;
+				for(i=1;i<=NF;i++){ if($i=="dev") dev=$(i+1); if($i=="lladdr") mac=tolower($(i+1)); }
+				if(mac=="") next;
+				printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\"}", (n++?",":""), jesc(nip), jesc(mac), jesc(dev), jesc(st);
+			}')"
+		printf '{"ok":true,"neighbors":[%s]}\n' "$js";;
+
 	*)
 		fail "unknown_op";;
 esac

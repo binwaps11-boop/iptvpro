@@ -31,5 +31,27 @@
 		"depends": {
 			"acl": [ "luci-app-kt412-plus" ]
 		}
+	},
+	"admin/mkapp/analyzer": {
+		"title": "محلل الواي فاي",
+		"order": 25,
+		"action": {
+			"type": "view",
+			"path": "kt412/analyzer"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	},
+	"admin/mkapp/neighbors": {
+		"title": "جيران الشبكة",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "kt412/neighbors"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
 	}
 }
