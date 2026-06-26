@@ -158,6 +158,13 @@ if [ -x /etc/init.d/kt412-wifi-early ]; then
 	/etc/init.d/kt412-wifi-early enable 2>/dev/null
 fi
 
+# --- NO-AUTO-REBOOT GUARANTEE: enable the every-boot guard that strips any reboot
+#     cron and disables watchcat, so the device can NEVER reboot itself. ---
+if [ -x /etc/init.d/kt412-noreboot ]; then
+	/etc/init.d/kt412-noreboot enable 2>/dev/null
+	/etc/init.d/kt412-noreboot start 2>/dev/null
+fi
+
 # --- logging to RAM only (protect flash; keep crash history for the watchdog) ---
 uci -q set system.@system[0].log_buffer_size='64'
 uci -q set system.@system[0].cronloglevel='8'

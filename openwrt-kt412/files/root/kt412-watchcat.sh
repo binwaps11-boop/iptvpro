@@ -53,17 +53,11 @@ need=$(( FAIL_MINUTES * 60 ))
 if [ "$elapsed" -ge "$need" ]; then
 	logger -t kt412-watchcat "internet down for ${elapsed}s (>= ${need}s) -> action=${ACTION}"
 	rm -f "$STATE"
-	case "$ACTION" in
-		reboot)
-			reboot
-			;;
-		*)
-			# soft recovery: bounce WAN; if PPPoE it re-dials
-			ifup "$WANIF" >/dev/null 2>&1
-			# also kick wifi station uplinks if any (harmless on pure AP)
-			wifi up >/dev/null 2>&1
-			;;
-	esac
+	# SOFT recovery ONLY — this device must never reboot itself. Even ACTION=reboot
+	# is treated as a soft WAN/wifi bounce (the 'reboot' path is intentionally gone).
+	ifup "$WANIF" >/dev/null 2>&1
+	# also kick wifi station uplinks if any (harmless on pure AP)
+	wifi up >/dev/null 2>&1
 fi
 
 exit 0
