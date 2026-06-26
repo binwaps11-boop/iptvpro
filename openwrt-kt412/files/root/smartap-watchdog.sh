@@ -64,17 +64,12 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 	if [ "$bad" = "1" ]; then
 		n=$(( $(cat "$fcf" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$fcf"
 		do_reload() {
-			case "$(uci -q get wireless.$r.band)" in
-				5g) rmmod ath10k_pci 2>/dev/null; rmmod ath10k_core 2>/dev/null; sleep 2
-				    modprobe ath10k_core 2>/dev/null; modprobe ath10k_pci 2>/dev/null;;
-				*)  rmmod ath9k 2>/dev/null; sleep 2; modprobe ath9k 2>/dev/null;;
-			esac
-			# Apply the EXISTING /etc/config/wireless (configured SSID/HT/encryption).
-			# Do NOT `wifi config`: after a module reload the phy can still be mid-
-			# registration, and `wifi config` would regenerate the config from detected
-			# phys and APPEND a default section -> the radio comes up as the stray
-			# "OpenWrt" AP (open, "HT Mode: null") instead of our configured "KT412".
-			sleep 3; ubus call network.reload >/dev/null 2>&1; wifi reload 2>/dev/null
+			# SAFE: never rmmod/modprobe a wifi driver at RUNTIME. Unloading ath9k/ath10k
+			# on a live system can stall the single 720MHz core past the ath79 HW-watchdog
+			# limit (~21.5s on QCA9558) -> spurious hard reboot. A genuinely ABSENT phy is
+			# recovered at boot by kt412-wifi-early; at runtime we only re-read the config
+			# and bring the radio up (no module unload), which can never stall the core.
+			ubus call network.reload >/dev/null 2>&1; wifi reload 2>/dev/null
 			nifc="$(ifc_of "$r")"
 			[ -n "$nifc" ] && [ -e "/sys/class/net/$nifc" ] && echo 0 > "$fcf"   # reset only if it came back
 		}
