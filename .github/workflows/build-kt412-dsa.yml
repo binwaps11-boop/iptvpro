@@ -120,6 +120,90 @@ jobs:
             echo "final-power source marker (expect KT412-30DBM-FINAL-NETDEV-POWER present):"; grep -c 'KT412-30DBM-FINAL-NETDEV-POWER' "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
           fi
 
+      # ------------------------------------------------------------------------
+      # BUILD CACHING (overlay-only pushes ~10-15 min instead of ~60 min)
+      #
+      # Why the key is built the way it is:
+      #   The compiled output (toolchain + kernel + packages, incl. the patched
+      #   ath9k/cfg80211 backports) is a pure function of:
+      #     * the pinned OpenWrt/PR #21837 build HEAD (PIN=cd4969767bbc),
+      #     * the kernel/power patches in dsa/patches/** (990/991/992),
+      #     * the build config in dsa/config.seed,
+      #     * the variant name.
+      #   It is NOT a function of the files/ overlay (files/www, files/usr,
+      #   dsa/files, ...). The overlay is copied in at IMAGE-ASSEMBLY time, after
+      #   compilation, so changing CSS/JS/scripts only repackages the image and
+      #   must reuse the cached toolchain+kernel+packages. Therefore the overlay
+      #   is deliberately EXCLUDED from the staging/build key.
+      #
+      #   Including PIN + patches-hash + config-hash in the key GUARANTEES we can
+      #   never ship a stale kernel/package: bump the OpenWrt pin, edit a power
+      #   patch, or change config.seed and the key changes -> a full rebuild.
+      #   restore-keys give a fallback ladder (same pin -> reuse toolchain even if
+      #   a package/config changed; make then rebuilds only what differs).
+      # ------------------------------------------------------------------------
+      - name: Compute cache keys
+        id: cachekey
+        run: |
+          PIN=cd4969767bbc   # MUST match the PR #21837 pin in the checkout step
+          VAR="${{ matrix.variant }}"
+          # Hash everything that affects compiled output but NOT the files/ overlay.
+          SEED_H=$(sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" | cut -c1-16)
+          PATCH_H=$(cat "$GITHUB_WORKSPACE"/kt/openwrt-kt412/dsa/patches/*.patch | sha256sum | cut -c1-16)
+          BASE="kt412-${VAR}-pin${PIN}"
+          # Full key: identical source+patches+config => full reuse (toolchain+kernel+pkgs).
+          echo "stage_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}" >> "$GITHUB_OUTPUT"
+          # Fallback ladder (most->least specific). A partial match still restores the
+          # toolchain/staging so make only rebuilds what actually changed.
+          {
+            echo "stage_restore<<EOF"
+            echo "${BASE}-cfg${SEED_H}-"     # same pin+seed, patches changed
+            echo "${BASE}-"                  # same pin, seed/patches changed (keeps toolchain)
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "dl_key=kt412-dl-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "ccache_key=kt412-ccache-${VAR}-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "computed stage_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}"
+
+      # (a) Download cache: source tarballs. Safe to reuse broadly across config/
+      #     patch changes, so it is keyed only on the pin (+ a date-free prefix).
+      - name: Cache OpenWrt downloads (dl/)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.dl_key }}-
+
+      # (b) ccache: object cache for the host/cross compilers. Keyed loosely
+      #     (pin+variant) and always updated via run_id suffix so it grows warm.
+      - name: Cache ccache (openwrt/.ccache)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.ccache_key }}-
+
+      # (c) Toolchain + compiled packages: staging_dir + build_dir. This is the big
+      #     win (toolchain ~20-30 min). Keyed on pin+config+patches with a fallback
+      #     ladder. NOTE on size: staging_dir+build_dir can be large; if the 10GB
+      #     repo cache limit is hit, GitHub evicts the LEAST-recently-used entries
+      #     (LRU). build_dir is the first thing to grow stale, so on eviction
+      #     pressure prefer keeping dl/ + ccache + staging_dir (toolchain) and drop
+      #     build_dir from the path below — staging_dir alone still skips the
+      #     toolchain rebuild while ccache absorbs most of the package recompile.
+      - name: Cache toolchain/staging + build (staging_dir, build_dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/build_dir
+          key: ${{ steps.cachekey.outputs.stage_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.stage_key }}-
+            ${{ steps.cachekey.outputs.stage_restore }}
+
       - name: Update & install feeds
         run: |
           cd openwrt
@@ -130,7 +214,16 @@ jobs:
         run: |
           cd openwrt
           cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" .config
+          # Enable ccache so the cached openwrt/.ccache dir (restored above) is actually
+          # consumed by the compiler. CONFIG_CCACHE requires CONFIG_DEVEL=y. OpenWrt puts
+          # the cache at $(TOPDIR)/.ccache (i.e. openwrt/.ccache) by default, which is the
+          # exact path cached by the "Cache ccache" step. defconfig keeps these symbols.
+          grep -q '^CONFIG_DEVEL=y'  .config || echo 'CONFIG_DEVEL=y'  >> .config
+          grep -q '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
           make defconfig
+          grep -q '^CONFIG_CCACHE=y' .config \
+            && echo "CCACHE ON (compiler cache at openwrt/.ccache)" \
+            || echo "WARN: CONFIG_CCACHE not set after defconfig (ccache disabled)"
           grep -i 'dw02-412h' .config || { echo "DEVICE NOT IN CONFIG"; exit 1; }
           # regdomain layer: ATH_USER_REGD must survive defconfig, else cfg80211
           # could clamp 2.4G back to ~24 and undo the forced 30. Gate it.
