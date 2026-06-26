@@ -70,6 +70,39 @@ jobs:
             sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
             echo "PATCHED: missing semicolon in $DTSI"
           fi
+          # === KT412 2.4G BOOT ROOT-CAUSE FIX (ath9k phy1 not registering for ~7 min) ===
+          # The &wmac node points ath9k's "calibration" nvmem cell at ART 0x1000, but
+          # THIS board has NO valid ath9k caldata there (ART 0x1000 is all 0xFF; the unit
+          # runs the default template, MAC 00:02:03:04:05:06). ath9k reads the 0xFF blob
+          # as its EEPROM, the AR9300 magic/checksum check FAILS with -EINVAL (NOT
+          # -EPROBE_DEFER, so it is never retried), ath9k_init_device aborts, and phy1
+          # NEVER registers at boot. Only the watchdog's late 'rmmod/modprobe ath9k'
+          # eventually re-probes it onto the default template (~7 min). FIX: drop ONLY
+          # the broken 'calibration' nvmem cell. With NO calibration cell,
+          # ath9k_nvmem_request_eeprom() returns -ENOENT gracefully, AH_USE_EEPROM stays
+          # set, and ath9k uses the on-chip/built-in default EEPROM template at the FIRST
+          # probe (~10-15s) — exactly the state the watchdog reload reaches, just
+          # immediately. NOTE: do NOT add 'qca,no-eeprom' here: that property makes ath9k
+          # request an external 'ath9k-eeprom-ahb-*.bin' firmware file (which we do not
+          # ship) and the probe would fail with -EINVAL again. The MAC nvmem cell is left
+          # intact; 5G (cal_art_5000, valid data) is untouched.
+          if grep -q 'nvmem-cell-names = "mac-address", "calibration"' "$DTSI"; then
+            # Drop ONLY the invalid 2.4G "calibration" nvmem cell. Pure sed (no python ->
+            # no heredoc-indentation fragility). Label-agnostic: keep the FIRST <...> entry
+            # on the nvmem-cells line (mac-address) and drop the 2nd (calibration), then
+            # trim cell-names to "mac-address" only.
+            sed -i 's/\(nvmem-cells = <[^>]*>\)[[:space:]]*,[[:space:]]*<[^>]*>;/\1;/' "$DTSI"
+            sed -i 's/nvmem-cell-names = "mac-address",[[:space:]]*"calibration";/nvmem-cell-names = "mac-address";/' "$DTSI"
+            echo "=== &wmac node after caldata fix ==="
+            awk '/&wmac/{f=1} f{print} /^};/{if(f)exit}' "$DTSI" || true
+            # GATE: the fix MUST have taken (else we'd ship a broken/mismatched DTS).
+            if awk '/&wmac/{f=1} f{print} /^};/{if(f)exit}' "$DTSI" | grep -q '"calibration"'; then
+              echo "FATAL: &wmac still references a calibration nvmem cell after fix -> DTS would mismatch"; exit 1
+            fi
+            echo "PATCHED: &wmac dropped invalid 2.4G calibration cell (ath9k uses default template at first probe ~10-15s)"
+          else
+            echo "NOTE: &wmac calibration wiring not in expected form; skipping caldata fix (verify DTS)"
+          fi
           # --- extreme only: ath9k 2.4G 30dBm patch.
           #     CRITICAL: ath9k/ath10k/cfg80211 are built from the mac80211 *backports*
           #     package, NOT the in-tree kernel. Patching target/linux/generic/hack-* does
@@ -174,6 +207,7 @@ jobs:
           echo "=== DSA evidence (head) ==="; head -30 files/etc/kt412-dsa-evidence.txt
           chmod +x files/etc/uci-defaults/* || true
           chmod +x files/etc/hotplug.d/ieee80211/* files/etc/hotplug.d/net/* 2>/dev/null || true
+          chmod 0755 files/etc/init.d/kt412-wifi-early 2>/dev/null || true
           chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
@@ -210,6 +244,7 @@ jobs:
           echo "=== REQUIRED FILES GATE ==="
           for f in etc/kt412-build-info etc/kt412-kernel-config.txt etc/kt412-dts.txt etc/kt412-dsa-evidence.txt \
                    etc/hotplug.d/ieee80211/10-kt412-wifi-ready etc/hotplug.d/net/20-kt412-eee \
+                   etc/init.d/kt412-wifi-early \
                    root/kt412-power-trace.sh root/kt412-rf-report.sh root/kt412-cpu-check.sh root/kt412-dsa-check.sh \
                    root/kt412-wireless-check.sh root/kt412-ui-check.sh \
                    root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt root/CPU_FIX_REPORT.txt root/DSA_RESULT.txt \
@@ -221,6 +256,22 @@ jobs:
           grep -q 'set-eee' files/etc/hotplug.d/net/20-kt412-eee && echo "GATE: EEE-off hotplug OK" || { echo "FATAL: EEE-off hotplug missing"; exit 1; }
           grep -q 'kt412-wifiready' files/etc/hotplug.d/ieee80211/10-kt412-wifi-ready && echo "GATE: 5G phy-ready hotplug OK" || { echo "FATAL: 5G hotplug missing"; exit 1; }
           grep -q 'soc=QCA9558' files/etc/kt412-build-info && echo "GATE: soc=QCA9558 OK" || { echo "FATAL: soc field missing"; exit 1; }
+          # --- 2.4G boot-race fixes (root cause: empty-ART ath9k caldata) ---
+          # (a) DTS caldata fix MUST have applied: the captured DTS must no longer point
+          #     the wmac calibration cell at cal_art_1000 (else ath9k -EINVAL -> 7-min phy).
+          if grep -q 'nvmem-cell-names' files/etc/kt412-dts.txt 2>/dev/null; then
+            grep -Eq '&wmac' files/etc/kt412-dts.txt && \
+            ! awk '/&wmac/{f=1} f&&/cal_art_1000/{print "BAD"} /^};/{if(f)f=0}' files/etc/kt412-dts.txt | grep -q BAD \
+              && echo "GATE: &wmac caldata fix applied (no cal_art_1000) OK" \
+              || { echo "FATAL: &wmac still references cal_art_1000 -> 2.4G would fail to register at boot"; exit 1; }
+          else
+            echo "NOTE: DTS capture lacks nvmem-cell-names; cannot gate caldata fix here (verify on device)"
+          fi
+          # (b) early one-shot recovery script present + does the ath9k module reload
+          grep -q 'reload ath9k' files/etc/init.d/kt412-wifi-early && echo "GATE: early ath9k recovery init OK" || { echo "FATAL: early wifi recovery missing"; exit 1; }
+          grep -q 'kt412-wifi-early enable' files/etc/uci-defaults/99-kt412-dsa && echo "GATE: early wifi init enabled at boot OK" || { echo "FATAL: early wifi init not enabled"; exit 1; }
+          # (c) watchdog escalates a MISSING phy straight to module reload (strike 1)
+          grep -q 'PHY ABSENT' files/root/smartap-watchdog.sh && echo "GATE: watchdog phy-absent fast path OK" || { echo "FATAL: watchdog phy-absent fast path missing"; exit 1; }
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
           S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"

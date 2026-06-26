@@ -1,0 +1,77 @@
+#!/bin/sh /etc/rc.common
+# KT412 EARLY WiFi safety net — turns the watchdog's slow 3-strike (~6-7 min)
+# recovery into a ~25-35s one. This is a BACKSTOP, not the primary bring-up.
+#
+# ROOT CAUSE (from boot logs): ath9k's WMAC pointed its "calibration" nvmem cell
+# at ART 0x1000, which on this board is all 0xFF (no caldata). ath9k read that as
+# its EEPROM, the AR9300 magic/checksum check FAILED with -EINVAL (not deferrable),
+# ath9k_init_device aborted, and phy1 NEVER registered at boot. The 2.4G radio only
+# came back at ~7 min when the 2-min cron watchdog finally reached its 3rd strike
+# (rmmod/modprobe ath9k), which re-probes onto the default template.
+#
+# The PRIMARY fix is in the DTS (build workflow drops the invalid calibration cell
+# so ath9k uses the default template at the FIRST probe, ~10-15s). This script is a
+# runtime backstop that does the SAME module-reload recovery EARLY and ONCE if a
+# radio's phy is still entirely missing ~20-30s in — so even if the DTS read ever
+# races/regresses, 2.4G is back in ~30s, not 7 min. Idempotent; never fires once
+# the phy/iface is present, so healthy boots are undisturbed. 5G (works at ~92s)
+# is left to its own firmware-load timing and is never reloaded here at boot.
+START=99
+USE_PROCD=1
+
+boot() { ( _kt412_wifi_early ) >/dev/null 2>&1 & }
+start() { boot; }   # allow manual re-run
+
+# Does this radio have a LIVE AP iface right now?
+_iface_live() {
+	ifc="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$1.interfaces[0].ifname" 2>/dev/null)"
+	[ -n "$ifc" ] && [ -e "/sys/class/net/$ifc" ]
+}
+
+# Does an ath9k (2.4G) phy exist at all? (phy index is board-swapped: 2.4G=phy1)
+_ath9k_phy_present() {
+	for p in /sys/class/ieee80211/phy*; do
+		[ -e "$p" ] || continue
+		# a 2.4G phy advertises 2.4GHz channels; cheap check via iw
+		idx="${p##*phy}"
+		iw phy "phy$idx" channels 2>/dev/null | grep -q '24[0-9][0-9] MHz' && return 0
+	done
+	return 1
+}
+
+_kt412_wifi_early() {
+	reloaded=0
+	i=0
+	while [ "$i" -lt 18 ]; do            # poll up to ~36s
+		UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$UP" in ''|*[!0-9]*) UP=0;; esac
+		all_ok=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			[ "$(uci -q get wireless.$r.disabled)" = "1" ] && continue
+			_iface_live "$r" && continue
+			all_ok=0
+			band="$(uci -q get wireless.$r.band)"
+			# Only act after the box has settled (>=22s) so we don't bounce a radio
+			# whose firmware/phy is legitimately still loading (esp. the 5G ath10k).
+			[ "$UP" -ge 22 ] || continue
+			if [ "$band" = "2g" ] && ! _ath9k_phy_present && [ "$reloaded" = 0 ]; then
+				# PHY entirely missing -> the empty-ART probe failure. Do the module
+				# reload ONCE (the action that actually works), then bring wifi up.
+				logger -t kt412-wifi-early "2.4G phy ABSENT at ${UP}s -> reload ath9k (early recovery, was 7min)"
+				rmmod ath9k 2>/dev/null; sleep 1; modprobe ath9k 2>/dev/null
+				reloaded=1
+				sleep 2
+				wifi config >/dev/null 2>&1
+				wifi up "$r" >/dev/null 2>&1
+			else
+				# phy present but iface missing (netifd didn't (re)start it) -> gentle kick
+				logger -t kt412-wifi-early "radio $r iface missing at ${UP}s -> force bring-up"
+				ubus call network.wireless down "{\"device\":\"$r\"}" >/dev/null 2>&1
+				ubus call network.wireless up   "{\"device\":\"$r\"}" >/dev/null 2>&1
+				wifi up "$r" >/dev/null 2>&1
+			fi
+		done
+		[ "$all_ok" = 1 ] && [ "$UP" -ge 12 ] && break
+		i=$((i + 1))
+		sleep 2
+	done
+}

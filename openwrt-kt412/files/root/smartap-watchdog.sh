@@ -40,21 +40,52 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 	# wedged = genuinely NO AP iface for this radio (ubus AND iwinfo agree), or its PHY no longer answers
 	if [ -z "$ifc" ] || [ ! -e "/sys/class/net/$ifc" ]; then bad=1
 	elif ! iw dev "$ifc" info >/dev/null 2>&1; then bad=1; fi
+	# Distinguish "PHY entirely MISSING" (driver never registered the radio — e.g.
+	# the empty-ART ath9k probe failure) from "merely wedged" (phy present, iface
+	# missing). A missing PHY only recovers via a MODULE RELOAD, so for that case we
+	# go straight to the reload on strike 1 instead of wasting two strikes (~4 min)
+	# on wifi down/up + reload that cannot work without a phy. phy index is
+	# board-swapped (2.4G=phy1, 5G=phy0) so we detect by band, not index.
+	phy_missing=0
+	if [ "$bad" = "1" ]; then
+		bandp="$(uci -q get wireless.$r.band)"
+		found_phy=0
+		for p in /sys/class/ieee80211/phy*; do
+			[ -e "$p" ] || continue; idx="${p##*phy}"
+			if [ "$bandp" = "5g" ]; then
+				iw phy "phy$idx" channels 2>/dev/null | grep -q '5[0-9][0-9][0-9] MHz' && { found_phy=1; break; }
+			else
+				iw phy "phy$idx" channels 2>/dev/null | grep -q '24[0-9][0-9] MHz' && { found_phy=1; break; }
+			fi
+		done
+		[ "$found_phy" = 0 ] && phy_missing=1
+	fi
 	fcf="$ST/fail_$r"
 	if [ "$bad" = "1" ]; then
 		n=$(( $(cat "$fcf" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$fcf"
-		log "radio $r (${ifc:-no-iface}) wedged (strike $n) -> soft recover"
-		if   [ "$n" -le 1 ]; then wifi down "$r" 2>/dev/null; sleep 2; wifi up "$r" 2>/dev/null
-		elif [ "$n" -le 2 ]; then wifi reload 2>/dev/null
-		else
+		do_reload() {
 			case "$(uci -q get wireless.$r.band)" in
 				5g) rmmod ath10k_pci 2>/dev/null; rmmod ath10k_core 2>/dev/null; sleep 2
 				    modprobe ath10k_core 2>/dev/null; modprobe ath10k_pci 2>/dev/null;;
 				*)  rmmod ath9k 2>/dev/null; sleep 2; modprobe ath9k 2>/dev/null;;
 			esac
-			sleep 3; wifi reload 2>/dev/null
+			sleep 3; wifi config >/dev/null 2>&1; wifi reload 2>/dev/null
 			nifc="$(ifc_of "$r")"
 			[ -n "$nifc" ] && [ -e "/sys/class/net/$nifc" ] && echo 0 > "$fcf"   # reset only if it came back
+		}
+		if [ "$phy_missing" = "1" ]; then
+			# PHY absent: module reload is the ONLY thing that helps -> do it now.
+			log "radio $r (${bandp}) PHY ABSENT (strike $n) -> module reload (fast path)"
+			do_reload
+		elif [ "$n" -le 1 ]; then
+			log "radio $r (${ifc:-no-iface}) wedged (strike $n) -> wifi down/up"
+			wifi down "$r" 2>/dev/null; sleep 2; wifi up "$r" 2>/dev/null
+		elif [ "$n" -le 2 ]; then
+			log "radio $r (${ifc:-no-iface}) wedged (strike $n) -> wifi reload"
+			wifi reload 2>/dev/null
+		else
+			log "radio $r (${ifc:-no-iface}) wedged (strike $n) -> module reload"
+			do_reload
 		fi
 	else
 		rm -f "$fcf"

@@ -111,6 +111,14 @@ if ! grep -q 'smartap-wd' /etc/crontabs/root 2>/dev/null; then
 fi
 /etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
 
+# --- EARLY WiFi safety net: enable the fast (~25-35s) one-shot bring-up/recovery
+#     init script. With the DTS caldata fix, ath9k registers phy1 at first probe;
+#     this script is the BACKSTOP that does an early module reload if a radio's phy
+#     is still absent ~25s in (turning the old 7-min watchdog recovery into ~30s). ---
+if [ -x /etc/init.d/kt412-wifi-early ]; then
+	/etc/init.d/kt412-wifi-early enable 2>/dev/null
+fi
+
 # --- logging to RAM only (protect flash; keep crash history for the watchdog) ---
 uci -q set system.@system[0].log_buffer_size='64'
 uci -q set system.@system[0].cronloglevel='8'
