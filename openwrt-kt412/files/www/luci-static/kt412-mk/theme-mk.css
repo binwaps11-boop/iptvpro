@@ -221,8 +221,9 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
    light text. */
 .mk-gauge{ display:flex; flex-direction:column; align-items:center; gap:10px;
   width:100%; max-width:100%; }
-.mk-gauge svg{ width:112px; height:112px; max-width:60vw; transform:rotate(-90deg);
-  display:block; }
+/* HARD small size — never 60vw (that rendered a ~324px giant disk on phones). */
+.mk-gauge svg{ width:112px!important; height:112px!important; max-width:112px!important;
+  transform:rotate(-90deg); display:block; }
 .mk-gauge circle{ fill:none!important; }                 /* kill any default black fill */
 .mk-gauge .track{ fill:none!important; stroke:#334155; stroke-width:11; }
 .mk-gauge .arc{ fill:none!important; stroke:var(--mk-accent); stroke-width:11;
@@ -294,7 +295,7 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
   .mk-cols-6{ grid-template-columns:repeat(2,1fr)!important; }
   .mk-iftiles{ grid-template-columns:repeat(2,1fr)!important; }
   .mk-card{ width:100%!important; max-width:100%!important; padding:14px!important; }
-  .mk-gauge svg{ width:96px; height:96px; }
+  .mk-gauge svg{ width:96px!important; height:96px!important; max-width:96px!important; }
   .mk-head .mk-logo{ font-size:20px; }
 }
 

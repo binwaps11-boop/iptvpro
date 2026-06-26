@@ -1,40 +1,46 @@
 #!/bin/sh
-# KT412 — make the custom purple-glass re-skin apply to EVERY LuCI page.
+# KT412 — make the custom dark "Obsidian + neon" re-skin apply to EVERY LuCI page.
 #
-# Mechanism (overlay-only, no theme package compile): the file
-#   /www/luci-static/bootstrap/kt412-theme.css
-# is shipped in the image. luci-theme-bootstrap loads /luci-static/bootstrap/
-# cascade.css on every single LuCI page, so we append a single @import line to
-# the END of that cascade.css at first boot. From then on every LuCI page
-# (Status, Network, System, our Smart AP views, ...) pulls in the custom
-# palette/cards/gradients + RTL Arabic direction. This is robust across LuCI
-# layout changes because we never replace bootstrap's own cascade.css.
+# Mechanism (overlay-only, no theme package compile): luci-theme-bootstrap loads
+#   /www/luci-static/bootstrap/cascade.css
+# on every single LuCI page. We inject our two overlay stylesheets via @import at
+# the TOP of that cascade.css so every LuCI page (Status, Network, System, our
+# Smart AP views, ...) pulls in the custom palette/cards + the modern dashboard /
+# login skin.
 #
-# bootstrap stays the selected default theme (luci.main.mediaurlbase), so no
-# theme switch is needed — we only ensure it is set.
+# IMPORTANT (this was the bug): a CSS `@import` is only valid when it PRECEDES every
+# style rule. A previous version *appended* the theme-mk.css import to the END of
+# cascade.css (after bootstrap's rules) -> invalid -> silently ignored by the
+# browser -> the dashboard gauges + login card were never styled. So here we put
+# BOTH imports at the very top, in order:
+#     @import "kt412-theme.css";              <- base palette/cards (loads first)
+#     @import "../kt412-mk/theme-mk.css";     <- modern dashboard+login (loads last => wins)
+# (theme-mk.css lives one dir up at /www/luci-static/kt412-mk/, hence ../).
+#
+# Self-healing + idempotent: we strip ANY prior kt412 import lines (valid-at-top OR
+# the old invalid-at-EOF one) and re-insert both at the top in the correct order, so
+# re-runs / sysupgrade-with-kept-settings always converge to a valid cascade.
 
 CASCADE="/www/luci-static/bootstrap/cascade.css"
-IMPORT='@import "kt412-theme.css";'
 
 if [ -f "$CASCADE" ]; then
-	# add the import once (idempotent across re-runs / re-flash with kept settings)
-	if ! grep -qF 'kt412-theme.css' "$CASCADE" 2>/dev/null; then
-		# @import must precede other rules to be valid CSS in some parsers, but
-		# bootstrap's cascade.css has no @import; appending works in every browser
-		# for a final override layer. Prepend to be standards-strict:
-		printf '%s\n' "$IMPORT" > "$CASCADE.kt412.tmp"
-		cat "$CASCADE" >> "$CASCADE.kt412.tmp"
-		mv "$CASCADE.kt412.tmp" "$CASCADE"
-	fi
+	# drop any previously-inserted kt412 import lines (both files), wherever they are
+	grep -v 'kt412-theme.css' "$CASCADE" 2>/dev/null \
+		| grep -v 'kt412-mk/theme-mk.css' > "$CASCADE.kt412.tmp"
+	# prepend both imports at the very top; theme-mk LAST among imports so it wins.
+	{
+		printf '%s\n' '@import "kt412-theme.css";'
+		printf '%s\n' '@import "../kt412-mk/theme-mk.css";'
+		cat "$CASCADE.kt412.tmp"
+	} > "$CASCADE"
+	rm -f "$CASCADE.kt412.tmp"
 fi
 
-# Ensure bootstrap is the active theme so the cascade.css above is the one loaded.
-uci -q get luci.main >/dev/null 2>&1 || {
-	uci -q set luci.main=internal
-}
+# Ensure bootstrap is the active theme so the cascade.css above is the one loaded,
+# and the LuCI chrome is Arabic (LuCI itself sets dir=rtl from the language; the
+# CSS no longer forces RTL on the page shell, so the native responsive layout works).
+uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
 uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
-# Arabic UI language for the LuCI chrome (falls back to English if the i18n
-# package is absent — purely cosmetic, the CSS already forces RTL).
 uci -q set luci.main.lang='ar'
 uci -q commit luci
 

@@ -53,10 +53,14 @@
    the mobile layout. EVERYTHING is border-box so width:100% never overflows. */
 *,*::before,*::after{box-sizing:border-box}
 
-/* ---- global page: deep obsidian base + Arabic RTL ---- */
+/* ---- global page: deep obsidian base (COLOUR ONLY) ----
+   NOTE: we deliberately do NOT set direction/text-align/width/float/flex on the
+   page shell. LuCI's own luci-theme-bootstrap already lays the shell out and is
+   responsive; forcing our own layout here is exactly what pushed the page "to the
+   side" / broke it. This theme is now a pure COLOUR+CARD skin — layout untouched.
+   RTL is applied only inside OUR own views (.mk-wrap / login card), not the shell. */
 html,body{
-  direction:rtl; text-align:right;
-  width:100%; max-width:100%; margin:0; overflow-x:hidden;
+  margin:0; overflow-x:hidden;
   background:var(--kt-bg0)!important; color:var(--kt-txt)!important;
   font-family:'Segoe UI',Tahoma,system-ui,-apple-system,'Noto Sans Arabic',sans-serif!important;
 }
@@ -68,24 +72,12 @@ body{
     linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 60%,var(--kt-bg0))!important;
   background-attachment:fixed!important;
 }
+/* COLOUR ONLY on the shell wrappers — never width / float / flex / direction.
+   luci-theme-bootstrap already lays out + collapses the shell responsively; the
+   previous build forced its own flex/float/width here, which fought bootstrap and
+   squeezed the page into a narrow column. We now only paint them transparent so the
+   obsidian page background shows through, and let bootstrap own ALL positioning. */
 #maincontent,.container,.main,.main-left,.main-right{background:transparent!important;color:var(--kt-txt)!important}
-
-/* ============================================================================
-   RESPONSIVE LAYOUT GUARD — the #1 mobile bug was the page being squeezed into
-   a narrow left column. Force every LuCI structural wrapper to full available
-   width with NO fixed px / min-width, so content fills the phone edge-to-edge.
-   We only touch width/box-model here (never break bootstrap's own collapse).
-   ============================================================================ */
-#maincontent,.container,.main-right,.cbi-map,.cbi-section,
-#view,.main > .container, .container > .row{
-  width:100%!important; max-width:100%!important; min-width:0!important;
-  float:none!important;
-}
-#maincontent{padding:14px!important}
-/* the content column must take ALL remaining space next to the sidebar */
-.main-right{flex:1 1 auto!important}
-/* let the flex main wrap so the sidebar never starves the content column */
-.main{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important}
 a{color:var(--kt-accent)}
 a:hover{color:var(--kt-accent3)}
 h1,h2,h3,h4,h5,legend{color:var(--kt-txt)!important}
@@ -257,37 +249,16 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 }
 
 /* ============================================================================
-   MOBILE-FIRST RESPONSIVE RULES — force a single full-width column on phones.
-   These guarantee the page fills the viewport instead of a narrow left strip,
-   regardless of the device's bootstrap version / RTL float layout.
+   MOBILE — COSMETIC ONLY. We do NOT re-lay-out the shell here (no .main /
+   .main-left / .main-right / .container / .cbi-value width/float/flex overrides):
+   luci-theme-bootstrap's own media queries already collapse the layout to a single
+   column and stack the CBI rows on phones. Forcing our own layout on top is what
+   broke it. The only thing we touch on mobile is comfortable padding on our own
+   cards so they don't feel cramped edge-to-edge.
    ============================================================================ */
 @media (max-width:600px){
-  /* stack the whole shell: sidebar on top (or hidden by LuCI), content full width */
-  .main{flex-direction:column!important}
-  .main-left,.main-right{
-    width:100%!important; max-width:100%!important; flex:1 1 100%!important; float:none!important;
-  }
-  #maincontent,.container{padding:10px!important}
-  /* cards / sections become edge-to-edge with comfortable padding */
-  .cbi-map,.cbi-section,.panel,.well,fieldset,.kt-card,.kt-pwcard{
-    width:100%!important; max-width:100%!important; margin-inline:0!important;
-    padding:14px!important; border-radius:12px!important;
-  }
-  /* CBI rows: label above field, both full width (was a messy side-by-side) */
-  .cbi-value{display:block!important; width:100%!important; padding:6px 0!important}
-  .cbi-value-title{display:block!important; width:auto!important; float:none!important;
-    text-align:right!important; padding:0 0 4px!important; margin:0!important}
-  .cbi-value-field{display:block!important; width:100%!important; margin:0!important; float:none!important}
-  .cbi-value-field input,.cbi-value-field select,.cbi-value-field textarea{width:100%!important}
-  /* keep tables from forcing horizontal scroll off-screen */
-  .table,table{display:block!important; width:100%!important; overflow-x:auto!important}
-  /* header / menu wrap instead of overflowing */
-  header,.navbar,#topmenu{flex-wrap:wrap!important}
-}
-
-/* tablet: gentle padding, still full width */
-@media (max-width:900px){
-  #maincontent,.container{width:100%!important;max-width:100%!important}
+  .kt-card,.kt-pwcard{padding:14px}
+  .table,table{overflow-x:auto}   /* wide tables scroll instead of overflowing */
 }
 
 /* ============================================================================

@@ -1,32 +1,16 @@
 #!/bin/sh
-# KT412 / MK APP — first-boot: layer the modern glassmorphism skin (theme-mk.css)
-# on top of the existing kt412-theme.css so the custom login + dashboard look and
-# the RTL Arabic re-skin apply to EVERY LuCI page.
+# KT412 / MK APP — modern dashboard + login skin (theme-mk.css).
 #
-# Mechanism (overlay-only, no theme package compile): luci-theme-bootstrap loads
-#   /www/luci-static/bootstrap/cascade.css
-# on every LuCI page. The earlier 40-kt412-luci-theme default already appended
-#   @import "kt412-theme.css";
-# We append our file AFTER it (so it wins as the LAST cascade layer). Our css
-# lives one dir up at /www/luci-static/kt412-mk/, so the import path relative to
-# cascade.css is ../kt412-mk/theme-mk.css. Idempotent across re-runs / re-flash.
+# NOTE: the cascade.css injection now lives ENTIRELY in 40-kt412-luci-theme, which
+# inserts BOTH @import lines at the TOP of cascade.css in the correct order
+# (kt412-theme.css then ../kt412-mk/theme-mk.css, the latter winning). This script
+# used to *append* the theme-mk.css @import to the END of cascade.css, which is
+# INVALID CSS (an @import after style rules is ignored) and is exactly why the
+# dashboard gauges + login card were never styled. That append is removed.
 #
-# Troubleshooting fallback: the dashboard theme-switch persists its choice in the
-# browser (localStorage 'kt412_mk_skin' -> <html data-mk-skin="off">), and every
-# rule in theme-mk.css is scoped to neutralise itself when that attribute is off,
-# so the import can stay in place while the user falls back to plain bootstrap.
+# Kept only as a belt-and-suspenders to re-assert the UCI theme/lang in case this
+# default runs in isolation. It performs no cascade.css edits.
 
-CASCADE="/www/luci-static/bootstrap/cascade.css"
-IMPORT='@import "../kt412-mk/theme-mk.css";'
-
-if [ -f "$CASCADE" ]; then
-	if ! grep -qF 'kt412-mk/theme-mk.css' "$CASCADE" 2>/dev/null; then
-		# append so it loads AFTER any earlier kt412-theme.css import (last wins)
-		printf '\n%s\n' "$IMPORT" >> "$CASCADE"
-	fi
-fi
-
-# Make sure bootstrap is the active theme and the UI is Arabic / RTL.
 uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
 uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
 uci -q set luci.main.lang='ar'

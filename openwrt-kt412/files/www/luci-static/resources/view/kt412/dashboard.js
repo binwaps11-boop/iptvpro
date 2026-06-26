@@ -64,9 +64,11 @@ function gauge(id, label, pct, meta){
 	var R = 52, C = 2*Math.PI*R, off = C*(1-pct/100);
 	return ''
 		+ '<div class="mk-gauge" data-gid="'+id+'">'
-		+ '<svg viewBox="0 0 128 128" aria-hidden="true">'
-		+   '<circle class="track" cx="64" cy="64" r="'+R+'"></circle>'
-		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" '
+		// width/height + fill="none" are set INLINE (not only via CSS) so the gauge can
+		// never render as a giant 60vw black disk if the stylesheet is slow/absent.
+		+ '<svg width="112" height="112" viewBox="0 0 128 128" aria-hidden="true">'
+		+   '<circle class="track" cx="64" cy="64" r="'+R+'" fill="none" stroke="#334155" stroke-width="11"></circle>'
+		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" fill="none" stroke-width="11" stroke-linecap="round" '
 		+     'stroke="'+gColor(pct,id)+'" stroke-dasharray="'+C.toFixed(1)+'" '
 		+     'stroke-dashoffset="'+off.toFixed(1)+'"></circle>'
 		+   '<g class="mk-gtext"><text class="mk-gval" x="64" y="62" text-anchor="middle">'+Math.round(pct)+'<tspan font-size="14">%</tspan></text></g>'
