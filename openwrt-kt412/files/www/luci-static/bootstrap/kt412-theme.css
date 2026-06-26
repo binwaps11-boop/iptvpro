@@ -1,52 +1,59 @@
 /* ============================================================================
-   KT412 / Smart AP — LuCI re-skin  (CLEAN PURPLE + WHITE, RTL Arabic-friendly)
+   KT412 / Smart AP — LuCI re-skin  (DARK DEEP OBSIDIAN + NEON, RTL Arabic-friendly)
    Overlay-only theme: this file is @import-ed into luci-theme-bootstrap's
    cascade.css on every LuCI page (see /etc/uci-defaults/40-kt412-luci-theme),
    so EVERY LuCI page inherits the custom look. Append-only overrides.
 
-   Redesign 2026: light, airy lavender/white base with purple (#7c3aed family)
-   used ONLY as an accent on the header, primary buttons, active states and
-   progress fills. Dark, high-contrast text on white cards for readability.
-   All class NAMES are preserved exactly — only colours / spacing / shadows /
-   radii / typography were changed, so the JS views keep working.
+   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0F172A base
+   with translucent slate glass panels (rgba(51,65,85,.55) + backdrop blur), light
+   text (#E2E8F0 / muted #94A3B8), neon accents — cyan #06B6D4 (wifi/active/links),
+   green #22C55E (healthy), amber #F59E0B (warning), crimson #EF4444 (error/down),
+   purple #8B5CF6 (storage/flash). All class NAMES preserved exactly — only colours
+   / spacing / shadows / radii were changed, so the JS views keep working.
+
+   This dark theme applies UNCONDITIONALLY (NOT gated behind prefers-color-scheme),
+   and preserves the box-sizing + full-width responsive guards and the
+   @media(max-width:600px) single-column rules.
    ============================================================================ */
 :root{
-  /* ---- core palette (light purple + white) ---- */
-  --kt-bg0:#f4f2fb;            /* page base — very light lavender            */
-  --kt-bg1:#efeafd;           /* secondary tint for gradients               */
-  --kt-bg2:#e7e0fb;
+  /* ---- core palette (deep obsidian + slate, NOT pure black) ---- */
+  --kt-bg0:#0F172A;            /* page base — deep obsidian                  */
+  --kt-bg1:#1E293B;           /* secondary panel tint for gradients          */
+  --kt-bg2:#334155;
 
-  --kt-card:#ffffff;          /* surfaces are white                         */
-  --kt-card2:#faf8ff;         /* faint lavender surface (table heads etc.)  */
-  --kt-glass:#ffffff;         /* kept as a var for legacy refs — now solid  */
-  --kt-glass-strong:#f3effd;
+  --kt-card:rgba(51,65,85,0.55);   /* translucent slate glass surfaces       */
+  --kt-card2:rgba(30,41,59,0.55);  /* deeper translucent surface (heads)     */
+  --kt-glass:rgba(51,65,85,0.55);  /* glass panel                            */
+  --kt-glass-strong:rgba(30,41,59,0.7);
 
-  --kt-stroke:#e6e0f5;        /* thin light border                          */
-  --kt-stroke-strong:#cbbef0; /* stronger border / focus ring base          */
+  --kt-stroke:rgba(148,163,184,0.18);        /* subtle light border          */
+  --kt-stroke-strong:rgba(6,182,212,0.55);   /* cyan focus ring base         */
 
-  --kt-txt:#1f2335;           /* primary text — dark, high contrast         */
-  --kt-txt2:#4a4f63;          /* secondary text                             */
-  --kt-muted:#7a7f93;         /* muted / hints                              */
+  --kt-txt:#E2E8F0;           /* primary text — light, high contrast        */
+  --kt-txt2:#CBD5E1;          /* secondary text                             */
+  --kt-muted:#94A3B8;         /* muted / hints                              */
 
-  --kt-accent:#7c3aed;        /* main purple accent                         */
-  --kt-accent2:#6d28d9;       /* deeper purple (gradient start)             */
-  --kt-accent3:#8b5cf6;       /* lighter violet (gradient end / links)      */
-  --kt-accent-soft:#f1ebfe;   /* accent tinted background (chips/hover)     */
+  --kt-accent:#06B6D4;        /* electric cyan — main accent / links        */
+  --kt-accent2:#06B6D4;       /* cyan (gradient start)                      */
+  --kt-accent3:#0891b2;       /* deeper cyan (gradient end)                 */
+  --kt-accent-soft:rgba(6,182,212,0.12);     /* cyan tinted bg (chips/hover) */
 
-  --kt-ok:#0f9d6b;            /* readable green on white                    */
-  --kt-warn:#b7791f;          /* readable amber on white                    */
-  --kt-bad:#dc2647;           /* readable red on white                      */
+  --kt-ok:#22C55E;            /* neon green — healthy / success             */
+  --kt-warn:#F59E0B;          /* amber — warning / high load                */
+  --kt-bad:#EF4444;           /* crimson — error / loop / down              */
+  --kt-violet:#8b5cf6;        /* purple — storage / flash                   */
 
-  --kt-grad:linear-gradient(135deg,var(--kt-accent2),var(--kt-accent3));
-  --kt-shadow:0 6px 22px rgba(109,40,217,.10);
-  --kt-shadow-lg:0 14px 38px rgba(109,40,217,.14);
+  --kt-grad:linear-gradient(135deg,#06B6D4,#0891b2);
+  --kt-shadow:0 6px 22px rgba(0,0,0,.45);
+  --kt-shadow-lg:0 14px 38px rgba(0,0,0,.55);
+  color-scheme:dark;
 }
 
 /* ---- global box model: prevent any fixed-width container from breaking
    the mobile layout. EVERYTHING is border-box so width:100% never overflows. */
 *,*::before,*::after{box-sizing:border-box}
 
-/* ---- global page: light lavender base + Arabic RTL ---- */
+/* ---- global page: deep obsidian base + Arabic RTL ---- */
 html,body{
   direction:rtl; text-align:right;
   width:100%; max-width:100%; margin:0; overflow-x:hidden;
@@ -55,9 +62,9 @@ html,body{
 }
 body{
   background-image:
-    radial-gradient(900px 600px at 12% -10%, #ece4fd 0%, transparent 55%),
-    radial-gradient(800px 600px at 110% 8%, #e9e1fc 0%, transparent 52%),
-    radial-gradient(700px 700px at 50% 120%, #f0ebfd 0%, transparent 55%),
+    radial-gradient(900px 600px at 12% -10%, rgba(6,182,212,.10) 0%, transparent 55%),
+    radial-gradient(800px 600px at 110% 8%, rgba(139,92,246,.10) 0%, transparent 52%),
+    radial-gradient(700px 700px at 50% 120%, rgba(34,197,94,.07) 0%, transparent 55%),
     linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 60%,var(--kt-bg0))!important;
   background-attachment:fixed!important;
 }
@@ -80,14 +87,14 @@ body{
 /* let the flex main wrap so the sidebar never starves the content column */
 .main{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important}
 a{color:var(--kt-accent)}
-a:hover{color:var(--kt-accent2)}
+a:hover{color:var(--kt-accent3)}
 h1,h2,h3,h4,h5,legend{color:var(--kt-txt)!important}
 
-/* ---- top header / navigation bar — the accent gradient bar ---- */
+/* ---- top header / navigation bar — the cyan accent gradient bar ---- */
 header,.header,#header,.navbar,#topmenu,.main > .loading{
-  background:linear-gradient(135deg,var(--kt-accent2),var(--kt-accent3))!important;
+  background:linear-gradient(135deg,#0891b2,#06B6D4)!important;
   border-color:transparent!important;color:#fff!important;
-  box-shadow:0 6px 20px rgba(109,40,217,.22)!important
+  box-shadow:0 6px 20px rgba(6,182,212,.30)!important
 }
 .navbar,.navbar a,header a,.fill a,.brand,.navbar-brand{color:#fff!important}
 .navbar-nav>li>a:hover,.nav>li>a:hover{background:rgba(255,255,255,.18)!important;color:#fff!important;border-radius:9px}
@@ -95,21 +102,22 @@ header,.header,#header,.navbar,#topmenu,.main > .loading{
 /* ---- left sidebar menu (mobile/desktop) ---- */
 .main-left,#mainmenu,.sidenav,.nav-sidebar{
   background:var(--kt-card)!important;
+  -webkit-backdrop-filter:blur(10px)!important;backdrop-filter:blur(10px)!important;
   border-inline-end:1px solid var(--kt-stroke)!important
 }
 .main-left a,.nav-sidebar a,#mainmenu a{color:var(--kt-txt2)!important}
-.main-left a:hover,.nav-sidebar a:hover{background:var(--kt-accent-soft)!important;color:var(--kt-accent2)!important;border-radius:9px}
+.main-left a:hover,.nav-sidebar a:hover{background:var(--kt-accent-soft)!important;color:var(--kt-accent)!important;border-radius:9px}
 .main-left .active>a,.nav-sidebar .active>a,li.active>a{
   background:var(--kt-grad)!important;color:#fff!important;
-  box-shadow:0 6px 16px rgba(124,58,237,.30)!important;border-radius:10px
+  box-shadow:0 6px 16px rgba(6,182,212,.35)!important;border-radius:10px
 }
 
-/* ---- content cards / CBI sections / fieldsets ---- */
+/* ---- content cards / CBI sections / fieldsets — translucent glass ---- */
 .cbi-section,.cbi-map,fieldset,.panel,.well,.table,.cbi-section-node,
 .node-main, .alert-message{
   background:var(--kt-card)!important;border:1px solid var(--kt-stroke)!important;
-  border-radius:16px!important;box-shadow:var(--kt-shadow)!important;color:var(--kt-txt)!important;
-  -webkit-backdrop-filter:none;backdrop-filter:none
+  border-radius:12px!important;box-shadow:var(--kt-shadow)!important;color:var(--kt-txt)!important;
+  -webkit-backdrop-filter:blur(10px)!important;backdrop-filter:blur(10px)!important
 }
 .cbi-section h3,.cbi-map h2,legend,.panel-title{color:var(--kt-txt)!important}
 .cbi-section-descr,.cbi-value-description,.cbi-map-descr,small,.text-muted{color:var(--kt-muted)!important}
@@ -123,41 +131,41 @@ tr:hover td{background:var(--kt-accent-soft)!important}
 
 /* ---- inputs / selects / textareas ---- */
 input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
-  background:#ffffff!important;color:var(--kt-txt)!important;
-  border:1px solid var(--kt-stroke-strong)!important;border-radius:10px!important
+  background:rgba(15,23,42,0.6)!important;color:var(--kt-txt)!important;
+  border:1px solid var(--kt-stroke)!important;border-radius:10px!important
 }
 input::placeholder,textarea::placeholder{color:var(--kt-muted)!important}
 input:focus,select:focus,textarea:focus{
-  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(124,58,237,.16)!important;outline:none
+  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(6,182,212,.25)!important;outline:none
 }
 
 /* ---- buttons ---- */
 .btn,.cbi-button,button,input[type=submit],input[type=button]{
-  border-radius:10px!important;font-weight:700!important;border:1px solid var(--kt-stroke-strong)!important;
-  background:#ffffff!important;color:var(--kt-accent2)!important;transition:.16s
+  border-radius:10px!important;font-weight:700!important;border:1px solid var(--kt-stroke)!important;
+  background:rgba(51,65,85,0.55)!important;color:var(--kt-accent)!important;transition:all .3s ease
 }
-.btn:hover,.cbi-button:hover,button:hover{background:var(--kt-accent-soft)!important;border-color:var(--kt-accent)!important}
+.btn:hover,.cbi-button:hover,button:hover{background:var(--kt-accent-soft)!important;border-color:var(--kt-accent)!important;box-shadow:0 6px 18px rgba(6,182,212,.25)!important}
 .cbi-button-save,.cbi-button-apply,.cbi-button-positive,.btn.cbi-button-action,
 input[type=submit]{
   background:var(--kt-grad)!important;color:#fff!important;
-  border-color:transparent!important;box-shadow:0 8px 20px rgba(124,58,237,.32)!important
+  border-color:transparent!important;box-shadow:0 8px 20px rgba(6,182,212,.32)!important
 }
 .cbi-button-save:hover,.cbi-button-apply:hover,.cbi-button-positive:hover,
 .btn.cbi-button-action:hover,input[type=submit]:hover{
-  color:#fff!important;box-shadow:0 12px 26px rgba(124,58,237,.42)!important;transform:translateY(-1px)
+  color:#fff!important;box-shadow:0 12px 26px rgba(6,182,212,.45)!important;transform:translateY(-1px)
 }
 .cbi-button-remove,.cbi-button-reset,.cbi-button-negative,.btn.danger{
-  background:linear-gradient(135deg,#e11d48,#f43f5e)!important;color:#fff!important;border-color:transparent!important
+  background:linear-gradient(135deg,#dc2626,#EF4444)!important;color:#fff!important;border-color:transparent!important
 }
 
 /* ---- alerts / notices ---- */
-.alert-message.warning,.notice{background:#fff8ec!important;border-color:#f4d79a!important;color:var(--kt-warn)!important}
-.alert-message.error,.error{background:#fdecef!important;border-color:#f6b4c0!important;color:var(--kt-bad)!important}
-.alert-message.success{background:#eafaf2!important;border-color:#9fe1c4!important;color:var(--kt-ok)!important}
+.alert-message.warning,.notice{background:rgba(245,158,11,.12)!important;border-color:rgba(245,158,11,.45)!important;color:var(--kt-warn)!important}
+.alert-message.error,.error{background:rgba(239,68,68,.12)!important;border-color:rgba(239,68,68,.45)!important;color:var(--kt-bad)!important}
+.alert-message.success{background:rgba(34,197,94,.12)!important;border-color:rgba(34,197,94,.45)!important;color:var(--kt-ok)!important}
 
 /* ---- LuCI status indicators ---- */
 .label,.badge{border-radius:999px!important}
-.cbi-tooltip,.tooltip-inner{background:#2a2150!important;color:#fff!important;border:1px solid var(--kt-accent)!important}
+.cbi-tooltip,.tooltip-inner{background:#1E293B!important;color:#fff!important;border:1px solid var(--kt-accent)!important}
 
 /* ============================================================================
    KT412 view widgets (used by /luci-static/resources/view/kt412/*.js)
@@ -169,9 +177,10 @@ input[type=submit]{
 @media(max-width:760px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr}}
 
-.kt-card{background:var(--kt-card);border:1px solid var(--kt-stroke);border-radius:16px;padding:18px;
-  box-shadow:var(--kt-shadow);position:relative;overflow:hidden;transition:transform .14s,box-shadow .14s}
-.kt-card:hover{transform:translateY(-2px);box-shadow:var(--kt-shadow-lg)}
+.kt-card{background:var(--kt-card);border:1px solid var(--kt-stroke);border-radius:12px;padding:1rem;
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  box-shadow:var(--kt-shadow);position:relative;overflow:hidden;transition:all .3s ease}
+.kt-card:hover{transform:translateY(-2px);box-shadow:var(--kt-shadow-lg);border-color:rgba(6,182,212,.35)}
 .kt-card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;
   background:var(--kt-grad);opacity:.9}
 .kt-card h3{font-size:14px;color:var(--kt-txt);font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:8px}
@@ -182,25 +191,26 @@ input[type=submit]{
 .kt-kv .v{font-weight:700;text-align:start;word-break:break-all;color:var(--kt-txt)}
 .kt-sub{font-size:12.5px;color:var(--kt-muted);margin-top:5px}
 .kt-badge{font-size:11.5px;padding:3px 9px;border-radius:999px;font-weight:700}
-.kt-badge.ok{background:#e6f7ef;color:var(--kt-ok)}
-.kt-badge.bad{background:#fdecef;color:var(--kt-bad)}
-.kt-badge.warn{background:#fff5e2;color:var(--kt-warn)}
+.kt-badge.ok{background:rgba(34,197,94,.15);color:var(--kt-ok)}
+.kt-badge.bad{background:rgba(239,68,68,.15);color:var(--kt-bad)}
+.kt-badge.warn{background:rgba(245,158,11,.15);color:var(--kt-warn)}
 
-/* stat tiles — keep vivid gradients (white text), softened to match accent */
-.kt-tile{border-radius:16px;padding:16px 14px;text-align:center;color:#fff;
-  border:0;box-shadow:0 8px 20px rgba(31,35,53,.14)}
+/* stat tiles — keep vivid neon gradients (white text) */
+.kt-tile{border-radius:12px;padding:16px 14px;text-align:center;color:#fff;
+  border:0;box-shadow:0 8px 20px rgba(0,0,0,.35)}
 .kt-tile .ti{font-size:20px}.kt-tile .tn{font-size:30px;font-weight:800;line-height:1.15}.kt-tile .tl{font-size:12px;opacity:.95}
-.kt-t-blue{background:linear-gradient(135deg,#6d28d9,#8b5cf6)}
-.kt-t-green{background:linear-gradient(135deg,#0f9d6b,#34d399)}
-.kt-t-cyan{background:linear-gradient(135deg,#0e7490,#22d3ee)}
-.kt-t-orange{background:linear-gradient(135deg,#d97706,#fbbf24)}
+.kt-t-blue{background:linear-gradient(135deg,#0891b2,#06B6D4)}
+.kt-t-green{background:linear-gradient(135deg,#16a34a,#22C55E)}
+.kt-t-cyan{background:linear-gradient(135deg,#0e7490,#06B6D4)}
+.kt-t-orange{background:linear-gradient(135deg,#d97706,#F59E0B)}
 
-/* circular gauges (conic-gradient donut used by status/nettools views) */
+/* circular gauges (conic-gradient donut used by status/nettools views)
+   fill via conic ring; center disk is the slate card colour, never black. */
 .kt-gcard{text-align:center;display:flex;flex-direction:column;align-items:center;gap:7px;padding-top:20px}
 .kt-gauge{position:relative;width:108px;height:108px;border-radius:50%;display:grid;place-items:center;
-  background:conic-gradient(var(--gc,var(--kt-accent)) calc(var(--p,0)*3.6deg),#ece6f8 0)}
+  background:conic-gradient(var(--gc,var(--kt-accent)) calc(var(--p,0)*3.6deg),#334155 0)}
 .kt-gauge::before{content:"";position:absolute;width:80px;height:80px;border-radius:50%;
-  background:var(--kt-card);box-shadow:inset 0 0 0 1px var(--kt-stroke)}
+  background:#1E293B;box-shadow:inset 0 0 0 1px var(--kt-stroke)}
 .kt-gauge span{position:relative;font-size:21px;font-weight:800;color:var(--kt-txt)}
 .kt-glabel{font-size:13px;color:var(--kt-txt2);font-weight:700}
 
@@ -211,7 +221,7 @@ input[type=submit]{
 .kt-dev .dmain{flex:1;min-width:130px}
 .kt-dev .dname{font-weight:700;font-size:14px;color:var(--kt-txt)}
 .kt-dev .dmeta{font-size:11.5px;color:var(--kt-muted);margin-top:2px}
-.kt-sigbar{width:84px;height:7px;border-radius:5px;background:#ece6f8;overflow:hidden}
+.kt-sigbar{width:84px;height:7px;border-radius:5px;background:#334155;overflow:hidden}
 .kt-sigbar>i{display:block;height:100%;border-radius:5px;transition:width .4s}
 
 /* power / range controls */
@@ -219,29 +229,29 @@ input[type=submit]{
 .kt-pwcard{margin-top:14px}
 .kt-pwcard .kt-kv .k{flex:1;min-width:120px}
 input[type=range].wpow,input[type=range].kt-range{-webkit-appearance:none;appearance:none;height:6px;border-radius:5px;
-  background:#e3dbf6!important;outline:none;border:0!important;width:100%}
+  background:#334155!important;outline:none;border:0!important;width:100%}
 input[type=range].wpow::-webkit-slider-thumb,input[type=range].kt-range::-webkit-slider-thumb{
   -webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;
-  background:var(--kt-grad);cursor:pointer;box-shadow:0 2px 8px rgba(124,58,237,.45)}
+  background:var(--kt-grad);cursor:pointer;box-shadow:0 2px 8px rgba(6,182,212,.55)}
 input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-thumb{
   width:18px;height:18px;border:0;border-radius:50%;background:var(--kt-grad);cursor:pointer}
-.kt-pwval{font-weight:800;font-size:18px;color:var(--kt-accent2)}
+.kt-pwval{font-weight:800;font-size:18px;color:var(--kt-accent)}
 
 /* primary action button used by views */
 .kt-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;border:0;border-radius:10px;
   cursor:pointer;font-size:14px;font-weight:700;color:#fff;background:var(--kt-grad);
-  box-shadow:0 8px 20px rgba(124,58,237,.32);transition:.16s}
-.kt-btn:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(124,58,237,.45)}
-.kt-btn.sec{background:#ffffff;border:1px solid var(--kt-stroke-strong);color:var(--kt-accent2);box-shadow:none}
+  box-shadow:0 8px 20px rgba(6,182,212,.32);transition:all .3s ease}
+.kt-btn:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(6,182,212,.45)}
+.kt-btn.sec{background:rgba(51,65,85,0.55);border:1px solid var(--kt-stroke);color:var(--kt-accent);box-shadow:none}
 .kt-btn.sec:hover{background:var(--kt-accent-soft)}
 .kt-field label,.kt-field .kt-flabel{display:block;margin:11px 0 5px;font-size:12.5px;color:var(--kt-txt2);font-weight:600}
 .kt-field input,.kt-field select{width:100%}
-.kt-note{font-size:12px;color:var(--kt-warn);background:#fff8ec;border:1px solid #f4d79a;
+.kt-note{font-size:12px;color:var(--kt-warn);background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.4);
   padding:9px 12px;border-radius:11px;margin:10px 0;line-height:1.6}
 
 /* mobile */
 @media(max-width:560px){
-  .kt-card,.kt-pwcard{padding:14px;border-radius:14px}
+  .kt-card,.kt-pwcard{padding:14px;border-radius:12px}
   .kt-grid.kt-cols-2,.kt-grid.kt-cols-3,.kt-grid.kt-cols-4{grid-template-columns:1fr!important}
   .kt-tile .tn{font-size:22px}
 }
@@ -261,7 +271,7 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   /* cards / sections become edge-to-edge with comfortable padding */
   .cbi-map,.cbi-section,.panel,.well,fieldset,.kt-card,.kt-pwcard{
     width:100%!important; max-width:100%!important; margin-inline:0!important;
-    padding:14px!important; border-radius:14px!important;
+    padding:14px!important; border-radius:12px!important;
   }
   /* CBI rows: label above field, both full width (was a messy side-by-side) */
   .cbi-value{display:block!important; width:100%!important; padding:6px 0!important}
@@ -281,28 +291,29 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 }
 
 /* ============================================================================
-   LIGHT-MODE LOCK. This theme is ALWAYS light (white + purple) by design — the
-   user's phone defaults to OS dark mode, and the previous build flipped the whole
-   palette to near-black here, which was the "black background / unreadable" bug.
-   We now FORCE the light palette even when the OS prefers dark, so the look is
-   identical and high-contrast on every device.
+   DARK-MODE LOCK. This theme is ALWAYS the deep-obsidian dark palette by design.
+   It applies UNCONDITIONALLY and is NOT gated behind prefers-color-scheme, so it
+   renders identically and high-contrast whether the phone OS is in dark OR light
+   mode. We RE-ASSERT the dark palette under prefers-color-scheme:light so the
+   look can never flip to a washed-out/light variant. NO light surface values
+   remain.
    ============================================================================ */
-:root{color-scheme:light}
-@media (prefers-color-scheme: dark){
+:root{color-scheme:dark}
+@media (prefers-color-scheme: light){
   :root:not([data-mk-skin="off"]){
-    /* re-assert the LIGHT palette (no dark flip) */
-    --kt-bg0:#f4f2fb; --kt-bg1:#efeafd; --kt-bg2:#e7e0fb;
-    --kt-card:#ffffff; --kt-card2:#faf8ff;
-    --kt-glass:#ffffff; --kt-glass-strong:#f3effd;
-    --kt-stroke:#e6e0f5; --kt-stroke-strong:#cbbef0;
-    --kt-txt:#1f2335; --kt-txt2:#4a4f63; --kt-muted:#7a7f93;
-    --kt-accent:#7c3aed; --kt-accent2:#6d28d9; --kt-accent3:#8b5cf6;
-    --kt-accent-soft:#f1ebfe;
-    --kt-ok:#0f9d6b; --kt-warn:#b7791f; --kt-bad:#dc2647;
-    --kt-shadow:0 6px 22px rgba(109,40,217,.10);
-    --kt-shadow-lg:0 14px 38px rgba(109,40,217,.14);
+    /* re-assert the DARK obsidian palette (no light flip) */
+    --kt-bg0:#0F172A; --kt-bg1:#1E293B; --kt-bg2:#334155;
+    --kt-card:rgba(51,65,85,0.55); --kt-card2:rgba(30,41,59,0.55);
+    --kt-glass:rgba(51,65,85,0.55); --kt-glass-strong:rgba(30,41,59,0.7);
+    --kt-stroke:rgba(148,163,184,0.18); --kt-stroke-strong:rgba(6,182,212,0.55);
+    --kt-txt:#E2E8F0; --kt-txt2:#CBD5E1; --kt-muted:#94A3B8;
+    --kt-accent:#06B6D4; --kt-accent2:#06B6D4; --kt-accent3:#0891b2;
+    --kt-accent-soft:rgba(6,182,212,0.12);
+    --kt-ok:#22C55E; --kt-warn:#F59E0B; --kt-bad:#EF4444; --kt-violet:#8b5cf6;
+    --kt-shadow:0 6px 22px rgba(0,0,0,.45);
+    --kt-shadow-lg:0 14px 38px rgba(0,0,0,.55);
   }
   :root:not([data-mk-skin="off"]) input,
   :root:not([data-mk-skin="off"]) select,
-  :root:not([data-mk-skin="off"]) textarea{background:#ffffff!important;color:var(--kt-txt)!important}
+  :root:not([data-mk-skin="off"]) textarea{background:rgba(15,23,42,0.6)!important;color:var(--kt-txt)!important}
 }

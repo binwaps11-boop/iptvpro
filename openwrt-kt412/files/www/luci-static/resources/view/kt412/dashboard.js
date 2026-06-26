@@ -48,7 +48,15 @@ function fmtUptime(s){
 	s = +s||0; var d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
 	if (d) return d+' يوم '+h+' س'; if (h) return h+' س '+m+' د'; return m+' دقيقة';
 }
-function gColor(p){ p=+p; if (p<60) return 'var(--mk-green)'; if (p<85) return 'var(--mk-amber)'; return 'var(--mk-red)'; }
+/* per-gauge base neon accent: CPU=cyan, RAM=green, Storage/Flash=purple */
+var GAUGE_BASE = { cpu:'#06B6D4', ram:'#22C55E', disk:'#8b5cf6' };
+/* arc colour: keep each gauge's neon identity at normal load, but escalate to
+   amber (high) / crimson (critical) so the user still sees pressure. */
+function gColor(p, id){ p=+p;
+	if (p>=85) return '#EF4444';                 /* crimson — critical */
+	if (p>=70) return '#F59E0B';                 /* amber  — high load */
+	return GAUGE_BASE[id] || '#06B6D4';          /* neon identity      */
+}
 
 /* ---- circular gauge (inline SVG) ---- */
 function gauge(id, label, pct, meta){
@@ -59,7 +67,7 @@ function gauge(id, label, pct, meta){
 		+ '<svg viewBox="0 0 128 128" aria-hidden="true">'
 		+   '<circle class="track" cx="64" cy="64" r="'+R+'"></circle>'
 		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" '
-		+     'stroke="'+gColor(pct)+'" stroke-dasharray="'+C.toFixed(1)+'" '
+		+     'stroke="'+gColor(pct,id)+'" stroke-dasharray="'+C.toFixed(1)+'" '
 		+     'stroke-dashoffset="'+off.toFixed(1)+'"></circle>'
 		+   '<g class="mk-gtext"><text class="mk-gval" x="64" y="62" text-anchor="middle">'+Math.round(pct)+'<tspan font-size="14">%</tspan></text></g>'
 		+ '</svg>'
@@ -71,7 +79,7 @@ function updateGauge(root, id, pct, meta){
 	var g = root.querySelector('.mk-gauge[data-gid="'+id+'"]'); if (!g) return;
 	pct = clamp(pct,0,100);
 	var R=52, C=2*Math.PI*R, off=C*(1-pct/100);
-	var arc = g.querySelector('.arc'); arc.setAttribute('stroke-dashoffset', off.toFixed(1)); arc.setAttribute('stroke', gColor(pct));
+	var arc = g.querySelector('.arc'); arc.setAttribute('stroke-dashoffset', off.toFixed(1)); arc.setAttribute('stroke', gColor(pct,id));
 	g.querySelector('.mk-gval').firstChild.nodeValue = String(Math.round(pct));
 	if (meta!=null) g.querySelector('.mk-gmeta').textContent = meta;
 }
@@ -106,13 +114,17 @@ function pickWanIf(ifaces){
 var ST = { last:null, lastTs:0, rxHist:[], txHist:[], wif:null, errs:null };
 var HIST = 40;
 
-/* ---- interface tiles ---- */
-function ifTile(name, label, icon, up, meta){
+/* ---- interface / RJ45 port tiles ----
+   plugged (up) -> neon green tile + a small speed badge (1000/100 Mbps);
+   unplugged (down) -> dark slate grey, dim. `speed` is Mbps (e.g. 1000/100). */
+function ifTile(name, label, icon, up, speed){
+	var badge = (up && speed) ? '<span class="spd">'+esc(speed)+' Mbps</span>' : '';
 	return '<div class="mk-iftile '+(up?'up':'down')+'">'
 		+ '<span class="led"></span>'
 		+ '<div class="ico">'+icon+'</div>'
 		+ '<div class="nm">'+esc(label)+'</div>'
-		+ '<div class="st">'+esc(up?(meta||'متصل'):'غير متصل')+'</div>'
+		+ '<div class="st">'+esc(up?'متصل':'غير متصل')+'</div>'
+		+ badge
 		+ '</div>';
 }
 
@@ -243,10 +255,10 @@ function refresh(root){
 			var lanDefs = [['lan1','LAN1'],['lan2','LAN2'],['lan3','LAN3'],['lan4','LAN4']];
 			lanDefs.forEach(function(d){
 				var p = pmap[d[0]]; var up = p && p.link==='up';
-				html += ifTile(d[0], d[1], '🖧', up, up && p.speed ? (p.speed+'Mb') : '');
+				html += ifTile(d[0], d[1], '🖧', up, up && p.speed ? p.speed : '');
 			});
 			var w = pmap['wan']; var wup = w && w.link==='up';
-			html += ifTile('wan','WAN','🌐', wup, wup && w.speed ? (w.speed+'Mb') : '');
+			html += ifTile('wan','WAN','🌐', wup, wup && w.speed ? w.speed : '');
 			// wifi radios from traffic ifaces (wlan*/phy*/ath*)
 			var wifis = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
 			if (wifis.length){
