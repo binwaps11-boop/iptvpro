@@ -343,7 +343,10 @@ if [ "$OP" = "clients" ]; then
 				if (mac!="") emit();
 				mac=$1;
 				sig=""; rx=""; tx=""; rxmcs=""; txmcs="";
-				for (i=1;i<=NF;i++) if ($i=="dBm") sig=$(i-1);
+				# the line is "<mac>  -52 dBm / -95 dBm (SNR ..)": the FIRST dBm is the
+				# client SIGNAL, the second is the NOISE floor. Take the first and STOP,
+				# else a strong/near client (-52) wrongly showed the noise (-95) -> red.
+				for (i=1;i<=NF;i++) if ($i=="dBm") { sig=$(i-1); break; }
 				next;
 			}
 			/^[[:space:]]*RX:/ {

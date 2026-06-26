@@ -1564,12 +1564,18 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 	# Name resolution (MikroTik-style): custom label (/etc/kt412-names: mac<TAB>name)
 	# wins, else the DHCP lease hostname, else empty. custom=true marks user-named.
 	neighbors)
+		# Only ACTIVE devices on the LAN bridge (same L2 segment) — like a MikroTik
+		# neighbour list. Filter to the lan bridge device and drop FAILED/INCOMPLETE
+		# (stale ARP that isn't actually present). De-dup by MAC (one row per device,
+		# preferring an IPv4 address).
+		BR="$(uci -q get network.lan.device 2>/dev/null)"; [ -n "$BR" ] || BR=br-lan
 		NGF="/tmp/kt_neigh.$$"
 		{ ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null; } > "$NGF"
 		NMF=/etc/kt412-names; [ -f "$NMF" ] || NMF=/dev/null
 		LSF=/tmp/dhcp.leases; [ -f "$LSF" ] || LSF=/dev/null
-		js="$(awk -v NMF="$NMF" -v LSF="$LSF" -v NGF="$NGF" '
+		js="$(awk -v NMF="$NMF" -v LSF="$LSF" -v NGF="$NGF" -v BR="$BR" '
 			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+			function isv4(a){ return (a ~ /\./) }
 			FILENAME==NMF { ti=index($0,"\t"); if(ti>1){ m=tolower(substr($0,1,ti-1)); cname[m]=substr($0,ti+1) } next }
 			FILENAME==LSF { m=tolower($2); if($4!="" && $4!="*") dname[m]=$4; next }
 			FILENAME==NGF {
@@ -1577,9 +1583,21 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 				nip=$1; dv=""; mac=""; st=$NF;
 				for(i=1;i<=NF;i++){ if($i=="dev") dv=$(i+1); if($i=="lladdr") mac=tolower($(i+1)); }
 				if(mac=="") next;
-				nm=""; cust="false";
-				if(mac in cname){ nm=cname[mac]; cust="true" } else if(mac in dname){ nm=dname[mac] }
-				printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\",\"name\":\"%s\",\"custom\":%s}", (n++?",":""), jesc(nip), jesc(mac), jesc(dv), jesc(st), jesc(nm), cust;
+				if(dv!=BR) next;                                  # only the LAN bridge
+				if(st=="FAILED" || st=="INCOMPLETE" || st=="NOARP") next;  # not present
+				# one row per MAC; prefer an IPv4 address as the shown IP
+				if(!(mac in seen) || (isv4(nip) && !isv4(rip[mac]))){
+					seen[mac]=1; rip[mac]=nip; rdv[mac]=dv; rst[mac]=st;
+				}
+			}
+			END{
+				first=1;
+				for(mac in seen){
+					nm=""; cust="false";
+					if(mac in cname){ nm=cname[mac]; cust="true" } else if(mac in dname){ nm=dname[mac] }
+					printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\",\"name\":\"%s\",\"custom\":%s}", (first?"":","), jesc(rip[mac]), jesc(mac), jesc(rdv[mac]), jesc(rst[mac]), jesc(nm), cust;
+					first=0;
+				}
 			}' "$NMF" "$LSF" "$NGF")"
 		rm -f "$NGF"
 		printf '{"ok":true,"neighbors":[%s]}\n' "$js";;

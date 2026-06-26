@@ -52,6 +52,14 @@ function notify(r, okMsg){
 	else ui.addNotification(null, E('p', {}, _('فشل: %s').format((r && r.error) || 'unknown')), 'error');
 }
 
+/* signal-strength colour for scan rows (dBm): strong=green, ok=amber, weak=red */
+function sigColor(sig){
+	var v = parseInt(sig, 10); if (isNaN(v)) return 'var(--kt-warn)';
+	if (v >= -67) return 'var(--kt-ok)';
+	if (v >= -78) return 'var(--kt-warn)';
+	return 'var(--kt-bad)';
+}
+
 function is5g(band){ return String(band||'').toLowerCase().indexOf('5') >= 0; }
 function bandTitle(band){ return is5g(band) ? _('📡 واي‑فاي 5G') : _('📶 واي‑فاي 2.4G'); }
 function bandShort(band){ return is5g(band) ? '5G' : '2.4G'; }
@@ -113,6 +121,14 @@ function radioCard(r){
 	modeSel.value = r.mode || 'ap';
 
 	var ssid = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', value:(r.ssid||'') });
+	/* SSID field is wrapped via fld(); keep a handle on its <label> so the mode
+	   <select> can relabel it (e.g. "Mesh ID" when mode='mesh') and to the field
+	   wrapper so we can guarantee it's always shown/enabled. */
+	var ssidField = fld('SSID', ssid);
+	var ssidLabel = ssidField.querySelector('label');
+	/* bssid of a scan-picked network (only used if backend wifi_apply reads it;
+	   the current wifi_apply handler does NOT, so this stays informational) */
+	var pickedBssid = '';
 
 	var secSel = E('select', { class:'cbi-input-select' }, [
 		E('option', { value:'open' }, _('مفتوحة (بدون تشفير)')),
@@ -152,6 +168,69 @@ function radioCard(r){
 			notify(j);
 		});
 	});
+
+	/* ---- Station (sta) network scanner — shown only when mode='sta' ---- */
+	var scanResults = E('div', {});           /* network list / status messages land here */
+	var scanBtn = E('button', { class:'kt-btn', style:'margin-bottom:8px' }, _('🔍 بحث عن الشبكات'));
+	scanBtn.addEventListener('click', function(){
+		scanBtn.disabled = true;
+		var lbl = scanBtn.textContent; scanBtn.textContent = _('جارٍ البحث…');
+		scanResults.innerHTML = '';
+		call({ op:'wscan', radio:r.radio }).then(function(j){
+			scanBtn.disabled = false; scanBtn.textContent = lbl;
+			scanResults.innerHTML = '';
+			if (!j || !j.ok){
+				scanResults.appendChild(E('div', { class:'kt-note' }, _('فشل البحث: %s').format((j && j.error) || 'unknown')));
+				return;
+			}
+			var nets = (j.nets || []).slice().sort(function(a, b){
+				return (parseInt(b.sig, 10) || -999) - (parseInt(a.sig, 10) || -999);
+			});
+			if (!nets.length){
+				scanResults.appendChild(E('div', { class:'kt-note' }, _('لا شبكات')));
+				return;
+			}
+			nets.forEach(function(n){
+				var nssid = n.ssid || n.essid || '';
+				var row = E('div', { class:'kt-dev', style:'cursor:pointer;align-items:center;gap:8px' }, [
+					E('span', { class:'kt-sigbar', style:'display:inline-block;width:10px;height:10px;border-radius:50%;background:' + sigColor(n.sig) }),
+					E('span', { style:'flex:1;font-weight:600' }, nssid || _('(مخفية)')),
+					E('span', { class:'kt-badge', dir:'ltr', style:'color:' + sigColor(n.sig) }, (n.sig || '?') + ' dBm'),
+					E('span', { class:'kt-sub', dir:'ltr' }, 'CH ' + (n.ch || '?')),
+					E('span', { class:'kt-sub' }, n.enc || _('مفتوحة'))
+				]);
+				row.addEventListener('click', function(){
+					ssid.value = nssid;
+					pickedBssid = n.bssid || '';
+					/* highlight the picked row */
+					Array.prototype.forEach.call(scanResults.children, function(c){ c.style.outline = ''; });
+					row.style.outline = '2px solid var(--kt-ok)';
+				});
+				scanResults.appendChild(row);
+			});
+		});
+	});
+	var scanBox = E('div', { class:'kt-field', style:'display:none' }, [
+		E('label', {}, _('📡 الشبكات القريبة')),
+		scanBtn,
+		scanResults
+	]);
+
+	/* ---- mode <select> wiring: dynamic SSID/Mesh-ID label + scan visibility ---- */
+	function syncMode(){
+		var m = modeSel.value;
+		if (m === 'mesh'){
+			ssidLabel.textContent = _('🕸️ Mesh ID (معرّف الشبكة)');
+			ssid.placeholder = _('اكتب معرّف الميش');
+		} else {
+			ssidLabel.textContent = 'SSID';
+			ssid.placeholder = '';
+		}
+		ssid.disabled = false;                 /* always editable across all modes */
+		scanBox.style.display = (m === 'sta') ? '' : 'none';
+	}
+	modeSel.addEventListener('change', syncMode);
+	syncMode();
 
 	var btn = E('button', { class:'kt-btn' }, _('💾 تطبيق'));
 	btn.addEventListener('click', function(){
@@ -197,8 +276,9 @@ function radioCard(r){
 			is5g(r.band) ? 'v' : '', enBadge),
 		E('div', { class:'kt-grid kt-cols-2' }, [
 			segField(_('الوضع'), modeSel),
-			fld('SSID', ssid)
+			ssidField
 		]),
+		scanBox,
 		E('div', { class:'kt-grid kt-cols-2' }, [
 			segField(_('التشفير'), secSel),
 			keyWrap

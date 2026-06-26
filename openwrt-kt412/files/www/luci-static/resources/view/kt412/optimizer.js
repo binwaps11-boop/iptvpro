@@ -175,7 +175,7 @@ function turboSection(){
 }
 
 /* ---------------- Live per-client rates ---------------- */
-function sigColor(s){ s=parseInt(s,10); if(isNaN(s))return 'var(--kt-txt2)'; if(s>=-60)return 'var(--kt-ok)'; if(s>=-72)return 'var(--kt-warn)'; return 'var(--kt-bad)'; }
+function sigColor(s){ s=parseInt(s,10); if(isNaN(s))return 'var(--kt-txt2)'; if(s>=-67)return 'var(--kt-ok)'; if(s>=-78)return 'var(--kt-warn)'; return 'var(--kt-bad)'; }
 
 function clientsSection(){
 	var btn = E('button', { 'class':'kt-btn' }, '👥 '+_('عرض العملاء وجودة الوصلة'));
