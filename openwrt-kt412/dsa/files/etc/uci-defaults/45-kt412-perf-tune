@@ -1,0 +1,107 @@
+#!/bin/sh
+# KT412 DSA — extra high-performance AP tuning (NEW, distinct from 99-kt412-dsa).
+# ============================================================================
+# SCOPE / SAFETY CONTRACT:
+#   * This file adds ONLY high-value, low-risk performance knobs that are NOT
+#     already set by 99-kt412-dsa (flow_offloading, packet_steering, fq_codel,
+#     conntrack sizing/timeouts, TCP sysctls, conloglevel, DNS cache are ALL in
+#     99 and are deliberately NOT touched here — no duplication).
+#   * It NEVER touches power/RF (txpower, the 990/991/992 patches), the DTS,
+#     ART/caldata, the wifi-boot scripts, or htmode/channel/mcast_rate. It does
+#     NOT trade range for speed (HT20 on 2.4G is preserved elsewhere).
+#   * Every action is guarded: a missing sysfs path / absent ethtool / missing
+#     netdev is ignored gracefully (|| true) so the boot can NEVER fail or brick.
+#   * Idempotent: a marker guard means re-running (e.g. another first-boot pass)
+#     is a no-op for the persistent parts.
+# Sources/rationale are noted per item (OpenWrt wiki Network/Performance, DSA
+# ethernet-offload notes, ath79/QCA9558 hardware reality).
+# ============================================================================
+
+MARK=/etc/kt412-perf-tune.done
+
+apply_runtime() {
+	# ----- (1) DSA ethernet offloads via ethtool -K -------------------------
+	# WHY: On DSA the conduit (eth0) + user ports carry all bridged/routed
+	# traffic through the CPU. Enabling generic segmentation/receive offload and
+	# checksum offload lets the stack batch packets => fewer per-packet CPU
+	# cycles => higher LAN/WAN throughput on a modest MIPS SoC. These are SOFTWARE
+	# offloads (GRO/GSO/TSO are done by the kernel) so they are safe even though
+	# the QCA8337 has no NIC-style HW offload. Source: OpenWrt wiki
+	# "Network/Performance tuning" + DSA ethernet offload discussion. Best-effort:
+	# unsupported features simply fail with ethtool returning non-zero (ignored).
+	if command -v ethtool >/dev/null 2>&1; then
+		for ifc in eth0 lan1 lan2 lan3 lan4 wan br-lan; do
+			[ -e "/sys/class/net/$ifc" ] || continue
+			# enable each feature independently so one unsupported flag does not
+			# abort the rest. All wrapped so a failure never errors the boot.
+			for feat in gro gso tso sg rx rxvlan txvlan; do
+				ethtool -K "$ifc" "$feat" on >/dev/null 2>&1 || true
+			done
+			# tx/rx checksum offload (named differently on some drivers)
+			ethtool -K "$ifc" tx on >/dev/null 2>&1 || true
+			ethtool -K "$ifc" rx on >/dev/null 2>&1 || true
+		done
+	fi
+
+	# ----- (2) Sensible txqueuelen on the conduit + bridge ------------------
+	# WHY: The default txqueuelen on some DSA conduits is small (e.g. 1000 or
+	# less); a slightly larger queue smooths bursty bridged traffic for many WiFi
+	# clients without bufferbloat (fq_codel from 99 manages the AQM). 1000 is the
+	# standard sane value. Source: OpenWrt wiki Network/Performance. Guarded.
+	for ifc in eth0 br-lan; do
+		[ -e "/sys/class/net/$ifc" ] || continue
+		ip link set dev "$ifc" txqueuelen 1000 >/dev/null 2>&1 || true
+	done
+
+	# ----- (3) CPU scaling governor = performance (ONLY if cpufreq exists) --
+	# WHY: A "performance" governor avoids frequency-ramp latency on routing
+	# bursts. The QCA9558 (ath79) almost certainly does NOT expose cpufreq, so
+	# this is a guarded no-op there. We ONLY write if the sysfs path exists —
+	# skip silently otherwise (never an error). Source: OpenWrt wiki perf tuning.
+	if [ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+		for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+			[ -w "$g" ] && echo performance > "$g" 2>/dev/null || true
+		done
+	fi
+
+	# ----- (4) Bridge multicast-to-unicast for WiFi efficiency --------------
+	# WHY: Converting flooded multicast to unicast on the bridge lets WiFi send
+	# at the client's negotiated (high MCS) rate instead of the lowest basic
+	# rate, helping streaming/mDNS without lowering range (this is NOT mcast_rate;
+	# it does not raise the basic-rate floor). Kernel feature on br-lan; guarded.
+	# Source: OpenWrt/mac80211 multicast_to_unicast notes.
+	if [ -e /sys/class/net/br-lan/bridge ]; then
+		echo 1 > /sys/class/net/br-lan/bridge/multicast_to_unicast 2>/dev/null || true
+	fi
+}
+
+# ----- (5) Persistent sysctl additions (NEW only; NOT in 99's kt412-tune) ---
+# WHY: 99-kt412-dsa already sets conntrack/TCP/qdisc sysctls under the
+# "# kt412-tune" block. Here we add a SEPARATE, clearly-marked block with knobs
+# 99 does NOT set: a larger UDP receive buffer floor for many concurrent WiFi
+# clients, and tcp_mtu_probing to recover throughput on PPPoE/low-MTU uplinks.
+# Distinct marker so it is idempotent and never duplicates the 99 block.
+if ! grep -q 'kt412-perf-tune' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-perf-tune (45; additive to the 99 kt412-tune block, no duplicates)
+# default socket buffer floors help many-client UDP/streaming without huge RAM
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+# probe a working MTU on PPPoE/encapsulated uplinks => avoids blackholed large
+# packets that otherwise stall throughput (OpenWrt wiki: PPPoE MTU issues)
+net.ipv4.tcp_mtu_probing=1
+SYS
+fi
+sysctl -p >/dev/null 2>&1 || true
+
+# Runtime offloads/governor must apply AFTER the network is up (netdevs exist).
+# Run once now (best-effort), then a short backgrounded retry so the DSA ports
+# that appear a few seconds into boot also get the offloads. Backgrounded so it
+# never delays boot; fully guarded so it can never error.
+apply_runtime
+( sleep 20; apply_runtime ) >/dev/null 2>&1 &
+
+# Mark done (the persistent sysctl block is already guarded by its own marker;
+# this is just a breadcrumb / future idempotency hook).
+: > "$MARK" 2>/dev/null || true
+exit 0
