@@ -255,7 +255,7 @@ jobs:
             echo "NOTE: could not confirm wmac caldata in DTS capture (verify on device that 2.4G inits)"
           fi
           # (b) early one-shot recovery script present + does the ath9k module reload
-          grep -q 'reload ath9k' files/etc/init.d/kt412-wifi-early && echo "GATE: early ath9k recovery init OK" || { echo "FATAL: early wifi recovery missing"; exit 1; }
+          grep -q 'modprobe ath9k' files/etc/init.d/kt412-wifi-early && echo "GATE: early ath9k recovery init OK" || { echo "FATAL: early wifi recovery missing"; exit 1; }
           grep -q 'kt412-wifi-early enable' files/etc/uci-defaults/99-kt412-dsa && echo "GATE: early wifi init enabled at boot OK" || { echo "FATAL: early wifi init not enabled"; exit 1; }
           # (c) watchdog escalates a MISSING phy straight to module reload (strike 1)
           grep -q 'PHY ABSENT' files/root/smartap-watchdog.sh && echo "GATE: watchdog phy-absent fast path OK" || { echo "FATAL: watchdog phy-absent fast path missing"; exit 1; }
