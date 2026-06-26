@@ -892,6 +892,18 @@ if [ -n "$ACT" ]; then
 			wifi reload >/dev/null 2>&1
 			printf '{"ok":true,"mac":"%s","blocked":%s}\n' "$mac" "$([ "$ACT" = block ] && echo true || echo false)";;
 
+		# ===================== NAME / RENAME a device (custom label by MAC) =====================
+		# Stored in /etc/kt412-names as "mac<TAB>name" (persists across reboot). Empty
+		# name clears the label. Name is kept raw (allows Arabic) minus tabs/newlines.
+		set_label)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17 | tr 'A-F' 'a-f')"
+			name="$(getp name | tr -d '\t\r\n' | cut -c1-48)"
+			[ -n "$mac" ] && [ "${#mac}" = 17 ] || fail "bad_mac"
+			NMF=/etc/kt412-names; touch "$NMF"
+			awk -F'\t' -v m="$mac" 'tolower($1)!=m' "$NMF" > "$NMF.tmp" 2>/dev/null; mv -f "$NMF.tmp" "$NMF"
+			[ -n "$name" ] && printf '%s\t%s\n' "$mac" "$name" >> "$NMF"
+			printf '{"ok":true,"mac":"%s","name":"%s"}\n' "$mac" "$(json_esc "$name")";;
+
 		# ===================== WIFI SCHEDULE (cron: off at night / on in morning) =====================
 		wifi_sched)
 			en="$(getp enabled | tr -cd '01')"
@@ -1548,16 +1560,28 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 			printf '{"ok":true,"samples":[]}\n'
 		fi;;
 
-	# ===================== NEIGHBORS: kernel ARP/ND table (ip neigh) =====================
+	# ===================== NEIGHBORS: kernel ARP/ND table + resolved name =====================
+	# Name resolution (MikroTik-style): custom label (/etc/kt412-names: mac<TAB>name)
+	# wins, else the DHCP lease hostname, else empty. custom=true marks user-named.
 	neighbors)
-		js="$( { ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null; } | awk '
+		NGF="/tmp/kt_neigh.$$"
+		{ ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null; } > "$NGF"
+		NMF=/etc/kt412-names; [ -f "$NMF" ] || NMF=/dev/null
+		LSF=/tmp/dhcp.leases; [ -f "$LSF" ] || LSF=/dev/null
+		js="$(awk -v NMF="$NMF" -v LSF="$LSF" -v NGF="$NGF" '
 			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
-			/lladdr/{
-				nip=$1; dev=""; mac=""; st=$NF;
-				for(i=1;i<=NF;i++){ if($i=="dev") dev=$(i+1); if($i=="lladdr") mac=tolower($(i+1)); }
+			FILENAME==NMF { ti=index($0,"\t"); if(ti>1){ m=tolower(substr($0,1,ti-1)); cname[m]=substr($0,ti+1) } next }
+			FILENAME==LSF { m=tolower($2); if($4!="" && $4!="*") dname[m]=$4; next }
+			FILENAME==NGF {
+				if($0 !~ /lladdr/) next;
+				nip=$1; dv=""; mac=""; st=$NF;
+				for(i=1;i<=NF;i++){ if($i=="dev") dv=$(i+1); if($i=="lladdr") mac=tolower($(i+1)); }
 				if(mac=="") next;
-				printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\"}", (n++?",":""), jesc(nip), jesc(mac), jesc(dev), jesc(st);
-			}')"
+				nm=""; cust="false";
+				if(mac in cname){ nm=cname[mac]; cust="true" } else if(mac in dname){ nm=dname[mac] }
+				printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\",\"name\":\"%s\",\"custom\":%s}", (n++?",":""), jesc(nip), jesc(mac), jesc(dv), jesc(st), jesc(nm), cust;
+			}' "$NMF" "$LSF" "$NGF")"
+		rm -f "$NGF"
 		printf '{"ok":true,"neighbors":[%s]}\n' "$js";;
 
 	*)

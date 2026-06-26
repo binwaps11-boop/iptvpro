@@ -2,9 +2,11 @@
 'require view';
 'require poll';
 
-/* KT412 Smart AP — Neighbors (جيران الشبكة): the kernel ARP / IPv6-ND neighbour
-   table (ip neigh) showing every L2/L3 neighbour: IP, MAC, interface, state.
-   Backend: /cgi-bin/kt412 op=neighbors -> {ok, neighbors:[{ip,mac,dev,state}]}. */
+/* KT412 Smart AP — Neighbors (جيران الشبكة), MikroTik-style: the kernel ARP /
+   IPv6-ND table with a resolved DEVICE NAME per entry, and you can name / rename
+   any device from here (✏️). Backend /cgi-bin/kt412:
+     op=neighbors -> {ok, neighbors:[{ip,mac,dev,state,name,custom}]}
+     act=set_label {mac,name}  (empty name clears the custom label) */
 
 var API = '/cgi-bin/kt412';
 var TOKEN = '';
@@ -26,6 +28,14 @@ function call(params){
 		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
 	});
 }
+function postCall(params){
+	return adopt().then(function(){
+		var usp = new URLSearchParams(params);
+		if (TOKEN) usp.set('token', TOKEN);
+		return fetch(API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:usp.toString()})
+			.then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
+	});
+}
 
 function stClass(s){
 	s = String(s||'').toUpperCase();
@@ -38,21 +48,32 @@ function reload(box){
 	return call({op:'neighbors'}).then(function(j){
 		if (!(j && j.ok)){ box.innerHTML = '<div class="kt-sub">تعذّر التحميل</div>'; return; }
 		var ns = (j.neighbors || []).filter(function(n){ return n.mac && n.mac !== '00:00:00:00:00:00'; });
-		ns.sort(function(a,b){ return (a.dev+'|'+a.ip).localeCompare(b.dev+'|'+b.ip); });
+		ns.sort(function(a,b){
+			var an = a.name?0:1, bn = b.name?0:1;          // named first
+			if (an !== bn) return an - bn;
+			return (a.dev+'|'+a.ip).localeCompare(b.dev+'|'+b.ip);
+		});
 		var ok = ns.filter(function(n){ return stClass(n.state)==='ok'; }).length;
+		var named = ns.filter(function(n){ return n.name; }).length;
 		var rows = ns.map(function(n){
-			return '<div class="kt-kv">'
-				+ '<span class="k" dir="ltr" style="text-align:left">'+esc(n.ip)+'</span>'
-				+ '<span class="v" dir="ltr" style="text-align:left;direction:ltr">'+esc(n.mac)+' · '+esc(n.dev)
-				+ ' <span class="kt-badge '+stClass(n.state)+'">'+esc(n.state)+'</span></span>'
+			var nm = n.name || _('(بدون اسم)');
+			var icon = n.custom ? '🏷️' : (n.name ? '🖥️' : '❔');
+			return '<div class="kt-dev">'
+				+ '<div class="dic">'+icon+'</div>'
+				+ '<div class="dmain">'
+				+   '<div class="dname">'+esc(nm)+' <span class="kt-badge '+stClass(n.state)+'">'+esc(n.state)+'</span></div>'
+				+   '<div class="dmeta" dir="ltr" style="direction:ltr">'+esc(n.ip)+' · '+esc(n.mac)+' · '+esc(n.dev)+'</div>'
+				+ '</div>'
+				+ '<button class="kt-btn sec kt-edit" data-mac="'+esc(n.mac)+'" data-name="'+esc(n.name||'')+'" title="'+_('تسمية')+'">✏️</button>'
 				+ '</div>';
 		}).join('');
 		box.innerHTML =
-			'<div class="kt-grid kt-cols-2">'
+			'<div class="kt-grid kt-cols-3">'
 			+ '<div class="kt-tile kt-t-blue"><div class="ti">🧭</div><div class="tn">'+ns.length+'</div><div class="tl">جيران الشبكة</div></div>'
 			+ '<div class="kt-tile kt-t-green"><div class="ti">✅</div><div class="tn">'+ok+'</div><div class="tl">REACHABLE</div></div>'
+			+ '<div class="kt-tile kt-t-cyan"><div class="ti">🏷️</div><div class="tn">'+named+'</div><div class="tl">مُسمّاة</div></div>'
 			+ '</div>'
-			+ '<div class="kt-card"><h3>🧭 جدول الجيران (ARP / IPv6 ND)</h3>'
+			+ '<div class="kt-card"><h3>🧭 جدول الجيران — الاسم · IP · MAC · المنفذ · الحالة</h3>'
 			+ (rows || '<div class="kt-sub">لا جيران مكتشفون بعد</div>')
 			+ '</div>';
 	});
@@ -62,10 +83,20 @@ return view.extend({
 	render: function(){
 		var box = E('div', {}, [
 			E('h2', {}, _('جيران الشبكة — Neighbors')),
-			E('div', { 'class':'kt-sub' }, _('كل جهاز معروف على الشبكة (IP · MAC · المنفذ · الحالة) من جدول نواة النظام.')),
+			E('div', { 'class':'kt-sub' }, _('كل جهاز على الشبكة باسمه (مثل ميكروتك). اضغط ✏️ لتسمية أو تعديل اسم أي جهاز.')),
 			E('div', { 'class':'kt-body', style:'margin-top:10px' }, E('div', { 'class':'kt-sub' }, _('جارٍ التحميل…')))
 		]);
 		var body = box.querySelector('.kt-body');
+		/* one delegated handler survives the innerHTML refresh on each poll */
+		body.addEventListener('click', function(e){
+			var b = e.target.closest ? e.target.closest('.kt-edit') : null;
+			if (!b) return;
+			var mac = b.getAttribute('data-mac'), cur = b.getAttribute('data-name') || '';
+			var nm = prompt(_('اسم الجهاز لـ ') + mac + ' :', cur);
+			if (nm === null) return;                       // cancelled
+			b.disabled = true;
+			postCall({ act:'set_label', mac:mac, name:nm }).then(function(){ reload(body); });
+		});
 		reload(body);
 		poll.add(function(){ return reload(body); }, 10);
 		return box;
