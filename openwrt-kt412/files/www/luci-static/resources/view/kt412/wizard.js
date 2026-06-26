@@ -2,13 +2,14 @@
 'require view';
 'require ui';
 
-/* KT412 Quick Config Wizard (إعدادات سريعة)
-   Single RTL view, 4 device presets + per-SSID VLAN mapping. Each preset posts
-   op=setmode&mode=... to the OWN backend /cgi-bin/kt412-wizard, which applies a
-   pre-baked, idempotent UCI profile then reloads the affected services.
-   Auth: adopt the current LuCI admin session id as the token (op=adopt). */
+/* KT412 Quick Config (إعدادات سريعة) — all-in-one NATIVE wireless + network panel.
+   Mirrors OpenWrt's native wireless options (mode + per-radio settings) AND WAN
+   (incl. PPPoE) AND VLAN-on-SSID, each card with its OWN instant Apply — no page
+   hopping. Talks to the MAIN backend /cgi-bin/kt412 using the same adopt()/call()
+   auth pattern as devices.js; state-changing actions go through postCall() which
+   POSTs a form-urlencoded body (incl. token), mirroring devices.js adopt() style. */
 
-var API = '/cgi-bin/kt412-wizard';
+var API = '/cgi-bin/kt412';
 var TOKEN = '';
 
 function adopt(){
@@ -20,19 +21,30 @@ function adopt(){
 		.then(function(j){ if (j && j.ok && j.token) TOKEN = j.token; return TOKEN; })
 		.catch(function(){ return ''; });
 }
-function call(params, post){
+/* GET read */
+function call(params){
 	return adopt().then(function(){
 		var usp = new URLSearchParams(params);
 		if (TOKEN) usp.set('token', TOKEN);
-		var opt = post ? {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:usp.toString()} : undefined;
-		var url = post ? API : (API + '?' + usp.toString());
-		return fetch(url, opt).then(function(r){ return r.json(); }).catch(function(){ return {ok:false,error:'network'}; });
+		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); })
+			.catch(function(){ return {ok:false,error:'network'}; });
+	});
+}
+/* POST action (form-urlencoded body incl. token), mirroring devices.js adopt() body style */
+function postCall(params){
+	return adopt().then(function(){
+		var usp = new URLSearchParams(params);
+		if (TOKEN) usp.set('token', TOKEN);
+		return fetch(API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+				body:usp.toString()})
+			.then(function(r){ return r.json(); })
+			.catch(function(){ return {ok:false,error:'network'}; });
 	});
 }
 
 /* ---- client-side validators (the CGI re-validates server-side) ---- */
 function validKey(k){ return (typeof k === 'string') && k.length >= 8 && k.length <= 63; }
-function validVid(v){ if (v === '' || v === null) return true; var n = +v; return Number.isInteger(n) && n >= 1 && n <= 4094; }
+function validVid(v){ if (v === '' || v === null || v === undefined) return true; var n = +v; return Number.isInteger(n) && n >= 1 && n <= 4094; }
 function validSsid(s){ return (typeof s === 'string') && s.length >= 1 && s.length <= 32; }
 
 function notify(r, okMsg){
@@ -40,152 +52,252 @@ function notify(r, okMsg){
 	else ui.addNotification(null, E('p', {}, _('فشل: %s').format((r && r.error) || 'unknown')), 'error');
 }
 
-return view.extend({
-	load: function(){ return call({op:'getmode'}); },
+function is5g(band){ return String(band||'').toLowerCase().indexOf('5') >= 0; }
+function bandTitle(band){ return is5g(band) ? _('📡 واي‑فاي 5G') : _('📶 واي‑فاي 2.4G'); }
+function bandShort(band){ return is5g(band) ? '5G' : '2.4G'; }
 
-	render: function(cur){
-		cur = cur || {};
-		var curMode = cur.ok ? cur.mode : '?';
+/* band-appropriate channel <option> lists (incl. 'auto') */
+function chanOptions(band, cur){
+	var list = is5g(band) ? [36,40,44,48,149,153,157,161] : [1,2,3,4,5,6,7,8,9,10,11];
+	var opts = [ E('option', { value:'auto' }, _('تلقائي (auto)')) ];
+	list.forEach(function(c){ opts.push(E('option', { value:String(c) }, String(c))); });
+	var o = E('select', { class:'cbi-input-select' }, opts);
+	var v = (cur === '' || cur == null) ? 'auto' : String(cur);
+	/* if the saved channel isn't in our static list, inject it so it stays selected */
+	if (v !== 'auto' && list.indexOf(+v) < 0){ o.appendChild(E('option', { value:v }, v)); }
+	o.value = v;
+	return o;
+}
 
-		/* ---------------- AP MODE ---------------- */
-		var apBtn = E('button', { class:'kt-btn' }, _('🛜 تطبيق وضع AP'));
-		apBtn.onclick = function(){
-			apBtn.textContent = '…';
-			call({op:'setmode', mode:'ap'}, true).then(function(r){
-				apBtn.textContent = _('🛜 تطبيق وضع AP'); notify(r); });
-		};
-		var apCard = E('div', { class:'kt-card' }, [
-			E('h3', {}, _('① نقطة وصول (Access Point)')),
-			E('p', {}, _('جسر LAN لكل المنافذ، DHCP معطّل، WAN غير مستخدم، طاقة عالية. الإدارة 192.168.1.1.')),
-			apBtn
-		]);
+function htOptions(band, cur){
+	var list = is5g(band) ? ['VHT20','VHT40','VHT80'] : ['HT20','HT40'];
+	var o = E('select', { class:'cbi-input-select' }, list.map(function(h){ return E('option', { value:h }, h); }));
+	var v = String(cur||'');
+	if (v && list.indexOf(v) < 0){ o.appendChild(E('option', { value:v }, v)); }
+	o.value = v || list[0];
+	return o;
+}
 
-		/* ---------------- MESH (802.11s / batman) ---------------- */
-		var mBackhaul = E('select', { class:'cbi-input-select' }, [
-			E('option', { value:'11s' }, _('802.11s أصلي (mesh_fwding)')),
-			E('option', { value:'batman' }, _('batman-adv (bat0) — مشفّر إلزامي'))
-		]);
-		var mId  = E('input', { type:'text', class:'cbi-input-text', value:'kt412-mesh', maxlength:'32' });
-		var mEnc = E('select', { class:'cbi-input-select' }, [
-			E('option', { value:'sae' }, 'WPA3-SAE'),
-			E('option', { value:'sae-mixed' }, 'WPA2/3 (sae-mixed)'),
-			E('option', { value:'psk2' }, 'WPA2-PSK')
-		]);
-		var mKey = E('input', { type:'text', class:'cbi-input-text', placeholder:_('مفتاح المش (8 أحرف+)') });
-		var mHint = E('p', {}, _('802.11s: المفتاح اختياري (يُنصح به). batman-adv: المفتاح إلزامي لمنع التنصّت.'));
-		mBackhaul.onchange = function(){
-			mHint.textContent = (mBackhaul.value === 'batman')
-				? _('batman-adv: المفتاح إلزامي. يتطلب حزم kmod-batman-adv + batctl.')
-				: _('802.11s: المفتاح اختياري (يُنصح به). يتطلب wpad-mesh-mbedtls.');
-		};
-		var mBtn = E('button', { class:'kt-btn' }, _('🕸️ تفعيل Mesh'));
-		mBtn.onclick = function(){
-			var bh = mBackhaul.value, key = mKey.value, id = mId.value;
-			if (!validSsid(id)) return ui.addNotification(null, E('p', {}, _('mesh_id غير صالح')), 'error');
-			if (bh === 'batman' && !validKey(key))
-				return ui.addNotification(null, E('p', {}, _('batman-adv يتطلب مفتاحاً من 8 أحرف على الأقل')), 'error');
-			if (key && !validKey(key))
-				return ui.addNotification(null, E('p', {}, _('المفتاح يجب أن يكون 8–63 حرفاً')), 'error');
-			mBtn.textContent = '…';
-			call({op:'setmode', mode:'mesh', backhaul:bh, mesh_id:id, enc:mEnc.value, key:key}, true).then(function(r){
-				mBtn.textContent = _('🕸️ تفعيل Mesh'); notify(r); });
-		};
-		var meshCard = E('div', { class:'kt-card' }, [
-			E('h3', {}, _('② شبكة Mesh (5G خلفية مخفية)')),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('نوع الخلفية')), mBackhaul ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('Mesh ID')), mId ])
-			]),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('التشفير')), mEnc ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('المفتاح المشترك')), mKey ])
-			]),
-			mHint, mBtn
-		]);
+/* ---------------- per-radio card ---------------- */
+function radioCard(r){
+	var modeSel = E('select', { class:'cbi-input-select' }, [
+		E('option', { value:'ap' },     _('نقطة وصول (AP)')),
+		E('option', { value:'sta' },    _('عميل (استقبال)')),
+		E('option', { value:'mesh' },   _('شبكة Mesh')),
+		E('option', { value:'ap-wds' }, _('جسر AP+WDS'))
+	]);
+	modeSel.value = r.mode || 'ap';
 
-		/* ---------------- WDS ---------------- */
-		var wRole = E('select', { class:'cbi-input-select' }, [
-			E('option', { value:'ap' }, _('wds-ap (الجذر / Root)')),
-			E('option', { value:'sta' }, _('wds-sta (الفرع / Leaf)'))
-		]);
-		var wBand = E('select', { class:'cbi-input-select' }, [
-			E('option', { value:'5g' }, '5GHz'),
-			E('option', { value:'2g' }, '2.4GHz')
-		]);
-		var wSsid = E('input', { type:'text', class:'cbi-input-text', placeholder:'KT412-WDS', maxlength:'32' });
-		var wKey  = E('input', { type:'text', class:'cbi-input-text', placeholder:_('مفتاح مشترك (8 أحرف+، أو فارغ=مفتوح)') });
-		var wBtn  = E('button', { class:'kt-btn' }, _('🔗 تطبيق WDS'));
-		wBtn.onclick = function(){
-			if (!validSsid(wSsid.value)) return ui.addNotification(null, E('p', {}, _('SSID مطلوب (1–32 حرفاً)')), 'error');
-			if (wKey.value && !validKey(wKey.value)) return ui.addNotification(null, E('p', {}, _('المفتاح 8–63 حرفاً أو فارغ')), 'error');
-			wBtn.textContent = '…';
-			call({op:'setmode', mode:'wds', role:wRole.value, band:wBand.value, ssid:wSsid.value, key:wKey.value}, true).then(function(r){
-				wBtn.textContent = _('🔗 تطبيق WDS'); notify(r); });
-		};
-		var wdsCard = E('div', { class:'kt-card' }, [
-			E('h3', {}, _('③ WDS (جسر L2 شفّاف نقطة-لنقطة)')),
-			E('p', {}, _('اضبط الطرفين بنفس SSID والمفتاح. أحدهما wds-ap والآخر wds-sta.')),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('الدور')), wRole ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('النطاق')), wBand ])
-			]),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('SSID')), wSsid ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('المفتاح')), wKey ])
-			]),
-			wBtn
-		]);
+	var ssid = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', value:(r.ssid||'') });
 
-		/* ---------------- PPPoE ---------------- */
-		var pUser = E('input', { type:'text', class:'cbi-input-text', placeholder:'username' });
-		var pPass = E('input', { type:'text', class:'cbi-input-text', placeholder:'password' });
-		var pBtn  = E('button', { class:'kt-btn' }, _('🌐 تطبيق PPPoE'));
-		pBtn.onclick = function(){
+	var secSel = E('select', { class:'cbi-input-select' }, [
+		E('option', { value:'open' }, _('مفتوحة (بدون تشفير)')),
+		E('option', { value:'psk2' }, 'WPA2 (PSK)')
+	]);
+	var keyWrap = E('div', { class:'kt-field' }, [
+		E('label', {}, _('🔒 كلمة المرور')),
+		E('input', { type:'text', class:'cbi-input-text kt-pwval', placeholder:_('8 أحرف على الأقل'), maxlength:'63' })
+	]);
+	var key = keyWrap.querySelector('input');
+	/* current radio has no exposed key; default to WPA2 if it has an SSID, else open is harmless */
+	secSel.value = 'psk2';
+	function syncSec(){ keyWrap.style.display = (secSel.value === 'open') ? 'none' : ''; }
+	secSel.onchange = syncSec; syncSec();
+
+	var chan = chanOptions(r.band, r.channel);
+	var ht   = htOptions(r.band, r.htmode);
+	var ctry = E('input', { type:'text', class:'cbi-input-text', maxlength:'2', style:'width:74px', value:(r.country || 'US') });
+
+	var tpInit = parseInt(r.txpower, 10); if (isNaN(tpInit)) tpInit = 20;
+	if (tpInit < 0) tpInit = 0; if (tpInit > 30) tpInit = 30;
+	var pwval = E('span', { class:'kt-pwval kt-badge ok' }, tpInit + ' dBm');
+	var rng   = E('input', { type:'range', class:'kt-range', min:'0', max:'30', step:'1', value:String(tpInit), style:'flex:1' });
+	rng.addEventListener('input', function(){ pwval.textContent = rng.value + ' dBm'; });
+
+	var hidden = E('input', { type:'checkbox' }); hidden.checked = (String(r.hidden) === '1');
+
+	var en = E('input', { type:'checkbox' }); en.checked = (r.enabled === true || r.enabled === 'true' || r.enabled === 1);
+	var enBadge = E('span', { class:'kt-badge ' + (en.checked ? 'ok' : 'bad') }, en.checked ? _('مُفعّل') : _('معطّل'));
+	en.addEventListener('change', function(){
+		var on = en.checked ? '1' : '0';
+		en.disabled = true;
+		postCall({act:'wifi_toggle', radio:r.radio, on:on}).then(function(j){
+			en.disabled = false;
+			enBadge.className = 'kt-badge ' + (en.checked ? 'ok' : 'bad');
+			enBadge.textContent = en.checked ? _('مُفعّل') : _('معطّل');
+			notify(j);
+		});
+	});
+
+	var btn = E('button', { class:'kt-btn' }, _('💾 تطبيق'));
+	btn.addEventListener('click', function(){
+		if (!validSsid(ssid.value))
+			return ui.addNotification(null, E('p', {}, _('SSID مطلوب (1–32 حرفاً)')), 'error');
+		var open = (secSel.value === 'open');
+		if (!open && !validKey(key.value))
+			return ui.addNotification(null, E('p', {}, _('المفتاح يجب أن يكون 8–63 حرفاً')), 'error');
+		btn.disabled = true; var lbl = btn.textContent; btn.textContent = '…';
+		var dbm = String(parseInt(rng.value, 10) || 0);
+		postCall({
+			act:'wifi_apply', radio:r.radio, mode:modeSel.value, ssid:ssid.value,
+			key:(open ? '' : key.value), channel:chan.value, htmode:ht.value,
+			country:ctry.value, hidden:(hidden.checked ? '1' : '0')
+		}).then(function(j){
+			notify(j);
+			/* chain txpower right after the wifi config applies */
+			return postCall({act:'txpower', radio:r.radio, dbm:dbm});
+		}).then(function(jp){
+			btn.disabled = false; btn.textContent = lbl;
+			if (jp && jp.ok)
+				ui.addNotification(null, E('p', {}, _('الطاقة: مطلوب %s / مُطبّق %s dBm').format(jp.requested, jp.actual)), 'info');
+		});
+	});
+
+	function fld(lbl, node){ return E('div', { class:'kt-field' }, [ E('label', {}, lbl), node ]); }
+
+	return E('div', { class:'kt-card' }, [
+		E('h3', {}, bandTitle(r.band) + ' (' + (r.radio||'') + ')'),
+		E('div', { class:'kt-grid kt-cols-2' }, [
+			fld(_('الوضع'), modeSel),
+			fld('SSID', ssid)
+		]),
+		E('div', { class:'kt-grid kt-cols-2' }, [
+			fld(_('التشفير'), secSel),
+			keyWrap
+		]),
+		E('div', { class:'kt-grid kt-cols-3' }, [
+			fld(_('القناة'), chan),
+			fld(_('عرض القناة (HTmode)'), ht),
+			fld(_('الدولة'), ctry)
+		]),
+		E('div', { class:'kt-field' }, [
+			E('label', {}, _('الطاقة (TxPower)')),
+			E('div', { class:'kt-row' }, [ rng, pwval ])
+		]),
+		E('div', { class:'kt-row', style:'gap:18px;flex-wrap:wrap;align-items:center' }, [
+			E('label', { class:'kt-row', style:'gap:6px' }, [ hidden, E('span', {}, _('إخفاء SSID')) ]),
+			E('label', { class:'kt-row', style:'gap:6px' }, [ en, E('span', {}, _('تفعيل الراديو')), enBadge ])
+		]),
+		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+	]);
+}
+
+/* ---------------- WAN card ---------------- */
+function wanCard(curProto){
+	var proto = E('select', { class:'cbi-input-select' }, [
+		E('option', { value:'dhcp' },   _('تلقائي DHCP')),
+		E('option', { value:'pppoe' },  'PPPoE'),
+		E('option', { value:'static' }, _('ثابت (Static)'))
+	]);
+	if (curProto === 'pppoe' || curProto === 'static' || curProto === 'dhcp') proto.value = curProto;
+
+	var pUser = E('input', { type:'text', class:'cbi-input-text', placeholder:'username' });
+	var pPass = E('input', { type:'text', class:'cbi-input-text', placeholder:'password' });
+	var pppoeBox = E('div', { class:'kt-grid kt-cols-2' }, [
+		E('div', { class:'kt-field' }, [ E('label', {}, _('👤 المستخدم')), pUser ]),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('🔒 كلمة المرور')), pPass ])
+	]);
+
+	var sIp   = E('input', { type:'text', class:'cbi-input-text', placeholder:'192.168.1.2' });
+	var sMask = E('input', { type:'text', class:'cbi-input-text', placeholder:'255.255.255.0' });
+	var sGw   = E('input', { type:'text', class:'cbi-input-text', placeholder:'192.168.1.1' });
+	var sDns  = E('input', { type:'text', class:'cbi-input-text', placeholder:'1.1.1.1' });
+	var staticBox = E('div', { class:'kt-grid kt-cols-2' }, [
+		E('div', { class:'kt-field' }, [ E('label', {}, _('IP العنوان')), sIp ]),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('قناع الشبكة')), sMask ]),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('البوابة')), sGw ]),
+		E('div', { class:'kt-field' }, [ E('label', {}, 'DNS'), sDns ])
+	]);
+
+	function sync(){
+		pppoeBox.style.display  = (proto.value === 'pppoe')  ? '' : 'none';
+		staticBox.style.display = (proto.value === 'static') ? '' : 'none';
+	}
+	proto.onchange = sync; sync();
+
+	var btn = E('button', { class:'kt-btn' }, _('💾 تطبيق WAN'));
+	btn.addEventListener('click', function(){
+		var p = proto.value, params;
+		if (p === 'pppoe'){
 			if (!pUser.value) return ui.addNotification(null, E('p', {}, _('اسم مستخدم PPPoE مطلوب')), 'error');
-			pBtn.textContent = '…';
-			call({op:'setmode', mode:'pppoe', user:pUser.value, pass:pPass.value}, true).then(function(r){
-				pBtn.textContent = _('🌐 تطبيق PPPoE'); notify(r); });
-		};
-		var pppoeCard = E('div', { class:'kt-card' }, [
-			E('h3', {}, _('④ عميل PPPoE (WAN)')),
-			E('p', {}, _('يضبط WAN على PPPoE مع عزل WAN في الجدار الناري (MTU 1492).')),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('👤 المستخدم')), pUser ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('🔒 كلمة المرور')), pPass ])
-			]),
-			pBtn
+			params = { act:'wan_pppoe', user:pUser.value, pass:pPass.value };
+		} else if (p === 'static'){
+			if (!sIp.value) return ui.addNotification(null, E('p', {}, _('عنوان IP مطلوب')), 'error');
+			params = { act:'wan_static', ip:sIp.value, mask:sMask.value, gw:sGw.value, dns:sDns.value };
+		} else {
+			params = { act:'wan_dhcp' };
+		}
+		btn.disabled = true; var lbl = btn.textContent; btn.textContent = '…';
+		postCall(params).then(function(j){ btn.disabled = false; btn.textContent = lbl; notify(j); });
+	});
+
+	return E('div', { class:'kt-card' }, [
+		E('h3', {}, _('🌐 إعداد WAN / الإنترنت')),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('نوع الاتصال (proto)')), proto ]),
+		pppoeBox, staticBox,
+		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+	]);
+}
+
+/* ---------------- VLAN-per-SSID card ---------------- */
+function vlanCard(radios){
+	var sel = E('select', { class:'cbi-input-select' },
+		radios.filter(function(r){ return r.iface; }).map(function(r){
+			return E('option', { value:r.iface }, bandShort(r.band) + ' — ' + (r.ssid || r.iface));
+		}));
+	var vid = E('input', { type:'text', class:'cbi-input-text', maxlength:'4', placeholder:_('2–4094، فارغ=LAN') });
+	var btn = E('button', { class:'kt-btn' }, _('تطبيق'));
+	btn.addEventListener('click', function(){
+		if (!sel.value) return ui.addNotification(null, E('p', {}, _('لا توجد واجهة SSID')), 'error');
+		if (!validVid(vid.value)) return ui.addNotification(null, E('p', {}, _('VLAN ID يجب أن يكون 1–4094 أو فارغاً')), 'error');
+		btn.disabled = true; var lbl = btn.textContent; btn.textContent = '…';
+		postCall({ act:'vlan_ssid', ssid:sel.value, vid:vid.value }).then(function(j){
+			btn.disabled = false; btn.textContent = lbl; notify(j);
+		});
+	});
+	return E('div', { class:'kt-card' }, [
+		E('h3', {}, _('🏷️ ربط SSID بـ VLAN')),
+		E('div', { class:'kt-grid kt-cols-2' }, [
+			E('div', { class:'kt-field' }, [ E('label', {}, 'SSID'), sel ]),
+			E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vid ])
+		]),
+		E('div', { class:'kt-note' }, _('فارغ أو 1 = LAN غير موسوم. غير ذلك = VLAN موسوم (2–4094).')),
+		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+	]);
+}
+
+return view.extend({
+	load: function(){ return call({op:'wifi_radios'}); },
+
+	render: function(rad){
+		rad = rad || {};
+		var radios = (rad.ok && rad.radios) ? rad.radios : [];
+
+		var box = E('div', { dir:'rtl' }, [
+			E('h2', {}, _('إعدادات سريعة — ضبط الوايرلس والشبكة')),
+			E('div', { class:'kt-sub', style:'margin-bottom:14px' },
+				_('كل بطاقة تُطبّق فوراً عند الضغط على «تطبيق» — لا حاجة للتنقّل بين صفحات الواجهات أو الوايرلس أو VLAN. اضبط الراديو والـ WAN (مع PPPoE) وربط SSID بـ VLAN من مكان واحد.'))
 		]);
 
-		/* ---------------- VLAN per SSID ---------------- */
-		var vBand = E('select', { class:'cbi-input-select' }, [
-			E('option', { value:'2g' }, _('SSID 2.4G')),
-			E('option', { value:'5g' }, _('SSID 5G'))
-		]);
-		var vVid = E('input', { type:'text', class:'cbi-input-text', placeholder:_('VLAN ID 2–4094 (فارغ=LAN غير موسوم)'), maxlength:'4' });
-		var vBtn = E('button', { class:'kt-btn' }, _('🏷️ ربط SSID بـ VLAN'));
-		vBtn.onclick = function(){
-			if (!validVid(vVid.value)) return ui.addNotification(null, E('p', {}, _('VLAN ID يجب أن يكون 1–4094')), 'error');
-			vBtn.textContent = '…';
-			call({op:'setmode', mode:'vlan', band:vBand.value, vid:vVid.value}, true).then(function(r){
-				vBtn.textContent = _('🏷️ ربط SSID بـ VLAN'); notify(r); });
-		};
-		var vlanCard = E('div', { class:'kt-card' }, [
-			E('h3', {}, _('⑤ VLAN لكل SSID (مستقل)')),
-			E('p', {}, _('اربط كل SSID بـ VLAN موسوم على منافذ lan1-4 عبر جسر DSA، أو اتركه فارغاً = LAN غير موسوم.')),
-			E('div', { class:'kt-grid kt-cols-2' }, [
-				E('div', { class:'kt-field' }, [ E('label', {}, _('الشبكة')), vBand ]),
-				E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vVid ])
-			]),
-			vBtn
-		]);
+		if (!radios.length){
+			box.appendChild(E('div', { class:'kt-card' },
+				E('div', { class:'kt-note' }, _('تعذّر قراءة إعدادات الوايرلس'))));
+		} else {
+			var grid = E('div', { class:'kt-grid kt-cols-2' });
+			radios.forEach(function(r){ grid.appendChild(radioCard(r)); });
+			box.appendChild(grid);
+		}
 
-		return E('div', {}, [
-			E('h2', {}, _('إعدادات سريعة — Quick Config Wizard')),
-			E('div', { class:'kt-card', style:'margin-bottom:16px' }, [
-				E('p', {}, _('الوضع الحالي: ') + curMode)
-			]),
-			apCard, meshCard, wdsCard, pppoeCard, vlanCard
-		]);
+		/* WAN card — render a placeholder now, then fire-and-fill proto from op=wan */
+		var wanSlot = E('div', {}, wanCard(''));
+		box.appendChild(wanSlot);
+		call({op:'wan'}).then(function(w){
+			if (w && w.ok){ wanSlot.innerHTML = ''; wanSlot.appendChild(wanCard(w.proto || '')); }
+		});
+
+		if (radios.length) box.appendChild(vlanCard(radios));
+
+		return box;
 	},
 
 	handleSave: null, handleSaveApply: null, handleReset: null
