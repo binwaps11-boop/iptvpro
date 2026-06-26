@@ -1,0 +1,23 @@
+{
+	"admin/mkapp": {
+		"title": "Quick Config",
+		"order": 6,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-wizard" ]
+		}
+	},
+	"admin/mkapp/wizard": {
+		"title": "إعدادات سريعة",
+		"order": 1,
+		"action": {
+			"type": "view",
+			"path": "kt412/wizard"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-wizard" ]
+		}
+	}
+}

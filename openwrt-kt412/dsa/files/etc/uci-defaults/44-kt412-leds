@@ -1,0 +1,81 @@
+#!/bin/sh
+# 44-kt412-leds  -- KT412 (DW02-412H, qca9558_dongwon) LED trigger mapping.
+#
+# Maps the board LEDs to sensible triggers via uci 'system' led sections:
+#   - power  : on at boot (default-on)
+#   - status : boot/heartbeat (timer or netdev) -- a visible "alive" indicator
+#   - lan    : link+activity on the LAN bridge
+#   - wlan2g : 2.4G wifi activity   (phy1tpt -> ath9k is phy1 = radio0 = 2.4G)
+#   - wlan5g : 5G wifi activity     (phy0tpt -> ath10k is phy0 = radio1 = 5G)
+#
+# LED LABEL SOURCE / HONESTY:
+#   The board DTS (qca9558_dongwon_dw02-412h.dtsi, PR #21837) defines the wifi
+#   activity LED with `linux,default-trigger = "phy1tpt"` (captured in the build
+#   evidence). That confirms phy1=ath9k=2.4G. The exact DT *label* strings are
+#   NOT fully captured in this repo, so the label names below
+#   ("dw02-412h:green:<fn>") are the conventional ath79 naming and MAY differ
+#   from the real silkscreen labels. We therefore AUTO-DETECT the real label for
+#   each function from /sys/class/leds and only fall back to the guessed name.
+#   Triggers (phy0tpt/phy1tpt/netdev/timer/default-on) are correct regardless of
+#   the label; if a label is wrong the section is simply inert (safe, no harm).
+#
+# Idempotent. POSIX sh. Does not touch RF/DSA. Marker: kt412-leds.done.
+
+MARK=/etc/kt412-leds.done
+[ -f "$MARK" ] && exit 0
+
+# Resolve a real LED sysfs name by keyword, else echo the provided fallback.
+find_led() {  # $1=keyword(s, space sep, OR-match) $2=fallback
+	for kw in $1; do
+		for p in /sys/class/leds/*"$kw"*; do
+			[ -e "$p" ] && { basename "$p"; return 0; }
+		done
+	done
+	echo "$2"
+}
+
+LED_POWER="$(find_led 'power pwr' 'dw02-412h:green:power')"
+LED_STATUS="$(find_led 'status sys system act' 'dw02-412h:green:status')"
+LED_LAN="$(find_led 'lan' 'dw02-412h:green:lan')"
+LED_2G="$(find_led 'wlan2g 2g 2.4 wifi2 phy1' 'dw02-412h:green:wlan2g')"
+LED_5G="$(find_led 'wlan5g 5g phy0' 'dw02-412h:green:wlan5g')"
+
+# (re)create a named uci led section -> set name(sysfs)+trigger, return section
+mk_led() {  # $1=section $2=sysfsname $3=trigger
+	sec="$1"; sys="$2"; trg="$3"
+	uci -q set system.$sec='led'
+	uci -q set system.$sec.name="$sec"
+	uci -q set system.$sec.sysfs="$sys"
+	uci -q set system.$sec.trigger="$trg"
+	uci -q set system.$sec.default='0'
+}
+
+# --- power: solid on whenever the device is powered ---
+mk_led kt412_power "$LED_POWER" 'default-on'
+uci -q set system.kt412_power.default='1'
+
+# --- status / boot: timer heartbeat so a hang is visible (slow blink) ---
+mk_led kt412_status "$LED_STATUS" 'timer'
+uci -q set system.kt412_status.delayon='1000'
+uci -q set system.kt412_status.delayoff='1000'
+
+# --- LAN link+activity on the bridge (netdev trigger) ---
+mk_led kt412_lan "$LED_LAN" 'netdev'
+uci -q set system.kt412_lan.dev='br-lan'
+uci -q delete system.kt412_lan.mode 2>/dev/null
+uci -q add_list system.kt412_lan.mode='link'
+uci -q add_list system.kt412_lan.mode='tx'
+uci -q add_list system.kt412_lan.mode='rx'
+
+# --- 2.4G activity: phy1tpt (ath9k = phy1 = radio0 = 2.4G) ---
+mk_led kt412_wlan2g "$LED_2G" 'phy1tpt'
+
+# --- 5G activity: phy0tpt (ath10k = phy0 = radio1 = 5G) ---
+mk_led kt412_wlan5g "$LED_5G" 'phy0tpt'
+
+uci -q commit system
+/etc/init.d/led enable >/dev/null 2>&1
+/etc/init.d/led restart >/dev/null 2>&1
+
+touch "$MARK"
+exit 0

@@ -1,0 +1,474 @@
+#!/bin/sh
+# KT412 "MK APP" diagnostic + loop/isolation + DSA switch CGI.
+# POSIX sh, runs as root under uhttpd. Auth model identical to the main kt412
+# CGI: a LuCI view passes its own ubus session id once (op=adopt); we verify it
+# can write uci (real authenticated admin) and mark it. Every privileged op
+# re-checks the mark. All inputs are sanitized; ops/fixes are whitelisted; the
+# only outbound network call is op=llm via curl with the user's own API key.
+#
+# Ops: adopt, diag, fix, llm, getloop, setloop, getswitch, setswitch.
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	local want="$1" pair rest
+	local IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; urldecode "$rest"; return 0;;
+		esac
+	done
+	return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-64; }
+sani_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.-' | cut -c1-32; }
+sani_int()  { printf '%s' "$1" | tr -cd '0-9' | cut -c1-9; }
+sani_onoff(){ case "$1" in 1|on|true) echo 1;; *) echo 0;; esac; }
+# allow url + a-z chars for endpoints/models (no spaces, no shell metachars)
+sani_url()  { printf '%s' "$1" | tr -cd 'A-Za-z0-9:/._?=&%-' | cut -c1-256; }
+# api keys: alnum plus the chars Anthropic/OpenAI keys use; never logged/echoed
+sani_key()  { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.-' | cut -c1-256; }
+fail()      { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- adopt (bootstrap from an existing LuCI session) ----------
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	[ -n "$SID" ] || fail "no_token"
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid session ----------
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
+[ "$MARK" = "1" ] || fail "unauthorized"
+
+# ============================================================================
+#  helpers shared by diag / fix
+# ============================================================================
+
+# bridge name for the lan interface (DSA: br-lan)
+br_dev() {
+	local d
+	d="$(uci -q get network.lan.device)"
+	[ -n "$d" ] || d="br-lan"
+	echo "$d"
+}
+# conduit (CPU) port for the DSA switch
+conduit() { echo "eth0"; }
+
+# emit one finding object (no leading comma; caller handles separators)
+# $1=id $2=severity(ok|warn|bad) $3=summary $4=fix_id(may be empty)
+emit_finding() {
+	[ -n "$FSEP" ] && printf ','
+	printf '{"id":"%s","severity":"%s","summary":"%s","fix_id":"%s"}' \
+		"$(json_esc "$1")" "$2" "$(json_esc "$3")" "$(json_esc "$4")"
+	FSEP=1
+}
+
+# ============================================================================
+#  op=diag  -- run the checklist, return structured findings
+# ============================================================================
+if [ "$OP" = "diag" ]; then
+	BR="$(br_dev)"; CPU="$(conduit)"
+	FSEP=''
+	printf '{"ok":true,"findings":['
+
+	# --- 1. conduit (CPU port) up? -----------------------------------------
+	if [ -e "/sys/class/net/$CPU/operstate" ]; then
+		ST="$(cat /sys/class/net/$CPU/operstate 2>/dev/null)"
+		if [ "$ST" = "up" ]; then
+			emit_finding "conduit" "ok" "منفذ التوصيل ($CPU) فعّال (up)." ""
+		else
+			emit_finding "conduit" "bad" "منفذ التوصيل ($CPU) ليس فعّالاً (الحالة: $ST)." "conduit_up"
+		fi
+	else
+		emit_finding "conduit" "warn" "تعذّر قراءة حالة منفذ التوصيل ($CPU)." ""
+	fi
+
+	# --- 2. bridge exists + has members ------------------------------------
+	if [ -d "/sys/class/net/$BR/bridge" ]; then
+		MEM="$(ls /sys/class/net/$BR/brif 2>/dev/null | tr '\n' ' ')"
+		if [ -n "$MEM" ]; then
+			emit_finding "bridge" "ok" "الجسر $BR موجود وأعضاؤه: $MEM" ""
+		else
+			emit_finding "bridge" "bad" "الجسر $BR موجود لكنه بلا أعضاء (لا منافذ LAN مرتبطة)." "readd_bridge_members"
+		fi
+		# STP active on bridge?
+		STP="$(cat /sys/class/net/$BR/bridge/stp_state 2>/dev/null)"
+		if [ "$STP" = "1" ]; then
+			emit_finding "stp" "ok" "STP مفعّل على $BR (حماية من اللوب)." ""
+		else
+			emit_finding "stp" "warn" "STP غير مفعّل على $BR — يُنصح بتفعيله لمنع اللوب." "enable_stp"
+		fi
+	else
+		emit_finding "bridge" "bad" "الجسر $BR غير موجود." ""
+	fi
+
+	# --- 3. active loop: topology change / fdb churn -----------------------
+	if [ -d "/sys/class/net/$BR/bridge" ]; then
+		TCN="$(cat /sys/class/net/$BR/bridge/topology_change_detected 2>/dev/null)"
+		FDB="$(bridge fdb show br "$BR" 2>/dev/null | wc -l)"
+		if [ "$TCN" = "1" ]; then
+			emit_finding "loop_active" "bad" "تغيّر طوبولوجي نشط على $BR — مؤشّر قوي على وجود لوب حالي." "enable_stp"
+		elif [ "${FDB:-0}" -gt 2000 ]; then
+			emit_finding "loop_active" "warn" "عدد ضخم من عناوين MAC في جدول الجسر ($FDB) — قد يدل على لوب/إغراق." "enable_stp"
+		else
+			emit_finding "loop_active" "ok" "لا مؤشّر على لوب نشط (عناوين MAC: ${FDB:-0})." ""
+		fi
+	fi
+
+	# --- 4. WAN / DHCP -----------------------------------------------------
+	WANPROTO="$(uci -q get network.wan.proto)"
+	WAN_L3="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	WAN_UP="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)"
+	if [ "$WANPROTO" = "dhcp" ]; then
+		WAN_IP="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+		if [ -n "$WAN_IP" ]; then
+			emit_finding "wan_dhcp" "ok" "WAN حصل على عنوان عبر DHCP: $WAN_IP" ""
+		elif [ "$WAN_UP" = "true" ]; then
+			emit_finding "wan_dhcp" "warn" "واجهة WAN فعّالة لكنها بلا تأجير DHCP (no lease) بعد." ""
+		else
+			emit_finding "wan_dhcp" "warn" "WAN على DHCP وليست فعّالة / لا يوجد تأجير." ""
+		fi
+	else
+		emit_finding "wan_dhcp" "ok" "بروتوكول WAN: ${WANPROTO:-غير معرّف}." ""
+	fi
+
+	# --- 5. rogue DHCP / dup subnet: LAN dnsmasq serving while bridged to an
+	#        upstream that already serves the same subnet -------------------
+	LAN_IP="$(uci -q get network.lan.ipaddr)"
+	DHCP_IGN="$(uci -q get dhcp.lan.ignore)"
+	if [ "$DHCP_IGN" != "1" ]; then
+		# our DHCP server is ON. Probe the LAN for ANOTHER DHCP server (rogue/upstream).
+		# Use a quick passive check: is there a foreign default gateway giving leases?
+		emit_finding "dhcp_server" "warn" "خادم DHCP مفعّل على هذا الجهاز (LAN ${LAN_IP:-?}). إن كان متصلاً بشبكة فيها راوتر آخر فقد يتعارض/يحدث لوب توزيع." "disable_dhcp"
+	else
+		emit_finding "dhcp_server" "ok" "خادم DHCP معطّل على هذا الجهاز (وضع AP آمن، لا تعارض)." ""
+	fi
+
+	# --- 6. IP conflict (arping our own LAN IP from the bridge) ------------
+	if [ -n "$LAN_IP" ] && command -v arping >/dev/null 2>&1; then
+		# -D duplicate-address-detection mode: if anyone else answers, conflict.
+		if arping -q -c 2 -w 2 -D -I "$BR" "$LAN_IP" >/dev/null 2>&1; then
+			emit_finding "ip_conflict" "ok" "لا تعارض IP على $LAN_IP." ""
+		else
+			emit_finding "ip_conflict" "bad" "تعارض عنوان IP محتمل: جهاز آخر يستخدم $LAN_IP على نفس الشبكة." ""
+		fi
+	else
+		emit_finding "ip_conflict" "warn" "تعذّر فحص تعارض IP (arping غير متوفر أو لا IP)." ""
+	fi
+
+	# --- 7. wireless country / band ----------------------------------------
+	CN_BAD=''
+	for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		c="$(uci -q get wireless.$r.country)"
+		[ -z "$c" ] && CN_BAD="$CN_BAD $r"
+	done
+	if [ -n "$CN_BAD" ]; then
+		emit_finding "wifi_country" "warn" "راديوهات بلا دولة محددة:$CN_BAD — قد تتعطّل القنوات/الطاقة." "set_country_us"
+	else
+		emit_finding "wifi_country" "ok" "كل الراديوهات لديها دولة محددة." ""
+	fi
+
+	# --- 8. mesh / WDS link state ------------------------------------------
+	MESH_SECT="$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.mode='\(mesh\|sta\)'.*/\1/p" | head -1)"
+	if [ -n "$MESH_SECT" ]; then
+		MODE="$(uci -q get wireless.$MESH_SECT.mode)"
+		IFC="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.*.interfaces[@.section=\"$MESH_SECT\"].ifname" 2>/dev/null | head -1)"
+		if [ -n "$IFC" ] && [ -e "/sys/class/net/$IFC/operstate" ] && [ "$(cat /sys/class/net/$IFC/operstate)" = "up" ]; then
+			emit_finding "mesh_link" "ok" "رابط $MODE فعّال ($IFC)." ""
+		else
+			emit_finding "mesh_link" "warn" "رابط $MODE ($MESH_SECT) ليس فعّالاً — قد يحتاج إعادة تشغيل." "restart_mesh"
+		fi
+	else
+		emit_finding "mesh_link" "ok" "لا يوجد إعداد mesh/WDS (نقطة وصول عادية)." ""
+	fi
+
+	printf ']}\n'
+	exit 0
+fi
+
+# ============================================================================
+#  op=fix  -- apply ONE whitelisted safe fix
+# ============================================================================
+if [ "$OP" = "fix" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	ID="$(sani_word "$(getp id)")"
+	BR="$(br_dev)"; CPU="$(conduit)"
+	case "$ID" in
+		enable_stp)
+			# DSA bridge stp lives on the network 'device' section for br-lan
+			sect="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='${BR}'.*/\1/p" | head -1)"
+			[ -z "$sect" ] && sect="$(uci show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=device/\1/p' | head -1)"
+			[ -n "$sect" ] && { uci -q set network.$sect.stp='1'; uci -q commit network; }
+			[ -d "/sys/class/net/$BR/bridge" ] && ip link set "$BR" type bridge stp_state 1 2>/dev/null
+			printf '{"ok":true,"msg":"تم تفعيل STP على %s."}\n' "$BR";;
+		disable_dhcp)
+			uci -q set dhcp.lan.ignore='1'
+			uci -q commit dhcp
+			/etc/init.d/dnsmasq reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم تعطيل خادم DHCP المحلي (وضع AP آمن)."}\n';;
+		set_country_us)
+			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+				uci -q set wireless.$r.country='US'
+			done
+			uci -q commit wireless
+			wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم ضبط الدولة US على كل الراديوهات."}\n';;
+		conduit_up)
+			ip link set "$CPU" up 2>/dev/null
+			printf '{"ok":true,"msg":"تمت محاولة رفع منفذ التوصيل %s."}\n' "$CPU";;
+		readd_bridge_members)
+			# re-add the standard DSA LAN ports to the bridge device section
+			sect="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='${BR}'.*/\1/p" | head -1)"
+			if [ -n "$sect" ]; then
+				for p in lan1 lan2 lan3 lan4; do
+					[ -e "/sys/class/net/$p" ] && uci -q add_list network.$sect.ports="$p"
+				done
+				uci -q commit network
+				/etc/init.d/network reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"تمت إعادة إضافة منافذ LAN إلى الجسر %s."}\n' "$BR"
+			else
+				fail "no_bridge_section"
+			fi;;
+		restart_mesh)
+			wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تمت إعادة تشغيل واجهات اللاسلكي (mesh/WDS)."}\n';;
+		*)
+			fail "unknown_fix";;
+	esac
+	exit 0
+fi
+
+# ============================================================================
+#  op=llm  -- ask a real LLM about the collected diagnostics
+# ============================================================================
+if [ "$OP" = "llm" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+
+	APIKEY="$(sani_key "$(uci -q get kt412.ai.apikey)")"
+	ENDPOINT="$(sani_url "$(uci -q get kt412.ai.endpoint)")"
+	MODEL="$(sani_url "$(uci -q get kt412.ai.model)")"
+	PROVIDER="$(uci -q get kt412.ai.provider | tr -cd 'a-z')"
+	[ -n "$MODEL" ] || MODEL="claude-opus-4-8"
+	[ -n "$PROVIDER" ] || PROVIDER="anthropic"
+
+	if [ -z "$APIKEY" ]; then
+		fail "no_apikey"
+	fi
+	command -v curl >/dev/null 2>&1 || fail "no_curl"
+
+	# the diagnostic JSON is passed in by the view (already collected via op=diag)
+	DIAG="$(getp diag)"
+	[ -n "$DIAG" ] || DIAG='{}'
+	# keep it bounded
+	DIAG="$(printf '%s' "$DIAG" | cut -c1-8000)"
+	DIAG_ESC="$(json_esc "$DIAG")"
+
+	PROMPT="أنت خبير شبكات. هذه نتائج فحص ذاتي من نقطة وصول KT412 (مبدّل DSA، جسر br-lan، منافذ lan1-4 و wan). حلّل النتائج بإيجاز بالعربية: ما المشاكل الفعلية، وما سببها المرجّح، وما الخطوات العملية لإصلاحها (مع ذكر زر الإصلاح بنقرة إن وُجد). النتائج بصيغة JSON: ${DIAG_ESC}"
+	PROMPT_ESC="$(json_esc "$PROMPT")"
+
+	TMPBODY="/tmp/kt412-llm-$$.json"
+	trap 'rm -f "$TMPBODY"' EXIT
+
+	if [ "$PROVIDER" = "openai" ]; then
+		[ -n "$ENDPOINT" ] || ENDPOINT="https://api.openai.com/v1/chat/completions"
+		printf '{"model":"%s","max_tokens":1024,"messages":[{"role":"user","content":"%s"}]}' \
+			"$(json_esc "$MODEL")" "$PROMPT_ESC" > "$TMPBODY"
+		RESP="$(curl -sS --max-time 30 \
+			-H "Content-Type: application/json" \
+			-H "Authorization: Bearer ${APIKEY}" \
+			--data-binary @"$TMPBODY" \
+			"$ENDPOINT" 2>/dev/null)"
+		RC=$?
+		[ $RC -ne 0 ] && fail "network"
+		TEXT="$(printf '%s' "$RESP" | jsonfilter -e '@.choices[0].message.content' 2>/dev/null)"
+		[ -z "$TEXT" ] && TEXT="$(printf '%s' "$RESP" | jsonfilter -e '@.error.message' 2>/dev/null)"
+	else
+		# Anthropic Messages API (default)
+		[ -n "$ENDPOINT" ] || ENDPOINT="https://api.anthropic.com/v1/messages"
+		printf '{"model":"%s","max_tokens":1024,"messages":[{"role":"user","content":"%s"}]}' \
+			"$(json_esc "$MODEL")" "$PROMPT_ESC" > "$TMPBODY"
+		RESP="$(curl -sS --max-time 30 \
+			-H "Content-Type: application/json" \
+			-H "x-api-key: ${APIKEY}" \
+			-H "anthropic-version: 2023-06-01" \
+			--data-binary @"$TMPBODY" \
+			"$ENDPOINT" 2>/dev/null)"
+		RC=$?
+		[ $RC -ne 0 ] && fail "network"
+		TEXT="$(printf '%s' "$RESP" | jsonfilter -e '@.content[0].text' 2>/dev/null)"
+		[ -z "$TEXT" ] && TEXT="$(printf '%s' "$RESP" | jsonfilter -e '@.error.message' 2>/dev/null)"
+	fi
+
+	rm -f "$TMPBODY"; trap - EXIT
+	[ -z "$TEXT" ] && fail "empty_response"
+	printf '{"ok":true,"analysis":"%s"}\n' "$(json_esc "$TEXT")"
+	exit 0
+fi
+
+# ============================================================================
+#  op=getloop / setloop  -- loop prevention + isolation toggles
+# ============================================================================
+if [ "$OP" = "getloop" ]; then
+	BR="$(br_dev)"
+	sect="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='${BR}'.*/\1/p" | head -1)"
+	STP="$(uci -q get network.$sect.stp)"
+	IGMP="$(uci -q get network.$sect.igmp_snooping)"
+	# wireless AP/client isolation: report 1 if ALL ap ifaces have isolate=1
+	ISO_ALL=1; ISO_ANY=0
+	for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.mode='ap'.*/\1/p"); do
+		ISO_ANY=1
+		v="$(uci -q get wireless.$s.isolate)"
+		[ "$v" = "1" ] || ISO_ALL=0
+	done
+	[ "$ISO_ANY" = "0" ] && ISO_ALL=0
+	# per-port isolation: report 1 if all bridge-vlan / bridge ports isolated
+	PISO="$(uci -q get kt412.loop.port_isolate)"
+	printf '{"ok":true,"stp":%s,"igmp_snooping":%s,"ap_isolate":%s,"port_isolate":%s}\n' \
+		"$(sani_onoff "$STP")" "$(sani_onoff "$IGMP")" "$ISO_ALL" "$(sani_onoff "$PISO")"
+	exit 0
+fi
+
+if [ "$OP" = "setloop" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	BR="$(br_dev)"
+	sect="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='${BR}'.*/\1/p" | head -1)"
+	[ -z "$sect" ] && sect="$(uci show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=device/\1/p' | head -1)"
+	[ -n "$sect" ] || fail "no_bridge_section"
+
+	STP="$(sani_onoff "$(getp stp)")"
+	IGMP="$(sani_onoff "$(getp igmp_snooping)")"
+	APISO="$(sani_onoff "$(getp ap_isolate)")"
+	PISO="$(sani_onoff "$(getp port_isolate)")"
+
+	uci -q set network.$sect.stp="$STP"
+	uci -q set network.$sect.igmp_snooping="$IGMP"
+	uci -q commit network
+
+	for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.mode='ap'.*/\1/p"); do
+		uci -q set wireless.$s.isolate="$APISO"
+	done
+	uci -q commit wireless
+
+	# remember per-port isolation intent + apply to bridge ports live
+	uci -q get kt412.loop >/dev/null 2>&1 || { uci -q set kt412.loop='settings'; }
+	uci -q set kt412.loop.port_isolate="$PISO"
+	uci -q commit kt412
+	for p in $(ls /sys/class/net/$BR/brif 2>/dev/null); do
+		ip link set "$p" type bridge_slave isolated "$([ "$PISO" = 1 ] && echo on || echo off)" 2>/dev/null
+	done
+
+	/etc/init.d/network reload >/dev/null 2>&1
+	wifi reload >/dev/null 2>&1
+	printf '{"ok":true,"msg":"تم تطبيق إعدادات منع اللوب والعزل."}\n'
+	exit 0
+fi
+
+# ============================================================================
+#  op=getswitch / setswitch  -- DSA port manager
+# ============================================================================
+if [ "$OP" = "getswitch" ]; then
+	BR="$(br_dev)"
+	FSEP=''
+	printf '{"ok":true,"bridge":"%s","ports":[' "$(json_esc "$BR")"
+	for p in lan1 lan2 lan3 lan4 wan; do
+		[ -e "/sys/class/net/$p" ] || continue
+		OPER="$(cat /sys/class/net/$p/operstate 2>/dev/null)"
+		SPEED="$(cat /sys/class/net/$p/speed 2>/dev/null)"
+		case "$SPEED" in ''|*[!0-9-]*) SPEED=0;; esac
+		DUP="$(cat /sys/class/net/$p/duplex 2>/dev/null)"
+		CARRIER="$(cat /sys/class/net/$p/carrier 2>/dev/null)"
+		# admin up/down from flags
+		ADMIN="up"
+		flags="$(cat /sys/class/net/$p/flags 2>/dev/null)"
+		# in bridge?
+		INBR=0; [ -e "/sys/class/net/$BR/brif/$p" ] && INBR=1
+		[ -n "$FSEP" ] && printf ','
+		printf '{"name":"%s","oper":"%s","carrier":%s,"speed":%s,"duplex":"%s","in_bridge":%s}' \
+			"$p" "${OPER:-unknown}" "$([ "$CARRIER" = 1 ] && echo 1 || echo 0)" \
+			"${SPEED:-0}" "${DUP:-unknown}" "$INBR"
+		FSEP=1
+	done
+	printf ']}\n'
+	exit 0
+fi
+
+if [ "$OP" = "setswitch" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	BR="$(br_dev)"
+	PORT="$(sani_word "$(getp port)")"
+	ACTION="$(getp action | tr -cd 'a-z_')"
+	# only the known DSA ports are addressable
+	case "$PORT" in lan1|lan2|lan3|lan4|wan) :;; *) fail "bad_port";; esac
+	[ -e "/sys/class/net/$PORT" ] || fail "no_such_port"
+
+	sect="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)\.name='${BR}'.*/\1/p" | head -1)"
+
+	case "$ACTION" in
+		enable)
+			ip link set "$PORT" up 2>/dev/null
+			printf '{"ok":true,"msg":"تم تفعيل المنفذ %s."}\n' "$PORT";;
+		disable)
+			# never let the operator down the conduit; ports here are leaf ports only
+			ip link set "$PORT" down 2>/dev/null
+			printf '{"ok":true,"msg":"تم تعطيل المنفذ %s."}\n' "$PORT";;
+		add_bridge)
+			[ -n "$sect" ] || fail "no_bridge_section"
+			uci -q del_list network.$sect.ports="$PORT" 2>/dev/null
+			uci -q add_list network.$sect.ports="$PORT"
+			uci -q commit network
+			/etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تمت إضافة %s إلى الجسر %s."}\n' "$PORT" "$BR";;
+		del_bridge)
+			[ -n "$sect" ] || fail "no_bridge_section"
+			uci -q del_list network.$sect.ports="$PORT"
+			uci -q commit network
+			/etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تمت إزالة %s من الجسر %s."}\n' "$PORT" "$BR";;
+		set_vlan)
+			VID="$(sani_int "$(getp vlan)")"
+			case "$VID" in ''|0) fail "bad_vlan";; esac
+			[ "$VID" -ge 1 ] && [ "$VID" -le 4094 ] || fail "bad_vlan"
+			# DSA bridge-vlan: tag this port on the given VLAN id
+			bvs="kt412_${PORT}_v${VID}"
+			uci -q set network.$bvs='bridge-vlan'
+			uci -q set network.$bvs.device="$BR"
+			uci -q set network.$bvs.vlan="$VID"
+			uci -q del_list network.$bvs.ports="$PORT"
+			uci -q add_list network.$bvs.ports="$PORT"
+			uci -q commit network
+			/etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم ضبط VLAN %s على المنفذ %s."}\n' "$VID" "$PORT";;
+		*)
+			fail "unknown_action";;
+	esac
+	exit 0
+fi
+
+fail "unknown_op"

@@ -1,0 +1,35 @@
+{
+	"admin/mkapp/ai": {
+		"title": "المساعد الذكي",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "kt412/ai"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-diag" ]
+		}
+	},
+	"admin/mkapp/loopguard": {
+		"title": "مكافح اللوب",
+		"order": 11,
+		"action": {
+			"type": "view",
+			"path": "kt412/loopguard"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-diag" ]
+		}
+	},
+	"admin/mkapp/switchmgr": {
+		"title": "التحكم بالمنافذ",
+		"order": 12,
+		"action": {
+			"type": "view",
+			"path": "kt412/switchmgr"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-diag" ]
+		}
+	}
+}

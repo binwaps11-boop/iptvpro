@@ -1013,14 +1013,17 @@ case "$OP" in
 					name="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/:.*//')"
 					case "$name" in lo|''|Inter-*|*face*) continue;; esac
 					rest="${line#*:}"
-					rx="$(printf '%s' "$rest" | awk '{print $1+0}')"
-					tx="$(printf '%s' "$rest" | awk '{print $9+0}')"
+					# /proc/net/dev RX cols 1-8: bytes pkts errs drop ...; TX cols 9-16: bytes pkts errs drop ...
+					set -- $(printf '%s' "$rest" | awk '{print $1+0, $3+0, $4+0, $9+0, $11+0, $12+0}')
+					rx="${1:-0}"; rxe="${2:-0}"; rxd="${3:-0}"; tx="${4:-0}"; txe="${5:-0}"; txd="${6:-0}"
 					[ "$first" -eq 1 ] || out="$out,"; first=0
-					out="$out$(printf '{"if":"%s","rx":%s,"tx":%s}' "$(json_esc "$name")" "${rx:-0}" "${tx:-0}")"
+					out="$out$(printf '{"if":"%s","rx":%s,"tx":%s,"rx_err":%s,"rx_drop":%s,"tx_err":%s,"tx_drop":%s}' "$(json_esc "$name")" "$rx" "$tx" "$rxe" "$rxd" "$txe" "$txd")"
 					;;
 			esac
 		done < /proc/net/dev
-		printf '{"ok":true,"ts":%s,"ifaces":[%s]}\n' "$(date +%s)" "$out";;
+		# best-effort brown-out / under-voltage signature from the kernel ring buffer
+		uv=0; dmesg 2>/dev/null | grep -qiE 'under.?volt|brownout|brown-out' && uv=1
+		printf '{"ok":true,"ts":%s,"undervolt":%s,"ifaces":[%s]}\n' "$(date +%s)" "$uv" "$out";;
 	system)
 		host="$(uci -q get system.@system[0].hostname)"; tz="$(uci -q get system.@system[0].timezone)"
 		now="$(date '+%Y-%m-%d %H:%M:%S')"

@@ -1,0 +1,23 @@
+{
+	"admin/mkapp": {
+		"title": "أدوات MK",
+		"order": 1,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-dash" ]
+		}
+	},
+	"admin/mkapp/dashboard": {
+		"title": "اللوحة الرئيسية",
+		"order": 1,
+		"action": {
+			"type": "view",
+			"path": "kt412/dashboard"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-dash" ]
+		}
+	}
+}

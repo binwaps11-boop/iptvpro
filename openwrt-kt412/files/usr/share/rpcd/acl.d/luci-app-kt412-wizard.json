@@ -1,0 +1,20 @@
+{
+	"luci-app-kt412-wizard": {
+		"description": "Grant access to the KT412 Quick Config Wizard (AP/Mesh/WDS/PPPoE/VLAN)",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"network.wireless": [ "status" ],
+				"network.interface": [ "dump" ],
+				"system": [ "info", "board" ]
+			},
+			"uci": [ "wireless", "network", "dhcp", "firewall", "system" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			},
+			"uci": [ "wireless", "network", "dhcp", "firewall", "system" ]
+		}
+	}
+}

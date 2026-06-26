@@ -176,7 +176,14 @@ jobs:
           # single unified LuCI UI (themed + Smart AP menu) ships in the image.
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/usr/." ./files/usr/
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/uci-defaults/40-kt412-luci-theme" ./files/etc/uci-defaults/40-kt412-luci-theme
-          chmod 0755 files/etc/uci-defaults/40-kt412-luci-theme || true
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/uci-defaults/41-kt412-mk-theme" ./files/etc/uci-defaults/41-kt412-mk-theme
+          chmod 0755 files/etc/uci-defaults/40-kt412-luci-theme files/etc/uci-defaults/41-kt412-mk-theme || true
+          # Ship ONLY the kt412 uci config (AI endpoint/key + loop settings) from files/etc/config.
+          # Do NOT copy the other files/etc/config/* there (network/wireless/dhcp/... are the
+          # non-DSA swconfig variant and would break this DSA image).
+          mkdir -p ./files/etc/config
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/config/kt412" ./files/etc/config/kt412
+          echo "MK files: $(ls files/etc/uci-defaults/4* files/etc/config/kt412 2>/dev/null | wc -l) extra etc files; views: $(ls files/www/luci-static/resources/view/kt412/*.js 2>/dev/null | wc -l)"
           # Capture the ACTUAL board DTS (PR #21837 version) into the image + log so the
           # qca8k switch/ports/mdio nodes can be reviewed precisely before any DTS edit.
           mkdir -p files/etc
@@ -289,14 +296,20 @@ jobs:
           # 3) LuCI re-skin (theme on every page) shipped + import wired at boot
           test -s files/www/luci-static/bootstrap/kt412-theme.css && echo "LUCI THEME CSS INCLUDED" || { echo "FATAL: kt412 LuCI theme css missing"; exit 1; }
           grep -q 'kt412-theme.css' files/etc/uci-defaults/40-kt412-luci-theme && echo "LUCI THEME IMPORT WIRED INCLUDED" || { echo "FATAL: theme @import uci-default missing"; exit 1; }
-          # 4) Smart AP LuCI app: menu.d + acl.d + the 3 client views (no power page)
-          test -s files/usr/share/luci/menu.d/luci-app-kt412.json && echo "LUCI MENU.D INCLUDED" || { echo "FATAL: kt412 menu.d missing"; exit 1; }
-          test -s files/usr/share/rpcd/acl.d/luci-app-kt412.json && echo "LUCI ACL.D INCLUDED" || { echo "FATAL: kt412 acl.d missing"; exit 1; }
-          for V in devices quick status; do
-            test -s "files/www/luci-static/resources/view/kt412/$V.js" && echo "LUCI VIEW INCLUDED: $V" || { echo "FATAL: kt412 view $V.js missing"; exit 1; }
+          # 4) MK APP: native in-LuCI views + menus + backends + uci config (one panel, no external server)
+          for M in luci-app-kt412 luci-app-kt412-dash luci-app-kt412-tools luci-app-kt412-diag luci-app-kt412-wizard; do
+            test -s "files/usr/share/luci/menu.d/$M.json" && echo "LUCI MENU.D INCLUDED: $M" || { echo "FATAL: menu.d $M missing"; exit 1; }
+            test -s "files/usr/share/rpcd/acl.d/$M.json" && echo "LUCI ACL.D INCLUDED: $M" || { echo "FATAL: acl.d $M missing"; exit 1; }
           done
-          # no duplicate custom power page (txpower lives only in LuCI Wireless)
-          [ ! -e files/www/luci-static/resources/view/kt412/power.js ] && echo "SINGLE-UI: no duplicate custom power page OK" || { echo "FATAL: custom power page must be removed (use LuCI Wireless)"; exit 1; }
+          for V in dashboard devices specs power nettools ai loopguard switchmgr wizard; do
+            test -s "files/www/luci-static/resources/view/kt412/$V.js" && echo "MK VIEW INCLUDED: $V" || { echo "FATAL: MK view $V.js missing"; exit 1; }
+          done
+          for B in kt412 kt412-tools kt412-diag kt412-wizard; do
+            test -s "files/www/cgi-bin/$B" && echo "MK BACKEND INCLUDED: $B" || { echo "FATAL: MK backend $B missing"; exit 1; }
+          done
+          test -s files/etc/config/kt412 && echo "MK UCI CONFIG (AI/loop) INCLUDED" || { echo "FATAL: etc/config/kt412 missing"; exit 1; }
+          test -s files/www/luci-static/kt412-mk/theme-mk.css && echo "MK THEME CSS INCLUDED" || { echo "FATAL: theme-mk.css missing"; exit 1; }
+          grep -q 'theme-mk.css' files/etc/uci-defaults/41-kt412-mk-theme && echo "MK THEME IMPORT WIRED" || { echo "FATAL: theme-mk @import uci-default missing"; exit 1; }
           # 5) backend (reused as the data source for the views) still complete
           g 'op=.\?ifaces\|ifaces)' "$C" "BACKEND INTERFACES INCLUDED"
           g 'dns_set'               "$C" "BACKEND DHCP DNS INCLUDED"
