@@ -69,7 +69,12 @@ for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 				    modprobe ath10k_core 2>/dev/null; modprobe ath10k_pci 2>/dev/null;;
 				*)  rmmod ath9k 2>/dev/null; sleep 2; modprobe ath9k 2>/dev/null;;
 			esac
-			sleep 3; wifi config >/dev/null 2>&1; wifi reload 2>/dev/null
+			# Apply the EXISTING /etc/config/wireless (configured SSID/HT/encryption).
+			# Do NOT `wifi config`: after a module reload the phy can still be mid-
+			# registration, and `wifi config` would regenerate the config from detected
+			# phys and APPEND a default section -> the radio comes up as the stray
+			# "OpenWrt" AP (open, "HT Mode: null") instead of our configured "KT412".
+			sleep 3; ubus call network.reload >/dev/null 2>&1; wifi reload 2>/dev/null
 			nifc="$(ifc_of "$r")"
 			[ -n "$nifc" ] && [ -e "/sys/class/net/$nifc" ] && echo 0 > "$fcf"   # reset only if it came back
 		}

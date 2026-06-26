@@ -197,6 +197,14 @@ jobs:
           chmod +x files/etc/uci-defaults/* || true
           chmod +x files/etc/hotplug.d/ieee80211/* files/etc/hotplug.d/net/* 2>/dev/null || true
           chmod 0755 files/etc/init.d/kt412-wifi-early 2>/dev/null || true
+          # EARLY WiFi load (SAFE: load order/timing only; no DTS/ART/caldata touched):
+          #   - /lib/preinit/95_kt412_load_wifi modprobes the wifi stack in PREINIT, the
+          #     earliest brick-safe stage (rootfs+ART mtd already mounted) so ath9k's
+          #     FIRST wmac probe sees caldata (~5-12s) instead of deferring to ~27s.
+          #   - /etc/modules-boot.d/00-kt412-wifi force-loads it in the boot-critical set
+          #     (before the normal /etc/modules.d kmodloader pass) as a second early path.
+          chmod 0755 files/lib/preinit/95_kt412_load_wifi 2>/dev/null || true
+          chmod 0644 files/etc/modules-boot.d/00-kt412-wifi 2>/dev/null || true
           chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
           if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
@@ -259,6 +267,38 @@ jobs:
           grep -q 'kt412-wifi-early enable' files/etc/uci-defaults/99-kt412-dsa && echo "GATE: early wifi init enabled at boot OK" || { echo "FATAL: early wifi init not enabled"; exit 1; }
           # (c) watchdog escalates a MISSING phy straight to module reload (strike 1)
           grep -q 'PHY ABSENT' files/root/smartap-watchdog.sh && echo "GATE: watchdog phy-absent fast path OK" || { echo "FATAL: watchdog phy-absent fast path missing"; exit 1; }
+          # (c2) APPLY-CONFIGURED-NOT-FALLBACK: after a late phy/module reload the bring-up
+          #      path MUST re-read /etc/config/wireless (`wifi reload`) so the CONFIGURED
+          #      "KT412"/HT20/open binds — and must NOT run `wifi config` (which regenerates
+          #      from detected phys and appends a stray "OpenWrt"/null-HT default). Verified
+          #      on-device: bare `wifi up`/`wifi config` after a late reload yielded ESSID
+          #      "OpenWrt", HT Mode null. Gate on OPERATIVE code (comments stripped).
+          for wf in files/etc/init.d/kt412-wifi-early files/etc/hotplug.d/ieee80211/10-kt412-wifi-ready files/root/smartap-watchdog.sh; do
+            code="$(sed -E 's/#.*$//' "$wf")"
+            echo "$code" | grep -q 'wifi reload' && echo "GATE: $wf applies configured (wifi reload) OK" || { echo "FATAL: $wf missing 'wifi reload' (would not bind configured SSID)"; exit 1; }
+            if echo "$code" | grep -q 'wifi config'; then
+              # only allowed inside the first-boot 'config missing' regen guard in 99-kt412-dsa
+              echo "FATAL: $wf still calls 'wifi config' on the bring-up path (causes stray OpenWrt default)"; exit 1
+            else
+              echo "GATE: $wf has NO 'wifi config' on bring-up path OK"
+            fi
+          done
+          # (d) EARLY wifi load present (SAFE load-order only; pushes 1st ath9k probe to ~preinit).
+          #     These shave 2.4G bring-up from minutes to ~10-25s WITHOUT any reload in the good case.
+          test -s files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: modules-boot.d early wifi load present OK" || { echo "FATAL: modules-boot.d early wifi load missing"; exit 1; }
+          grep -q '^ath9k' files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: modules-boot.d loads ath9k OK" || { echo "FATAL: modules-boot.d does not load ath9k"; exit 1; }
+          grep -q 'nohwcrypt=1' files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: early load keeps nohwcrypt=1 OK" || { echo "FATAL: early load lost nohwcrypt option"; exit 1; }
+          test -x files/lib/preinit/95_kt412_load_wifi && echo "GATE: preinit early wifi load present+exec OK" || { echo "FATAL: preinit early wifi load missing/not executable"; exit 1; }
+          grep -q 'modprobe' files/lib/preinit/95_kt412_load_wifi && echo "GATE: preinit modprobes wifi OK" || { echo "FATAL: preinit early load does not modprobe"; exit 1; }
+          # SAFETY: the early-load paths must NEVER touch caldata/ART/nvmem (load-order only).
+          # Check OPERATIVE code only — strip '#' comments first (the files explain in comments
+          # exactly what they must NOT do, which is fine; only real commands must be clean).
+          if sed -E 's/#.*$//' files/lib/preinit/95_kt412_load_wifi files/etc/modules-boot.d/00-kt412-wifi \
+               | grep -qiE 'nvmem|caldata|/dev/mtd|eeprom|art'; then
+            echo "FATAL: early-load CODE references caldata/ART/nvmem — must be load-order only"; exit 1
+          else
+            echo "GATE: early-load is load-order ONLY (no caldata/ART/nvmem in code) OK"
+          fi
           echo "=== FEATURE INCLUSION GATE (must all pass) ==="
           C=files/www/cgi-bin/kt412
           S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"

@@ -14,7 +14,10 @@
 # iface — reloading a radio's module if its phy is missing, or just `wifi up` if
 # the phy is present but the iface isn't. Idempotent; stops as soon as both bands
 # are up; never touches a healthy radio.
-START=97
+# START early (just after netifd=20) so the mtd-gated bring-up loop begins ASAP and
+# is ready the moment the ART mtd is readable. The work is backgrounded and polls, so
+# starting early never blocks boot; ubus/netifd calls inside simply retry until up.
+START=21
 USE_PROCD=1
 
 boot() { ( _kt412_wifi_robust ) >/dev/null 2>&1 & }
@@ -54,10 +57,35 @@ _reload_band() {
 	esac
 }
 
+# Apply the EXISTING /etc/config/wireless to a radio so the CONFIGURED interface
+# (our "KT412" SSID, HT20, open) binds — never a fallback "OpenWrt"/null-HT default.
+# Order: reload netifd's config view, then `wifi reload <radio>` (re-reads the config
+# file and starts the configured ifaces). Targeted ubus up + a final bare `wifi up`
+# are only belt-and-suspenders AFTER the config has been (re)read. NO `wifi config`.
+_apply_config() {
+	r="$1"
+	ubus call network.reload >/dev/null 2>&1            # netifd re-reads network/wireless
+	if   wifi reload "$r"        >/dev/null 2>&1; then :  # preferred: re-read + bring up configured ifaces
+	elif wifi reload            >/dev/null 2>&1; then :  # some builds: reload takes no arg
+	elif /sbin/wifi reload_legacy >/dev/null 2>&1; then : # legacy fallback
+	fi
+	# Targeted bring-up of THIS radio (now that config is reloaded) + last-resort kick.
+	ubus call network.wireless up "{\"device\":\"$r\"}" >/dev/null 2>&1
+	wifi up "$r" >/dev/null 2>&1
+}
+
 _kt412_wifi_robust() {
-	# 1) wait (max 30s) for the ART mtd so the FIRST reload already has caldata
-	w=0; while [ "$w" -lt 30 ]; do _art_ready && break; w=$((w+2)); sleep 2; done
-	_log "ART ready after ${w}s; starting WiFi bring-up"
+	# 1) Gate PURELY on the ART mtd becoming readable — no fixed pre-wait. The instant
+	#    caldata is available we may act, so the worst case is ~mtd-ready + a few sec
+	#    (not a fixed >=22-30s floor). Poll fast (0.5s) up to a 60s safety ceiling so a
+	#    pathological boot still can't hang here. (preinit normally already loaded the
+	#    stack and registered phy1, in which case the loop below just does `wifi up`.)
+	w=0
+	while [ "$w" -lt 120 ]; do
+		_art_ready && break
+		w=$((w+1)); sleep 0.5 2>/dev/null || sleep 1
+	done
+	_log "ART readable after ~$((w/2))s; starting WiFi bring-up"
 
 	# 2) per-band reload budget (avoid thrashing): each band reloaded at most twice
 	r2g=0; r5g=0
@@ -74,11 +102,21 @@ _kt412_wifi_robust() {
 					2g) [ "$r2g" -lt 2 ] && { _reload_band 2g; r2g=$((r2g+1)); sleep 3; } ;;
 					5g) [ "$r5g" -lt 2 ] && { _reload_band 5g; r5g=$((r5g+1)); sleep 3; } ;;
 				esac
-				wifi config >/dev/null 2>&1
+				# NOTE: deliberately NO `wifi config` here. `wifi config` regenerates
+				# /etc/config/wireless from detected phys and, when a radio's phy is not
+				# present at that instant (exactly our late-registration case), APPENDS a
+				# fresh DEFAULT section -> the device then comes up as the stray "OpenWrt"
+				# AP, open, "HT Mode: null" instead of our configured "KT412"/HT20. Our
+				# static /etc/config/wireless already has both radios, so we never need it.
 			fi
-			# phy now there (or already was) but iface missing -> bring it up
-			ubus call network.wireless up "{\"device\":\"$r\"}" >/dev/null 2>&1
-			wifi up "$r" >/dev/null 2>&1
+			# phy now there (or already was) but iface missing -> APPLY THE EXISTING
+			# CONFIG (not a fallback). After a late phy add / module reload, netifd's
+			# view is stale, so a bare `wifi up` can bring the radio up with a default
+			# template. Re-read the real config first so the CONFIGURED SSID/HT20/
+			# encryption bind: reload netifd's config, then `wifi reload <radio>` (which
+			# re-reads /etc/config/wireless and starts the configured ifaces). Keep a
+			# `wifi up` as a last-resort kick only AFTER the config has been reloaded.
+			_apply_config "$r"
 		done
 		[ "$need" = 0 ] && { _log "both bands up at ${t}s"; break; }
 		t=$((t+4)); sleep 4

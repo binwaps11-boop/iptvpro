@@ -36,9 +36,17 @@ _run() {
     [ -n "$ifc" ] && [ -e "/sys/class/net/$ifc" ] && continue
     # AP iface missing: this radio's phy is ready now (we got its add event, or a
     # sibling's) but netifd hasn't (re)started it. Force a clean retry-reset.
-    logger -t kt412-wifiready "radio $r AP iface missing at ${UP}s -> force bring-up"
-    wifi config >/dev/null 2>&1                 # ensure section exists (no-op for us)
+    logger -t kt412-wifiready "radio $r AP iface missing at ${UP}s -> apply configured bring-up"
+    # IMPORTANT: do NOT `wifi config` here. When this radio's phy registered late,
+    # `wifi config` regenerates /etc/config/wireless from currently-detected phys and
+    # APPENDS a default section -> the radio comes up as the stray "OpenWrt" AP (open,
+    # "HT Mode: null") instead of our configured "KT412"/HT20. Our static config
+    # already has both radios, so we apply the EXISTING config instead of regenerating.
+    ubus call network.reload >/dev/null 2>&1                     # netifd re-reads the real config
     ubus call network.wireless down "{\"device\":\"$r\"}" >/dev/null 2>&1
+    if   wifi reload "$r" >/dev/null 2>&1; then :                # preferred: re-read config + start configured ifaces
+    elif wifi reload      >/dev/null 2>&1; then :
+    fi
     ubus call network.wireless up   "{\"device\":\"$r\"}" >/dev/null 2>&1
     # belt-and-suspenders: if the targeted ubus call isn't honoured, kick netifd
     wifi up "$r" >/dev/null 2>&1

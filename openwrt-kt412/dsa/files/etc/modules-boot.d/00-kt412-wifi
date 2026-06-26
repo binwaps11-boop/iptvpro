@@ -1,0 +1,25 @@
+# KT412 EARLY WiFi load (SAFE: load order/timing only — never touches DTS/ART/caldata).
+#
+# WHY: stock OpenWrt only loads ath9k/ath10k in the LATE kmodloader pass over
+# /etc/modules.d/* (~27s on this box). ath9k's AHB wmac probe then DEFERS and is
+# never retried, so phy1 (2.4G) doesn't appear until the watchdog reloads ath9k
+# minutes later. modules-boot.d is the BOOT-CRITICAL set: procd's /etc/init.d/boot
+# loads it BEFORE the normal /etc/modules.d pass, so the wifi stack is requested
+# much earlier — the first wmac probe happens while the ART mtd (caldata) is already
+# mounted (rootfs is up before this stage), so it succeeds instead of deferring.
+#
+# This does NOT remove the normal load: it is purely additive/earlier. kmodloader
+# is idempotent — already-loaded modules are skipped in the later /etc/modules.d pass.
+#
+# The 'options' line must live here too: kmodloader applies module options from the
+# *.d file that first loads the module, and the 2.4G HW-crypto race fix (nohwcrypt=1,
+# normally in /etc/modules.d/ath9k) must still be in effect for this early load.
+options ath9k nohwcrypt=1
+
+# Dependency order is auto-resolved by kmodloader (cfg80211 -> mac80211 -> ath -> driver),
+# but list deps first for determinism. ath10k_pci pulls ath10k_core; ath9k pulls ath.
+cfg80211
+mac80211
+ath
+ath9k
+ath10k_pci
