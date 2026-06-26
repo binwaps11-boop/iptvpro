@@ -145,9 +145,9 @@ function shell(){
 	+ '    </div>'
 	+ '  </div>'
 	+ '  <div class="mk-grid mk-cols-3" id="mk-gauges">'
-	+ '    <div class="mk-card">'+gauge('cpu','المعالج CPU',0,'—')+'</div>'
-	+ '    <div class="mk-card">'+gauge('ram','الذاكرة RAM',0,'—')+'</div>'
-	+ '    <div class="mk-card">'+gauge('disk','التخزين Storage',0,'—')+'</div>'
+	+ '    <div class="mk-card">'+gauge('cpu','استخدام المعالج CPU',0,'—')+'</div>'
+	+ '    <div class="mk-card">'+gauge('ram','استخدام الذاكرة RAM',0,'—')+'</div>'
+	+ '    <div class="mk-card">'+gauge('disk','استخدام التخزين Storage',0,'—')+'</div>'
 	+ '  </div>'
 	+ '  <div class="mk-grid mk-cols-2" style="margin-top:16px">'
 	+ '    <div class="mk-card">'
@@ -287,7 +287,11 @@ return view.extend({
 		root.innerHTML = shell();
 		wireToggle(root);
 		refresh(root);
-		poll.add(function(){ return refresh(root); }, 4);
+		// Poll every 10s (was 4s). On the single-core QCA9558, each refresh forks
+		// several CGI subprocesses; 4s polling was itself a major CPU consumer that
+		// inflated the very CPU-usage gauge. 10s keeps the dashboard live while cutting
+		// its own CPU footprint ~2.5x for a much lighter idle load.
+		poll.add(function(){ return refresh(root); }, 10);
 		return root;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null

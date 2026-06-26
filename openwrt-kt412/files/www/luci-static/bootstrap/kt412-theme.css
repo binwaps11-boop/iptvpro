@@ -288,3 +288,86 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   :root:not([data-mk-skin="off"]) select,
   :root:not([data-mk-skin="off"]) textarea{background:rgba(15,23,42,0.6)!important;color:var(--kt-txt)!important}
 }
+
+/* ============================================================================
+   wizard redesign  (KT412 Quick Config / إعدادات سريعة)
+   Append-only, all classes prefixed kt-wz- to avoid collisions. Reuses the
+   existing :root obsidian+neon palette vars (no new hardcoded brand colours).
+   ============================================================================ */
+
+/* ---- top header banner ---- */
+.kt-wz-hero{position:relative;overflow:hidden;border-radius:16px;padding:22px 22px;margin-bottom:20px;
+  background:linear-gradient(135deg,rgba(6,182,212,.16),rgba(139,92,246,.14) 60%,rgba(15,23,42,.2));
+  border:1px solid var(--kt-stroke);box-shadow:var(--kt-shadow);
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.kt-wz-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:var(--kt-grad);opacity:.95}
+.kt-wz-hero::after{content:"";position:absolute;width:240px;height:240px;border-radius:50%;right:-70px;top:-120px;
+  background:radial-gradient(circle,rgba(6,182,212,.25),transparent 70%);pointer-events:none}
+.kt-wz-hero-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.kt-wz-hero-ic{width:58px;height:58px;flex:0 0 58px;border-radius:16px;display:grid;place-items:center;font-size:28px;
+  background:var(--kt-grad);box-shadow:0 8px 22px rgba(6,182,212,.4)}
+.kt-wz-hero-txt{flex:1;min-width:200px}
+.kt-wz-hero-txt h2{margin:0 0 4px!important;font-size:21px;font-weight:800;letter-spacing:.2px}
+.kt-wz-hero-txt p{margin:0;font-size:13px;color:var(--kt-txt2);line-height:1.7}
+.kt-wz-hero-chip{font-size:11.5px;font-weight:700;padding:5px 12px;border-radius:999px;white-space:nowrap;
+  background:rgba(34,197,94,.15);color:var(--kt-ok);border:1px solid rgba(34,197,94,.4)}
+
+/* ---- premium card head (icon tile + title + subtitle) ---- */
+.kt-wz-head{display:flex;align-items:flex-start;gap:13px;margin-bottom:16px;padding-bottom:14px;
+  border-bottom:1px solid var(--kt-stroke)}
+.kt-wz-ic{width:44px;height:44px;flex:0 0 44px;border-radius:13px;display:grid;place-items:center;font-size:22px;
+  background:var(--kt-accent-soft);border:1px solid var(--kt-stroke);box-shadow:inset 0 0 0 1px rgba(6,182,212,.12)}
+.kt-wz-ic.v{background:rgba(139,92,246,.14)}
+.kt-wz-ic.g{background:rgba(34,197,94,.14)}
+.kt-wz-htxt{flex:1;min-width:0}
+.kt-wz-htxt .t{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:15px;font-weight:800;color:var(--kt-txt)}
+.kt-wz-htxt .s{margin-top:3px;font-size:12px;color:var(--kt-muted);line-height:1.6}
+.kt-wz-card{padding:1.15rem 1.25rem}
+
+/* ---- segmented pill selector wrap (styled native select look) ---- */
+.kt-wz-seg{position:relative;display:flex;align-items:center}
+.kt-wz-seg select{appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  width:100%;padding:10px 14px;padding-inline-start:34px;font-weight:600;cursor:pointer;
+  background:rgba(15,23,42,.6)!important;border:1px solid var(--kt-stroke)!important;border-radius:10px!important;
+  color:var(--kt-txt)!important;transition:all .25s ease}
+.kt-wz-seg select:hover{border-color:rgba(6,182,212,.4)!important}
+.kt-wz-seg::after{content:"▾";position:absolute;inset-inline-start:13px;top:50%;transform:translateY(-50%);
+  pointer-events:none;color:var(--kt-accent);font-size:12px}
+
+/* ---- styled txpower slider with live neon bubble ---- */
+.kt-wz-pwr{margin-top:6px;padding:14px 16px;border-radius:13px;
+  background:linear-gradient(135deg,rgba(6,182,212,.06),rgba(15,23,42,.25));
+  border:1px solid var(--kt-stroke)}
+.kt-wz-pwr-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:11px}
+.kt-wz-pwr-top .lbl{font-size:12.5px;font-weight:700;color:var(--kt-txt2);display:flex;align-items:center;gap:7px}
+.kt-wz-bubble{position:relative;font-weight:800;font-size:15px;color:#fff;padding:5px 13px;border-radius:999px;
+  background:var(--kt-grad);box-shadow:0 4px 14px rgba(6,182,212,.5);min-width:74px;text-align:center}
+.kt-wz-scale{display:flex;justify-content:space-between;margin-top:7px;font-size:10.5px;color:var(--kt-muted);font-weight:600}
+
+/* ---- toggle pills (hide ssid / enable radio) ---- */
+.kt-wz-toggles{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.kt-wz-toggle{display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:11px;cursor:pointer;flex:1;min-width:150px;
+  background:var(--kt-card2);border:1px solid var(--kt-stroke);transition:all .25s ease}
+.kt-wz-toggle:hover{border-color:rgba(6,182,212,.35);background:var(--kt-accent-soft)}
+.kt-wz-toggle span.lab{font-size:12.5px;font-weight:600;color:var(--kt-txt2)}
+.kt-wz-toggle input[type=checkbox]{width:18px;height:18px;accent-color:var(--kt-accent);cursor:pointer;flex:0 0 18px;margin:0}
+.kt-wz-toggle .sp{flex:1}
+
+/* ---- card footer action row (separated, right-aligned in RTL) ---- */
+.kt-wz-foot{display:flex;align-items:center;gap:12px;margin-top:18px;padding-top:14px;
+  border-top:1px solid var(--kt-stroke);flex-wrap:wrap}
+.kt-wz-foot .kt-btn{min-width:150px}
+.kt-wz-foot .fhint{flex:1;font-size:11.5px;color:var(--kt-muted);min-width:120px}
+
+/* ---- subtle staggered entrance ---- */
+@keyframes kt-wz-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.kt-wz-anim{animation:kt-wz-in .45s ease both}
+
+/* ---- mobile tuning specific to the wizard ---- */
+@media(max-width:560px){
+  .kt-wz-hero{padding:18px 16px}
+  .kt-wz-hero-txt h2{font-size:18px}
+  .kt-wz-card{padding:1rem}
+  .kt-wz-foot .kt-btn{width:100%;min-width:0}
+  .kt-wz-toggle{min-width:0}
+}

@@ -56,6 +56,30 @@ function is5g(band){ return String(band||'').toLowerCase().indexOf('5') >= 0; }
 function bandTitle(band){ return is5g(band) ? _('📡 واي‑فاي 5G') : _('📶 واي‑فاي 2.4G'); }
 function bandShort(band){ return is5g(band) ? '5G' : '2.4G'; }
 
+/* ---- premium presentation helpers (visual only) ---- */
+/* polished card header: icon tile + bold title (+ optional inline node) + muted subtitle */
+function cardHead(icon, title, subtitle, tone, titleExtra){
+	var tline = [ E('span', {}, title) ];
+	if (titleExtra) tline.push(titleExtra);
+	return E('div', { class:'kt-wz-head' }, [
+		E('div', { class:'kt-wz-ic' + (tone ? ' ' + tone : '') }, icon),
+		E('div', { class:'kt-wz-htxt' }, [
+			E('div', { class:'t' }, tline),
+			subtitle ? E('div', { class:'s' }, subtitle) : ''
+		])
+	]);
+}
+/* labelled field */
+function fld(lbl, node){ return E('div', { class:'kt-field' }, [ E('label', {}, lbl), node ]); }
+/* wrap a native <select> in the segmented-pill chrome (purely cosmetic) */
+function segField(lbl, sel){ return E('div', { class:'kt-field' }, [ E('label', {}, lbl), E('div', { class:'kt-wz-seg' }, sel) ]); }
+/* a styled toggle pill carrying an existing checkbox + label (+ optional trailing badge) */
+function togglePill(cb, label, trailing){
+	var kids = [ cb, E('span', { class:'lab' }, label) ];
+	if (trailing){ kids.push(E('span', { class:'sp' })); kids.push(trailing); }
+	return E('label', { class:'kt-wz-toggle' }, kids);
+}
+
 /* band-appropriate channel <option> lists (incl. 'auto') */
 function chanOptions(band, cur){
 	var list = is5g(band) ? [36,40,44,48,149,153,157,161] : [1,2,3,4,5,6,7,8,9,10,11];
@@ -110,8 +134,8 @@ function radioCard(r){
 
 	var tpInit = parseInt(r.txpower, 10); if (isNaN(tpInit)) tpInit = 20;
 	if (tpInit < 0) tpInit = 0; if (tpInit > 30) tpInit = 30;
-	var pwval = E('span', { class:'kt-pwval kt-badge ok' }, tpInit + ' dBm');
-	var rng   = E('input', { type:'range', class:'kt-range', min:'0', max:'30', step:'1', value:String(tpInit), style:'flex:1' });
+	var pwval = E('span', { class:'kt-wz-bubble' }, tpInit + ' dBm');
+	var rng   = E('input', { type:'range', class:'kt-range', min:'0', max:'30', step:'1', value:String(tpInit) });
 	rng.addEventListener('input', function(){ pwval.textContent = rng.value + ' dBm'; });
 
 	var hidden = E('input', { type:'checkbox' }); hidden.checked = (String(r.hidden) === '1');
@@ -153,32 +177,46 @@ function radioCard(r){
 		});
 	});
 
-	function fld(lbl, node){ return E('div', { class:'kt-field' }, [ E('label', {}, lbl), node ]); }
+	var bandIcon = is5g(r.band) ? '📡' : '📶';
+	var bandSub  = is5g(r.band)
+		? _('نطاق 5 جيجاهرتز — سرعة أعلى ومدى أقصر')
+		: _('نطاق 2.4 جيجاهرتز — تغطية أوسع وتوافق أعلى');
 
-	return E('div', { class:'kt-card' }, [
-		E('h3', {}, bandTitle(r.band) + ' (' + (r.radio||'') + ')'),
+	/* power control: live neon bubble + scale rail */
+	var pwrBlock = E('div', { class:'kt-wz-pwr' }, [
+		E('div', { class:'kt-wz-pwr-top' }, [
+			E('span', { class:'lbl' }, [ E('span', {}, '⚡'), E('span', {}, _('الطاقة (TxPower)')) ]),
+			pwval
+		]),
+		rng,
+		E('div', { class:'kt-wz-scale' }, [ E('span', {}, '0'), E('span', {}, '15'), E('span', {}, '30 dBm') ])
+	]);
+
+	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead(bandIcon, bandTitle(r.band).replace(/^[^\s]+\s/, ''), bandSub + ' · ' + (r.radio||''),
+			is5g(r.band) ? 'v' : '', enBadge),
 		E('div', { class:'kt-grid kt-cols-2' }, [
-			fld(_('الوضع'), modeSel),
+			segField(_('الوضع'), modeSel),
 			fld('SSID', ssid)
 		]),
 		E('div', { class:'kt-grid kt-cols-2' }, [
-			fld(_('التشفير'), secSel),
+			segField(_('التشفير'), secSel),
 			keyWrap
 		]),
 		E('div', { class:'kt-grid kt-cols-3' }, [
-			fld(_('القناة'), chan),
-			fld(_('عرض القناة (HTmode)'), ht),
+			segField(_('القناة'), chan),
+			segField(_('عرض القناة (HTmode)'), ht),
 			fld(_('الدولة'), ctry)
 		]),
-		E('div', { class:'kt-field' }, [
-			E('label', {}, _('الطاقة (TxPower)')),
-			E('div', { class:'kt-row' }, [ rng, pwval ])
+		pwrBlock,
+		E('div', { class:'kt-wz-toggles' }, [
+			togglePill(hidden, _('إخفاء SSID')),
+			togglePill(en, _('تفعيل الراديو'))
 		]),
-		E('div', { class:'kt-row', style:'gap:18px;flex-wrap:wrap;align-items:center' }, [
-			E('label', { class:'kt-row', style:'gap:6px' }, [ hidden, E('span', {}, _('إخفاء SSID')) ]),
-			E('label', { class:'kt-row', style:'gap:6px' }, [ en, E('span', {}, _('تفعيل الراديو')), enBadge ])
-		]),
-		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+		E('div', { class:'kt-wz-foot' }, [
+			E('span', { class:'fhint' }, _('يُطبّق فوراً على هذا الراديو')),
+			btn
+		])
 	]);
 }
 
@@ -231,11 +269,14 @@ function wanCard(curProto){
 		postCall(params).then(function(j){ btn.disabled = false; btn.textContent = lbl; notify(j); });
 	});
 
-	return E('div', { class:'kt-card' }, [
-		E('h3', {}, _('🌐 إعداد WAN / الإنترنت')),
-		E('div', { class:'kt-field' }, [ E('label', {}, _('نوع الاتصال (proto)')), proto ]),
+	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead('🌐', _('إعداد WAN / الإنترنت'), _('اختر نوع اتصالك بالإنترنت — DHCP تلقائي أو PPPoE أو عنوان ثابت'), 'g'),
+		segField(_('نوع الاتصال (proto)'), proto),
 		pppoeBox, staticBox,
-		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+		E('div', { class:'kt-wz-foot' }, [
+			E('span', { class:'fhint' }, _('يُعاد ضبط واجهة WAN فور التطبيق')),
+			btn
+		])
 	]);
 }
 
@@ -255,14 +296,17 @@ function vlanCard(radios){
 			btn.disabled = false; btn.textContent = lbl; notify(j);
 		});
 	});
-	return E('div', { class:'kt-card' }, [
-		E('h3', {}, _('🏷️ ربط SSID بـ VLAN')),
+	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead('🏷️', _('ربط SSID بـ VLAN'), _('اعزل شبكة لاسلكية على VLAN موسوم أو اتركها على LAN'), 'v'),
 		E('div', { class:'kt-grid kt-cols-2' }, [
-			E('div', { class:'kt-field' }, [ E('label', {}, 'SSID'), sel ]),
+			segField('SSID', sel),
 			E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vid ])
 		]),
 		E('div', { class:'kt-note' }, _('فارغ أو 1 = LAN غير موسوم. غير ذلك = VLAN موسوم (2–4094).')),
-		E('div', { class:'kt-row', style:'margin-top:10px' }, [ btn ])
+		E('div', { class:'kt-wz-foot' }, [
+			E('span', { class:'fhint' }, _('يربط الواجهة المحددة بالشبكة المختارة')),
+			btn
+		])
 	]);
 }
 
@@ -274,14 +318,23 @@ return view.extend({
 		var radios = (rad.ok && rad.radios) ? rad.radios : [];
 
 		var box = E('div', { dir:'rtl' }, [
-			E('h2', {}, _('إعدادات سريعة — ضبط الوايرلس والشبكة')),
-			E('div', { class:'kt-sub', style:'margin-bottom:14px' },
-				_('كل بطاقة تُطبّق فوراً عند الضغط على «تطبيق» — لا حاجة للتنقّل بين صفحات الواجهات أو الوايرلس أو VLAN. اضبط الراديو والـ WAN (مع PPPoE) وربط SSID بـ VLAN من مكان واحد.'))
+			E('div', { class:'kt-wz-hero kt-wz-anim' }, [
+				E('div', { class:'kt-wz-hero-row' }, [
+					E('div', { class:'kt-wz-hero-ic' }, '⚙️'),
+					E('div', { class:'kt-wz-hero-txt' }, [
+						E('h2', {}, _('الإعدادات السريعة — ضبط فوري')),
+						E('p', {}, _('كل بطاقة تُطبّق فوراً عند الضغط على «تطبيق» — لا حاجة للتنقّل بين صفحات الواجهات أو الوايرلس أو VLAN. اضبط الراديو والـ WAN (مع PPPoE) وربط SSID بـ VLAN من مكان واحد.'))
+					]),
+					E('span', { class:'kt-wz-hero-chip' }, _('⚡ تطبيق فوري'))
+				])
+			])
 		]);
 
 		if (!radios.length){
-			box.appendChild(E('div', { class:'kt-card' },
-				E('div', { class:'kt-note' }, _('تعذّر قراءة إعدادات الوايرلس'))));
+			box.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+				cardHead('📶', _('الوايرلس'), _('لم يتم العثور على إعدادات راديو'), ''),
+				E('div', { class:'kt-note' }, _('تعذّر قراءة إعدادات الوايرلس'))
+			]));
 		} else {
 			var grid = E('div', { class:'kt-grid kt-cols-2' });
 			radios.forEach(function(r){ grid.appendChild(radioCard(r)); });
