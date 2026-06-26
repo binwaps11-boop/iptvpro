@@ -14,9 +14,38 @@ uci -q commit
 # (192.168.1.1) stays reachable by setting a static IP on your PC, or enable
 # DHCP from the dashboard: الشبكة > LAN > خادم DHCP (زر اختياري).
 uci -q set dhcp.lan.ignore='1'
+# IPv6 on a dumb AP: we do NOT run an IPv6 server here. Instead, with the WAN port
+# bridged into br-lan (below), the upstream router's IPv6 (RA/DHCPv6/NDP) passes
+# THROUGH the bridge to every client natively. odhcpd stays off so it never
+# conflicts with the real router. (To make the device itself route IPv6, switch to
+# Router mode in the wizard.)
 uci -q set dhcp.lan.dhcpv6='disabled'
 uci -q set dhcp.lan.ra='disabled'
 uci -q commit dhcp
+
+# ============================================================================
+# ALL-PORTS-LAN (dumb AP): bridge the WAN port INTO br-lan so the internet uplink
+# can be plugged into ANY of the 5 ports (WAN + LAN1-4) — the WAN port then accepts
+# internet exactly like a LAN port. Also turn OFF bridge multicast snooping so IPv6
+# RA/ND (and mDNS) flow cleanly across the bridge to clients.
+# ============================================================================
+wandev="$(uci -q get network.wan.device 2>/dev/null)"
+[ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname 2>/dev/null)"
+brsec=""; i=0
+while uci -q get network.@device[$i] >/dev/null 2>&1; do
+	[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && { brsec="@device[$i]"; break; }
+	i=$((i+1))
+done
+if [ -n "$brsec" ]; then
+	uci -q set network.$brsec.igmp_snooping='0'      # let IPv6 RA/ND + mDNS pass
+	if [ -n "$wandev" ]; then
+		uci -q del_list network.$brsec.ports="$wandev"
+		uci -q add_list network.$brsec.ports="$wandev"
+		uci -q set network.wan.disabled='1'          # no separate WAN; it's a LAN port now
+		uci -q set network.wan.auto='0'
+	fi
+	uci -q commit network
+fi
 
 # --- custom purple-glass dashboard: make the API CGI executable ---
 chmod 0755 /www/cgi-bin/* 2>/dev/null

@@ -1,80 +1,42 @@
 #!/bin/sh
-# 42-kt412-mac-unique  -- KT412 unique per-interface MAC on first boot.
+# 42-kt412-mac-unique -- KT412: GENUINE (vendor-OUI) MAC addresses.
 #
-# WHY: cloned/template KT412 (DW02-412H) units, and some MikroTik-style images,
-# ship the SAME MAC on multiple interfaces (the classic "duplicate MAC" bug):
-# WAN, LAN bridge, 2.4G and 5G end up identical -> bridge loops, ARP confusion,
-# upstream DHCP handing one lease, random "no internet". This script gives EACH
-# interface a UNIQUE, STABLE, locally-administered MAC derived from the board's
-# base MAC, so no two interfaces ever collide.
+# User wants the device MACs to be the genuine "وكالة" ones, NOT locally-administered
+# (02:..) generated addresses. So:
+#   * WIRED ports (eth0 / wan / lan1-4 / br-lan): left ENTIRELY on their FACTORY MACs
+#     (DSA/board.d already assigns the real vendor MACs from the label/ART).
+#   * WIRELESS vifs: ath9k/ath10k can come up on a default template MAC
+#     (00:02:03:04:05:06) or collide, so we pin them to distinct addresses that keep
+#     the unit's GENUINE OUI (first 5 octets of the real eth0 MAC) and the genuine
+#     low-byte pattern -- for this unit (eth0 ...:7a) that restores 2.4G ...:7b and
+#     5G ...:7e, i.e. the real factory wireless MACs. NO locally-administered bit.
 #
-# Real board MACs (from the unit): 00:07:89:43:67:7a / 7b / 7e.
-# We take the base OUI+NIC 00:07:89:43:67 and append a per-interface low byte,
-# then SET the locally-administered bit (0x02) on the first octet so the derived
-# addresses are valid LAA and never clash with the factory globally-unique ones.
-# Base first octet 0x00 -> 0x02 (locally administered, unicast).
-#
-# Idempotent: guarded by a marker file; re-running changes nothing.
-# POSIX sh. Uses uci (network device macaddr / wireless macaddr).
-
-MARK=/etc/kt412-mac-unique.done
+# Idempotent (new marker so it re-applies once even on a settings-kept sysupgrade
+# that still carries the old 02:.. addresses). POSIX sh.
+MARK=/etc/kt412-mac-genuine.done
 [ -f "$MARK" ] && exit 0
 
-# --- base MAC (first 5 octets) + locally-administered first octet -------------
-# Prefer the real board base; fall back to the device's own label MAC if present.
-BASE_PREFIX="00:07:89:43:67"
-LABEL="$(cat /sys/class/net/eth0/address 2>/dev/null)"
-case "$LABEL" in
-	[0-9A-Fa-f][0-9A-Fa-f]:*)
-		# use the live label MAC's first 5 octets so derived MACs track the unit
-		BASE_PREFIX="$(echo "$LABEL" | cut -d: -f1-5)"
-		;;
-esac
+# genuine base MAC of the unit (real eth0 / label MAC, vendor OUI)
+BASE="$(cat /sys/class/net/eth0/address 2>/dev/null)"
+case "$BASE" in [0-9A-Fa-f][0-9A-Fa-f]:*) : ;; *) BASE="00:07:89:43:67:7a";; esac
+PREFIX="$(echo "$BASE" | cut -d: -f1-5)"          # genuine OUI + (first 5 octets)
+BL="$(echo "$BASE" | cut -d: -f6)"; bld=$(( 0x$BL ))
 
-# set locally-administered bit on octet 1 (OR 0x02), clear multicast bit (AND 0xFE)
-o1="$(echo "$BASE_PREFIX" | cut -d: -f1)"
-rest="$(echo "$BASE_PREFIX" | cut -d: -f2-5)"
-o1d=$(( 0x$o1 ))
-o1d=$(( (o1d | 2) & 254 ))
-LAA_PREFIX="$(printf '%02x' "$o1d"):$rest"
+# distinct GENUINE-OUI low bytes for the wireless vifs (NO 0x02 LAA flip).
+# offsets chosen so eth0 ...:7a -> 2.4G ...:7b (+1) and 5G ...:7e (+4) = the unit's
+# real factory wireless MACs.
+gmac() { printf '%s:%02x\n' "$PREFIX" $(( (bld + $1) & 255 )); }
+W24_MAC="$(gmac 1)"    # 2.4G
+W5G_MAC="$(gmac 4)"    # 5G
+MESH_MAC="$(gmac 5)"   # mesh vif (only applied if/when a mesh vif exists)
 
-mac_for() { printf '%s:%s\n' "$LAA_PREFIX" "$1"; }
+# WIRED interfaces are intentionally NOT touched -> they keep their factory MACs.
 
-# Distinct low-byte offsets per interface (never reused):
-WAN_MAC="$(mac_for a0)"
-LAN_MAC="$(mac_for a1)"
-W24_MAC="$(mac_for a2)"
-W5G_MAC="$(mac_for a3)"
-MESH_MAC="$(mac_for a4)"
-
-# --- helper: find/create a network 'device' section by name, set its macaddr ---
-set_dev_mac() {  # $1=ifname  $2=mac
-	name="$1"; mac="$2"; sec=""
-	[ -n "$name" ] || return 0
-	i=0
-	while uci -q get network.@device[$i] >/dev/null 2>&1; do
-		[ "$(uci -q get network.@device[$i].name)" = "$name" ] && { sec="@device[$i]"; break; }
-		i=$((i+1))
-	done
-	if [ -z "$sec" ]; then
-		sec="$(uci -q add network device)"
-		uci -q set network.$sec.name="$name"
-	fi
-	uci -q set network.$sec.macaddr="$mac"
-}
-
-# --- LAN bridge (br-lan) ---
-set_dev_mac "br-lan" "$LAN_MAC"
-
-# --- WAN: its underlying netdev (DSA wan port) ---
-WANDEV="$(uci -q get network.wan.device)"; [ -n "$WANDEV" ] || WANDEV="$(uci -q get network.wan.ifname)"
-[ -n "$WANDEV" ] && set_dev_mac "$WANDEV" "$WAN_MAC"
-
-# --- 2.4G (radio0) + 5G (radio1): set macaddr on the AP wifi-iface ------------
 for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
 	dev="$(uci -q get wireless.$s.device)"
 	band="$(uci -q get wireless.$dev.band)"
 	case "$s" in
+		kt412guest) : ;;   # guest BSS: let hostapd derive a distinct MAC from the 2.4G vif
 		kt412_mesh) uci -q set wireless.$s.macaddr="$MESH_MAC";;
 		*)
 			if [ "$band" = "5g" ]; then uci -q set wireless.$s.macaddr="$W5G_MAC"
@@ -82,12 +44,6 @@ for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-
 			;;
 	esac
 done
-# reserve the mesh MAC even if no mesh vif exists yet: stored as a comment-free
-# placeholder is not possible in uci, so it is simply applied when a mesh vif is
-# created later by the wizard (which names it kt412_mesh -> matched above on
-# re-provision). The offset a4 is never used by any other interface.
-
-uci -q commit network
 uci -q commit wireless
 
 touch "$MARK"
