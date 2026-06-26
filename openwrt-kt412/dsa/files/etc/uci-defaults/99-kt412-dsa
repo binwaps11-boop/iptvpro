@@ -95,7 +95,11 @@ dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p'
 # (WiFi range/roaming/QoS are baked into the static /etc/config/wireless.)
 
 # --- kernel tuning: high connection count + anti-hang (recycle conntrack fast,
-#     guard memory so the box never OOM-locks; panic->reboot, never freeze) ---
+#     guard memory so the box never OOM-locks). IMPORTANT: panic_on_oops is 0 so a
+#     transient/recoverable driver oops (ath9k/ath10k/qca8k) is LOGGED and the box
+#     keeps running, instead of being escalated to a full panic+reboot (that was a
+#     cause of "runs a while then suddenly reboots"). A genuine panic still reboots
+#     after 10s (kernel.panic=10) so the device can self-recover. ---
 if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
 	cat >> /etc/sysctl.conf <<'SYS'
 # kt412-tune
@@ -117,13 +121,19 @@ net.core.rmem_max=4194304
 net.core.wmem_max=4194304
 net.core.netdev_max_backlog=3000
 fs.file-max=32768
-vm.min_free_kbytes=8192
+vm.min_free_kbytes=16384
 vm.panic_on_oom=0
 kernel.panic=10
-kernel.panic_on_oops=1
+kernel.panic_on_oops=0
 kernel.hung_task_panic=0
 SYS
 fi
+# SELF-HEAL: an earlier firmware shipped kernel.panic_on_oops=1 (reboots on every
+# recoverable driver oops). On a settings-kept sysupgrade the guard above won't
+# rewrite the file, so force the safe values in-place and apply them live now.
+sed -i 's/^kernel\.panic_on_oops=1/kernel.panic_on_oops=0/' /etc/sysctl.conf 2>/dev/null
+sed -i 's/^vm\.min_free_kbytes=8192/vm.min_free_kbytes=16384/' /etc/sysctl.conf 2>/dev/null
+sysctl -w kernel.panic_on_oops=0 >/dev/null 2>&1
 sysctl -p >/dev/null 2>&1
 # enlarge conntrack hash buckets (=max/4) to keep lookups O(1) under load
 echo 4096 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
