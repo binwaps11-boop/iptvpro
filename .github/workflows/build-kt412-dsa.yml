@@ -70,39 +70,21 @@ jobs:
             sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
             echo "PATCHED: missing semicolon in $DTSI"
           fi
-          # === KT412 2.4G BOOT ROOT-CAUSE FIX (ath9k phy1 not registering for ~7 min) ===
-          # The &wmac node points ath9k's "calibration" nvmem cell at ART 0x1000, but
-          # THIS board has NO valid ath9k caldata there (ART 0x1000 is all 0xFF; the unit
-          # runs the default template, MAC 00:02:03:04:05:06). ath9k reads the 0xFF blob
-          # as its EEPROM, the AR9300 magic/checksum check FAILS with -EINVAL (NOT
-          # -EPROBE_DEFER, so it is never retried), ath9k_init_device aborts, and phy1
-          # NEVER registers at boot. Only the watchdog's late 'rmmod/modprobe ath9k'
-          # eventually re-probes it onto the default template (~7 min). FIX: drop ONLY
-          # the broken 'calibration' nvmem cell. With NO calibration cell,
-          # ath9k_nvmem_request_eeprom() returns -ENOENT gracefully, AH_USE_EEPROM stays
-          # set, and ath9k uses the on-chip/built-in default EEPROM template at the FIRST
-          # probe (~10-15s) — exactly the state the watchdog reload reaches, just
-          # immediately. NOTE: do NOT add 'qca,no-eeprom' here: that property makes ath9k
-          # request an external 'ath9k-eeprom-ahb-*.bin' firmware file (which we do not
-          # ship) and the probe would fail with -EINVAL again. The MAC nvmem cell is left
-          # intact; 5G (cal_art_5000, valid data) is untouched.
-          if grep -q 'nvmem-cell-names = "mac-address", "calibration"' "$DTSI"; then
-            # Drop ONLY the invalid 2.4G "calibration" nvmem cell. Pure sed (no python ->
-            # no heredoc-indentation fragility). Label-agnostic: keep the FIRST <...> entry
-            # on the nvmem-cells line (mac-address) and drop the 2nd (calibration), then
-            # trim cell-names to "mac-address" only.
-            sed -i 's/\(nvmem-cells = <[^>]*>\)[[:space:]]*,[[:space:]]*<[^>]*>;/\1;/' "$DTSI"
-            sed -i 's/nvmem-cell-names = "mac-address",[[:space:]]*"calibration";/nvmem-cell-names = "mac-address";/' "$DTSI"
-            echo "=== &wmac node after caldata fix ==="
-            awk '/&wmac/{f=1} f{print} /^};/{if(f)exit}' "$DTSI" || true
-            # GATE: the fix MUST have taken (else we'd ship a broken/mismatched DTS).
-            if awk '/&wmac/{f=1} f{print} /^};/{if(f)exit}' "$DTSI" | grep -q '"calibration"'; then
-              echo "FATAL: &wmac still references a calibration nvmem cell after fix -> DTS would mismatch"; exit 1
-            fi
-            echo "PATCHED: &wmac dropped invalid 2.4G calibration cell (ath9k uses default template at first probe ~10-15s)"
-          else
-            echo "NOTE: &wmac calibration wiring not in expected form; skipping caldata fix (verify DTS)"
-          fi
+          # === DTS caldata edit REVERTED (it bricked BOTH radios) ===
+          # A previous attempt removed the ath9k "calibration" nvmem cell from &wmac to
+          # speed 2.4G boot. THIS WAS WRONG and is permanently removed:
+          #  (1) ath9k's AHB wmac does NOT fall back to a built-in template — without a
+          #      caldata source it hard-fails: "ath_ahb_eeprom_read: eeprom data has to be
+          #      provided externally" -> "failed to initialize device" (-5) -> 2.4G DEAD.
+          #  (2) the label-agnostic sed also matched the ath10k pcie node's 2-cell
+          #      nvmem-cells line and stripped cal_art_5000 -> "otp calibration failed"
+          #      "could not probe fw (-22)" -> 5G DEAD too.
+          # So we keep the ORIGINAL DTS caldata wiring intact for BOTH radios. The slow
+          # 2.4G boot is handled ONLY at runtime (init.d/kt412-wifi-early early
+          # rmmod/modprobe + watchdog missing-phy fast reload) which brings phy1 up in
+          # ~25-35s with WORKING calibration, and at worst degrades to the original
+          # (working) behavior — never a brick. NO DTS caldata edit is performed.
+          echo "DTS caldata wiring left INTACT for ath9k + ath10k (no nvmem cell removed)."
           # --- extreme only: ath9k 2.4G 30dBm patch.
           #     CRITICAL: ath9k/ath10k/cfg80211 are built from the mac80211 *backports*
           #     package, NOT the in-tree kernel. Patching target/linux/generic/hack-* does
@@ -263,16 +245,14 @@ jobs:
           grep -q 'set-eee' files/etc/hotplug.d/net/20-kt412-eee && echo "GATE: EEE-off hotplug OK" || { echo "FATAL: EEE-off hotplug missing"; exit 1; }
           grep -q 'kt412-wifiready' files/etc/hotplug.d/ieee80211/10-kt412-wifi-ready && echo "GATE: 5G phy-ready hotplug OK" || { echo "FATAL: 5G hotplug missing"; exit 1; }
           grep -q 'soc=QCA9558' files/etc/kt412-build-info && echo "GATE: soc=QCA9558 OK" || { echo "FATAL: soc field missing"; exit 1; }
-          # --- 2.4G boot-race fixes (root cause: empty-ART ath9k caldata) ---
-          # (a) DTS caldata fix MUST have applied: the captured DTS must no longer point
-          #     the wmac calibration cell at cal_art_1000 (else ath9k -EINVAL -> 7-min phy).
-          if grep -q 'nvmem-cell-names' files/etc/kt412-dts.txt 2>/dev/null; then
-            grep -Eq '&wmac' files/etc/kt412-dts.txt && \
-            ! awk '/&wmac/{f=1} f&&/cal_art_1000/{print "BAD"} /^};/{if(f)f=0}' files/etc/kt412-dts.txt | grep -q BAD \
-              && echo "GATE: &wmac caldata fix applied (no cal_art_1000) OK" \
-              || { echo "FATAL: &wmac still references cal_art_1000 -> 2.4G would fail to register at boot"; exit 1; }
+          # --- 2.4G slow-boot mitigation (RUNTIME ONLY; DTS caldata left INTACT) ---
+          # (a) The DTS caldata cell MUST still be present for BOTH radios — removing it
+          #     bricks WiFi (ath9k -5 "eeprom must be provided externally"; ath10k otp -22).
+          #     Gate that the captured wmac STILL has its calibration cell (i.e. NOT edited).
+          if grep -q '&wmac' files/etc/kt412-dts.txt 2>/dev/null && grep -q 'cal_art_1000' files/etc/kt412-dts.txt 2>/dev/null; then
+            echo "GATE: &wmac caldata wiring INTACT (cal_art_1000 present) OK"
           else
-            echo "NOTE: DTS capture lacks nvmem-cell-names; cannot gate caldata fix here (verify on device)"
+            echo "NOTE: could not confirm wmac caldata in DTS capture (verify on device that 2.4G inits)"
           fi
           # (b) early one-shot recovery script present + does the ath9k module reload
           grep -q 'reload ath9k' files/etc/init.d/kt412-wifi-early && echo "GATE: early ath9k recovery init OK" || { echo "FATAL: early wifi recovery missing"; exit 1; }
