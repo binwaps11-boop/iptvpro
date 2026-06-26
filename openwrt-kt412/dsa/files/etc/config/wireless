@@ -3,7 +3,9 @@
 # device boots (no first-boot reload delay; uci-defaults no longer rewrites this).
 # 2.4G = ath9k (radio0) HT20 (20 MHz, stable / less interference, many devices).
 # 5G   = ath10k-ct (radio1) VHT80. Non-DFS ch 11 & 149. Country US.
-# Roaming (802.11k/v) + WMM + keep-distant-clients baked in here.
+# Roaming (802.11k/v) + WMM baked in here. 2.4G HT20 THROUGHPUT TUNING (longer
+# range kept): short_gi_20 + legacy_rates=0 (drop slow 802.11b CCK so airtime
+# isn't wasted) + both chains (2x2 -> up to MCS15 ~144 Mbit/s on HT20).
 # OPEN network (no password) on both bands by request. 802.11r (FT) removed
 # because Fast Transition needs a PSK/key; 11k + 11v roaming stay enabled.
 # Extreme variant: the build bumps radio0 txpower 24 -> 30.
@@ -17,6 +19,7 @@ config wifi-device 'radio0'
 	option noscan '1'
 	option country 'US'
 	option cell_density '0'
+	option short_gi_20 '1'
 	option disabled '0'
 	option txpower '24'
 
@@ -27,6 +30,7 @@ config wifi-iface 'default_radio0'
 	option ssid 'KT412'
 	option encryption 'none'
 	option wmm '1'
+	option legacy_rates '0'
 	option disassoc_low_ack '0'
 	option ieee80211k '1'
 	option ieee80211v '1'
@@ -51,6 +55,7 @@ config wifi-iface 'default_radio1'
 	option ssid 'KT412-5G'
 	option encryption 'none'
 	option wmm '1'
+	option legacy_rates '0'
 	option disassoc_low_ack '0'
 	option ieee80211k '1'
 	option ieee80211v '1'
