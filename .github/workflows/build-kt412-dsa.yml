@@ -321,7 +321,7 @@ jobs:
             test -s "files/usr/share/luci/menu.d/$M.json" && echo "LUCI MENU.D INCLUDED: $M" || { echo "FATAL: menu.d $M missing"; exit 1; }
             test -s "files/usr/share/rpcd/acl.d/$M.json" && echo "LUCI ACL.D INCLUDED: $M" || { echo "FATAL: acl.d $M missing"; exit 1; }
           done
-          for V in dashboard devices specs power nettools ai loopguard switchmgr wizard optimizer; do
+          for V in dashboard devices specs power nettools loopguard switchmgr wizard optimizer clients netcfg speed; do
             test -s "files/www/luci-static/resources/view/kt412/$V.js" && echo "MK VIEW INCLUDED: $V" || { echo "FATAL: MK view $V.js missing"; exit 1; }
           done
           for B in kt412 kt412-tools kt412-diag kt412-wizard kt412-perf; do
