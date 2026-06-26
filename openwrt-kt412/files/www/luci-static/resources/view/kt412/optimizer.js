@@ -187,7 +187,7 @@ function clientsSection(){
 			var rows = (r.clients||[]).map(function(c){
 				return E('div', { 'class':'kt-kv' }, [
 					E('span',{'class':'k'}, esc(c.mac)),
-					E('span',{'class':'v', style:'color:'+sigColor(c.signal)},
+					E('span',{'class':'v', dir:'ltr', style:'color:'+sigColor(c.signal)+';text-align:left;direction:ltr'},
 						(c.signal?esc(c.signal)+' dBm':'—')
 						+ ' · ↓'+esc(c.rx_mbit||'—')+' ↑'+esc(c.tx_mbit||'—')+' Mbit/s'
 						+ ((c.rx_mcs||c.tx_mcs)?(' · MCS '+esc(c.rx_mcs||'?')+'/'+esc(c.tx_mcs||'?')):''))

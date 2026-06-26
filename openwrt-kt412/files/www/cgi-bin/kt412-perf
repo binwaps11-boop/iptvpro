@@ -347,11 +347,12 @@ if [ "$OP" = "clients" ]; then
 				next;
 			}
 			/^[[:space:]]*RX:/ {
-				for (i=1;i<=NF;i++){ if ($i=="MBit/s") rx=$(i-1); if ($i ~ /^MCS$/) rxmcs=$(i+1); }
+				# match MBit by regex (iwinfo may print "MBit/s" or "MBit/s," with a comma)
+				for (i=1;i<=NF;i++){ if ($i ~ /MBit/) rx=$(i-1); if ($i ~ /^MCS$/) rxmcs=$(i+1); }
 				next;
 			}
 			/^[[:space:]]*TX:/ {
-				for (i=1;i<=NF;i++){ if ($i=="MBit/s") tx=$(i-1); if ($i ~ /^MCS$/) txmcs=$(i+1); }
+				for (i=1;i<=NF;i++){ if ($i ~ /MBit/) tx=$(i-1); if ($i ~ /^MCS$/) txmcs=$(i+1); }
 				next;
 			}
 			END { if (mac!="") emit(); }

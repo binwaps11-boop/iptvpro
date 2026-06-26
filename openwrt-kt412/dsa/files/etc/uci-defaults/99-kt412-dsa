@@ -5,7 +5,7 @@
 # the ONLY web UI, covering OpenWrt/LuCI core functions with a real backend.
 uci -q set network.lan.ipaddr='192.168.1.1'
 uci -q set network.lan.netmask='255.255.255.0'
-uci -q set system.@system[0].hostname='KT412-DSA'
+uci -q set system.@system[0].hostname='Smart-AP'
 uci -q commit
 
 # --- DHCP SERVER OFF BY DEFAULT ---------------------------------------------

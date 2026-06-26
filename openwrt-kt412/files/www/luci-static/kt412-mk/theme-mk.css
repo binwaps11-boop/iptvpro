@@ -99,7 +99,7 @@ body.node-main-login .cbi-map{
 }
 /* MK / KT412 branding injected above the form via ::before */
 body:has(input#luci_password) .cbi-map::before{
-  content:"KT412 · MK"; display:block; text-align:center;
+  content:"Smart AP"; display:block; text-align:center;
   font-size:30px; font-weight:800; letter-spacing:1px; margin-bottom:2px;
   background:linear-gradient(90deg,#06B6D4,#8b5cf6);
   -webkit-background-clip:text; background-clip:text; color:transparent;
@@ -107,7 +107,7 @@ body:has(input#luci_password) .cbi-map::before{
 }
 body:has(input#luci_password) .cbi-map::after{
   /* small pre-login device-info line (firmware / chipset / mode) */
-  content:"لوحة تحكم الشبكة — تسجيل الدخول · Firmware KT412 · Chipset MT7621 · Router Mode";
+  content:"لوحة تحكم Smart AP — تسجيل الدخول · Chipset QCA9558 · Access Point";
   display:block; text-align:center;
   color:var(--mk-muted); font-size:12px; margin-bottom:20px; line-height:1.6;
 }

@@ -138,7 +138,7 @@ function shell(){
 	return ''
 	+ '<div class="mk-wrap">'
 	+ '  <div class="mk-head">'
-	+ '    <div><div class="mk-logo">KT412 · MK</div><div class="mk-sub">لوحة التحكم الذكية — Smart Dashboard</div></div>'
+	+ '    <div><div class="mk-logo">Smart AP</div><div class="mk-sub">لوحة التحكم الذكية — Smart Dashboard</div></div>'
 	+ '    <div class="mk-spacer"></div>'
 	+ '    <div class="mk-toggle'+(skinOff?'':' on')+'" id="mk-skin-toggle" title="تبديل الواجهة الزجاجية / Bootstrap">'
 	+ '      <span class="sw"><i></i></span><span>الواجهة الزجاجية</span>'
