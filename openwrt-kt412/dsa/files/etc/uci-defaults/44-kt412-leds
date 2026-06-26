@@ -1,81 +1,59 @@
 #!/bin/sh
-# 44-kt412-leds  -- KT412 (DW02-412H, qca9558_dongwon) LED trigger mapping.
+# 44-kt412-leds -- KT412 (DW02-412H) LED mapping, fixed to the REAL board LEDs
+# confirmed from the device (/sys/class/leds):
+#     green:wan      GPIO  -> WAN link/activity (OpenWrt 01_leds already drives it; leave it)
+#     green:wlan     GPIO  -> the PHYSICAL WiFi LED. It shipped UNCONFIGURED (trigger
+#                             "none") = dark -> "wifi light not working". We drive it.
+#     ath9k-phy2 / ath10k-phy0   driver-internal LEDs (auto phyNtpt) -- left untouched.
+# There is NO separate power/status/lan LED on this board, so we map ONLY the WiFi LED.
 #
-# Maps the board LEDs to sensible triggers via uci 'system' led sections:
-#   - power  : on at boot (default-on)
-#   - status : boot/heartbeat (timer or netdev) -- a visible "alive" indicator
-#   - lan    : link+activity on the LAN bridge
-#   - wlan2g : 2.4G wifi activity   (phy1tpt -> ath9k is phy1 = radio0 = 2.4G)
-#   - wlan5g : 5G wifi activity     (phy0tpt -> ath10k is phy0 = radio1 = 5G)
-#
-# LED LABEL SOURCE / HONESTY:
-#   The board DTS (qca9558_dongwon_dw02-412h.dtsi, PR #21837) defines the wifi
-#   activity LED with `linux,default-trigger = "phy1tpt"` (captured in the build
-#   evidence). That confirms phy1=ath9k=2.4G. The exact DT *label* strings are
-#   NOT fully captured in this repo, so the label names below
-#   ("dw02-412h:green:<fn>") are the conventional ath79 naming and MAY differ
-#   from the real silkscreen labels. We therefore AUTO-DETECT the real label for
-#   each function from /sys/class/leds and only fall back to the guessed name.
-#   Triggers (phy0tpt/phy1tpt/netdev/timer/default-on) are correct regardless of
-#   the label; if a label is wrong the section is simply inert (safe, no harm).
-#
-# Idempotent. POSIX sh. Does not touch RF/DSA. Marker: kt412-leds.done.
+# IMPORTANT: the 2.4G ath9k phy INDEX is not stable across boots (seen as phy1 AND
+# phy2). A static uci led section with a fixed "phy2tpt" would break when the index
+# changes. So we set green:wlan's trigger DYNAMICALLY to the live 2.4G phy's tpt
+# trigger via a tiny helper, run on every wifi hotplug + a short post-boot loop.
+# Idempotent install. POSIX sh. Touches NO RF/DSA/caldata.
 
-MARK=/etc/kt412-leds.done
-[ -f "$MARK" ] && exit 0
+# 1) helper: point green:wlan at the CURRENT 2.4G (ath9k) phy throughput trigger
+cat > /usr/sbin/kt412-wlan-led <<'HELP'
+#!/bin/sh
+LED=/sys/class/leds/green:wlan
+[ -e "$LED/trigger" ] || exit 0
+N=
+for p in /sys/class/ieee80211/phy*; do
+	[ -e "$p" ] || continue
+	iw phy "${p##*/}" info 2>/dev/null | grep -q '24[0-9][0-9] MHz' && { N="${p##*phy}"; break; }
+done
+if [ -n "$N" ] && grep -q "phy${N}tpt" "$LED/trigger"; then
+	echo "phy${N}tpt" > "$LED/trigger" 2>/dev/null   # blink on 2.4G activity
+else
+	echo default-on > "$LED/trigger" 2>/dev/null     # phy not up yet -> at least solid "on"
+fi
+HELP
+chmod 0755 /usr/sbin/kt412-wlan-led
 
-# Resolve a real LED sysfs name by keyword, else echo the provided fallback.
-find_led() {  # $1=keyword(s, space sep, OR-match) $2=fallback
-	for kw in $1; do
-		for p in /sys/class/leds/*"$kw"*; do
-			[ -e "$p" ] && { basename "$p"; return 0; }
-		done
-	done
-	echo "$2"
-}
+# 2) re-apply whenever a wifi phy (re)appears (handles the variable phy index + reloads)
+mkdir -p /etc/hotplug.d/ieee80211
+cat > /etc/hotplug.d/ieee80211/30-kt412-wlan-led <<'HP'
+#!/bin/sh
+case "$ACTION" in add|bind) /usr/sbin/kt412-wlan-led;; esac
+HP
+chmod 0755 /etc/hotplug.d/ieee80211/30-kt412-wlan-led
 
-LED_POWER="$(find_led 'power pwr' 'dw02-412h:green:power')"
-LED_STATUS="$(find_led 'status sys system act' 'dw02-412h:green:status')"
-LED_LAN="$(find_led 'lan' 'dw02-412h:green:lan')"
-LED_2G="$(find_led 'wlan2g 2g 2.4 wifi2 phy1' 'dw02-412h:green:wlan2g')"
-LED_5G="$(find_led 'wlan5g 5g phy0' 'dw02-412h:green:wlan5g')"
+# 3) and run it for the next ~40s of THIS boot (the 2.4G phy can register late)
+( i=0; while [ "$i" -lt 8 ]; do /usr/sbin/kt412-wlan-led; i=$((i+1)); sleep 5; done ) >/dev/null 2>&1 &
 
-# (re)create a named uci led section -> set name(sysfs)+trigger, return section
-mk_led() {  # $1=section $2=sysfsname $3=trigger
-	sec="$1"; sys="$2"; trg="$3"
-	uci -q set system.$sec='led'
-	uci -q set system.$sec.name="$sec"
-	uci -q set system.$sec.sysfs="$sys"
-	uci -q set system.$sec.trigger="$trg"
-	uci -q set system.$sec.default='0'
-}
+# 4) make sure green:wan keeps its WAN netdev trigger (in case it was cleared)
+if [ -e /sys/class/leds/green:wan ]; then
+	uci -q get system.@led[-1] >/dev/null 2>&1
+	if ! uci -q show system | grep -q "sysfs='green:wan'"; then
+		s="kt412_wan"
+		uci -q set system.$s='led'; uci -q set system.$s.name='WAN'
+		uci -q set system.$s.sysfs='green:wan'; uci -q set system.$s.trigger='netdev'
+		uci -q set system.$s.dev='wan'
+		uci -q delete system.$s.mode 2>/dev/null
+		uci -q add_list system.$s.mode='link'; uci -q add_list system.$s.mode='tx'; uci -q add_list system.$s.mode='rx'
+		uci -q commit system; /etc/init.d/led reload >/dev/null 2>&1
+	fi
+fi
 
-# --- power: solid on whenever the device is powered ---
-mk_led kt412_power "$LED_POWER" 'default-on'
-uci -q set system.kt412_power.default='1'
-
-# --- status / boot: timer heartbeat so a hang is visible (slow blink) ---
-mk_led kt412_status "$LED_STATUS" 'timer'
-uci -q set system.kt412_status.delayon='1000'
-uci -q set system.kt412_status.delayoff='1000'
-
-# --- LAN link+activity on the bridge (netdev trigger) ---
-mk_led kt412_lan "$LED_LAN" 'netdev'
-uci -q set system.kt412_lan.dev='br-lan'
-uci -q delete system.kt412_lan.mode 2>/dev/null
-uci -q add_list system.kt412_lan.mode='link'
-uci -q add_list system.kt412_lan.mode='tx'
-uci -q add_list system.kt412_lan.mode='rx'
-
-# --- 2.4G activity: phy1tpt (ath9k = phy1 = radio0 = 2.4G) ---
-mk_led kt412_wlan2g "$LED_2G" 'phy1tpt'
-
-# --- 5G activity: phy0tpt (ath10k = phy0 = radio1 = 5G) ---
-mk_led kt412_wlan5g "$LED_5G" 'phy0tpt'
-
-uci -q commit system
-/etc/init.d/led enable >/dev/null 2>&1
-/etc/init.d/led restart >/dev/null 2>&1
-
-touch "$MARK"
 exit 0
