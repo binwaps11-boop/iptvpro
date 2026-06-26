@@ -48,6 +48,43 @@ function fmtUptime(s){
 	s = +s||0; var d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
 	if (d) return d+' يوم '+h+' س'; if (h) return h+' س '+m+' د'; return m+' دقيقة';
 }
+/* ---- tiny inline SVG icon set (currentColor stroked) ---- */
+function ic(name){
+	var p = {
+		cpu:    '<rect x="4.5" y="4.5" width="15" height="15" rx="2"/><rect x="8.5" y="8.5" width="7" height="7" rx="1"/><path d="M9 1.5v3M12 1.5v3M15 1.5v3M9 19.5v3M12 19.5v3M15 19.5v3M1.5 9h3M1.5 12h3M1.5 15h3M19.5 9h3M19.5 12h3M19.5 15h3"/>',
+		ram:    '<rect x="2.5" y="7" width="19" height="10" rx="1.5"/><path d="M6 7v-2M10 7v-2M14 7v-2M18 7v-2M6 22v-5M18 22v-5"/><path d="M6.5 11h2M11 11h2M15.5 11h2"/>',
+		disk:   '<path d="M3 8l2-4h14l2 4"/><rect x="3" y="8" width="18" height="11" rx="2"/><circle cx="8" cy="13.5" r="1.4"/><path d="M12 12.5h6M12 15h6"/>',
+		net:    '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z"/>',
+		ports:  '<rect x="3" y="9" width="18" height="11" rx="2"/><path d="M8 9V6a4 4 0 0 1 8 0v3M8 13v3M12 13v3M16 13v3"/>',
+		power:  '<path d="M13 2L4.5 13.5H11l-1 8.5L19.5 10H13z"/>',
+		up:     '<path d="M12 19V5M5 12l7-7 7 7"/>',
+		down:   '<path d="M12 5v14M5 12l7 7 7-7"/>',
+		clock:  '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+		chip:   '<rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1.5v3M15 1.5v3M9 19.5v3M15 19.5v3M1.5 9h3M1.5 15h3M19.5 9h3M19.5 15h3"/>',
+		fw:     '<path d="M12 2l8 3v6c0 5-3.4 8.4-8 11-4.6-2.6-8-6-8-11V5z"/><path d="M9 12l2 2 4-4"/>',
+		users:  '<circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M16.5 13.5a5.5 5.5 0 0 1 4 6.5"/>',
+		wifi:   '<path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8 15.5a5 5 0 0 1 8 0"/><circle cx="12" cy="19.5" r="1.3" fill="currentColor" stroke="none"/>',
+		lan:    '<rect x="6" y="3" width="12" height="18" rx="1.5"/><path d="M9 3v-1h6v1M9 21v1h6v-1M6 8h-2M6 12h-2M6 16h-2M20 8h-2M20 12h-2M20 16h-2"/>',
+		err:    '<path d="M12 2l10 18H2z"/><path d="M12 9v5M12 17.5v.5" stroke-linecap="round"/>',
+		check:  '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5 5.5-6"/>'
+	};
+	return '<svg class="mk-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
+		+ 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(p[name]||'')+'</svg>';
+}
+/* status chip for the header bar */
+function chip(icon, label, value, cls){
+	return '<div class="mk-chip '+(cls||'')+'">'+ic(icon)
+		+ '<span class="ck">'+esc(label)+'</span>'
+		+ '<b class="cv">'+esc(value)+'</b></div>';
+}
+/* section header: icon + title + subtle divider */
+function section(icon, title, sub){
+	return '<div class="mk-sec">'+ic(icon)
+		+ '<div class="mk-sec-t"><span class="t">'+esc(title)+'</span>'
+		+ (sub?'<span class="s">'+esc(sub)+'</span>':'')+'</div>'
+		+ '<span class="mk-sec-rule"></span></div>';
+}
+
 /* per-gauge base neon accent: CPU=cyan, RAM=green, Storage/Flash=purple */
 var GAUGE_BASE = { cpu:'#06B6D4', ram:'#22C55E', disk:'#8b5cf6' };
 /* arc colour: keep each gauge's neon identity at normal load, but escalate to
@@ -59,24 +96,27 @@ function gColor(p, id){ p=+p;
 }
 
 /* ---- circular gauge (inline SVG) ---- */
-function gauge(id, label, pct, meta){
+function gauge(id, label, icon, pct, meta){
 	pct = clamp(pct,0,100);
 	var R = 52, C = 2*Math.PI*R, off = C*(1-pct/100);
 	return ''
 		+ '<div class="mk-gauge" data-gid="'+id+'">'
+		+ '<div class="mk-gring">'
 		// width/height + fill="none" are set INLINE (not only via CSS) so the gauge can
 		// never render as a giant 60vw black disk if the stylesheet is slow/absent.
 		// No rotation on the <svg> or a counter-rotated text group (that flung the % out
 		// of view): only the arc is rotated, via a transform ATTRIBUTE around (64,64), so
 		// the % value stays upright and centered.
-		+ '<svg width="112" height="112" viewBox="0 0 128 128" aria-hidden="true">'
+		+ '<svg width="124" height="124" viewBox="0 0 128 128" aria-hidden="true">'
 		+   '<circle class="track" cx="64" cy="64" r="'+R+'" fill="none" stroke="#334155" stroke-width="11"></circle>'
 		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" fill="none" stroke-width="11" stroke-linecap="round" transform="rotate(-90 64 64)" '
 		+     'stroke="'+gColor(pct,id)+'" stroke-dasharray="'+C.toFixed(1)+'" '
 		+     'stroke-dashoffset="'+off.toFixed(1)+'"></circle>'
-		+   '<text class="mk-gval" x="64" y="64" text-anchor="middle" dominant-baseline="central">'+Math.round(pct)+'<tspan font-size="14">%</tspan></text>'
+		+   '<text class="mk-gval" x="64" y="60" text-anchor="middle" dominant-baseline="central">'+Math.round(pct)+'<tspan class="mk-gunit" font-size="15" dy="-1">%</tspan></text>'
+		+   '<text class="mk-gcap" x="64" y="84" text-anchor="middle" dominant-baseline="central">USAGE</text>'
 		+ '</svg>'
-		+ '<div class="mk-glabel">'+esc(label)+'</div>'
+		+ '</div>'
+		+ '<div class="mk-glabel">'+ic(icon)+'<span>'+esc(label)+'</span></div>'
 		+ '<div class="mk-gmeta">'+esc(meta||'')+'</div>'
 		+ '</div>';
 }
@@ -122,11 +162,14 @@ var HIST = 40;
 /* ---- interface / RJ45 port tiles ----
    plugged (up) -> neon green tile + a small speed badge (1000/100 Mbps);
    unplugged (down) -> dark slate grey, dim. `speed` is Mbps (e.g. 1000/100). */
-function ifTile(name, label, icon, up, speed){
-	var badge = (up && speed) ? '<span class="spd">'+esc(speed)+' Mbps</span>' : '';
-	return '<div class="mk-iftile '+(up?'up':'down')+'">'
+function ifTile(name, label, icon, up, speed, kind){
+	var spd = up && speed ? (+speed>=1000?'1000':(''+speed)) : '';
+	var badge = (up && speed)
+		? '<span class="spd '+(+speed>=1000?'gig':'fe')+'">'+esc(spd)+'<i>Mbps</i></span>'
+		: (up ? '<span class="spd link">●<i>link</i></span>' : '<span class="spd off">—</span>');
+	return '<div class="mk-iftile '+(kind||'rj45')+' '+(up?'up':'down')+'">'
 		+ '<span class="led"></span>'
-		+ '<div class="ico">'+icon+'</div>'
+		+ '<div class="ico">'+ic(icon)+'</div>'
 		+ '<div class="nm">'+esc(label)+'</div>'
 		+ '<div class="st">'+esc(up?'متصل':'غير متصل')+'</div>'
 		+ badge
@@ -137,38 +180,76 @@ function shell(){
 	var skinOff = (localStorage.getItem(SKIN_KEY)==='off');
 	return ''
 	+ '<div class="mk-wrap">'
-	+ '  <div class="mk-head">'
-	+ '    <div><div class="mk-logo">Smart AP</div><div class="mk-sub">لوحة التحكم الذكية — Smart Dashboard</div></div>'
+	/* ===== premium top HEADER bar ===== */
+	+ '  <div class="mk-topbar">'
+	+ '    <div class="mk-brand">'
+	+ '      <div class="mk-mark">'+ic('wifi')+'</div>'
+	+ '      <div class="mk-brand-t">'
+	+ '        <div class="mk-logo">Smart AP</div>'
+	+ '        <div class="mk-sub">لوحة التحكم الذكية — Smart Control Panel</div>'
+	+ '      </div>'
+	+ '    </div>'
 	+ '    <div class="mk-spacer"></div>'
 	+ '    <div class="mk-toggle'+(skinOff?'':' on')+'" id="mk-skin-toggle" title="تبديل الواجهة الزجاجية / Bootstrap">'
 	+ '      <span class="sw"><i></i></span><span>الواجهة الزجاجية</span>'
 	+ '    </div>'
 	+ '  </div>'
-	+ '  <div class="mk-grid mk-cols-3" id="mk-gauges">'
-	+ '    <div class="mk-card">'+gauge('cpu','استخدام المعالج CPU',0,'—')+'</div>'
-	+ '    <div class="mk-card">'+gauge('ram','استخدام الذاكرة RAM',0,'—')+'</div>'
-	+ '    <div class="mk-card">'+gauge('disk','استخدام التخزين Storage',0,'—')+'</div>'
+	/* status chip row */
+	+ '  <div class="mk-chips" id="mk-chips">'
+	+      chip('clock','التشغيل','—','c-up')
+	+      chip('chip','الطراز','—','c-model')
+	+      chip('fw','الإصدار','—','c-fw')
+	+      chip('users','الأجهزة','—','c-clients')
+	+      chip('wifi','2.4G','—','c-w24')
+	+      chip('wifi','5G','—','c-w5')
 	+ '  </div>'
-	+ '  <div class="mk-grid mk-cols-2" style="margin-top:16px">'
-	+ '    <div class="mk-card">'
-	+ '      <h3>📈 حركة الشبكة — RX / TX <span class="mk-hint" id="mk-wif"></span></h3>'
+
+	/* ===== النظام — System gauges ===== */
+	+      section('cpu','النظام','System · CPU / RAM / Storage')
+	+ '  <div class="mk-grid mk-cols-3" id="mk-gauges">'
+	+ '    <div class="mk-card mk-gcard">'+gauge('cpu','استخدام المعالج CPU','cpu',0,'—')+'</div>'
+	+ '    <div class="mk-card mk-gcard">'+gauge('ram','استخدام الذاكرة RAM','ram',0,'—')+'</div>'
+	+ '    <div class="mk-card mk-gcard">'+gauge('disk','استخدام التخزين Storage','disk',0,'—')+'</div>'
+	+ '  </div>'
+
+	/* ===== الشبكة — Network ===== */
+	+      section('net','الشبكة','Network · Traffic & Errors')
+	+ '  <div class="mk-grid mk-cols-2">'
+	+ '    <div class="mk-card mk-traffic">'
+	+ '      <h3>'+ic('net')+'<span>حركة الشبكة — RX / TX</span><span class="mk-hint" id="mk-wif"></span></h3>'
 	+ '      <svg class="mk-spark" viewBox="0 0 320 80" preserveAspectRatio="none" id="mk-spark">'
-	+ '        <line class="mk-spark-axis" x1="0" y1="40" x2="320" y2="40"></line>'
+	+ '        <defs>'
+	+ '          <linearGradient id="mk-gr-rx" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#06B6D4" stop-opacity="0.32"/><stop offset="1" stop-color="#06B6D4" stop-opacity="0"/></linearGradient>'
+	+ '          <linearGradient id="mk-gr-tx" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8b5cf6" stop-opacity="0.30"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></linearGradient>'
+	+ '        </defs>'
+	+ '        <g class="mk-spark-grid">'
+	+ '          <line x1="0" y1="20" x2="320" y2="20"></line>'
+	+ '          <line x1="0" y1="40" x2="320" y2="40" class="mk-spark-axis"></line>'
+	+ '          <line x1="0" y1="60" x2="320" y2="60"></line>'
+	+ '        </g>'
 	+ '        <g id="mk-spark-rx"></g><g id="mk-spark-tx"></g>'
 	+ '      </svg>'
 	+ '      <div class="mk-traffic-rates">'
-	+ '        <div class="mk-rate rx"><span class="dot"></span>تنزيل RX <b id="mk-rx">—</b></div>'
-	+ '        <div class="mk-rate tx"><span class="dot"></span>رفع TX <b id="mk-tx">—</b></div>'
+	+ '        <div class="mk-rate rx"><span class="ri">'+ic('down')+'</span><span class="rl">تنزيل RX</span><b id="mk-rx">—</b></div>'
+	+ '        <div class="mk-rate tx"><span class="ri">'+ic('up')+'</span><span class="rl">رفع TX</span><b id="mk-tx">—</b></div>'
 	+ '      </div>'
 	+ '      <div class="mk-errs" id="mk-errs"></div>'
 	+ '    </div>'
-	+ '    <div class="mk-card">'
-	+ '      <h3>🔌 الواجهات النشطة — Interfaces</h3>'
-	+ '      <div class="mk-iftiles" id="mk-iftiles"><div class="mk-load">…</div></div>'
+	+ '    <div class="mk-card mk-portcard">'
+	+ '      <h3>'+ic('ports')+'<span>الواجهات النشطة — Interfaces</span></h3>'
+	+ '      <div class="mk-iftiles mk-iftiles-net" id="mk-iftiles-net"><div class="mk-load">…</div></div>'
 	+ '    </div>'
 	+ '  </div>'
-	+ '  <div class="mk-card mk-power" id="mk-power" style="margin-top:16px">'
-	+ '    <h3>⚡ استقرار الطاقة — Power &amp; Voltage</h3>'
+
+	/* ===== المنافذ — RJ45 port map ===== */
+	+      section('ports','المنافذ','Ports · RJ45 Map & Radios')
+	+ '  <div class="mk-card mk-portmap">'
+	+ '    <div class="mk-iftiles" id="mk-iftiles"><div class="mk-load">…</div></div>'
+	+ '  </div>'
+
+	/* ===== الطاقة — Power ===== */
+	+      section('power','الطاقة','Power · Voltage Stability')
+	+ '  <div class="mk-card mk-power" id="mk-power">'
 	+ '    <div id="mk-power-badge" class="mk-pwr-badge info">معلومة — Info</div>'
 	+ '    <div class="mk-pwr-text">'
 	+ '      تأكد من مصدر طاقة مستقر <b>12V 1.5A/2A</b> لتفادي سقوط الواي فاي تحت الحمل.'
@@ -207,6 +288,29 @@ function refresh(root){
 			updateGauge(root,'cpu',cpu,'حِمل '+(sm.load? (sm.load/65536).toFixed(2):'—'));
 			updateGauge(root,'ram',ramP, fmtBytes(used*1024)+' / '+fmtBytes(mt*1024));
 			updateGauge(root,'disk',dP, fmtBytes(fu*1024)+' / '+fmtBytes(ft*1024));
+		}
+
+		/* ----- header status chips ----- */
+		function setChip(cls, val, on){
+			var c = root.querySelector('.mk-chip.'+cls); if (!c) return;
+			c.querySelector('.cv').textContent = val;
+			if (on===true) c.classList.add('ok'); else if (on===false) c.classList.remove('ok');
+		}
+		if (sm.ok){
+			setChip('c-up', fmtUptime(sm.uptime));
+			setChip('c-model', sm.model ? String(sm.model).replace(/^.*\s/,'').slice(0,18) || sm.model : '—');
+			setChip('c-fw', sm.fw || sm.firmware || sm.release || (sm.openwrt? 'OpenWrt '+sm.openwrt : '—'));
+		}
+		/* radios (2.4G / 5G) presence from traffic ifaces */
+		var radios = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
+		setChip('c-w24', radios.length>=1 ? 'يعمل' : 'مغلق', radios.length>=1);
+		setChip('c-w5',  radios.length>=2 ? 'يعمل' : (radios.length>=1?'—':'مغلق'), radios.length>=2);
+		/* connected clients estimate: linked LAN ports + active radios */
+		if (pt.ok && Array.isArray(pt.ports)){
+			var linkedLan = pt.ports.filter(function(p){ return /^lan/.test(p.name) && p.link==='up'; }).length;
+			setChip('c-clients', String(linkedLan + radios.length));
+		} else if (radios.length){
+			setChip('c-clients', String(radios.length));
 		}
 
 		/* ----- power / voltage advisory ----- */
@@ -251,29 +355,51 @@ function refresh(root){
 			}
 		}
 
-		/* ----- interface tiles ----- */
+		/* ----- interface tiles: full RJ45 port map + radios ----- */
+		var pmap = {};
+		if (pt.ok && Array.isArray(pt.ports)) pt.ports.forEach(function(p){ pmap[p.name]=p; });
+		var wifis = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
+
 		var tilesEl = root.querySelector('#mk-iftiles');
 		if (tilesEl){
 			var html = '';
-			var pmap = {};
-			if (pt.ok && Array.isArray(pt.ports)) pt.ports.forEach(function(p){ pmap[p.name]=p; });
-			var lanDefs = [['lan1','LAN1'],['lan2','LAN2'],['lan3','LAN3'],['lan4','LAN4']];
+			var w = pmap['wan']; var wup = w && w.link==='up';
+			html += ifTile('wan','WAN','net', wup, wup && w.speed ? w.speed : '', 'rj45 wan');
+			var lanDefs = [['lan1','LAN 1'],['lan2','LAN 2'],['lan3','LAN 3'],['lan4','LAN 4']];
 			lanDefs.forEach(function(d){
 				var p = pmap[d[0]]; var up = p && p.link==='up';
-				html += ifTile(d[0], d[1], '🖧', up, up && p.speed ? p.speed : '');
+				html += ifTile(d[0], d[1], 'lan', up, up && p.speed ? p.speed : '', 'rj45');
 			});
-			var w = pmap['wan']; var wup = w && w.link==='up';
-			html += ifTile('wan','WAN','🌐', wup, wup && w.speed ? w.speed : '');
-			// wifi radios from traffic ifaces (wlan*/phy*/ath*)
-			var wifis = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
+			// wifi radios from traffic ifaces (wlan*/phy*/ath*) rendered as device tiles
 			if (wifis.length){
 				wifis.forEach(function(x,i){
-					html += ifTile(x['if'], (i===0?'WiFi 2.4G':'WiFi 5G'), '📶', true, '');
+					html += ifTile(x['if'], (i===0?'WiFi 2.4G':'WiFi 5G'), 'wifi', true, '', 'radio');
 				});
 			} else {
-				html += ifTile('wifi','WiFi','📶', false, '');
+				html += ifTile('wifi','WiFi','wifi', false, '', 'radio');
 			}
 			tilesEl.innerHTML = html;
+		}
+
+		/* ----- compact interface summary inside the Network card ----- */
+		var netTilesEl = root.querySelector('#mk-iftiles-net');
+		if (netTilesEl){
+			var nh = '';
+			var wn = pmap['wan']; var wnup = wn && wn.link==='up';
+			nh += ifTile('wan','WAN','net', wnup, wnup && wn.speed ? wn.speed : '', 'rj45 wan');
+			var lanUp = (pt.ok && Array.isArray(pt.ports)) ? pt.ports.filter(function(p){ return /^lan/.test(p.name) && p.link==='up'; }).length : 0;
+			nh += '<div class="mk-iftile rj45 '+(lanUp?'up':'down')+'"><span class="led"></span>'
+				+ '<div class="ico">'+ic('ports')+'</div><div class="nm">LAN</div>'
+				+ '<div class="st">'+lanUp+' / 4 نشط</div>'
+				+ '<span class="spd '+(lanUp?'link':'off')+'">'+(lanUp?lanUp+'×':'—')+'<i>up</i></span></div>';
+			if (wifis.length){
+				wifis.forEach(function(x,i){
+					nh += ifTile(x['if'], (i===0?'2.4G':'5G'), 'wifi', true, '', 'radio');
+				});
+			} else {
+				nh += ifTile('wifi','WiFi','wifi', false, '', 'radio');
+			}
+			netTilesEl.innerHTML = nh;
 		}
 	});
 }

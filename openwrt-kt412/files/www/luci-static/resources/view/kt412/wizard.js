@@ -410,25 +410,76 @@ return view.extend({
 			])
 		]);
 
+		/* ---- Tab panels (ALL kept in the DOM at all times; tabs only show/hide
+		   them via .is-active, so every element handle/closure built below stays
+		   live — the WAN async refill, scan rows, mode wiring, toggles, etc.). ---- */
+
+		/* TAB 1 — Wireless: the per-radio cards (or an empty-state card) */
+		var wlPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'wifi' });
 		if (!radios.length){
-			box.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+			wlPanel.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 				cardHead('📶', _('الوايرلس'), _('لم يتم العثور على إعدادات راديو'), ''),
 				E('div', { class:'kt-note' }, _('تعذّر قراءة إعدادات الوايرلس'))
 			]));
 		} else {
 			var grid = E('div', { class:'kt-grid kt-cols-2' });
 			radios.forEach(function(r){ grid.appendChild(radioCard(r)); });
-			box.appendChild(grid);
+			wlPanel.appendChild(grid);
 		}
 
-		/* WAN card — render a placeholder now, then fire-and-fill proto from op=wan */
+		/* TAB 2 — WAN: render a placeholder now, then fire-and-fill proto from op=wan */
+		var wanPanel = E('div', { class:'kt-tab-panel', 'data-tab':'wan' });
 		var wanSlot = E('div', {}, wanCard(''));
-		box.appendChild(wanSlot);
+		wanPanel.appendChild(wanSlot);
 		call({op:'wan'}).then(function(w){
 			if (w && w.ok){ wanSlot.innerHTML = ''; wanSlot.appendChild(wanCard(w.proto || '')); }
 		});
 
-		if (radios.length) box.appendChild(vlanCard(radios));
+		/* TAB 3 — VLAN: SSID↔VLAN binding (only when we actually have radios) */
+		var vlanPanel = E('div', { class:'kt-tab-panel', 'data-tab':'vlan' });
+		if (radios.length) vlanPanel.appendChild(vlanCard(radios));
+		else vlanPanel.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+			cardHead('🏷️', _('ربط SSID بـ VLAN'), _('لا توجد واجهات لاسلكية متاحة'), 'v'),
+			E('div', { class:'kt-note' }, _('تعذّر العثور على واجهات SSID لربطها بـ VLAN'))
+		]));
+
+		var panels = [ wlPanel, wanPanel, vlanPanel ];
+
+		/* ---- styled tab bar: buttons toggle which panel is visible (default first).
+		   We NEVER detach panels — only flip the .is-active class, so existing
+		   element handles and event closures keep working. ---- */
+		var tabDefs = [
+			{ key:'wifi', icon:'📶', label:_('الوايرلس') },
+			{ key:'wan',  icon:'🌐', label:_('WAN') },
+			{ key:'vlan', icon:'🏷️', label:_('VLAN') }
+		];
+		var tabBtns = [];
+		function selectTab(key){
+			tabBtns.forEach(function(b){
+				var on = (b.getAttribute('data-tab') === key);
+				b.classList.toggle('is-active', on);
+				b.setAttribute('aria-selected', on ? 'true' : 'false');
+			});
+			panels.forEach(function(p){
+				p.classList.toggle('is-active', p.getAttribute('data-tab') === key);
+			});
+		}
+		var tabBar = E('div', { class:'kt-tabs', role:'tablist' }, tabDefs.map(function(t){
+			var b = E('button', {
+				class:'kt-tab' + (t.key === 'wifi' ? ' is-active' : ''),
+				type:'button', role:'tab', 'data-tab':t.key,
+				'aria-selected': (t.key === 'wifi') ? 'true' : 'false'
+			}, [
+				E('span', { class:'kt-tab-ic' }, t.icon),
+				E('span', { class:'kt-tab-lbl' }, t.label)
+			]);
+			b.addEventListener('click', function(){ selectTab(t.key); });
+			tabBtns.push(b);
+			return b;
+		}));
+
+		box.appendChild(tabBar);
+		box.appendChild(E('div', { class:'kt-tab-body' }, panels));
 
 		return box;
 	},

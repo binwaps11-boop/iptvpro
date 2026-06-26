@@ -343,6 +343,232 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
 }
 
 /* ============================================================================
+   PREMIUM DASHBOARD UPGRADE (2026 — control-panel home, append-only)
+   Reuses the existing palette vars (NO recolor). Adds: a real top header bar,
+   status-chip row, styled section headers, glow-ring gauges, a refined traffic
+   card, real device-LED port tiles, entrance animation + hover lift. RTL.
+   Every rule below is still neutralised by :root[data-mk-skin="off"] because it
+   only restyles .mk-* surfaces that the kill-switch already overrides.
+   ============================================================================ */
+
+/* ---- small inline icon baseline (currentColor) ---- */
+.mk-ic{ width:16px; height:16px; flex:0 0 auto; vertical-align:middle; }
+
+/* ---- entrance animation (subtle rise + fade) ---- */
+@keyframes mkRise{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:translateY(0); } }
+@keyframes mkSheen{ from{ background-position:0 0; } to{ background-position:-200% 0; } }
+.mk-wrap > *{ animation:mkRise .5s cubic-bezier(.22,.61,.36,1) both; }
+.mk-wrap > *:nth-child(2){ animation-delay:.04s; }
+.mk-wrap > *:nth-child(3){ animation-delay:.08s; }
+.mk-wrap > *:nth-child(4){ animation-delay:.12s; }
+.mk-wrap > *:nth-child(5){ animation-delay:.16s; }
+.mk-wrap > *:nth-child(6){ animation-delay:.20s; }
+.mk-wrap > *:nth-child(7){ animation-delay:.24s; }
+.mk-wrap > *:nth-child(n+8){ animation-delay:.28s; }
+@media (prefers-reduced-motion: reduce){ .mk-wrap > *{ animation:none; } }
+
+.mk-wrap{ max-width:1160px; margin:0 auto; padding:6px 2px 24px; }
+
+/* ============================================================================
+   TOP HEADER BAR — device identity + theme toggle
+   ============================================================================ */
+.mk-topbar{
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  margin:2px 0 14px; padding:14px 18px; border-radius:16px;
+  background:
+    radial-gradient(420px 160px at 92% -40%, rgba(139,92,246,.20), transparent 70%),
+    radial-gradient(520px 200px at 0% -30%, rgba(6,182,212,.20), transparent 70%),
+    var(--mk-card);
+  border:1px solid var(--mk-stroke);
+  box-shadow:var(--mk-shadow), inset 0 1px 0 rgba(255,255,255,.05);
+  -webkit-backdrop-filter:blur(14px) saturate(140%); backdrop-filter:blur(14px) saturate(140%);
+}
+.mk-brand{ display:flex; align-items:center; gap:13px; }
+.mk-mark{
+  width:46px; height:46px; flex:0 0 auto; border-radius:13px;
+  display:flex; align-items:center; justify-content:center; color:#fff;
+  background:linear-gradient(135deg,#06B6D4,#8b5cf6);
+  box-shadow:0 8px 20px -6px rgba(6,182,212,.55), inset 0 1px 0 rgba(255,255,255,.30);
+}
+.mk-mark .mk-ic{ width:26px; height:26px; }
+.mk-brand-t .mk-logo{
+  font-size:26px; font-weight:800; letter-spacing:.4px; line-height:1.05;
+  background:linear-gradient(90deg,#06B6D4,#8b5cf6);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  -webkit-text-fill-color:transparent;
+}
+.mk-brand-t .mk-sub{ color:var(--mk-txt2); font-size:12.5px; margin-top:2px; }
+
+/* ---- status chip row ---- */
+.mk-chips{ display:flex; flex-wrap:wrap; gap:10px; margin:0 0 6px; }
+.mk-chip{
+  display:inline-flex; align-items:center; gap:7px; min-height:34px;
+  padding:6px 13px; border-radius:11px; font-size:12.5px; color:var(--mk-txt2);
+  background:var(--mk-card2); border:1px solid var(--mk-stroke);
+  -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+  transition:border-color .25s ease, transform .2s ease, box-shadow .25s ease;
+}
+.mk-chip:hover{ transform:translateY(-1px); border-color:rgba(6,182,212,.4); box-shadow:var(--mk-shadow); }
+.mk-chip .mk-ic{ color:var(--mk-muted); }
+.mk-chip .ck{ color:var(--mk-muted); }
+.mk-chip .cv{ color:var(--mk-txt); font-weight:800; letter-spacing:.2px; }
+.mk-chip.ok{ border-color:rgba(34,197,94,.40); background:rgba(34,197,94,.10); }
+.mk-chip.ok .mk-ic{ color:var(--mk-green); }
+.mk-chip.ok .cv{ color:var(--mk-green); }
+
+/* ============================================================================
+   SECTION HEADERS — icon + title + subtle divider
+   ============================================================================ */
+.mk-sec{ display:flex; align-items:center; gap:11px; margin:22px 2px 13px; }
+.mk-sec > .mk-ic{
+  width:34px; height:34px; padding:8px; border-radius:10px; color:var(--mk-accent);
+  background:rgba(6,182,212,.12); border:1px solid rgba(6,182,212,.30);
+  box-shadow:inset 0 0 12px rgba(6,182,212,.12);
+}
+.mk-sec-t{ display:flex; flex-direction:column; line-height:1.15; }
+.mk-sec-t .t{ font-size:16.5px; font-weight:800; color:var(--mk-txt); letter-spacing:.2px; }
+.mk-sec-t .s{ font-size:11px; color:var(--mk-muted); letter-spacing:.3px; }
+.mk-sec-rule{ flex:1; height:1px; margin-inline-start:6px;
+  background:linear-gradient(90deg, rgba(148,163,184,.28), transparent); }
+
+/* card heading icon alignment (h3 already flex) */
+.mk-card h3 .mk-ic{ color:var(--mk-accent); width:18px; height:18px; }
+.mk-card h3 span{ display:inline-flex; align-items:center; }
+
+/* ============================================================================
+   PREMIUM GAUGE CARDS — larger, centered, glow ring, bold %, trend caption
+   ============================================================================ */
+.mk-gcard{ padding:18px 14px 16px; }
+.mk-gcard::before{ /* faint top accent line */
+  content:""; position:absolute; inset:0 0 auto 0; height:2px;
+  background:linear-gradient(90deg, transparent, rgba(6,182,212,.5), transparent);
+  opacity:.6;
+}
+.mk-gring{ position:relative; display:inline-flex; }
+.mk-gring::after{ /* soft glow halo behind the ring */
+  content:""; position:absolute; inset:8px; border-radius:50%;
+  box-shadow:0 0 34px 2px rgba(6,182,212,.16); pointer-events:none; z-index:0;
+}
+.mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
+  display:block; position:relative; z-index:1; }
+.mk-gauge .arc{ filter:drop-shadow(0 0 6px rgba(6,182,212,.45)); }
+.mk-gauge .mk-gval{ font-size:30px; }
+.mk-gauge .mk-gunit{ fill:var(--mk-muted); font-weight:700; }
+.mk-gauge .mk-gcap{ fill:var(--mk-muted); font-size:9px; font-weight:800; letter-spacing:2px; }
+.mk-gauge .mk-glabel{ display:flex; align-items:center; justify-content:center; gap:7px; margin-top:2px; }
+.mk-gauge .mk-glabel .mk-ic{ color:var(--mk-accent); }
+.mk-gcard[data-none]{}
+.mk-gauge[data-gid="ram"] + .mk-glabel,
+.mk-gauge[data-gid="ram"] .mk-glabel .mk-ic{ color:var(--mk-green); }
+.mk-gauge[data-gid="disk"] .mk-glabel .mk-ic{ color:var(--mk-violet); }
+.mk-gauge[data-gid="ram"] .mk-gring::after{ box-shadow:0 0 34px 2px rgba(34,197,94,.16); }
+.mk-gauge[data-gid="disk"] .mk-gring::after{ box-shadow:0 0 34px 2px rgba(139,92,246,.16); }
+
+/* ============================================================================
+   PREMIUM TRAFFIC CARD
+   ============================================================================ */
+.mk-traffic .mk-spark{ height:118px; margin-top:4px; }
+.mk-spark-grid line{ stroke:rgba(148,163,184,.10); stroke-width:1; stroke-dasharray:3 5; }
+.mk-traffic-rates{ gap:12px; margin-top:14px; }
+.mk-rate{
+  flex:1 1 0; min-width:130px; display:flex; align-items:center; gap:9px;
+  padding:11px 13px; border-radius:13px; background:var(--mk-card2);
+  border:1px solid var(--mk-stroke);
+}
+.mk-rate .ri{ width:30px; height:30px; flex:0 0 auto; border-radius:9px;
+  display:flex; align-items:center; justify-content:center; }
+.mk-rate .ri .mk-ic{ width:17px; height:17px; }
+.mk-rate.rx .ri{ color:var(--mk-accent); background:rgba(6,182,212,.14); border:1px solid rgba(6,182,212,.35); }
+.mk-rate.tx .ri{ color:var(--mk-violet); background:rgba(139,92,246,.14); border:1px solid rgba(139,92,246,.35); }
+.mk-rate .rl{ color:var(--mk-muted); font-size:12px; }
+.mk-rate b{ margin-inline-start:auto; font-size:18px; font-weight:800; letter-spacing:.2px; }
+.mk-errs{
+  margin-top:13px; padding:9px 13px; border-radius:11px; font-size:12.5px;
+  background:var(--mk-card2); border:1px solid var(--mk-stroke);
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+
+/* ============================================================================
+   PREMIUM PORT MAP — real device-LED tiles
+   ============================================================================ */
+.mk-portmap .mk-iftiles{ grid-template-columns:repeat(7,1fr); }
+.mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr); }
+.mk-iftile{
+  padding:15px 8px 13px; border-radius:15px;
+  display:flex; flex-direction:column; align-items:center; gap:3px;
+  background:linear-gradient(180deg, rgba(51,65,85,.30), var(--mk-card2));
+}
+.mk-iftile .ico{ display:flex; align-items:center; justify-content:center; color:var(--mk-muted); }
+.mk-iftile .ico .mk-ic{ width:26px; height:26px; }
+.mk-iftile .led{
+  top:10px; inset-inline-start:10px; width:9px; height:9px; border-radius:50%;
+  background:var(--mk-grey); box-shadow:0 0 0 3px rgba(100,116,139,.12);
+}
+.mk-iftile .nm{ font-weight:800; font-size:13px; margin-top:5px; }
+.mk-iftile .st{ font-size:10.5px; }
+/* speed / link badge */
+.mk-iftile .spd{ display:inline-flex; align-items:baseline; gap:3px; margin-top:7px;
+  padding:3px 9px; border-radius:999px; font-size:11px; font-weight:800; line-height:1;
+  color:#0F172A; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
+.mk-iftile .spd i{ font-style:normal; font-size:8.5px; font-weight:700; opacity:.8; }
+.mk-iftile .spd.gig{ background:var(--mk-green); }
+.mk-iftile .spd.fe{ background:var(--mk-amber); box-shadow:0 0 10px rgba(245,158,11,.45); }
+.mk-iftile .spd.link{ background:rgba(6,182,212,.18); color:var(--mk-accent);
+  border:1px solid rgba(6,182,212,.4); box-shadow:none; }
+.mk-iftile .spd.off{ background:rgba(100,116,139,.18); color:var(--mk-muted); box-shadow:none; }
+/* plugged / up = neon green tile + lit LED */
+.mk-iftile.up{ border-color:rgba(34,197,94,.50);
+  background:linear-gradient(180deg, rgba(34,197,94,.16), rgba(34,197,94,.06)); }
+.mk-iftile.up .ico{ color:var(--mk-green); }
+.mk-iftile.up .led{ background:var(--mk-green); box-shadow:0 0 10px 1px rgba(34,197,94,.85), 0 0 0 3px rgba(34,197,94,.18); }
+.mk-iftile.up .nm{ color:var(--mk-green); }
+/* radios (wifi) lit in cyan when active */
+.mk-iftile.radio.up{ border-color:rgba(6,182,212,.50);
+  background:linear-gradient(180deg, rgba(6,182,212,.16), rgba(6,182,212,.05)); }
+.mk-iftile.radio.up .ico{ color:var(--mk-accent); }
+.mk-iftile.radio.up .led{ background:var(--mk-accent); box-shadow:0 0 10px 1px rgba(6,182,212,.85), 0 0 0 3px rgba(6,182,212,.18); }
+.mk-iftile.radio.up .nm{ color:var(--mk-accent); }
+.mk-iftile.radio.up .spd.link{ background:rgba(6,182,212,.18); }
+/* WAN highlight ring when up */
+.mk-iftile.wan.up{ box-shadow:inset 0 0 0 1px rgba(34,197,94,.30), var(--mk-shadow); }
+/* unplugged / down = dim slate */
+.mk-iftile.down{ background:rgba(30,41,59,0.42); border-color:var(--mk-stroke); opacity:.62; }
+.mk-iftile.down .ico{ color:var(--mk-grey); }
+.mk-iftile.down .led{ background:var(--mk-grey); box-shadow:0 0 0 3px rgba(100,116,139,.10); }
+
+/* ============================================================================
+   POWER CARD
+   ============================================================================ */
+.mk-power{ padding:16px 18px; }
+.mk-power .mk-pwr-badge{ display:inline-flex; align-items:center; gap:6px; }
+
+/* ============================================================================
+   RESPONSIVE
+   ============================================================================ */
+@media (max-width:980px){
+  .mk-portmap .mk-iftiles{ grid-template-columns:repeat(4,1fr); }
+}
+@media (max-width:900px){
+  .mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr); }
+}
+@media (max-width:600px){
+  .mk-topbar{ padding:13px 14px; }
+  .mk-brand-t .mk-logo{ font-size:22px; }
+  .mk-mark{ width:42px; height:42px; }
+  .mk-chips{ gap:8px; }
+  .mk-chip{ font-size:12px; padding:6px 11px; }
+  .mk-sec{ margin:18px 2px 11px; }
+  .mk-sec-t .t{ font-size:15px; }
+  .mk-portmap .mk-iftiles{ grid-template-columns:repeat(2,1fr)!important; }
+  .mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr)!important; }
+  .mk-rate{ min-width:100%; }
+}
+@media (max-width:380px){
+  .mk-portmap .mk-iftiles,
+  .mk-portcard .mk-iftiles-net{ grid-template-columns:1fr!important; }
+}
+
+/* ============================================================================
    DARK-MODE LOCK. This skin is ALWAYS the deep-obsidian dark palette (never a
    light flip). The dark palette applies UNCONDITIONALLY and is NOT gated behind
    prefers-color-scheme, so it renders identically whether the phone OS is in
