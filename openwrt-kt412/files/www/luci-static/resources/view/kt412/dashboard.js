@@ -66,12 +66,15 @@ function gauge(id, label, pct, meta){
 		+ '<div class="mk-gauge" data-gid="'+id+'">'
 		// width/height + fill="none" are set INLINE (not only via CSS) so the gauge can
 		// never render as a giant 60vw black disk if the stylesheet is slow/absent.
+		// No rotation on the <svg> or a counter-rotated text group (that flung the % out
+		// of view): only the arc is rotated, via a transform ATTRIBUTE around (64,64), so
+		// the % value stays upright and centered.
 		+ '<svg width="112" height="112" viewBox="0 0 128 128" aria-hidden="true">'
 		+   '<circle class="track" cx="64" cy="64" r="'+R+'" fill="none" stroke="#334155" stroke-width="11"></circle>'
-		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" fill="none" stroke-width="11" stroke-linecap="round" '
+		+   '<circle class="arc" cx="64" cy="64" r="'+R+'" fill="none" stroke-width="11" stroke-linecap="round" transform="rotate(-90 64 64)" '
 		+     'stroke="'+gColor(pct,id)+'" stroke-dasharray="'+C.toFixed(1)+'" '
 		+     'stroke-dashoffset="'+off.toFixed(1)+'"></circle>'
-		+   '<g class="mk-gtext"><text class="mk-gval" x="64" y="62" text-anchor="middle">'+Math.round(pct)+'<tspan font-size="14">%</tspan></text></g>'
+		+   '<text class="mk-gval" x="64" y="64" text-anchor="middle" dominant-baseline="central">'+Math.round(pct)+'<tspan font-size="14">%</tspan></text>'
 		+ '</svg>'
 		+ '<div class="mk-glabel">'+esc(label)+'</div>'
 		+ '<div class="mk-gmeta">'+esc(meta||'')+'</div>'

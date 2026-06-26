@@ -221,14 +221,15 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
    light text. */
 .mk-gauge{ display:flex; flex-direction:column; align-items:center; gap:10px;
   width:100%; max-width:100%; }
-/* HARD small size — never 60vw (that rendered a ~324px giant disk on phones). */
+/* HARD small size — never 60vw (that rendered a ~324px giant disk on phones).
+   NO rotation on the svg: the arc itself is rotated via a transform attribute, so the
+   centered % text stays upright and visible. */
 .mk-gauge svg{ width:112px!important; height:112px!important; max-width:112px!important;
-  transform:rotate(-90deg); display:block; }
+  display:block; }
 .mk-gauge circle{ fill:none!important; }                 /* kill any default black fill */
 .mk-gauge .track{ fill:none!important; stroke:#334155; stroke-width:11; }
 .mk-gauge .arc{ fill:none!important; stroke:var(--mk-accent); stroke-width:11;
   stroke-linecap:round; transition:stroke-dashoffset .7s ease, stroke .4s ease; }
-.mk-gauge .mk-gtext{ transform:rotate(90deg); }
 .mk-gauge .mk-gval{ font-size:26px; font-weight:800; fill:var(--mk-txt); stroke:none; }
 .mk-gauge .mk-glabel{ color:var(--mk-txt2); font-size:13px; font-weight:700; }
 .mk-gauge .mk-gmeta{ color:var(--mk-muted); font-size:11px; }

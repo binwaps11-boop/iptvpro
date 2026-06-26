@@ -1,15 +1,4 @@
 {
-	"admin/mkapp/ai": {
-		"title": "المساعد الذكي",
-		"order": 10,
-		"action": {
-			"type": "view",
-			"path": "kt412/ai"
-		},
-		"depends": {
-			"acl": [ "luci-app-kt412-diag" ]
-		}
-	},
 	"admin/mkapp/loopguard": {
 		"title": "مكافح اللوب",
 		"order": 11,
