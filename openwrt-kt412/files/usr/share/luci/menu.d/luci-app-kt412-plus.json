@@ -1,0 +1,35 @@
+{
+	"admin/mkapp/clients": {
+		"title": "الأجهزة والتحكم",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "kt412/clients"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	},
+	"admin/mkapp/netcfg": {
+		"title": "الجدولة وشبكة الضيوف",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "kt412/netcfg"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	},
+	"admin/mkapp/speed": {
+		"title": "اختبار السرعة والرسوم",
+		"order": 45,
+		"action": {
+			"type": "view",
+			"path": "kt412/speed"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	}
+}
