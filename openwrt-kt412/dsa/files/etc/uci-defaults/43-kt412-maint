@@ -1,7 +1,7 @@
 #!/bin/sh
 # 43-kt412-maint  -- KT412 maintenance & stability (first boot).
-#   1. WatchCat ping-recovery   (watchcat package config if present, else cron)
-#   2. scheduled reboot every 12h
+#   1. SOFT ping-recovery only (NEVER reboots) + disables any rebooting watchcat
+#   2. NO scheduled reboot (removed — it was a spontaneous-reboot cause)
 #   3. channel optimization / lock (2.4G -> 1..11 only; 5G -> stable plan)
 #
 # Idempotent. Uses DISTINCT guard markers so it never fights 99-kt412-dsa /
@@ -13,42 +13,35 @@ MARK=/etc/kt412-maint.done
 mkdir -p /etc/crontabs
 
 # ============================================================================
-# 1) WATCHCAT -- ping-based recovery
+# 1) PING RECOVERY -- SOFT ONLY. The device must NEVER reboot itself.
 # ============================================================================
-# If the 'watchcat' package is installed (it ships /etc/config/watchcat +
-# /etc/init.d/watchcat) we configure it natively. Otherwise we fall back to our
-# own /root/kt412-watchcat.sh driven from cron. Either way: ping recovery with a
-# 10-minute loss threshold, soft "restart WAN" action (not a reboot loop).
+# ROOT-CAUSE FIX for spurious "it was working then rebooted on its own":
+#   * native watchcat in mode='ping_reboot' REBOOTS the whole device when the
+#     ping host is unreachable for the period -- on a pure AP (or any upstream
+#     blip) that is a spontaneous reboot, sometimes a loop. We DISABLE it.
+#   * We replace it with our own cron watchdog that does a SOFT recovery only
+#     (bounce WAN / wifi up) and NEVER reboots.
+# Self-healing: also strips any rebooting watchcat section / reboot cron that a
+# previous firmware left in the persisted config on a settings-kept sysupgrade.
 if [ -f /etc/init.d/watchcat ]; then
-	# native watchcat: one 'ping_reboot' section that restarts the network if
-	# the pinged hosts are unreachable for the period. (period/timeout in s.)
-	if ! uci -q get watchcat.@watchcat[0] >/dev/null 2>&1; then
-		uci -q add watchcat watchcat >/dev/null 2>&1
-	fi
-	uci -q set watchcat.@watchcat[0].mode='ping_reboot'
-	uci -q set watchcat.@watchcat[0].period='600'      # 10 min of loss
-	uci -q set watchcat.@watchcat[0].ping_hosts='1.1.1.1'
-	uci -q set watchcat.@watchcat[0].ping_period='60'
-	uci -q set watchcat.@watchcat[0].force_delay='30'
-	uci -q set watchcat.@watchcat[0].failure_period='600'
-	uci -q commit watchcat
-	/etc/init.d/watchcat enable >/dev/null 2>&1
-	/etc/init.d/watchcat restart >/dev/null 2>&1
-else
-	# fallback: our own ping watchdog every 5 min (marker: kt412-watchcat)
-	chmod 0755 /root/kt412-watchcat.sh 2>/dev/null
-	if ! grep -q 'kt412-watchcat' /etc/crontabs/root 2>/dev/null; then
-		echo '*/5 * * * * ACTION=ifdown FAIL_MINUTES=10 /root/kt412-watchcat.sh # kt412-watchcat' >> /etc/crontabs/root
-	fi
+	/etc/init.d/watchcat stop >/dev/null 2>&1
+	/etc/init.d/watchcat disable >/dev/null 2>&1
+	# remove every existing watchcat section so no ping_reboot/periodic_reboot survives
+	while uci -q delete watchcat.@watchcat[0] >/dev/null 2>&1; do :; done
+	uci -q commit watchcat >/dev/null 2>&1
+fi
+# our own SOFT ping watchdog (no reboot, ever): bounces WAN on sustained loss
+chmod 0755 /root/kt412-watchcat.sh 2>/dev/null
+if ! grep -q 'kt412-watchcat' /etc/crontabs/root 2>/dev/null; then
+	echo '*/5 * * * * ACTION=ifdown FAIL_MINUTES=10 /root/kt412-watchcat.sh # kt412-watchcat' >> /etc/crontabs/root
 fi
 
 # ============================================================================
-# 2) SCHEDULED REBOOT every 12h (02:00 and 14:00). Marker: kt412-maint-reboot.
-#    Distinct from the smartap watchdog (which never reboots on its own).
+# 2) NO SCHEDULED REBOOT. A healthy device does not need one, and a 12h cron
+#    reboot is exactly the "rebooted by itself while working" symptom. Remove
+#    any scheduled-reboot cron a previous firmware installed (self-healing).
 # ============================================================================
-if ! grep -q 'kt412-maint-reboot' /etc/crontabs/root 2>/dev/null; then
-	echo '0 2,14 * * * sleep 20 && reboot # kt412-maint-reboot' >> /etc/crontabs/root
-fi
+sed -i '/# kt412-maint-reboot/d' /etc/crontabs/root 2>/dev/null
 
 /etc/init.d/cron enable >/dev/null 2>&1
 /etc/init.d/cron restart >/dev/null 2>&1
