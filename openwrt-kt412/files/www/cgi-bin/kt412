@@ -867,6 +867,95 @@ if [ -n "$ACT" ]; then
 			/etc/init.d/network reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
 			printf '{"ok":true,"msg":"منفذ WAN = %s"}\n' "$(json_esc "$pt")";;
 
+		# ===================== DEVICE CONTROL: block / unblock a client =====================
+		block|unblock)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17 | tr 'A-F' 'a-f')"
+			[ -n "$mac" ] && [ "${#mac}" = 17 ] || fail "bad_mac"
+			for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+				[ "$(uci -q get wireless.$s.mode)" = "ap" ] || continue
+				if [ "$ACT" = "block" ]; then
+					uci -q set wireless.$s.macfilter='deny'
+					uci -q del_list wireless.$s.maclist="$mac"
+					uci -q add_list wireless.$s.maclist="$mac"
+				else
+					uci -q del_list wireless.$s.maclist="$mac"
+					# no more blocked MACs on this iface -> drop the filter entirely
+					uci -q get wireless.$s.maclist >/dev/null 2>&1 || uci -q delete wireless.$s.macfilter
+				fi
+			done
+			uci -q commit wireless
+			# immediate kick (deauth) from every live AP iface
+			for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+				ubus call hostapd.$i del_client "{\"addr\":\"$mac\",\"reason\":1,\"deauth\":true,\"ban_time\":60000}" >/dev/null 2>&1
+				iw dev "$i" station del "$mac" >/dev/null 2>&1
+			done
+			wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"mac":"%s","blocked":%s}\n' "$mac" "$([ "$ACT" = block ] && echo true || echo false)";;
+
+		# ===================== WIFI SCHEDULE (cron: off at night / on in morning) =====================
+		wifi_sched)
+			en="$(getp enabled | tr -cd '01')"
+			offh="$(sani_int "$(getp off_h)")"; onh="$(sani_int "$(getp on_h)")"
+			CR=/etc/crontabs/root; touch "$CR"
+			sed -i '/# kt412-sched/d' "$CR" 2>/dev/null
+			if [ "$en" = "1" ] && [ -n "$offh" ] && [ -n "$onh" ] \
+			   && [ "$offh" -ge 0 ] 2>/dev/null && [ "$offh" -le 23 ] 2>/dev/null \
+			   && [ "$onh" -ge 0 ] 2>/dev/null && [ "$onh" -le 23 ] 2>/dev/null; then
+				printf '0 %s * * * /sbin/wifi down # kt412-sched\n' "$offh" >> "$CR"
+				printf '0 %s * * * /sbin/wifi up # kt412-sched\n'   "$onh"  >> "$CR"
+				/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
+				printf '{"ok":true,"msg":"الجدولة مفعّلة: إطفاء %s:00 — تشغيل %s:00"}\n' "$offh" "$onh"
+			else
+				/etc/init.d/cron restart >/dev/null 2>&1
+				printf '{"ok":true,"msg":"الجدولة موقّفة"}\n'
+			fi;;
+
+		# ===================== GUEST SSID (isolated clients) =====================
+		guest)
+			en="$(getp enabled | tr -cd '01')"
+			gssid="$(sani "$(getp ssid)")"; [ -n "$gssid" ] || gssid="KT412-Guest"
+			gkey="$(sani "$(getp key)")"
+			gr=""
+			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+				[ "$(uci -q get wireless.$r.band)" = "2g" ] && { gr="$r"; break; }
+			done
+			[ -n "$gr" ] || gr="radio0"
+			sec="kt412guest"
+			if [ "$en" = "1" ]; then
+				uci -q set wireless.$sec=wifi-iface
+				uci -q set wireless.$sec.device="$gr"
+				uci -q set wireless.$sec.mode='ap'
+				uci -q set wireless.$sec.network='lan'
+				uci -q set wireless.$sec.ssid="$gssid"
+				uci -q set wireless.$sec.isolate='1'
+				if [ -n "$gkey" ] && [ "${#gkey}" -ge 8 ]; then
+					uci -q set wireless.$sec.encryption='psk2'; uci -q set wireless.$sec.key="$gkey"
+				else
+					uci -q set wireless.$sec.encryption='none'; uci -q delete wireless.$sec.key
+				fi
+			else
+				uci -q delete wireless.$sec
+			fi
+			uci -q commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"شبكة الضيوف %s"}\n' "$([ "$en" = 1 ] && echo "مفعّلة ($gssid)" || echo "موقّفة")";;
+
+		# ===================== SPEEDTEST (download throughput, backgrounded) =====================
+		speedtest)
+			szp="$(getp size | tr -cd '0-9')"; case "$szp" in 10|50|100) :;; *) szp=10;; esac
+			F=/tmp/kt412-spd; rm -f "$F.done" "$F.out"
+			( url="http://speedtest.tele2.net/${szp}MB.zip"
+			  bytes=$((szp*1024*1024))
+			  t0="$(date +%s)"
+			  timeout 60 uclient-fetch -q -O /dev/null "$url" >/dev/null 2>&1 \
+			    || timeout 60 wget -q -O /dev/null "$url" >/dev/null 2>&1
+			  rc=$?
+			  t1="$(date +%s)"; dt=$((t1-t0)); [ "$dt" -lt 1 ] && dt=1
+			  if [ "$rc" = "0" ]; then mbps=$(( bytes*8/dt/1000000 )); echo "$mbps" > "$F.out"
+			  else echo "-1" > "$F.out"; fi
+			  touch "$F.done"
+			) >/dev/null 2>&1 &
+			printf '{"ok":true,"msg":"بدأ اختبار السرعة (%sMB)","size":%s}\n' "$szp" "$szp";;
+
 		*) fail "unknown_action";;
 	esac
 	exit 0
@@ -1412,6 +1501,52 @@ $(iwinfo "$i" assoclist 2>/dev/null)
 			for s in dnsmasq uhttpd rpcd netifd; do echo -n "$s: "; pidof "$s" >/dev/null 2>&1 && echo يعمل || echo متوقف; done
 		} | base64 2>/dev/null | tr -d '\n')"
 		printf '{"ok":true,"out":"%s"}\n' "$t";;
+
+	# ===================== blocked MAC list (for the clients view) =====================
+	blocked)
+		out=""; first=1
+		for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+			[ "$(uci -q get wireless.$s.macfilter)" = "deny" ] || continue
+			for m in $(uci -q get wireless.$s.maclist 2>/dev/null); do
+				m="$(printf '%s' "$m" | tr 'A-F' 'a-f')"
+				case ",$out," in *",$m,"*) continue;; esac
+				sep=$([ "$first" = 1 ] && echo "" || echo ","); first=0
+				out="$out$sep\"$m\""
+			done
+		done
+		printf '{"ok":true,"blocked":[%s]}\n' "$out";;
+
+	# ===================== wifi schedule (current cron state) =====================
+	sched_get)
+		offh="$(sed -n 's/^0 \([0-9]*\) .*wifi down # kt412-sched/\1/p' /etc/crontabs/root 2>/dev/null | head -1)"
+		onh="$(sed -n 's/^0 \([0-9]*\) .*wifi up # kt412-sched/\1/p' /etc/crontabs/root 2>/dev/null | head -1)"
+		en=$([ -n "$offh" ] && echo 1 || echo 0)
+		printf '{"ok":true,"enabled":%s,"off_h":"%s","on_h":"%s"}\n' "$en" "${offh:-}" "${onh:-}";;
+
+	# ===================== guest ssid (current state) =====================
+	guest_get)
+		if uci -q get wireless.kt412guest >/dev/null 2>&1; then
+			gs="$(uci -q get wireless.kt412guest.ssid)"; ge="$(uci -q get wireless.kt412guest.encryption)"
+			printf '{"ok":true,"enabled":1,"ssid":"%s","secure":%s}\n' "$(json_esc "$gs")" "$([ "$ge" = none ] || [ -z "$ge" ] && echo false || echo true)"
+		else
+			printf '{"ok":true,"enabled":0,"ssid":"KT412-Guest","secure":false}\n'
+		fi;;
+
+	# ===================== speedtest result (poll) =====================
+	spd)
+		F=/tmp/kt412-spd
+		if [ -f "$F.done" ]; then printf '{"ok":true,"done":true,"mbps":"%s"}\n' "$(cat "$F.out" 2>/dev/null)"
+		else printf '{"ok":true,"done":false}\n'; fi;;
+
+	# ===================== resource history (sampler ring buffer) =====================
+	history)
+		F=/tmp/kt412-hist
+		if [ -f "$F" ]; then
+			out="$(awk 'BEGIN{f=1} NF>=5{ s=(f?"":","); f=0; printf "%s{\"t\":%s,\"cpu\":%s,\"mem\":%s,\"rx\":%s,\"tx\":%s}", s,$1,$2,$3,$4,$5 }' "$F" 2>/dev/null)"
+			printf '{"ok":true,"samples":[%s]}\n' "$out"
+		else
+			printf '{"ok":true,"samples":[]}\n'
+		fi;;
 
 	*)
 		fail "unknown_op";;
