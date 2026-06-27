@@ -193,6 +193,14 @@ body:has(input#luci_password) input[type="password"]:focus{
   outline:none!important;
 }
 body:has(input#luci_password) input::placeholder{ color:var(--mk-muted)!important; }
+/* keep browser autofill (saved credentials) on the dark glass, not a white box */
+body.node-main-login input:-webkit-autofill,
+body:has(input#luci_password) input:-webkit-autofill,
+body:has(input#luci_password) input:-webkit-autofill:focus{
+  -webkit-box-shadow:0 0 0 1000px rgba(15,23,42,.78) inset!important;
+  -webkit-text-fill-color:var(--mk-txt)!important;
+  caret-color:var(--mk-txt)!important; border-radius:13px!important;
+}
 
 body:has(input#luci_password) .cbi-page-actions,
 body:has(input#luci_password) .right{
@@ -221,6 +229,30 @@ body:has(input#luci_password) button[type="submit"]:active{
 }
 /* hide the bootstrap reset/cancel button on the login page */
 body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
+
+/* hide ALL LuCI chrome on the login page (top navbar/header, side menu, footer)
+   so the centered glass card floats alone on the obsidian field — no stray cyan
+   navbar or "Powered by" footer above/below it. */
+body.node-main-login header, body.node-main-login #header,
+body.node-main-login .navbar, body.node-main-login #topmenu,
+body.node-main-login #mainmenu, body.node-main-login .main-left,
+body.node-main-login footer, body.node-main-login #footer, body.node-main-login .footer,
+body:has(input#luci_password) header, body:has(input#luci_password) #header,
+body:has(input#luci_password) .navbar, body:has(input#luci_password) #topmenu,
+body:has(input#luci_password) #mainmenu, body:has(input#luci_password) .main-left,
+body:has(input#luci_password) footer, body:has(input#luci_password) #footer,
+body:has(input#luci_password) .footer{ display:none!important; }
+
+/* style a wrong-password / error message cleanly INSIDE the card (not raw text) */
+body.node-main-login .alert-message,
+body:has(input#luci_password) .alert-message,
+body:has(input#luci_password) .error,
+body:has(input#luci_password) p.alert{
+  background:rgba(239,68,68,.12)!important; color:#fca5a5!important;
+  border:1px solid rgba(239,68,68,.35)!important; border-radius:11px!important;
+  padding:11px 13px!important; margin:0 0 16px!important; font-size:13px!important;
+  text-align:center!important; box-shadow:none!important;
+}
 
 /* phones: card ~92vw, scaled padding, fonts stay legible */
 @media (max-width:480px){
