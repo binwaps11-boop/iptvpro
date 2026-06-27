@@ -12,19 +12,7 @@
 # default runs in isolation. It performs no cascade.css edits.
 
 uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
-# AL-MALAKI parity: the "نظام الملكي" professional look is simply the OFFICIAL
-# OpenWrt "openwrt2020" LuCI theme (verified from its screenshots + its luci
-# config: mediaurlbase '/luci-static/openwrt2020'). Make it the DEFAULT theme so
-# the whole admin UI matches AL-MALAKI exactly (light theme, blue/purple sidebar,
-# stock cards/tabs/buttons). SAFE FALLBACK: if the theme package did not build
-# (feed rename), the dir is absent -> keep the bootstrap theme (our dark skin)
-# so the UI is never left without CSS. The custom dark Smart AP skin stays
-# shipped on bootstrap and the user can switch back in System > Language & Style.
-if [ -d /www/luci-static/openwrt2020 ]; then
-	uci -q set luci.main.mediaurlbase='/luci-static/openwrt2020'
-else
-	uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
-fi
+uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
 uci -q set luci.main.lang='ar'
 uci -q commit luci
 

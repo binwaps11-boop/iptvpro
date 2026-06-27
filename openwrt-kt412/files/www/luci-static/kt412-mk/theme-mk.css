@@ -246,9 +246,8 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
   display:inline-flex; align-items:center; gap:8px; cursor:pointer; user-select:none;
   padding:8px 14px; border-radius:999px; font-size:13px; color:var(--mk-txt2);
   background:var(--mk-card); border:1px solid var(--mk-stroke);
-  /* de-blurred: backdrop-filter on a poll-repainted surface re-rasterizes the
-     layer every tick on the 720MHz core. Flat == cheaper AND closer to openwrt2020. */
-  transition:background .25s ease,border-color .25s ease,box-shadow .25s ease;
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  transition:all .3s ease;
 }
 .mk-toggle .sw{ width:38px; height:20px; border-radius:999px; position:relative;
   background:#334155; transition:background .3s ease; }
@@ -268,8 +267,9 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
   background:var(--mk-card);
   border:1px solid var(--mk-stroke); border-radius:var(--mk-radius);
   box-shadow:var(--mk-shadow);
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
   padding:1rem; position:relative; overflow:hidden;
-  transition:background .25s ease,border-color .25s ease,box-shadow .25s ease;
+  transition:all .3s ease;
 }
 .mk-card:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow-lg); border-color:rgba(6,182,212,.35); }
 .mk-card h3{ margin:0 0 14px; font-size:15px; color:var(--mk-txt); font-weight:800; display:flex; align-items:center; gap:8px; }
@@ -301,9 +301,9 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
 .mk-traffic-rates{ display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; }
 .mk-rate{ display:flex; align-items:center; gap:8px; font-size:14px; }
 .mk-rate b{ font-size:18px; font-weight:800; }
-.mk-rate.rx b{ color:var(--mk-accent); }
-.mk-rate.tx b{ color:var(--mk-violet); }
-.mk-rate b{ font-variant-numeric:tabular-nums; }
+.mk-rate .dot{ width:10px; height:10px; border-radius:50%; }
+.mk-rate.rx .dot{ background:var(--mk-accent); } .mk-rate.rx b{ color:var(--mk-accent); }
+.mk-rate.tx .dot{ background:var(--mk-violet); } .mk-rate.tx b{ color:var(--mk-violet); }
 .mk-errs{ margin-top:10px; color:var(--mk-txt2); font-size:12px; }
 .mk-errs .bad{ color:var(--mk-red); font-weight:700; }
 .mk-errs .ok{ color:var(--mk-green); font-weight:700; }
@@ -313,9 +313,10 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
 .mk-iftile{
   background:var(--mk-card2); border:1px solid var(--mk-stroke);
   border-radius:14px; padding:14px 10px; text-align:center; position:relative;
-  transition:background .25s ease,border-color .25s ease,box-shadow .25s ease;
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  transition:all .3s ease;
 }
-.mk-iftile:hover{ box-shadow:var(--mk-shadow); border-color:rgba(6,182,212,.30); }
+.mk-iftile:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow); }
 .mk-iftile .ico{ font-size:22px; }
 .mk-iftile .nm{ font-weight:700; font-size:14px; margin-top:4px; color:var(--mk-txt); }
 .mk-iftile .st{ font-size:11px; color:var(--mk-muted); margin-top:2px; }
@@ -374,7 +375,8 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
 
 /* ---- entrance animation (subtle rise + fade) ---- */
 @keyframes mkRise{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:translateY(0); } }
-.mk-wrap > *{ animation:mkRise .3s cubic-bezier(.22,.61,.36,1) both; }
+@keyframes mkSheen{ from{ background-position:0 0; } to{ background-position:-200% 0; } }
+.mk-wrap > *{ animation:mkRise .5s cubic-bezier(.22,.61,.36,1) both; }
 .mk-wrap > *:nth-child(2){ animation-delay:.04s; }
 .mk-wrap > *:nth-child(3){ animation-delay:.08s; }
 .mk-wrap > *:nth-child(4){ animation-delay:.12s; }
@@ -422,10 +424,10 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
   display:inline-flex; align-items:center; gap:7px; min-height:34px;
   padding:6px 13px; border-radius:11px; font-size:12.5px; color:var(--mk-txt2);
   background:var(--mk-card2); border:1px solid var(--mk-stroke);
-  font-variant-numeric:tabular-nums;
-  transition:border-color .25s ease, box-shadow .25s ease;
+  -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+  transition:border-color .25s ease, transform .2s ease, box-shadow .25s ease;
 }
-.mk-chip:hover{ border-color:rgba(6,182,212,.4); box-shadow:var(--mk-shadow); }
+.mk-chip:hover{ transform:translateY(-1px); border-color:rgba(6,182,212,.4); box-shadow:var(--mk-shadow); }
 .mk-chip .mk-ic{ color:var(--mk-muted); }
 .mk-chip .ck{ color:var(--mk-muted); }
 .mk-chip .cv{ color:var(--mk-txt); font-weight:800; letter-spacing:.2px; }
@@ -456,12 +458,19 @@ body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
    PREMIUM GAUGE CARDS — larger, centered, glow ring, bold %, trend caption
    ============================================================================ */
 .mk-gcard{ padding:18px 14px 16px; }
+.mk-gcard::before{ /* faint top accent line */
+  content:""; position:absolute; inset:0 0 auto 0; height:2px;
+  background:linear-gradient(90deg, transparent, rgba(6,182,212,.5), transparent);
+  opacity:.6;
+}
 .mk-gring{ position:relative; display:inline-flex; }
-/* halo (.mk-gring::after) + top-accent (.mk-gcard::before) + arc drop-shadow
-   REMOVED: each re-rasterized the gauge layer on every 10s poll x3 gauges —
-   the single biggest avoidable GPU/CPU cost. Flat arcs read cleaner anyway. */
+.mk-gring::after{ /* soft glow halo behind the ring */
+  content:""; position:absolute; inset:8px; border-radius:50%;
+  box-shadow:0 0 34px 2px rgba(6,182,212,.16); pointer-events:none; z-index:0;
+}
 .mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
   display:block; position:relative; z-index:1; }
+.mk-gauge .arc{ filter:drop-shadow(0 0 6px rgba(6,182,212,.45)); }
 .mk-gauge .mk-gval{ font-size:30px; }
 .mk-gauge .mk-gunit{ fill:var(--mk-muted); font-weight:700; }
 .mk-gauge .mk-gcap{ fill:var(--mk-muted); font-size:9px; font-weight:800; letter-spacing:2px; }
