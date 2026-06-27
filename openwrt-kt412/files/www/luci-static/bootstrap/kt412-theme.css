@@ -938,3 +938,79 @@ input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
   .kt-kv{flex-wrap:wrap;gap:4px}
   table,thead,tbody,th,td,tr{font-size:12.5px}
 }
+
+/* ============================================================================
+   RESPONSIVE FRAMEWORK — real mobile + laptop, tested across the target widths
+   (360/375/390/414 phone · 768/820 tablet · 1024/1366/1440/1920 desktop).
+   Built on the EXISTING containers (#view, .mk-wrap, .kt-grid, .kt-card, tables)
+   so LuCI's own responsive chrome/menu is preserved. CSS only.
+   ============================================================================ */
+/* 0) Overflow safety: nothing escapes the viewport; flex/grid children may shrink */
+html,body{max-width:100%;overflow-x:hidden}
+#view,#view *{min-width:0}
+#view img,#view svg,#view canvas{max-width:100%}
+.tech-value,.kt-mono{direction:ltr;unicode-bidi:isolate;font-variant-numeric:tabular-nums}
+
+/* 1) Content column: fluid with comfortable padding; capped + centered on desktop */
+#view,.mk-wrap{width:100%;box-sizing:border-box}
+#maincontent>.container{padding-left:14px;padding-right:14px}
+
+/* 2) Fluid type/padding via clamp (never too small on phone, not huge on desktop) */
+#view h2{font-size:clamp(18px,2.4vw,22px)}
+.kt-card{padding:clamp(0.9rem,1.6vw,1.25rem)}
+.kt-card h3{font-size:clamp(14px,1.6vw,15px)}
+
+/* 3) Card grids: fluid auto-fit is the base for EVERY width (no fixed counts that
+   break phones); explicit counts only kick in on real desktops below. */
+.kt-grid.kt-cols-2{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.kt-grid.kt-cols-3{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.kt-grid.kt-cols-4{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.mk-grid.mk-cols-2{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.mk-grid.mk-cols-3{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.mk-grid.mk-cols-6{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+
+/* 4) Responsive tables: scroll horizontally INSIDE their card on narrow screens
+   (intentional, only for wide tables) — never push the page sideways. */
+.responsive-table,#view table{width:100%}
+@media (max-width:760px){
+  #view table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  #view table thead th{white-space:nowrap}
+}
+
+/* ---- PHONE (<=600px): single/again-fluid columns, full-width controls, touch ---- */
+@media (max-width:600px){
+  #maincontent>.container{padding-left:10px;padding-right:10px}
+  .kt-grid.kt-cols-2,.kt-grid.kt-cols-3,.kt-grid.kt-cols-4,
+  .mk-grid.mk-cols-2,.mk-grid.mk-cols-3{grid-template-columns:1fr}
+  .mk-grid.mk-cols-6{grid-template-columns:repeat(2,1fr)}
+  .kt-btn,.cbi-button,button.cbi-button{min-height:44px}     /* comfortable touch */
+  .kt-field input,.kt-field select,.kt-field textarea,.cbi-input-text,.cbi-input-select{
+    width:100%!important;max-width:100%!important;font-size:16px}  /* 16px = no iOS zoom */
+  .mk-topbar{flex-direction:column;align-items:stretch;text-align:center}
+  .mk-chips{justify-content:center}
+}
+/* small phones (<=400px): tighten gauges so 2-up still fits 360px */
+@media (max-width:400px){
+  .mk-gauge svg{width:104px!important;height:104px!important}
+}
+
+/* ---- TABLET (601–1024px): 2-up cards, gauges 3-up where they fit ---- */
+@media (min-width:601px) and (max-width:1024px){
+  .kt-grid.kt-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kt-grid.kt-cols-3,.mk-grid.mk-cols-3{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kt-grid.kt-cols-4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mk-grid.mk-cols-6{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+
+/* ---- LAPTOP/DESKTOP (>=1025px): use the width intelligently, capped + centered ---- */
+@media (min-width:1025px){
+  #view>div,.mk-wrap{max-width:1240px;margin-left:auto;margin-right:auto}
+  .kt-grid.kt-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kt-grid.kt-cols-3,.mk-grid.mk-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .kt-grid.kt-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .mk-grid.mk-cols-6{grid-template-columns:repeat(6,minmax(0,1fr))}
+}
+/* wide desktop (>=1600px): a touch more breathing room, no giant empty gutters */
+@media (min-width:1600px){
+  #view>div,.mk-wrap{max-width:1360px}
+}
