@@ -144,7 +144,7 @@ return view.extend({
 			postCall({ act:'set_label', mac:mac, name:nm }).then(function(){ reload(body); });
 		});
 		reload(body);
-		poll.add(function(){ return reload(body); }, 10);
+		poll.add(function(){ return reload(body); }, 20);
 		return box;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null

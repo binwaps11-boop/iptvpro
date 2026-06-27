@@ -23,10 +23,13 @@
   --kt-bg1:#111A2E;           /* secondary panel tint for gradients          */
   --kt-bg2:#1B2840;
 
-  --kt-card:rgba(24,34,54,0.62);   /* cleaner, more defined glass surface    */
-  --kt-card2:rgba(15,23,42,0.66);  /* deeper surface (card heads)            */
-  --kt-glass:rgba(24,34,54,0.62);  /* glass panel                            */
-  --kt-glass-strong:rgba(13,20,36,0.74);
+  /* surfaces firmed up (higher opacity) so text reads cleanly and we can use a
+     LIGHTER blur — heavy backdrop-filter blur was both a browser-CPU cost and a
+     readability problem ("الزجاج يضعف القراءة"). */
+  --kt-card:rgba(22,32,52,0.90);   /* near-opaque slate — crisp text          */
+  --kt-card2:rgba(13,20,38,0.92);  /* deeper surface (card heads)            */
+  --kt-glass:rgba(22,32,52,0.90);  /* glass panel                            */
+  --kt-glass-strong:rgba(11,18,34,0.94);
 
   --kt-stroke:rgba(148,163,184,0.14);        /* crisp, subtle hairline border */
   --kt-stroke-2:rgba(148,163,184,0.22);      /* slightly stronger separator   */
@@ -806,3 +809,9 @@ a{color:var(--kt-accent)}a:hover{color:#67E8F9}
 /* focus ring: single consistent cyan everywhere */
 input:focus,select:focus,textarea:focus,.cbi-input-text:focus,.cbi-input-select:focus{
   border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(34,211,238,.22)!important}
+
+/* ---- LIGHTER glass: surfaces are near-opaque now, so a heavy blur is wasted
+   browser CPU and only hurt text clarity. Cap blur low everywhere. ---- */
+.kt-card,.cbi-section,.cbi-map,.panel,.well,.main-left,#mainmenu,
+.kt-tabs,.mk-card,.mk-topbar,.mk-chip{
+  -webkit-backdrop-filter:blur(4px)!important;backdrop-filter:blur(4px)!important}

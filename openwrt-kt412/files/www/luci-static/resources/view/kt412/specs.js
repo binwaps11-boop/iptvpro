@@ -128,7 +128,9 @@ return view.extend({
 		]);
 		var body = box.querySelector('.kt-body');
 		reload(body);
-		poll.add(function(){ return reload(body); }, 5);
+		/* hardware specs are near-static (model/CPU/flash/kernel rarely change),
+		   so a 5s poll forked the CGI 12x/min for nothing. 30s is plenty. */
+		poll.add(function(){ return reload(body); }, 30);
 		return box;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null
