@@ -53,7 +53,103 @@ jobs:
             python3 python3-setuptools rsync swig unzip zlib1g-dev file wget \
             ccache ecj fastjar java-propose-classpath libelf-dev
 
+      # ------------------------------------------------------------------------
+      # INCREMENTAL BUILD CACHE (cachewrtbuild pattern)
+      #
+      # Cache keys are computed FIRST (they only need the kt/ checkout, already
+      # done above) so the WHOLE-TREE cache can be restored BEFORE the OpenWrt
+      # clone — and the clone/feeds/configure/toolchain work can then be SKIPPED
+      # on a hit.
+      #
+      # Why the keys are built the way they are:
+      #   The compiled output (toolchain + kernel + packages, incl. the patched
+      #   ath9k/cfg80211 backports) is a pure function of:
+      #     * the pinned OpenWrt/PR #21837 build HEAD (PIN=cd4969767bbc),
+      #     * the kernel/power patches in dsa/patches/** (990/991/992),
+      #     * the build config in dsa/config.seed,
+      #     * the variant name.
+      #   It is NOT a function of the files/ overlay (files/www, files/usr,
+      #   dsa/files, ...). The overlay is copied in at IMAGE-ASSEMBLY time, after
+      #   compilation, so changing CSS/JS/scripts only repackages the image and
+      #   must reuse the cached toolchain+kernel+packages. Therefore the overlay
+      #   is deliberately EXCLUDED from every cache key.
+      #
+      #   Including PIN + patches-hash + config-hash in the key GUARANTEES we can
+      #   never ship a stale kernel/package: bump the OpenWrt pin, edit a power
+      #   patch, or change config.seed and the key changes -> a FULL rebuild.
+      # ------------------------------------------------------------------------
+      - name: Compute cache keys
+        id: cachekey
+        run: |
+          PIN=cd4969767bbc   # MUST match the PR #21837 pin in the checkout step
+          VAR="${{ matrix.variant }}"
+          # Hash everything that affects compiled output but NOT the files/ overlay.
+          SEED_H=$(sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" | cut -c1-16)
+          PATCH_H=$(cat "$GITHUB_WORKSPACE"/kt/openwrt-kt412/dsa/patches/*.patch | sha256sum | cut -c1-16)
+          BASE="kt412-${VAR}-pin${PIN}"
+          # Whole-tree key: identical pin+patches+config => the prepared+compiled
+          # OpenWrt tree is reusable verbatim (toolchain+kernel+pkgs, with their
+          # ORIGINAL mtimes preserved so `make` stays truly incremental).
+          echo "tree_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}-tree1" >> "$GITHUB_OUTPUT"
+          # Fallback ladder for dl/ and ccache only (NOT the whole tree: a partial
+          # whole-tree restore from a different config/patch would be inconsistent,
+          # so the tree cache is EXACT-match only — a miss => full clean rebuild).
+          echo "dl_key=kt412-dl-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "ccache_key=kt412-ccache-${VAR}-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "computed tree_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}-tree1"
+
+      # (a) Whole prepared+compiled OpenWrt tree: staging_dir + build_dir + tmp +
+      #     .config + feeds + the in-tree package sources, restored WITH their
+      #     original mtimes. This is THE win: on a hit there is no fresh git clone,
+      #     so source mtimes are NOT newer than the cached objects and `make`
+      #     repackages only the image (~3-7 min) instead of rebuilding the
+      #     toolchain/kernel/packages (~24 min). EXACT-match key only (no
+      #     restore-keys) so a pin/patch/config change forces a full clean build.
+      #
+      #     SIZE / EVICTION: a full openwrt/ tree is large; we keep it under
+      #     GitHub's 10GB/repo cache limit by EXCLUDING:
+      #       * openwrt/.git  (huge history; `make` does not need it)
+      #       * openwrt/dl    (cached separately below)
+      #       * openwrt/bin   (rebuilt every run; the image is the deliverable)
+      #     zstd compression (actions/cache default) shrinks the rest a lot. If the
+      #     tree still risks eviction, drop build_dir/target-* from the path and
+      #     rely on staging_dir+ccache (toolchain stays cached; ccache absorbs the
+      #     package recompile) — but the whole-tree cache is the fast path.
+      - name: Restore OpenWrt tree (toolchain+kernel+packages, incremental)
+        id: treecache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt
+            !openwrt/.git
+            !openwrt/dl
+            !openwrt/bin
+          key: ${{ steps.cachekey.outputs.tree_key }}
+
+      # (b) Download cache: source tarballs. Safe to reuse broadly across config/
+      #     patch changes, so it is keyed only on the pin. Restored on hit AND
+      #     miss (downloads are reused either way).
+      - name: Cache OpenWrt downloads (dl/)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.dl_key }}-
+
+      # (c) ccache: object cache for the host/cross compilers. Keyed loosely
+      #     (pin+variant) and always updated via run_id suffix so it grows warm.
+      #     Used on a tree-cache MISS to accelerate the full rebuild.
+      - name: Cache ccache (openwrt/.ccache)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.ccache_key }}-
+
       - name: "Checkout OpenWrt + apply PR 21837 (DSA) + fix DTS"
+        if: steps.treecache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/openwrt/openwrt.git
           cd openwrt
@@ -120,97 +216,15 @@ jobs:
             echo "final-power source marker (expect KT412-30DBM-FINAL-NETDEV-POWER present):"; grep -c 'KT412-30DBM-FINAL-NETDEV-POWER' "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
           fi
 
-      # ------------------------------------------------------------------------
-      # BUILD CACHING (overlay-only pushes ~10-15 min instead of ~60 min)
-      #
-      # Why the key is built the way it is:
-      #   The compiled output (toolchain + kernel + packages, incl. the patched
-      #   ath9k/cfg80211 backports) is a pure function of:
-      #     * the pinned OpenWrt/PR #21837 build HEAD (PIN=cd4969767bbc),
-      #     * the kernel/power patches in dsa/patches/** (990/991/992),
-      #     * the build config in dsa/config.seed,
-      #     * the variant name.
-      #   It is NOT a function of the files/ overlay (files/www, files/usr,
-      #   dsa/files, ...). The overlay is copied in at IMAGE-ASSEMBLY time, after
-      #   compilation, so changing CSS/JS/scripts only repackages the image and
-      #   must reuse the cached toolchain+kernel+packages. Therefore the overlay
-      #   is deliberately EXCLUDED from the staging/build key.
-      #
-      #   Including PIN + patches-hash + config-hash in the key GUARANTEES we can
-      #   never ship a stale kernel/package: bump the OpenWrt pin, edit a power
-      #   patch, or change config.seed and the key changes -> a full rebuild.
-      #   restore-keys give a fallback ladder (same pin -> reuse toolchain even if
-      #   a package/config changed; make then rebuilds only what differs).
-      # ------------------------------------------------------------------------
-      - name: Compute cache keys
-        id: cachekey
-        run: |
-          PIN=cd4969767bbc   # MUST match the PR #21837 pin in the checkout step
-          VAR="${{ matrix.variant }}"
-          # Hash everything that affects compiled output but NOT the files/ overlay.
-          SEED_H=$(sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" | cut -c1-16)
-          PATCH_H=$(cat "$GITHUB_WORKSPACE"/kt/openwrt-kt412/dsa/patches/*.patch | sha256sum | cut -c1-16)
-          BASE="kt412-${VAR}-pin${PIN}"
-          # Full key: identical source+patches+config => full reuse (toolchain+kernel+pkgs).
-          echo "stage_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}" >> "$GITHUB_OUTPUT"
-          # Fallback ladder (most->least specific). A partial match still restores the
-          # toolchain/staging so make only rebuilds what actually changed.
-          {
-            echo "stage_restore<<EOF"
-            echo "${BASE}-cfg${SEED_H}-"     # same pin+seed, patches changed
-            echo "${BASE}-"                  # same pin, seed/patches changed (keeps toolchain)
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "dl_key=kt412-dl-pin${PIN}" >> "$GITHUB_OUTPUT"
-          echo "ccache_key=kt412-ccache-${VAR}-pin${PIN}" >> "$GITHUB_OUTPUT"
-          echo "computed stage_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}"
-
-      # (a) Download cache: source tarballs. Safe to reuse broadly across config/
-      #     patch changes, so it is keyed only on the pin (+ a date-free prefix).
-      - name: Cache OpenWrt downloads (dl/)
-        uses: actions/cache@v4
-        with:
-          path: openwrt/dl
-          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ steps.cachekey.outputs.dl_key }}-
-
-      # (b) ccache: object cache for the host/cross compilers. Keyed loosely
-      #     (pin+variant) and always updated via run_id suffix so it grows warm.
-      - name: Cache ccache (openwrt/.ccache)
-        uses: actions/cache@v4
-        with:
-          path: openwrt/.ccache
-          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ steps.cachekey.outputs.ccache_key }}-
-
-      # (c) Toolchain + compiled packages: staging_dir + build_dir. This is the big
-      #     win (toolchain ~20-30 min). Keyed on pin+config+patches with a fallback
-      #     ladder. NOTE on size: staging_dir+build_dir can be large; if the 10GB
-      #     repo cache limit is hit, GitHub evicts the LEAST-recently-used entries
-      #     (LRU). build_dir is the first thing to grow stale, so on eviction
-      #     pressure prefer keeping dl/ + ccache + staging_dir (toolchain) and drop
-      #     build_dir from the path below — staging_dir alone still skips the
-      #     toolchain rebuild while ccache absorbs most of the package recompile.
-      - name: Cache toolchain/staging + build (staging_dir, build_dir)
-        uses: actions/cache@v4
-        with:
-          path: |
-            openwrt/staging_dir
-            openwrt/build_dir
-          key: ${{ steps.cachekey.outputs.stage_key }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ steps.cachekey.outputs.stage_key }}-
-            ${{ steps.cachekey.outputs.stage_restore }}
-
       - name: Update & install feeds
+        if: steps.treecache.outputs.cache-hit != 'true'
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Configure
+        if: steps.treecache.outputs.cache-hit != 'true'
         run: |
           cd openwrt
           cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" .config
@@ -238,9 +252,29 @@ jobs:
             grep -q "^CONFIG_PACKAGE_${p}=y" .config && echo "LUCI MODULE OK: $p" || echo "WARN: $p not explicitly selected (may come via luci dep)"
           done
 
+      # On a tree-cache HIT the toolchain/kernel/packages are already compiled and
+      # restored with their original mtimes. cachewrtbuild's proven trick: strip the
+      # toolchain stamp prerequisites from the top-level Makefile so `make` will NOT
+      # re-evaluate (and re-run) tools/toolchain even if any host mtime looks newer.
+      # `make` then only re-assembles the rootfs/image from the cached packages +
+      # the (freshly re-copied) files/ overlay -> ~3-7 min. SKIPPED on a miss (the
+      # full clean build needs those prerequisites to actually build the toolchain).
+      - name: "Skip toolchain rebuild on cache hit (strip Makefile stamps)"
+        if: steps.treecache.outputs.cache-hit == 'true'
+        run: |
+          cd openwrt
+          sed -i 's/ $(tool.*\/stamp-compile)//;' Makefile
+          sed -i 's/ $(tool.*\/stamp-install)//;' Makefile
+          echo "Toolchain stamp prerequisites stripped from Makefile (cache hit -> incremental image-only make)."
+
       - name: "Add files overlay (dashboard + variant power default)"
         run: |
           cd openwrt
+          # ALWAYS runs (hit or miss): the overlay is the only thing that changes on
+          # an overlay-only push, and it is baked at image-assembly time. Start from a
+          # clean ./files so a restored cache tree (which already contains last build's
+          # ./files) does not nest it as ./files/files or keep stale overlay content.
+          rm -rf ./files
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/files" ./files
           mkdir -p ./files/www ./files/root ./files/usr ./files/etc/uci-defaults
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
