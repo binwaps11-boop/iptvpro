@@ -1,13 +1,15 @@
 {
 	"admin/mkapp/optimizer": {
-		"title": "محسّن الأداء",
+		"title": "Performance Tuning",
 		"order": 13,
 		"action": {
 			"type": "view",
 			"path": "kt412/optimizer"
 		},
 		"depends": {
-			"acl": [ "luci-app-kt412-perf" ]
+			"acl": [
+				"luci-app-kt412-perf"
+			]
 		}
 	}
 }

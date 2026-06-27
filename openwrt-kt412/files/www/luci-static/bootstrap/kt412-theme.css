@@ -202,13 +202,18 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 [style*="background:#FFF"],[style*="background-color:#fff"],
 [style*="background-color: #fff"]{ background:var(--kt-card)!important; }
 
-/* keep the wide-screen layout TIDY (no stretch/overlap): cap the readable width
-   of the main content on big monitors and guarantee card spacing. Width/:not-shell
-   only — we still let bootstrap own positioning; this just bounds + spaces. */
+/* DESKTOP layout: our JS views render into #view (a plain div). Without a width
+   cap the cards stretch edge-to-edge on a wide monitor and read as "unformatted".
+   Cap + center the view container on desktop and give comfortable side padding so
+   the laptop layout looks tidy (like the old build). Width/padding only — bootstrap
+   still owns positioning; phones/tablets keep the fluid full-width auto-fit grids. */
 @media (min-width:1200px){
-  #maincontent > .container, #view > .cbi-map, .mk-wrap{
-    max-width:1180px!important; margin-left:auto!important; margin-right:auto!important;
+  #maincontent > .container, #view, #view > div, #view > .cbi-map, .mk-wrap{
+    max-width:1200px!important; margin-left:auto!important; margin-right:auto!important;
   }
+}
+@media (min-width:992px){
+  #maincontent, #view{ padding-left:18px!important; padding-right:18px!important; box-sizing:border-box; }
 }
 .cbi-section, .cbi-map, .kt-card, .mk-card{ margin-bottom:16px!important; }
 

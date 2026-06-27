@@ -363,12 +363,14 @@ function refresh(root){
 		var radios = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
 		setChip('c-w24', radios.length>=1 ? 'يعمل' : 'مغلق', radios.length>=1);
 		setChip('c-w5',  radios.length>=2 ? 'يعمل' : (radios.length>=1?'—':'مغلق'), radios.length>=2);
-		/* connected clients estimate: linked LAN ports + active radios */
-		if (pt.ok && Array.isArray(pt.ports)){
+		/* connected clients: REAL count (unique associated Wi-Fi stations + wired
+		   neighbours) from op=summary — was wrongly showing the RADIO count, so one
+		   device read as "2". Fall back to the old estimate only if the field is absent. */
+		if (sm.ok && sm.clients != null){
+			setChip('c-clients', String(sm.clients));
+		} else if (pt.ok && Array.isArray(pt.ports)){
 			var linkedLan = pt.ports.filter(function(p){ return /^lan/.test(p.name) && p.link==='up'; }).length;
-			setChip('c-clients', String(linkedLan + radios.length));
-		} else if (radios.length){
-			setChip('c-clients', String(radios.length));
+			setChip('c-clients', String(linkedLan));
 		}
 
 		/* ----- power / voltage advisory ----- */

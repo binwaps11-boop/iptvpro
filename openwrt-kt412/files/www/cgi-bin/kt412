@@ -1028,6 +1028,32 @@ if [ -n "$ACT" ]; then
 				printf '{"ok":true,"msg":"إعادة التشغيل المجدولة مُطفأة — الجهاز يظل شغّالاً ولا يعيد التشغيل"}\n'
 			fi;;
 
+		iptv_save)
+			# IPTV playlist: accept an M3U/M3U8 URL (fetched via curl) OR an uploaded
+			# file (sent base64 in 'body'). Saved to /www/iptv/playlist.m3u, served by
+			# uhttpd at http://<lan-ip>/iptv/playlist.m3u for any player (TiviMate/VLC).
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			url="$(getp url | tr -cd 'A-Za-z0-9:/._%?=&~+-' | cut -c1-1024)"
+			mkdir -p /www/iptv 2>/dev/null
+			DST=/www/iptv/playlist.m3u
+			if [ -n "$url" ]; then
+				curl -fsSL --max-time 30 -A 'KT412-IPTV' -o "$DST.tmp" "$url" 2>/dev/null && [ -s "$DST.tmp" ] \
+					&& mv -f "$DST.tmp" "$DST" || { rm -f "$DST.tmp" 2>/dev/null; fail "fetch_failed"; }
+				src="url"
+			else
+				b="$(getp body)"; [ -n "$b" ] || fail "no_data"
+				printf '%s' "$b" | base64 -d > "$DST.tmp" 2>/dev/null && [ -s "$DST.tmp" ] \
+					&& mv -f "$DST.tmp" "$DST" || { rm -f "$DST.tmp" 2>/dev/null; fail "decode_failed"; }
+				src="upload"
+			fi
+			cnt="$(grep -ci '#EXTINF' "$DST" 2>/dev/null)"; case "$cnt" in ''|*[!0-9]*) cnt=0;; esac
+			lip="$(uci -q get network.lan.ipaddr)"
+			printf '{"ok":true,"src":"%s","channels":%s,"url":"http://%s/iptv/playlist.m3u"}\n' "$src" "$cnt" "$(json_esc "$lip")";;
+		iptv_clear)
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			rm -f /www/iptv/playlist.m3u 2>/dev/null
+			printf '{"ok":true,"msg":"تم حذف قائمة التشغيل"}\n';;
+
 		# ===================== PACKAGES (apk) =====================
 		pkg_install)
 			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
@@ -1334,9 +1360,16 @@ case "$OP" in
 		[ -n "$ovl" ] || ovl="$(df -k / 2>/dev/null | awk 'NR>1 && NF>=5 {print $(NF-4)","$(NF-3); exit}')"
 		fs_total="${ovl%,*}"; fs_used="${ovl#*,}"
 		case "$fs_total" in ''|*[!0-9]*) fs_total=0;; esac; case "$fs_used" in ''|*[!0-9]*) fs_used=0;; esac
-		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s,"cpu_idle":%s,"cpu_total":%s,"cpu_pct":%s}\n' \
+		# REAL connected-client count: unique associated Wi-Fi station MACs across ALL
+		# radios + distinct wired neighbours on br-lan, deduplicated. (The dashboard
+		# used to show the RADIO count — so one phone read as "2"; this is the truth.)
+		clients="$( { for d in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID.*/\1/p'); do iwinfo "$d" assoclist 2>/dev/null; done; \
+			ip neigh show dev br-lan 2>/dev/null | grep -iE 'REACHABLE|STALE'; } \
+			| grep -oiE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-f' 'A-F' | sort -u | grep -c . )"
+		case "$clients" in ''|*[!0-9]*) clients=0;; esac
+		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s,"cpu_idle":%s,"cpu_total":%s,"cpu_pct":%s,"clients":%s}\n' \
 			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \
-			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}" "${cpu_idle:-0}" "${cpu_total:-0}" "${cpu_pct:-0}";;
+			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}" "${cpu_idle:-0}" "${cpu_total:-0}" "${cpu_pct:-0}" "${clients:-0}";;
 	wan)
 		S="$(ubus call network.interface.wan status 2>/dev/null)"
 		gv(){ printf '%s' "$S" | jsonfilter -e "$1" 2>/dev/null; }
@@ -1348,6 +1381,11 @@ case "$OP" in
 		printf '{"ok":true,"up":%s,"proto":"%s","device":"%s","ip":"%s","mask":%s,"gateway":"%s","dns":"%s","uptime":%s,"vlan":"%s"}\n' \
 			"${up:-false}" "$(json_esc "$proto")" "$(json_esc "$dev")" "$(json_esc "$ip")" \
 			"${mask:-0}" "$(json_esc "$gw")" "$(json_esc "$dns")" "${upt:-0}" "$(json_esc "$vid")";;
+	iptv_status)
+		DST=/www/iptv/playlist.m3u; ex=false; cnt=0
+		if [ -f "$DST" ]; then ex=true; cnt="$(grep -ci '#EXTINF' "$DST" 2>/dev/null)"; case "$cnt" in ''|*[!0-9]*) cnt=0;; esac; fi
+		lip="$(uci -q get network.lan.ipaddr)"
+		printf '{"ok":true,"exists":%s,"channels":%s,"url":"http://%s/iptv/playlist.m3u"}\n' "$ex" "$cnt" "$(json_esc "$lip")";;
 	lan)
 		ip="$(uci -q get network.lan.ipaddr)"; mask="$(uci -q get network.lan.netmask)"
 		ign="$(uci -q get dhcp.lan.ignore)"; st="$(uci -q get dhcp.lan.start)"
