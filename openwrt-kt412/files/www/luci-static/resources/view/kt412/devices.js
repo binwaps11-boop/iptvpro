@@ -23,7 +23,12 @@ function call(params){
 	return adopt().then(function(){
 		var usp = new URLSearchParams(params);
 		if (TOKEN) usp.set('token', TOKEN);
-		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
+		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); })
+			/* invalidate a stale session so the NEXT poll re-adopts instead of
+			   failing forever; reset only on an explicit auth error to avoid
+			   adopt storms on the single core. */
+			.then(function(j){ if (j && j.ok===false && (j.error==='unauthorized'||j.error==='no_token')) TOKEN=''; return j; })
+			.catch(function(){ return {ok:false}; });
 	});
 }
 

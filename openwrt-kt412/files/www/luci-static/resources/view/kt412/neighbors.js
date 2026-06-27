@@ -21,11 +21,13 @@ function adopt(){
 		.then(function(j){ if (j && j.ok && j.token) TOKEN = j.token; return TOKEN; })
 		.catch(function(){ return ''; });
 }
+/* reset a stale token on an explicit auth error so the next poll re-adopts */
+function authReset(j){ if (j && j.ok===false && (j.error==='unauthorized'||j.error==='no_token')) TOKEN=''; return j; }
 function call(params){
 	return adopt().then(function(){
 		var usp = new URLSearchParams(params);
 		if (TOKEN) usp.set('token', TOKEN);
-		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
+		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).then(authReset).catch(function(){ return {ok:false}; });
 	});
 }
 function postCall(params){
@@ -33,7 +35,7 @@ function postCall(params){
 		var usp = new URLSearchParams(params);
 		if (TOKEN) usp.set('token', TOKEN);
 		return fetch(API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:usp.toString()})
-			.then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
+			.then(function(r){ return r.json(); }).then(authReset).catch(function(){ return {ok:false}; });
 	});
 }
 

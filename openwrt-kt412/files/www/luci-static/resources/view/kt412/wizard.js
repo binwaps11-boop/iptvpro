@@ -134,13 +134,18 @@ function radioCard(r){
 		E('option', { value:'open' }, _('مفتوحة (بدون تشفير)')),
 		E('option', { value:'psk2' }, 'WPA2 (PSK)')
 	]);
+	/* current encryption + whether a key already exists (from wifi_radios). Lets us
+	   preselect WPA2 and treat an empty key as "keep the existing one" instead of
+	   forcing psk2 with a blank field (which downgraded WPA2 -> open on apply). */
+	var hasKey = (r.has_key === true);
+	var curEnc = String(r.encryption || '').toLowerCase();
+	var key = E('input', { type:'text', class:'cbi-input-text kt-pwval', maxlength:'63',
+		placeholder: hasKey ? _('اتركه فارغاً للإبقاء على المفتاح الحالي') : _('8 أحرف على الأقل') });
 	var keyWrap = E('div', { class:'kt-field' }, [
 		E('label', {}, _('🔒 كلمة المرور')),
-		E('input', { type:'text', class:'cbi-input-text kt-pwval', placeholder:_('8 أحرف على الأقل'), maxlength:'63' })
+		key
 	]);
-	var key = keyWrap.querySelector('input');
-	/* current radio has no exposed key; default to WPA2 if it has an SSID, else open is harmless */
-	secSel.value = 'psk2';
+	secSel.value = (curEnc && curEnc !== 'none') ? 'psk2' : 'open';
 	function syncSec(){ keyWrap.style.display = (secSel.value === 'open') ? 'none' : ''; }
 	secSel.onchange = syncSec; syncSec();
 
@@ -237,13 +242,16 @@ function radioCard(r){
 		if (!validSsid(ssid.value))
 			return ui.addNotification(null, E('p', {}, _('SSID مطلوب (1–32 حرفاً)')), 'error');
 		var open = (secSel.value === 'open');
-		if (!open && !validKey(key.value))
+		/* secured network + blank key + a key already exists => keep the current key */
+		var keepkey = (!open && !key.value && hasKey);
+		if (!open && !keepkey && !validKey(key.value))
 			return ui.addNotification(null, E('p', {}, _('المفتاح يجب أن يكون 8–63 حرفاً')), 'error');
 		btn.disabled = true; var lbl = btn.textContent; btn.textContent = '…';
 		var dbm = String(parseInt(rng.value, 10) || 0);
 		postCall({
 			act:'wifi_apply', radio:r.radio, mode:modeSel.value, ssid:ssid.value,
-			key:(open ? '' : key.value), channel:chan.value, htmode:ht.value,
+			key:(open ? '' : key.value), keepkey:(keepkey ? '1' : '0'),
+			channel:chan.value, htmode:ht.value,
 			country:ctry.value, hidden:(hidden.checked ? '1' : '0')
 		}).then(function(j){
 			notify(j);
@@ -253,6 +261,10 @@ function radioCard(r){
 			btn.disabled = false; btn.textContent = lbl;
 			if (jp && jp.ok)
 				ui.addNotification(null, E('p', {}, _('الطاقة: مطلوب %s / مُطبّق %s dBm').format(jp.requested, jp.actual)), 'info');
+			else
+				notify(jp);   /* surface a txpower failure instead of silently swallowing it */
+		}).catch(function(){
+			btn.disabled = false; btn.textContent = lbl; notify(null);
 		});
 	});
 

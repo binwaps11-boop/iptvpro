@@ -11,6 +11,9 @@
 
 var API = '/cgi-bin/kt412-tools';
 var TOKEN = '';
+/* while non-zero and in the future, the background poll must NOT rebuild the
+   cards (it would wipe the apply success/error message before it can be read). */
+var applyBusyUntil = 0;
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
 
@@ -59,10 +62,13 @@ function radioCard(r){
 		var v=parseInt(num.value,10);
 		if (isNaN(v)||v<0||v>30){ msg.textContent=_('القيمة يجب أن تكون بين 0 و 30 dBm'); msg.style.color='var(--kt-bad)'; return; }
 		btn.disabled=true; msg.style.color='var(--kt-txt2)'; msg.textContent=_('جارٍ التطبيق…');
+		applyBusyUntil = Date.now() + 15000;
 		call({op:'setpower', radio:r.radio, dbm:String(v)}, true).then(function(j){
 			btn.disabled=false;
 			if (j && j.ok){ msg.style.color='var(--kt-ok)'; msg.textContent=_('تم الضبط على')+' '+v+' dBm — '+_('يُعاد تحميل الواي‑فاي'); }
 			else { msg.style.color='var(--kt-bad)'; msg.textContent=_('فشل التطبيق')+': '+esc((j&&j.error)||'?'); }
+			/* keep the result on screen ~8s after completion before the poll resumes */
+			applyBusyUntil = Date.now() + 8000;
 		});
 	});
 
@@ -107,7 +113,8 @@ return view.extend({
 		reload(body);
 		/* refresh live netdev/phy values periodically, but only when not editing */
 		poll.add(function(){
-			if (document.activeElement && /INPUT|SELECT/.test(document.activeElement.tagName)) return Promise.resolve();
+			if (Date.now() < applyBusyUntil) return Promise.resolve();
+			if (document.activeElement && /INPUT|SELECT|BUTTON/.test(document.activeElement.tagName)) return Promise.resolve();
 			return reload(body);
 		}, 12);
 		return box;

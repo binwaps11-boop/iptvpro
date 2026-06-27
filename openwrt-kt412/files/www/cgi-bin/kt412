@@ -314,6 +314,7 @@ if [ -n "$ACT" ]; then
 			chan="$(sani_word "$(getp channel)")"; htmode="$(sani_word "$(getp htmode)")"
 			country="$(printf '%s' "$(getp country)" | tr -cd 'A-Za-z' | cut -c1-2 | tr a-z A-Z)"
 			hidden="$(getp hidden | tr -cd '01')"
+			keepkey="$(getp keepkey | tr -cd '01')"
 			[ -n "$radio" ] || fail "no_radio"
 			ifsec="$(wifi_iface_for "$radio")"
 			[ -n "$ifsec" ] || fail "radio_not_found"
@@ -322,6 +323,17 @@ if [ -n "$ACT" ]; then
 			uci -q delete wireless.$ifsec.wds
 			uci -q delete wireless.$ifsec.mesh_id
 			uci -q delete wireless.$ifsec.mesh_fwding
+			# Encryption/key policy (fixes the WPA2->open downgrade):
+			#  - keepkey=1  -> the user left the key blank on a secured network: leave
+			#    the EXISTING encryption + key exactly as-is (lets them change channel
+			#    /mode/SSID without retyping the password).
+			#  - else key given -> set WPA2 (sae for mesh) with that key.
+			#  - else (user explicitly chose open: key empty AND keepkey unset) -> open.
+			set_enc() {  # $1 = wpa mode for a present key (psk2|sae)
+				if [ "$keepkey" = "1" ]; then return 0; fi
+				if [ -n "$key" ]; then uci set wireless.$ifsec.encryption="$1"; uci set wireless.$ifsec.key="$key"
+				else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi
+			}
 			case "$mode" in
 				mesh)
 					uci set wireless.$ifsec.mode='mesh'
@@ -329,23 +341,21 @@ if [ -n "$ACT" ]; then
 					uci set wireless.$ifsec.mesh_fwding='1'
 					uci set wireless.$ifsec.network='lan'   # bridge the mesh into LAN so peers pass traffic
 					uci -q delete wireless.$ifsec.ssid
-					if [ -n "$key" ] && [ "${#key}" -ge 8 ]; then uci set wireless.$ifsec.encryption='sae'; uci set wireless.$ifsec.key="$key"
-					else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi;;
+					# mesh needs >=8 char key for sae; too-short non-empty key falls back to open
+					if [ "$keepkey" != "1" ] && [ -n "$key" ] && [ "${#key}" -lt 8 ]; then key=""; fi
+					set_enc sae;;
 				sta)
 					uci set wireless.$ifsec.mode='sta'
 					uci set wireless.$ifsec.ssid="$ssid"
-					if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='psk2'; uci set wireless.$ifsec.key="$key"
-					else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi;;
+					set_enc psk2;;
 				ap-wds)
 					uci set wireless.$ifsec.mode='ap'; uci set wireless.$ifsec.wds='1'
 					uci set wireless.$ifsec.ssid="$ssid"
-					if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='psk2'; uci set wireless.$ifsec.key="$key"
-					else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi;;
+					set_enc psk2;;
 				*)
 					uci set wireless.$ifsec.mode='ap'
 					uci set wireless.$ifsec.ssid="$ssid"
-					if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='psk2'; uci set wireless.$ifsec.key="$key"
-					else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi;;
+					set_enc psk2;;
 			esac
 			[ -n "$hidden" ] && uci set wireless.$ifsec.hidden="$hidden"
 			[ -n "$chan" ] && uci set wireless.$radio.channel="$chan"
@@ -1069,18 +1079,25 @@ case "$OP" in
 			band="$(uci -q get wireless.$r.band)"; ch="$(uci -q get wireless.$r.channel)"
 			ht="$(uci -q get wireless.$r.htmode)"; cc="$(uci -q get wireless.$r.country)"
 			tp="$(uci -q get wireless.$r.txpower)"; dis="$(uci -q get wireless.$r.disabled)"
-			ssid=""; mode="ap"; hidden="0"
+			ssid=""; mode="ap"; hidden="0"; enc=""; haskey=false
 			s="$(wifi_iface_for "$r")"
 			if [ -n "$s" ]; then
 				mode="$(uci -q get wireless.$s.mode)"; hidden="$(uci -q get wireless.$s.hidden)"
 				ssid="$(uci -q get wireless.$s.ssid)"; [ -z "$ssid" ] && ssid="$(uci -q get wireless.$s.mesh_id)"
 				[ "$(uci -q get wireless.$s.wds)" = "1" ] && [ "$mode" = "ap" ] && mode="ap-wds"
+				# expose the CURRENT encryption + whether a key already exists, so the
+				# wizard can preselect WPA2 and let the user keep the existing key
+				# (apply a channel change without retyping) instead of forcing psk2
+				# with an empty field (which silently downgraded WPA2 -> open).
+				# NEVER expose the plaintext key itself.
+				enc="$(uci -q get wireless.$s.encryption)"
+				[ -n "$(uci -q get wireless.$s.key)" ] && haskey=true
 			fi
 			en=true; [ "$dis" = "1" ] && en=false
 			[ "$first" -eq 1 ] || out="$out,"; first=0
-			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","htmode":"%s","country":"%s","ssid":"%s","mode":"%s","hidden":"%s","txpower":"%s","enabled":%s,"iface":"%s"}' \
+			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","htmode":"%s","country":"%s","ssid":"%s","mode":"%s","hidden":"%s","txpower":"%s","enabled":%s,"iface":"%s","encryption":"%s","has_key":%s}' \
 				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$ch")" "$(json_esc "$ht")" "$(json_esc "$cc")" \
-				"$(json_esc "$ssid")" "$(json_esc "${mode:-ap}")" "$(json_esc "${hidden:-0}")" "$(json_esc "$tp")" "$en" "$(json_esc "$s")")"
+				"$(json_esc "$ssid")" "$(json_esc "${mode:-ap}")" "$(json_esc "${hidden:-0}")" "$(json_esc "$tp")" "$en" "$(json_esc "$s")" "$(json_esc "$enc")" "$haskey")"
 		done
 		printf '{"ok":true,"radios":[%s]}\n' "$out";;
 	ports)
