@@ -24,28 +24,29 @@
    ============================================================================ */
 
 :root{
-  /* deep obsidian surfaces (NOT pure black) */
-  --mk-bg0:#0F172A; --mk-bg1:#1E293B; --mk-bg2:#334155;
-  --mk-card:rgba(51,65,85,0.55); --mk-card2:rgba(30,41,59,0.55);
+  /* PRO refinement — richer near-black surfaces, cleaner glass, brighter text,
+     refined accent + softer shadows (synced with kt412-theme.css). */
+  --mk-bg0:#0A0F1C; --mk-bg1:#111A2E; --mk-bg2:#1B2840;
+  --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
 
-  /* accent family — neon cyan primary */
-  --mk-accent:#06B6D4; --mk-accent2:#06B6D4; --mk-violet:#8b5cf6;
-  --mk-blue:#06B6D4; --mk-cyan:#06B6D4;        /* legacy aliases now cyan      */
-  --mk-grad:linear-gradient(135deg,#06B6D4,#0891b2);
+  /* accent family — refined bright cyan primary */
+  --mk-accent:#22D3EE; --mk-accent2:#22D3EE; --mk-violet:#A78BFA;
+  --mk-blue:#22D3EE; --mk-cyan:#22D3EE;        /* legacy aliases now cyan      */
+  --mk-grad:linear-gradient(135deg,#22D3EE 0%,#0891B2 55%,#0E7490 100%);
 
-  /* status colours — neon on dark */
-  --mk-green:#22C55E; --mk-amber:#F59E0B; --mk-red:#EF4444; --mk-grey:#64748B;
+  /* status colours — refined on dark */
+  --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
 
   /* glass surfaces / strokes */
-  --mk-glass:rgba(51,65,85,0.55); --mk-glass2:rgba(30,41,59,0.55);
-  --mk-stroke:rgba(148,163,184,0.18); --mk-stroke2:rgba(6,182,212,0.55);
+  --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
+  --mk-stroke:rgba(148,163,184,0.14); --mk-stroke2:rgba(34,211,238,0.50);
 
-  /* text — light, high contrast on dark */
-  --mk-txt:#E2E8F0; --mk-txt2:#CBD5E1; --mk-muted:#94A3B8;
+  /* text — brighter, high contrast on dark */
+  --mk-txt:#F1F5F9; --mk-txt2:#C3CEDE; --mk-muted:#8693A8;
 
-  --mk-shadow:0 8px 26px rgba(0,0,0,.45);
-  --mk-shadow-lg:0 16px 40px rgba(0,0,0,.55);
-  --mk-radius:12px;
+  --mk-shadow:0 4px 18px rgba(0,0,0,.40);
+  --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
+  --mk-radius:14px;
   color-scheme:dark;
 }
 
@@ -725,16 +726,16 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 :root{color-scheme:dark}
 @media (prefers-color-scheme: light){
   :root:not([data-mk-skin="off"]){
-    --mk-bg0:#0F172A; --mk-bg1:#1E293B; --mk-bg2:#334155;
-    --mk-card:rgba(51,65,85,0.55); --mk-card2:rgba(30,41,59,0.55);
-    --mk-glass:rgba(51,65,85,0.55); --mk-glass2:rgba(30,41,59,0.55);
-    --mk-stroke:rgba(148,163,184,0.18); --mk-stroke2:rgba(6,182,212,0.55);
-    --mk-txt:#E2E8F0; --mk-txt2:#CBD5E1; --mk-muted:#94A3B8;
-    --mk-accent:#06B6D4; --mk-accent2:#06B6D4; --mk-violet:#8b5cf6;
-    --mk-blue:#06B6D4; --mk-cyan:#06B6D4;
-    --mk-green:#22C55E; --mk-amber:#F59E0B; --mk-red:#EF4444; --mk-grey:#64748B;
-    --mk-shadow:0 8px 26px rgba(0,0,0,.45);
-    --mk-shadow-lg:0 16px 40px rgba(0,0,0,.55);
+    --mk-bg0:#0A0F1C; --mk-bg1:#111A2E; --mk-bg2:#1B2840;
+    --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
+    --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
+    --mk-stroke:rgba(148,163,184,0.14); --mk-stroke2:rgba(34,211,238,0.50);
+    --mk-txt:#F1F5F9; --mk-txt2:#C3CEDE; --mk-muted:#8693A8;
+    --mk-accent:#22D3EE; --mk-accent2:#22D3EE; --mk-violet:#A78BFA;
+    --mk-blue:#22D3EE; --mk-cyan:#22D3EE;
+    --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
+    --mk-shadow:0 4px 18px rgba(0,0,0,.40);
+    --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
   }
   :root:not([data-mk-skin="off"]) .mk-gauge .track{ stroke:#334155; }
   :root:not([data-mk-skin="off"]) .mk-spark-axis{ stroke:rgba(148,163,184,.18); }

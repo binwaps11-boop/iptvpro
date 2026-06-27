@@ -16,36 +16,41 @@
    @media(max-width:600px) single-column rules.
    ============================================================================ */
 :root{
-  /* ---- core palette (deep obsidian + slate, NOT pure black) ---- */
-  --kt-bg0:#0F172A;            /* page base — deep obsidian                  */
-  --kt-bg1:#1E293B;           /* secondary panel tint for gradients          */
-  --kt-bg2:#334155;
+  /* ---- core palette — PRO refinement: richer near-black base, cleaner glass,
+     crisper borders, brighter text, restrained accent + softer shadows (less
+     neon glow = more professional). Identity (obsidian + cyan) preserved. ---- */
+  --kt-bg0:#0A0F1C;            /* page base — deeper, richer obsidian        */
+  --kt-bg1:#111A2E;           /* secondary panel tint for gradients          */
+  --kt-bg2:#1B2840;
 
-  --kt-card:rgba(51,65,85,0.55);   /* translucent slate glass surfaces       */
-  --kt-card2:rgba(30,41,59,0.55);  /* deeper translucent surface (heads)     */
-  --kt-glass:rgba(51,65,85,0.55);  /* glass panel                            */
-  --kt-glass-strong:rgba(30,41,59,0.7);
+  --kt-card:rgba(24,34,54,0.62);   /* cleaner, more defined glass surface    */
+  --kt-card2:rgba(15,23,42,0.66);  /* deeper surface (card heads)            */
+  --kt-glass:rgba(24,34,54,0.62);  /* glass panel                            */
+  --kt-glass-strong:rgba(13,20,36,0.74);
 
-  --kt-stroke:rgba(148,163,184,0.18);        /* subtle light border          */
-  --kt-stroke-strong:rgba(6,182,212,0.55);   /* cyan focus ring base         */
+  --kt-stroke:rgba(148,163,184,0.14);        /* crisp, subtle hairline border */
+  --kt-stroke-2:rgba(148,163,184,0.22);      /* slightly stronger separator   */
+  --kt-stroke-strong:rgba(6,182,212,0.50);   /* cyan focus ring base          */
 
-  --kt-txt:#E2E8F0;           /* primary text — light, high contrast        */
-  --kt-txt2:#CBD5E1;          /* secondary text                             */
-  --kt-muted:#94A3B8;         /* muted / hints                              */
+  --kt-txt:#F1F5F9;           /* primary text — brighter, high contrast      */
+  --kt-txt2:#C3CEDE;          /* secondary text                             */
+  --kt-muted:#8693A8;         /* muted / hints                              */
 
-  --kt-accent:#06B6D4;        /* electric cyan — main accent / links        */
-  --kt-accent2:#06B6D4;       /* cyan (gradient start)                      */
-  --kt-accent3:#0891b2;       /* deeper cyan (gradient end)                 */
-  --kt-accent-soft:rgba(6,182,212,0.12);     /* cyan tinted bg (chips/hover) */
+  --kt-accent:#22D3EE;        /* refined bright cyan — links / active        */
+  --kt-accent2:#22D3EE;       /* cyan (gradient start)                      */
+  --kt-accent3:#0E7490;       /* deep teal (gradient end)                   */
+  --kt-accent-soft:rgba(34,211,238,0.10);    /* cyan tinted bg (chips/hover)  */
 
-  --kt-ok:#22C55E;            /* neon green — healthy / success             */
-  --kt-warn:#F59E0B;          /* amber — warning / high load                */
-  --kt-bad:#EF4444;           /* crimson — error / loop / down              */
-  --kt-violet:#8b5cf6;        /* purple — storage / flash                   */
+  --kt-ok:#34D399;            /* refined emerald — healthy / success         */
+  --kt-warn:#FBBF24;          /* refined amber — warning / high load         */
+  --kt-bad:#F87171;           /* refined coral-red — error / down            */
+  --kt-violet:#A78BFA;        /* refined violet — storage / flash            */
 
-  --kt-grad:linear-gradient(135deg,#06B6D4,#0891b2);
-  --kt-shadow:0 6px 22px rgba(0,0,0,.45);
-  --kt-shadow-lg:0 14px 38px rgba(0,0,0,.55);
+  /* smoother, single-family premium gradient (cyan -> deep teal) */
+  --kt-grad:linear-gradient(135deg,#22D3EE 0%,#0891B2 55%,#0E7490 100%);
+  /* softer, deeper shadows (depth without the heavy neon halo) */
+  --kt-shadow:0 4px 18px rgba(0,0,0,.40);
+  --kt-shadow-lg:0 12px 34px rgba(0,0,0,.50);
   color-scheme:dark;
 }
 
@@ -66,10 +71,9 @@ html,body{
 }
 body{
   background-image:
-    radial-gradient(900px 600px at 12% -10%, rgba(6,182,212,.10) 0%, transparent 55%),
-    radial-gradient(800px 600px at 110% 8%, rgba(139,92,246,.10) 0%, transparent 52%),
-    radial-gradient(700px 700px at 50% 120%, rgba(34,197,94,.07) 0%, transparent 55%),
-    linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 60%,var(--kt-bg0))!important;
+    radial-gradient(1000px 680px at 12% -12%, rgba(34,211,238,.06) 0%, transparent 58%),
+    radial-gradient(900px 680px at 110% 6%, rgba(167,139,250,.05) 0%, transparent 55%),
+    linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 62%,var(--kt-bg0))!important;
   background-attachment:fixed!important;
 }
 /* COLOUR ONLY on the shell wrappers — never width / float / flex / direction.
@@ -321,17 +325,17 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 :root{color-scheme:dark}
 @media (prefers-color-scheme: light){
   :root:not([data-mk-skin="off"]){
-    /* re-assert the DARK obsidian palette (no light flip) */
-    --kt-bg0:#0F172A; --kt-bg1:#1E293B; --kt-bg2:#334155;
-    --kt-card:rgba(51,65,85,0.55); --kt-card2:rgba(30,41,59,0.55);
-    --kt-glass:rgba(51,65,85,0.55); --kt-glass-strong:rgba(30,41,59,0.7);
-    --kt-stroke:rgba(148,163,184,0.18); --kt-stroke-strong:rgba(6,182,212,0.55);
-    --kt-txt:#E2E8F0; --kt-txt2:#CBD5E1; --kt-muted:#94A3B8;
-    --kt-accent:#06B6D4; --kt-accent2:#06B6D4; --kt-accent3:#0891b2;
-    --kt-accent-soft:rgba(6,182,212,0.12);
-    --kt-ok:#22C55E; --kt-warn:#F59E0B; --kt-bad:#EF4444; --kt-violet:#8b5cf6;
-    --kt-shadow:0 6px 22px rgba(0,0,0,.45);
-    --kt-shadow-lg:0 14px 38px rgba(0,0,0,.55);
+    /* re-assert the refined DARK obsidian palette (no light flip) */
+    --kt-bg0:#0A0F1C; --kt-bg1:#111A2E; --kt-bg2:#1B2840;
+    --kt-card:rgba(24,34,54,0.62); --kt-card2:rgba(15,23,42,0.66);
+    --kt-glass:rgba(24,34,54,0.62); --kt-glass-strong:rgba(13,20,36,0.74);
+    --kt-stroke:rgba(148,163,184,0.14); --kt-stroke-2:rgba(148,163,184,0.22); --kt-stroke-strong:rgba(6,182,212,0.50);
+    --kt-txt:#F1F5F9; --kt-txt2:#C3CEDE; --kt-muted:#8693A8;
+    --kt-accent:#22D3EE; --kt-accent2:#22D3EE; --kt-accent3:#0E7490;
+    --kt-accent-soft:rgba(34,211,238,0.10);
+    --kt-ok:#34D399; --kt-warn:#FBBF24; --kt-bad:#F87171; --kt-violet:#A78BFA;
+    --kt-shadow:0 4px 18px rgba(0,0,0,.40);
+    --kt-shadow-lg:0 12px 34px rgba(0,0,0,.50);
   }
   :root:not([data-mk-skin="off"]) input,
   :root:not([data-mk-skin="off"]) select,
