@@ -43,7 +43,7 @@ cpu:'<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v2 M15 3v2 M9
 star:'<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17.8 6.6 20l1-6.1L3.2 9.5l6.1-.9z"/>',
 dot:'<circle cx="12" cy="12" r="5"/>'
 };
-function ktIcSvg(n){return '<svg class="kti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(KTI[n]||KTI.dot)+'</svg>';}
+function ktIcSvg(n){return '<svg class="kti" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(KTI[n]||KTI.dot)+'</svg>';}
 function ktIc(n){var d=document.createElement('div');d.innerHTML=ktIcSvg(n);return d.firstChild;}
 
 /* ============================================================================
@@ -112,7 +112,10 @@ function ic(name){
 		err:    '<path d="M12 2l10 18H2z"/><path d="M12 9v5M12 17.5v.5" stroke-linecap="round"/>',
 		check:  '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5 5.5-6"/>'
 	};
-	return '<svg class="mk-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
+	// INTRINSIC width/height attributes so the icon can NEVER balloon if the CSS
+	// size rule is slow/missing (that was the giant-plug/huge-icon bug on desktop).
+	// CSS .mk-ic / context rules can still scale it down where needed.
+	return '<svg class="mk-ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
 		+ 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(p[name]||'')+'</svg>';
 }
 /* status chip for the header bar */
