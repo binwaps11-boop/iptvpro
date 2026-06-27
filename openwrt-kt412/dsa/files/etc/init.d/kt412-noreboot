@@ -14,12 +14,15 @@ USE_PROCD=1
 _strip() {
 	CR=/etc/crontabs/root
 	if [ -f "$CR" ]; then
-		# drop any cron that runs 'reboot', plus our legacy reboot marker.
-		# NOTE: do NOT strip the kt412-watchcat cron — it is a SOFT (ifdown/ifup)
-		# recovery that NEVER reboots, so removing it gave no reboot-safety benefit
-		# and permanently killed the soft watchdog after the first reboot.
-		sed -i '/reboot/d; /kt412-maint-reboot/d' "$CR" 2>/dev/null
+		# drop any cron that runs 'reboot' EXCEPT the user's OPT-IN scheduled reboot
+		# (tagged '# kt412-userreboot'), plus our legacy reboot marker. This keeps
+		# accidental/auto reboots impossible while honouring a reboot the user set on
+		# purpose. NOTE: the kt412-watchcat cron is SOFT (ifdown/ifup, never reboots).
+		sed -i '/# kt412-userreboot/!{/reboot/d}; /kt412-maint-reboot/d' "$CR" 2>/dev/null
 	fi
+	# re-assert the user's optional scheduled-reboot line from uci (so a keep-settings
+	# flash restores it); a no-op when the user never enabled it.
+	[ -x /usr/sbin/kt412-reboot-sched ] && /usr/sbin/kt412-reboot-sched >/dev/null 2>&1
 	# disable the watchcat package entirely (its ping_reboot/periodic_reboot modes
 	# are a clean-reboot source on upstream blips / clock jumps)
 	if [ -x /etc/init.d/watchcat ]; then

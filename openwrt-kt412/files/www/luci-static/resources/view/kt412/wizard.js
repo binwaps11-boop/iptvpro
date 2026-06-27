@@ -697,6 +697,54 @@ function programModeCard(radios){
 	return card;
 }
 
+/* ---------------- optional scheduled reboot (OFF by default) ---------------- */
+function rebootCard(){
+	var enable = E('input', { type:'checkbox' });
+	var iv = E('input', { type:'number', class:'cbi-input-text', min:'1', max:'30', value:'2', style:'max-width:130px' });
+	var un = E('select', { class:'cbi-input-select' }, [
+		E('option', { value:'days' },  _('أيام')),
+		E('option', { value:'hours' }, _('ساعات'))
+	]);
+	var fIv = fld(_('كل (الفترة)'), iv);
+	var fUn = segField(_('الوحدة'), un);
+	function sync(){ var on = enable.checked; fIv.style.display = on ? '' : 'none'; fUn.style.display = on ? '' : 'none'; }
+	enable.addEventListener('change', sync);
+	var stateBox = E('div', { class:'kt-note muted', style:'margin-top:10px' }, [ ktIc('search'), ' ' + _('جارٍ قراءة الحالة…') ]);
+	function refresh(){
+		call({ op:'sched_reboot' }).then(function(s){
+			if (!s || !s.ok){ stateBox.textContent = _('تعذّر قراءة الحالة'); return; }
+			enable.checked = (s.enabled === '1');
+			if (s.interval) iv.value = s.interval;
+			if (s.unit) un.value = s.unit;
+			sync();
+			stateBox.textContent = '';
+			stateBox.appendChild(ktIc(s.enabled === '1' ? 'check' : 'dot'));
+			stateBox.appendChild(document.createTextNode(' ' + (s.enabled === '1'
+				? _('مُفعّلة: يعيد التشغيل كل %s %s').format(s.interval, (s.unit === 'hours' ? _('ساعة') : _('يوم')))
+				: _('مُطفأة: الجهاز يظل شغّالاً ولا يعيد التشغيل'))));
+		}).catch(function(){ stateBox.textContent = _('تعذّر قراءة الحالة'); });
+	}
+	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('حفظ') ]);
+	btn.addEventListener('click', function(){
+		var n = +iv.value;
+		if (enable.checked && (!Number.isInteger(n) || n < 1)){ return ui.addNotification(null, E('p', {}, _('أدخل فترة صحيحة')), 'error'); }
+		btn.disabled = true;
+		postCall({ act:'sched_reboot', enable: enable.checked ? '1' : '0', interval: iv.value, unit: un.value })
+			.then(function(j){ btn.disabled = false; notify(j); setTimeout(refresh, 500); })
+			.catch(function(){ btn.disabled = false; notify(null); });
+	});
+	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead(ktIc('gear'), _('إعادة التشغيل المجدولة'), _('اختياري — مُطفأة افتراضياً.'), 'g'),
+		E('div', { class:'kt-field' }, [ togglePill(enable, _('تفعيل إعادة تشغيل مجدولة')) ]),
+		fIv, fUn,
+		E('div', { class:'kt-note info' }, _('افتراضياً مُطفأة: الجهاز يظل شغّالاً ولا يعيد التشغيل أبداً. عند التفعيل فقط يعيد التشغيل كل الفترة التي تحدّدها (مثال: كل يومين، أو كل 6 ساعات). تبقى حماية «عدم إعادة التشغيل العرضي» فعّالة دائماً.')),
+		stateBox,
+		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً')), btn ])
+	]);
+	sync(); refresh();
+	return card;
+}
+
 return view.extend({
 	load: function(){ return call({op:'wifi_radios'}); },
 
@@ -750,7 +798,11 @@ return view.extend({
 		var progPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'prog' });
 		progPanel.appendChild(programModeCard(radios));
 
-		var panels = [ progPanel, vlanPanel, wlPanel, wanPanel ];
+		/* TAB — النظام: optional scheduled reboot (OFF by default) */
+		var sysPanel = E('div', { class:'kt-tab-panel', 'data-tab':'sys' });
+		sysPanel.appendChild(rebootCard());
+
+		var panels = [ progPanel, vlanPanel, wlPanel, wanPanel, sysPanel ];
 
 		/* ---- styled tab bar: buttons toggle which panel is visible (default first).
 		   We NEVER detach panels — only flip the .is-active class, so existing
@@ -759,7 +811,8 @@ return view.extend({
 			{ key:'prog', icon:'gear', label:_('وضع البرمجة') },
 			{ key:'vlan', icon:'tag', label:_('VLAN') },
 			{ key:'wifi', icon:'wifi', label:_('الوايرلس') },
-			{ key:'wan',  icon:'globe', label:_('WAN') }
+			{ key:'wan',  icon:'globe', label:_('WAN') },
+			{ key:'sys',  icon:'gear', label:_('النظام') }
 		];
 		var tabBtns = [];
 		function selectTab(key){

@@ -1,0 +1,33 @@
+#!/bin/sh
+# KT412 OPTIONAL scheduled reboot — applies (or clears) ONE tagged cron line from
+# uci 'kt412.reboot'. DEFAULT = disabled => the device NEVER reboots on its own.
+# Only when the user explicitly enables it (Smart AP > النظام) is a single line
+# installed: '# kt412-userreboot'. The kt412-noreboot guard preserves ONLY this
+# tagged line and strips every other reboot source, so accidental/auto reboots
+# stay impossible while the user's deliberate schedule is honoured.
+CR=/etc/crontabs/root
+mkdir -p /etc/crontabs 2>/dev/null
+[ -f "$CR" ] || : > "$CR"
+# always drop the previous managed line first (idempotent)
+sed -i '/# kt412-userreboot/d' "$CR" 2>/dev/null
+
+en="$(uci -q get kt412.reboot.enabled 2>/dev/null)"
+if [ "$en" = "1" ]; then
+	iv="$(uci -q get kt412.reboot.interval 2>/dev/null)"
+	un="$(uci -q get kt412.reboot.unit 2>/dev/null)"
+	case "$iv" in ''|*[!0-9]*) iv=1;; esac
+	[ "$iv" -ge 1 ] 2>/dev/null || iv=1
+	case "$un" in
+		hours)
+			[ "$iv" -le 23 ] 2>/dev/null || iv=23
+			# every <iv> hours, on the hour
+			echo "0 */$iv * * * /sbin/reboot # kt412-userreboot" >> "$CR" ;;
+		*)
+			[ "$iv" -le 30 ] 2>/dev/null || iv=30
+			# every <iv> days at 04:00 (quiet hour)
+			echo "0 4 */$iv * * /sbin/reboot # kt412-userreboot" >> "$CR" ;;
+	esac
+fi
+/etc/init.d/cron enable >/dev/null 2>&1
+/etc/init.d/cron restart >/dev/null 2>&1
+exit 0

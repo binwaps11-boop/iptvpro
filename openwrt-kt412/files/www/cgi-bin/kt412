@@ -1000,8 +1000,29 @@ if [ -n "$ACT" ]; then
 			printf '%s\n' "$txt" | sed '/reboot/d; /poweroff/d; /halt/d' > /etc/crontabs/root
 			# never let a user crontab edit delete the Smart AP self-heal watchdog line
 			grep -q 'smartap-wd' /etc/crontabs/root || echo '*/2 * * * * /root/smartap-watchdog.sh # smartap-wd' >> /etc/crontabs/root
+			# re-assert the optional user scheduled-reboot line (managed separately)
+			[ -x /usr/sbin/kt412-reboot-sched ] && /usr/sbin/kt412-reboot-sched >/dev/null 2>&1
 			/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
 			printf '{"ok":true,"msg":"تم حفظ المهام المجدولة"}\n';;
+		sched_reboot)
+			# OPTIONAL scheduled reboot — OFF by default (device never reboots itself).
+			# enable=1 + interval + unit(hours|days) installs ONE tagged cron line via
+			# /usr/sbin/kt412-reboot-sched; enable=0 removes it. The no-reboot guard
+			# preserves ONLY this tagged line, so accidental reboots stay impossible.
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			en="$(getp enable | tr -cd '01')"; iv="$(sani_int "$(getp interval)")"; un="$(getp unit | tr -cd 'a-z')"
+			[ -f /etc/config/kt412 ] || : > /etc/config/kt412
+			uci -q get kt412.reboot >/dev/null 2>&1 || uci -q set kt412.reboot=reboot
+			uci -q set kt412.reboot.enabled="${en:-0}"
+			[ -n "$iv" ] && uci -q set kt412.reboot.interval="$iv"
+			case "$un" in hours|days) uci -q set kt412.reboot.unit="$un";; esac
+			uci -q commit kt412
+			/usr/sbin/kt412-reboot-sched >/dev/null 2>&1
+			if [ "$en" = "1" ]; then
+				printf '{"ok":true,"msg":"إعادة التشغيل المجدولة مُفعّلة: كل %s %s"}\n' "$(json_esc "$(uci -q get kt412.reboot.interval)")" "$([ "$(uci -q get kt412.reboot.unit)" = hours ] && echo ساعة || echo يوم)"
+			else
+				printf '{"ok":true,"msg":"إعادة التشغيل المجدولة مُطفأة — الجهاز يظل شغّالاً ولا يعيد التشغيل"}\n'
+			fi;;
 
 		# ===================== PACKAGES (apk) =====================
 		pkg_install)
@@ -1576,6 +1597,12 @@ case "$OP" in
 			printf '{"mode":"%s","ssid":"%s","network":"%s"}' "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "${nw:-lan}")"
 		done
 		printf ']}\n';;
+	sched_reboot)
+		# read-back of the optional scheduled-reboot setting (default: disabled)
+		en="$(uci -q get kt412.reboot.enabled)"; [ -n "$en" ] || en="0"
+		iv="$(uci -q get kt412.reboot.interval)"; [ -n "$iv" ] || iv="1"
+		un="$(uci -q get kt412.reboot.unit)"; [ -n "$un" ] || un="days"
+		printf '{"ok":true,"enabled":"%s","interval":"%s","unit":"%s"}\n' "$en" "$iv" "$(json_esc "$un")";;
 	program_state)
 		# READ-BACK of the ACTUAL device role after program_mode (real, not fake):
 		# LAN IP, WAN proto, vlan_filtering, and each radio's mode/ssid/channel/network.
