@@ -359,9 +359,10 @@ function radioCard(r){
 /* ---------------- WAN card ---------------- */
 function wanCard(curProto){
 	var proto = E('select', { class:'cbi-input-select' }, [
-		E('option', { value:'dhcp' },   _('تلقائي DHCP')),
+		E('option', { value:'dhcp' },   _('تلقائي DHCP (راوتr/بوابة + NAT)')),
 		E('option', { value:'pppoe' },  'PPPoE'),
-		E('option', { value:'static' }, _('ثابت (Static)'))
+		E('option', { value:'static' }, _('ثابت (Static)')),
+		E('option', { value:'apbridge' }, _('نقطة وصول — تمرير الإنترنت (جسر WAN→LAN)'))
 	]);
 	if (curProto === 'pppoe' || curProto === 'static' || curProto === 'dhcp') proto.value = curProto;
 
@@ -383,9 +384,11 @@ function wanCard(curProto){
 		E('div', { class:'kt-field' }, [ E('label', {}, 'DNS'), sDns ])
 	]);
 
+	var apNote = E('div', { class:'kt-note info' }, _('وضع نقطة الوصول: ضع كابل الإنترنت في منفذ WAN — يمرَّر الإنترنت مباشرةً لكل أجهزة LAN والواي‑فاي (DHCP من الراوتر المصدر). يبقى الوصول للإدارة على نفس عنوان الجهاز الثابت (لا قفل). لإرجاع وضع الراوتر اختر «تلقائي DHCP».'));
 	function sync(){
 		pppoeBox.style.display  = (proto.value === 'pppoe')  ? '' : 'none';
 		staticBox.style.display = (proto.value === 'static') ? '' : 'none';
+		apNote.style.display    = (proto.value === 'apbridge') ? '' : 'none';
 	}
 	proto.onchange = sync; sync();
 
@@ -398,6 +401,8 @@ function wanCard(curProto){
 		} else if (p === 'static'){
 			if (!sIp.value) return ui.addNotification(null, E('p', {}, _('عنوان IP مطلوب')), 'error');
 			params = { act:'wan_static', ip:sIp.value, mask:sMask.value, gw:sGw.value, dns:sDns.value };
+		} else if (p === 'apbridge'){
+			params = { act:'wan_apbridge' };
 		} else {
 			params = { act:'wan_dhcp' };
 		}
@@ -408,7 +413,7 @@ function wanCard(curProto){
 	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 		cardHead(ktIc('globe'), _('إعداد WAN / الإنترنت'), _('اختر نوع اتصالك بالإنترنت — DHCP تلقائي أو PPPoE أو عنوان ثابت'), 'g'),
 		segField(_('نوع الاتصال (proto)'), proto),
-		pppoeBox, staticBox,
+		pppoeBox, staticBox, apNote,
 		E('div', { class:'kt-wz-foot' }, [
 			E('span', { class:'fhint' }, _('يُعاد ضبط واجهة WAN فور التطبيق')),
 			btn

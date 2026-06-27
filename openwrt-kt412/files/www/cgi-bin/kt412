@@ -126,6 +126,41 @@ if [ -n "$ACT" ]; then
 		wan_reconnect)
 			ifup wan >/dev/null 2>&1
 			printf '{"ok":true,"msg":"WAN reconnecting"}\n';;
+		wan_apbridge)
+			# TRUE Access Point passthrough: bridge the WAN uplink port INTO br-lan so
+			# a cable plugged into the WAN socket feeds internet to every LAN + Wi-Fi
+			# client (the upstream router serves DHCP/internet). The device keeps its
+			# STATIC management IP (always reachable -> no lockout) AND gets its own
+			# upstream IP via a DHCP alias so it can ping / reach the internet too.
+			# Local DHCP server is silenced so it doesn't fight the upstream one.
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			wandev="$(uci -q get network.wan.device)"; [ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname)"; [ -n "$wandev" ] || wandev="wan"
+			uci -q get network.$brsec.ports | grep -qw "$wandev" || uci add_list network.$brsec.ports="$wandev"
+			uci -q delete network.wan; uci -q delete network.wan6
+			uci -q set network.wanalias=interface; uci -q set network.wanalias.device='br-lan'; uci -q set network.wanalias.proto='dhcp'
+			uci -q set dhcp.lan.ignore='1'
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"وضع نقطة الوصول: الكابل في WAN يمرّر الإنترنت لكل الأجهزة (DHCP من المصدر). الإدارة تبقى على %s"}\n' "$(json_esc "$(uci -q get network.lan.ipaddr)")";;
+		wan_gateway)
+			# Revert to ROUTER/GATEWAY: take the WAN port back out of br-lan, restore a
+			# routed WAN (DHCP client + NAT from the wan firewall zone) and re-enable
+			# the local DHCP server. Use this when the device IS the main router.
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			for p in wan eth1 wan1; do uci -q del_list network.$brsec.ports="$p" 2>/dev/null; done
+			uci -q delete network.wanalias
+			uci -q set network.wan=interface; uci -q set network.wan.device='wan'; uci -q set network.wan.proto='dhcp'
+			uci -q delete dhcp.lan.ignore
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"وضع الراوتر: WAN عبر DHCP + NAT، خادم DHCP المحلي مُفعّل"}\n';;
 		wan_vlan)
 			vid="$(sani_int "$(getp vid)")"
 			[ -n "$vid" ] || fail "no_vid"
