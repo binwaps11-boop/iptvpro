@@ -815,3 +815,21 @@ input:focus,select:focus,textarea:focus,.cbi-input-text:focus,.cbi-input-select:
 .kt-card,.cbi-section,.cbi-map,.panel,.well,.main-left,#mainmenu,
 .kt-tabs,.mk-card,.mk-topbar,.mk-chip{
   -webkit-backdrop-filter:blur(4px)!important;backdrop-filter:blur(4px)!important}
+
+/* ============================================================================
+   RTL / LTR CORRECTNESS — global, applies to every page.
+   Arabic UI is RTL, but technical VALUES (IP, MAC, dBm, Mbit/s, channels, kernel
+   strings, counts) are Latin/numeric and must render LEFT-TO-RIGHT or they get
+   visually reordered ("192.168.1.1" -> "1.1.168.192"). `unicode-bidi:isolate`
+   keeps each value as its own run inside the surrounding Arabic sentence. We only
+   target clearly-technical containers — NOT prose — so Arabic text stays RTL.
+   ============================================================================ */
+.kt-badge,.mk-chip .cv,.kt-kv .v,.dmeta,.dname .kt-badge,
+code,pre,kbd,samp,.kt-mono,
+input[type=text],input[type=number],input[type=password],select,
+.cbi-input-text,.cbi-input-password,.cbi-input-select{
+  direction:ltr; unicode-bidi:isolate;}
+/* numeric/technical inputs read most naturally left-aligned even in an RTL card */
+input[type=number],.kt-mono{ text-align:left; }
+/* headers already flex (icon+label aligned); just guard long titles from overflow */
+.kt-card h3>span,.mk-card h3>span{min-width:0}
