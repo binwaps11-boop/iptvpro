@@ -416,31 +416,29 @@ function wanCard(curProto){
 	]);
 }
 
-/* ---------------- VLAN-per-SSID card ---------------- */
-function vlanCard(radios){
-	var sel = E('select', { class:'cbi-input-select' },
-		radios.filter(function(r){ return r.iface; }).map(function(r){
-			return E('option', { value:r.iface }, bandShort(r.band) + ' — ' + (r.ssid || r.iface));
-		}));
-	var vid = E('input', { type:'text', class:'cbi-input-text', maxlength:'4', placeholder:_('2–4094، فارغ=LAN') });
-	var btn = E('button', { class:'kt-btn' }, _('تطبيق'));
+/* ---------------- UNIFIED device-wide VLAN card ----------------
+   ONE VLAN id applied to the WHOLE AP at once: tagged on every LAN port AND
+   bound to every Wi-Fi SSID (both bands) together — not a per-SSID toggle.
+   Management stays on the untagged LAN (the backend keeps VLAN 1 untagged on
+   all ports) so applying a VLAN can never lock the operator out. */
+function vlanAllCard(){
+	var vid = E('input', { type:'text', class:'cbi-input-text', maxlength:'4', placeholder:_('2–4094، فارغ = بدون VLAN') });
+	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('تطبيق على الكل') ]);
 	btn.addEventListener('click', function(){
-		if (!sel.value) return ui.addNotification(null, E('p', {}, _('لا توجد واجهة SSID')), 'error');
 		if (!validVid(vid.value)) return ui.addNotification(null, E('p', {}, _('VLAN ID يجب أن يكون 1–4094 أو فارغاً')), 'error');
 		btn.disabled = true; var lbl = btn.textContent; btn.textContent = '…';
-		postCall({ act:'vlan_ssid', ssid:sel.value, vid:vid.value }).then(function(j){
-			btn.disabled = false; btn.textContent = lbl; notify(j);
-		});
+		postCall({ act:'vlan_all', vid:vid.value }).then(function(j){
+			btn.disabled = false; btn.textContent = ''; btn.appendChild(ktIc('check')); btn.appendChild(document.createTextNode(' ' + _('تطبيق على الكل')));
+			notify(j);
+		}).catch(function(){ btn.disabled = false; notify(null); });
 	});
 	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
-		cardHead(ktIc('tag'), _('ربط SSID بـ VLAN'), _('اعزل شبكة لاسلكية على VLAN موسوم أو اتركها على LAN'), 'v'),
-		E('div', { class:'kt-grid kt-cols-2' }, [
-			segField('SSID', sel),
-			E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vid ])
-		]),
-		E('div', { class:'kt-note' }, _('فارغ أو 1 = LAN غير موسوم. غير ذلك = VLAN موسوم (2–4094).')),
+		cardHead(ktIc('tag'), _('VLAN موحّد — لكل المنافذ والوايرلس'),
+			_('رقم VLAN واحد يُطبَّق على كل منافذ LAN وكل شبكات الوايرلس معاً'), 'v'),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID للجهاز كامل')), vid ]),
+		E('div', { class:'kt-note info' }, _('فارغ أو 1 = بدون VLAN (شبكة LAN عادية). من 2 إلى 4094 = يوسم كل منافذ LAN ويربط كل الوايرلس على هذا الـ VLAN معاً. إدارة الجهاز تبقى على LAN دائماً — لا يمكن أن تُقفل عنك.')),
 		E('div', { class:'kt-wz-foot' }, [
-			E('span', { class:'fhint' }, _('يربط الواجهة المحددة بالشبكة المختارة')),
+			E('span', { class:'fhint' }, _('يطبّق فوراً على المنافذ + كل الوايرلس')),
 			btn
 		])
 	]);
@@ -470,8 +468,8 @@ return view.extend({
 		   them via .is-active, so every element handle/closure built below stays
 		   live — the WAN async refill, scan rows, mode wiring, toggles, etc.). ---- */
 
-		/* TAB 1 — Wireless: the per-radio cards (or an empty-state card) */
-		var wlPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'wifi' });
+		/* Wireless: the per-radio cards (or an empty-state card) — not the default tab */
+		var wlPanel = E('div', { class:'kt-tab-panel', 'data-tab':'wifi' });
 		if (!radios.length){
 			wlPanel.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 				cardHead(ktIc('wifi'), _('الوايرلس'), _('لم يتم العثور على إعدادات راديو'), ''),
@@ -491,23 +489,19 @@ return view.extend({
 			if (w && w.ok){ wanSlot.innerHTML = ''; wanSlot.appendChild(wanCard(w.proto || '')); }
 		});
 
-		/* TAB 3 — VLAN: SSID↔VLAN binding (only when we actually have radios) */
-		var vlanPanel = E('div', { class:'kt-tab-panel', 'data-tab':'vlan' });
-		if (radios.length) vlanPanel.appendChild(vlanCard(radios));
-		else vlanPanel.appendChild(E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
-			cardHead(ktIc('tag'), _('ربط SSID بـ VLAN'), _('لا توجد واجهات لاسلكية متاحة'), 'v'),
-			E('div', { class:'kt-note' }, _('تعذّر العثور على واجهات SSID لربطها بـ VLAN'))
-		]));
+		/* TAB 1 (DEFAULT) — VLAN: unified device-wide VLAN (all ports + all wifi) */
+		var vlanPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'vlan' });
+		vlanPanel.appendChild(vlanAllCard());
 
-		var panels = [ wlPanel, wanPanel, vlanPanel ];
+		var panels = [ vlanPanel, wlPanel, wanPanel ];
 
 		/* ---- styled tab bar: buttons toggle which panel is visible (default first).
 		   We NEVER detach panels — only flip the .is-active class, so existing
 		   element handles and event closures keep working. ---- */
 		var tabDefs = [
+			{ key:'vlan', icon:'tag', label:_('VLAN') },
 			{ key:'wifi', icon:'wifi', label:_('الوايرلس') },
-			{ key:'wan',  icon:'globe', label:_('WAN') },
-			{ key:'vlan', icon:'tag', label:_('VLAN') }
+			{ key:'wan',  icon:'globe', label:_('WAN') }
 		];
 		var tabBtns = [];
 		function selectTab(key){
@@ -522,9 +516,9 @@ return view.extend({
 		}
 		var tabBar = E('div', { class:'kt-tabs', role:'tablist' }, tabDefs.map(function(t){
 			var b = E('button', {
-				class:'kt-tab' + (t.key === 'wifi' ? ' is-active' : ''),
+				class:'kt-tab' + (t.key === 'vlan' ? ' is-active' : ''),
 				type:'button', role:'tab', 'data-tab':t.key,
-				'aria-selected': (t.key === 'wifi') ? 'true' : 'false'
+				'aria-selected': (t.key === 'vlan') ? 'true' : 'false'
 			}, [
 				E('span', { class:'kt-tab-ic' }, [ ktIc(t.icon) ]),
 				E('span', { class:'kt-tab-lbl' }, t.label)
