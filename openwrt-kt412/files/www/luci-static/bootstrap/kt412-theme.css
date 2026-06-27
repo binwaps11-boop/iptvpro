@@ -513,3 +513,44 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   .kt-dev{padding:11px}
   .kt-btn{padding:11px 16px}
 }
+
+/* ============================================================================
+   POLISH PASS — text/frame/menus + STRICT anti-overlap (تحسين ومنع التداخل).
+   Append-only color/skin layer; no layout-shell overrides, glass design intact.
+   ============================================================================ */
+
+/* key/value rows: never let the label and the value collide. They sit on one
+   line when they fit and the value wraps to its own line when long, instead of
+   overprinting the label (the main "تداخل" the user saw). */
+.kt-kv{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 14px}
+.kt-kv .k{flex:0 1 auto;min-width:0;color:var(--kt-txt2);overflow-wrap:anywhere}
+.kt-kv .v{flex:1 1 auto;min-width:0;text-align:start;font-weight:700;color:var(--kt-txt);
+  word-break:normal;overflow-wrap:anywhere}
+
+/* badges + pills: clip cleanly inside their box, never spill across neighbours */
+.kt-badge{display:inline-flex;align-items:center;max-width:100%;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+
+/* latin tokens (MAC / version / kernel / IP) inside RTL text stay readable and
+   self-contained so they don't reorder into the surrounding Arabic */
+.kt-kv .v,.kt-mono,.kt-dev .mac,.kt-ip{unicode-bidi:isolate}
+
+/* LuCI sidebar / top menu (القوائم): roomy rows, wrap long labels, clear active
+   state — no cramped or overlapping menu entries on phone or desktop. */
+.main-left a,.nav-sidebar a,#mainmenu a,#topmenu a,.cbi-tabmenu a{
+  display:block;padding:9px 12px;margin:1px 4px;line-height:1.5;border-radius:9px;
+  white-space:normal;overflow-wrap:anywhere}
+#mainmenu li,.nav-sidebar li{list-style:none}
+
+/* card / section frames (الإطار): consistent rounded glass edge + a touch more
+   inner breathing room so content never touches the border. */
+.cbi-section,.cbi-map,fieldset,.panel,.well{border-radius:14px}
+.cbi-value{align-items:center}
+
+/* selects/inputs: belt-and-suspenders against clipped option text (الكلام) */
+input,select,textarea,.cbi-input-text,.cbi-input-select{
+  min-height:42px;line-height:1.5;box-sizing:border-box}
+select,.cbi-input-select{text-overflow:ellipsis}
+
+/* headings never overflow their card */
+.kt-card h3,.cbi-section h3,.cbi-map h2,.cbi-section-descr{overflow-wrap:anywhere}

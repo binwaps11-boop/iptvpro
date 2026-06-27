@@ -73,7 +73,7 @@ return view.extend({
 	render: function(){
 		var box = E('div', {}, [
 			E('h2', {}, _('الأجهزة المتصلة — Devices')),
-			E('div', { 'class':'kt-body' }, E('div', { 'class':'kt-sub' }, _('جارٍ التحميل…')))
+			E('div', { 'class':'kt-body', 'dir':'rtl' }, E('div', { 'class':'kt-sub' }, _('جارٍ التحميل…')))
 		]);
 		var body = box.querySelector('.kt-body');
 		reload(body);

@@ -30,7 +30,9 @@ function call(params){
 
 function kv(k,v){ return '<div class="kt-kv"><span class="k">'+esc(k)+'</span><span class="v">'+esc(v)+'</span></div>'; }
 function dur(s){
-	var d=s.up_d, h=s.up_h, m=s.up_m, sec=s.up_s;
+	/* coerce + default so a missing field never prints the literal "undefined" */
+	if (s.up_d==null && s.up_h==null && s.up_m==null && s.up_s==null) return '—';
+	var d=+s.up_d||0, h=+s.up_h||0, m=+s.up_m||0, sec=+s.up_s||0;
 	return d+'ي : '+h+'س : '+m+'د : '+sec+'ث';
 }
 
