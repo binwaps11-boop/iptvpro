@@ -1339,6 +1339,33 @@ case "$OP" in
 			[ -n "$cells" ] && { [ "$first" -eq 1 ] || out="$out,"; first=0; out="$out$cells"; }
 		done
 		printf '{"ok":true,"nets":[%s]}\n' "$out";;
+	vlan_state)
+		# READ-BACK of the ACTUAL applied VLAN config (proves the apply is real,
+		# not a fake success): bridge vlan_filtering flag, every bridge-vlan
+		# (vlan + ports) and every Wi-Fi iface's bound network.
+		brsec=""; i=0
+		while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+		done
+		flt="$(uci -q get network.$brsec.vlan_filtering)"; [ -n "$flt" ] || flt="0"
+		printf '{"ok":true,"filtering":"%s","vlans":[' "$flt"
+		i=0; f=1
+		while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+			v="$(uci -q get network.@bridge-vlan[$i].vlan)"
+			p="$(uci -q get network.@bridge-vlan[$i].ports 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/ *$//')"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"vlan":"%s","ports":"%s"}' "$(json_esc "$v")" "$(json_esc "$p")"
+			i=$((i+1))
+		done
+		printf '],"wifi":['
+		f=1
+		for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+			nw="$(uci -q get wireless.$wif.network)"; wm="$(uci -q get wireless.$wif.mode)"
+			ss="$(uci -q get wireless.$wif.ssid)"; [ -n "$ss" ] || ss="$(uci -q get wireless.$wif.mesh_id)"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"mode":"%s","ssid":"%s","network":"%s"}' "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "${nw:-lan}")"
+		done
+		printf ']}\n';;
 	wscan)   # scan on ONE radio's iface (for the Station uplink picker); returns {ssid,bssid,ch,sig,enc}
 		radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || fail "no_radio"
 		dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"

@@ -456,18 +456,33 @@ function vlanFlexCard(radios){
 			if (m === 'vlan')      p.ports = portSel.value;
 			else if (m === 'mesh') p.mesh  = '1';
 		}
-		postCall(p).then(function(j){ btn.disabled = false; notify(j); })
+		postCall(p).then(function(j){ btn.disabled = false; notify(j); setTimeout(refreshState, 600); })
 			.catch(function(){ btn.disabled = false; notify(null); });
 	});
+	/* live read-back of the ACTUAL applied config (proves it is real, not fake) */
+	var stateBox = E('div', { class:'kt-note muted', style:'margin-top:10px' }, [ ktIc('search'), ' ' + _('جارٍ قراءة الحالة الفعلية من الجهاز…') ]);
+	function refreshState(){
+		call({ op:'vlan_state' }).then(function(s){
+			if (!s || !s.ok){ stateBox.textContent = _('تعذّر قراءة الحالة'); return; }
+			var parts = [ (s.filtering === '1') ? _('VLAN مفعّل') : _('بردج (بدون VLAN)') ];
+			(s.vlans || []).forEach(function(v){ if (v.vlan && v.vlan !== '1') parts.push('VLAN ' + v.vlan + (v.ports ? (' [' + v.ports + ']') : '')); });
+			(s.wifi || []).forEach(function(w){ if (w.network && w.network !== 'lan') parts.push((w.ssid || w.mode || 'wifi') + ' → ' + w.network); });
+			stateBox.textContent = '';
+			stateBox.appendChild(ktIc('check'));
+			stateBox.appendChild(document.createTextNode(' ' + _('المطبّق فعلياً على الجهاز') + ': ' + parts.join(' · ')));
+		}).catch(function(){ stateBox.textContent = _('تعذّر قراءة الحالة'); });
+	}
 	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 		cardHead(ktIc('tag'), _('VLAN'), _('اختر الوضعية — والباقي يبقى LAN.'), 'v'),
 		segField(_('الوضعية'), modeSel),
 		vidField,
 		portField,
 		E('div', { class:'kt-note info' }, _('بردج = بدون VLAN (LAN عادي). VLAN = يضع منفذ الدخول المختار على الـ VLAN والباقي LAN. Mesh = يضع الميش على الـ VLAN. الإدارة تبقى قابلة للوصول دائماً.')),
+		stateBox,
 		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً')), btn ])
 	]);
 	syncMode();
+	refreshState();
 	return card;
 }
 
