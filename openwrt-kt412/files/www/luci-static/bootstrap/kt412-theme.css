@@ -170,6 +170,45 @@ input[type=submit]{
 .cbi-tooltip,.tooltip-inner{background:#1E293B!important;color:#fff!important;border:1px solid var(--kt-accent)!important}
 
 /* ============================================================================
+   PC / wide-screen WHITE-LEAK coverage. On a laptop the user saw white blocks +
+   overlap. These are LuCI surfaces the base skin left white and our cards above
+   didn't name: the luci-mod-dashboard widgets, log/<pre> blocks, modal/cbi
+   tables, panels, and a few generic containers. COLOUR ONLY — no layout/flex/
+   width/float on the shell (that previously broke the page).
+   ============================================================================ */
+.dashboard, .dashboard > div, .dashboard .cbi-section, .dashboard-bg,
+[data-widget], .widget, .cbi-section-node-tabbed, .cbi-tabcontainer,
+.panel-body, .well, .modal, .cbi-modal, .cbi-section-create,
+.tr, .tr.table-titles, .tr.cbi-section-table-titles, .tr.cbi-section-table-row,
+table.cbi-section-table, .table.cbi-section-table,
+pre, code, .ifacebox, .ifacebox-body, .network-status-table, .zonebadge,
+.cbi-value-field > div, .cbi-dynlist{
+  background:var(--kt-card)!important; color:var(--kt-txt)!important;
+  border-color:var(--kt-stroke)!important;
+}
+pre, code{ background:var(--kt-bg1)!important; border:1px solid var(--kt-stroke)!important;
+  border-radius:10px!important; padding:10px 12px!important; color:var(--kt-txt2)!important; }
+/* table cells/rows must stay transparent so the .table card shows through (not white) */
+.dashboard td, .dashboard th, table td, table th, .tr .td{ background:transparent!important; }
+.tr.table-titles .th, .tr.cbi-section-table-titles .th{ background:var(--kt-card2)!important; }
+/* SVG/canvas charts (statistics / dashboard graphs) — kill the white plot bg */
+svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important; }
+/* iframes (rare) and any element a base rule paints white: last-resort guards */
+[style*="background:#fff"],[style*="background: #fff"],
+[style*="background:#FFF"],[style*="background-color:#fff"],
+[style*="background-color: #fff"]{ background:var(--kt-card)!important; }
+
+/* keep the wide-screen layout TIDY (no stretch/overlap): cap the readable width
+   of the main content on big monitors and guarantee card spacing. Width/:not-shell
+   only — we still let bootstrap own positioning; this just bounds + spaces. */
+@media (min-width:1200px){
+  #maincontent > .container, #view > .cbi-map, .mk-wrap{
+    max-width:1180px!important; margin-left:auto!important; margin-right:auto!important;
+  }
+}
+.cbi-section, .cbi-map, .kt-card, .mk-card{ margin-bottom:16px!important; }
+
+/* ============================================================================
    KT412 view widgets (used by /luci-static/resources/view/kt412/*.js)
    ============================================================================ */
 .kt-grid{display:grid;gap:16px;margin-bottom:16px}
