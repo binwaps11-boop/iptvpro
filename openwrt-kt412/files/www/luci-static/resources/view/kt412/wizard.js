@@ -505,6 +505,130 @@ function vlanFlexCard(radios){
 	return card;
 }
 
+/* ---------------- AL-MALAKI-style unified "وضع البرمجة" (programming mode) ----------------
+   ONE dropdown selects the whole device role; the fields shown adapt to the mode.
+   Modes: AP, AP+VLAN, Mesh, Mesh+VLAN, WDS-tx, WDS-tx+VLAN, WDS-rx, WDS-rx+VLAN, Broadband.
+   Backend act=program_mode applies it for real (channels/IP/SSID/key/VLAN/password/wipe). */
+function programModeCard(radios){
+	var MODES = [
+		{ v:'ap',          t:_('نقطة وصول (AP)') },
+		{ v:'ap_vlan',     t:_('نقطة وصول (AP) + VLAN') },
+		{ v:'mesh',        t:_('شبكة Mesh') },
+		{ v:'mesh_vlan',   t:_('شبكة Mesh + VLAN') },
+		{ v:'wds_tx',      t:_('WDS مُرسِل (AP-WDS)') },
+		{ v:'wds_tx_vlan', t:_('WDS مُرسِل + VLAN') },
+		{ v:'wds_rx',      t:_('WDS مُستقبِل (Client-WDS)') },
+		{ v:'wds_rx_vlan', t:_('WDS مُستقبِل + VLAN') },
+		{ v:'broadband',   t:_('برودباند (راوتر — WAN/DHCP)') }
+	];
+	var modeSel = E('select', { class:'cbi-input-select' },
+		MODES.map(function(m){ return E('option', { value:m.v }, m.t); }));
+
+	var allRadios = (radios || []).filter(function(r){ return r.radio; });
+	var r24 = allRadios.filter(function(r){ return !is5g(r.band); })[0] || null;
+	var r5  = allRadios.filter(function(r){ return  is5g(r.band); })[0] || null;
+
+	/* fields */
+	var ip    = E('input', { type:'text', class:'cbi-input-text', maxlength:'15', placeholder:_('مثال: 192.168.1.21 (اتركه فارغاً لعدم التغيير)') });
+	var vid   = E('input', { type:'text', class:'cbi-input-text', maxlength:'4',  placeholder:_('2–4094') });
+	var ssid  = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', placeholder:_('إسم شبكة البث') });
+	var key   = E('input', { type:'text', class:'cbi-input-text', maxlength:'63', placeholder:_('8+ أحرف، فارغ = مفتوح') });
+	var ch24  = chanOptions('2.4', r24 ? r24.channel : 'auto');
+	var ch5   = chanOptions('5',   r5  ? r5.channel  : 'auto');
+	var radioSel = E('select', { class:'cbi-input-select' },
+		allRadios.map(function(r){ return E('option', { value:r.radio }, (is5g(r.band) ? '5G' : '2.4G') + ' — ' + r.radio); }));
+	var meshId  = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', placeholder:_('مثال: mesh-home') });
+	var meshKey = E('input', { type:'text', class:'cbi-input-text', maxlength:'63', placeholder:_('8+ أحرف، فارغ = مفتوح') });
+	var upSsid  = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', placeholder:_('SSID المصدر المراد الاتصال به') });
+	var upBssid = E('input', { type:'text', class:'cbi-input-text', maxlength:'17', placeholder:_('BSSID اختياري: AA:BB:CC:DD:EE:FF') });
+	var newpass = E('input', { type:'password', class:'cbi-input-password', maxlength:'63', placeholder:_('اتركها فارغة لعدم التغيير') });
+	var wipe    = E('input', { type:'checkbox' });
+
+	/* field wrappers (toggled per mode) */
+	var fIp     = fld(_('عنوان IP للجهاز'), ip);
+	var fVid    = fld(_('رقم الفيلان (VLAN)'), vid);
+	var fSsid   = fld(_('إسم شبكة البث (SSID)'), ssid);
+	var fKey    = fld(_('كلمة مرور الشبكة'), key);
+	var fCh24   = segField(_('إختر قناة 2.4G'), ch24);
+	var fCh5    = segField(_('إختر قناة 5G'), ch5);
+	var fRadio  = segField(_('التردد (الراديو)'), radioSel);
+	var fMeshId = fld(_('Mesh ID'), meshId);
+	var fMeshK  = fld(_('مفتاح الميش (اختياري)'), meshKey);
+	var fUpSsid = fld(_('SSID المصدر (المُرسِل)'), upSsid);
+	var fUpBss  = fld(_('BSSID المصدر (اختياري)'), upBssid);
+	var fNewpass= fld(_('تغيير كلمة مرور الجهاز'), newpass);
+	var fWipe   = E('div', { class:'kt-field' }, [ togglePill(wipe, _('حذف الإعدادات السابقة')) ]);
+
+	function show(node, on){ node.style.display = on ? '' : 'none'; }
+	function syncMode(){
+		var m = modeSel.value;
+		var isVlan  = /vlan$/.test(m);
+		var isMesh  = (m === 'mesh' || m === 'mesh_vlan');
+		var isRx    = (m === 'wds_rx' || m === 'wds_rx_vlan');
+		var hasAp   = !isRx;                                   /* every non-receiver mode broadcasts an SSID */
+		show(fVid,    isVlan);
+		show(fSsid,   hasAp);
+		show(fKey,    true);                                   /* key used for AP psk OR uplink auth */
+		show(fCh24,   !isRx);
+		show(fCh5,    !isRx);
+		show(fRadio,  isMesh || isRx);                         /* mesh/receiver need a chosen radio */
+		show(fMeshId, isMesh);
+		show(fMeshK,  isMesh);
+		show(fUpSsid, isRx);
+		show(fUpBss,  isRx);
+		fKey.querySelector('label').textContent = isRx ? _('كلمة مرور المصدر') : _('كلمة مرور الشبكة');
+	}
+	modeSel.addEventListener('change', syncMode);
+
+	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('تطبيق وضع البرمجة') ]);
+	btn.addEventListener('click', function(){
+		var m = modeSel.value, isVlan = /vlan$/.test(m);
+		var isMesh = (m === 'mesh' || m === 'mesh_vlan'), isRx = (m === 'wds_rx' || m === 'wds_rx_vlan');
+		if (isVlan && (!/^[0-9]{1,4}$/.test(vid.value) || +vid.value < 2 || +vid.value > 4094)){
+			return ui.addNotification(null, E('p', {}, _('أدخل رقم VLAN صحيح (2–4094)')), 'error');
+		}
+		if (ip.value && !/^(\d{1,3}\.){3}\d{1,3}$/.test(ip.value)){
+			return ui.addNotification(null, E('p', {}, _('عنوان IP غير صحيح')), 'error');
+		}
+		if (isMesh && !meshId.value.trim()){
+			return ui.addNotification(null, E('p', {}, _('أدخل Mesh ID')), 'error');
+		}
+		if (isRx && !upSsid.value.trim()){
+			return ui.addNotification(null, E('p', {}, _('أدخل SSID المصدر')), 'error');
+		}
+		var p = {
+			act:'program_mode', mode:m,
+			ip: ip.value.trim(),
+			vid: isVlan ? vid.value : '',
+			ssid: ssid.value, key: key.value,
+			ch24: (ch24.value === 'auto') ? '' : ch24.value,
+			ch5:  (ch5.value  === 'auto') ? '' : ch5.value,
+			mesh_id: isMesh ? meshId.value.trim() : '',
+			mesh_key: isMesh ? meshKey.value : '',
+			radio: (isMesh || isRx) ? radioSel.value : '',
+			up_ssid: isRx ? upSsid.value : '',
+			up_bssid: isRx ? upBssid.value : '',
+			newpass: newpass.value,
+			wipe: wipe.checked ? '1' : '0'
+		};
+		btn.disabled = true;
+		postCall(p).then(function(j){ btn.disabled = false; notify(j); })
+			.catch(function(){ btn.disabled = false; notify(null); });
+	});
+
+	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead(ktIc('gear'), _('وضع البرمجة'), _('اختر وظيفة الجهاز — وتُضبط تلقائياً الحقول المطلوبة.'), 'v'),
+		segField(_('وضع البرمجة'), modeSel),
+		fIp, fVid, fRadio, fSsid, fKey, fMeshId, fMeshK, fUpSsid, fUpBss,
+		E('div', { class:'kt-grid kt-cols-2' }, [ fCh24, fCh5 ]),
+		fNewpass, fWipe,
+		E('div', { class:'kt-note info' }, _('AP = نقطة وصول. AP+VLAN = نقطة وصول داخل VLAN. Mesh = ربط لاسلكي بين الأجهزة + خدمة الجوالات على نفس التردد. WDS مُرسِل/مُستقبِل = جسر لاسلكي. برودباند = راوتر بإنترنت WAN. الإدارة تبقى قابلة للوصول.')),
+		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً على الجهاز')), btn ])
+	]);
+	syncMode();
+	return card;
+}
+
 return view.extend({
 	load: function(){ return call({op:'wifi_radios'}); },
 
@@ -551,15 +675,20 @@ return view.extend({
 		});
 
 		/* TAB 1 (DEFAULT) — VLAN: unified device-wide VLAN (all ports + all wifi) */
-		var vlanPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'vlan' });
+		var vlanPanel = E('div', { class:'kt-tab-panel', 'data-tab':'vlan' });
 		vlanPanel.appendChild(vlanFlexCard(radios));
 
-		var panels = [ vlanPanel, wlPanel, wanPanel ];
+		/* TAB (DEFAULT) — وضع البرمجة: AL-MALAKI-style 9-mode unified device programming */
+		var progPanel = E('div', { class:'kt-tab-panel is-active', 'data-tab':'prog' });
+		progPanel.appendChild(programModeCard(radios));
+
+		var panels = [ progPanel, vlanPanel, wlPanel, wanPanel ];
 
 		/* ---- styled tab bar: buttons toggle which panel is visible (default first).
 		   We NEVER detach panels — only flip the .is-active class, so existing
 		   element handles and event closures keep working. ---- */
 		var tabDefs = [
+			{ key:'prog', icon:'gear', label:_('وضع البرمجة') },
 			{ key:'vlan', icon:'tag', label:_('VLAN') },
 			{ key:'wifi', icon:'wifi', label:_('الوايرلس') },
 			{ key:'wan',  icon:'globe', label:_('WAN') }
@@ -577,9 +706,9 @@ return view.extend({
 		}
 		var tabBar = E('div', { class:'kt-tabs', role:'tablist' }, tabDefs.map(function(t){
 			var b = E('button', {
-				class:'kt-tab' + (t.key === 'vlan' ? ' is-active' : ''),
+				class:'kt-tab' + (t.key === 'prog' ? ' is-active' : ''),
 				type:'button', role:'tab', 'data-tab':t.key,
-				'aria-selected': (t.key === 'vlan') ? 'true' : 'false'
+				'aria-selected': (t.key === 'prog') ? 'true' : 'false'
 			}, [
 				E('span', { class:'kt-tab-ic' }, [ ktIc(t.icon) ]),
 				E('span', { class:'kt-tab-lbl' }, t.label)
