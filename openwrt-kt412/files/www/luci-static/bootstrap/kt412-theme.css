@@ -609,3 +609,10 @@ header,.header,#header,.navbar,#topmenu{
 
 /* tiles: gentle inner glow ring on hover for a premium tactile feel */
 .kt-tile:hover{box-shadow:var(--kt-shadow), 0 0 0 1px rgba(6,182,212,.22)}
+
+/* professional inline icon set (replaces emoji): inherits text colour, optically
+   aligned to the baseline, never shrinks in flex rows. */
+.kti{width:1.05em;height:1.05em;flex:0 0 auto;vertical-align:-3px;display:inline-block}
+.kt-card h3 .kti,.kt-wz-head .kti{width:1.15em;height:1.15em;color:var(--kt-accent)}
+.kt-badge .kti{width:1em;height:1em;vertical-align:-2px}
+.kt-tab .kti{width:1.1em;height:1.1em}
