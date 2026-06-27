@@ -343,9 +343,9 @@ if [ -n "$ACT" ]; then
 			vid="$(sani_int "$(getp vid)")"
 			pmode="$(getp mode | tr -cd 'a-z')"; [ "$pmode" = "access" ] || pmode=tag
 			wifi="$(getp wifi | tr -cd '01')"; mesh="$(getp mesh | tr -cd '01')"
-			praw="$(getp ports | tr 'A-Z' 'a-z' | tr -cd 'lan0-9,')"
+			praw="$(getp ports | tr 'A-Z' 'a-z' | tr -cd 'lanw0-9,')"
 			SELP=""; OLDIFS="$IFS"; IFS=','
-			for t in $praw; do case "$t" in lan1|lan2|lan3|lan4) case " $SELP " in *" $t "*) :;; *) SELP="$SELP $t";; esac;; esac; done
+			for t in $praw; do case "$t" in lan1|lan2|lan3|lan4|wan) case " $SELP " in *" $t "*) :;; *) SELP="$SELP $t";; esac;; esac; done
 			IFS="$OLDIFS"
 			brsec=""; i=0
 			while uci -q get network.@device[$i] >/dev/null 2>&1; do
@@ -353,6 +353,9 @@ if [ -n "$ACT" ]; then
 			done
 			[ -n "$brsec" ] || fail "no_bridge"
 			# ----- always clear prior VLAN artifacts first (idempotent rebuild) -----
+			# Drop any prior WAN-port bridge membership; it is re-added below only if the
+			# operator selected 'wan' this time, so the WAN role is restored otherwise.
+			uci -q del_list network.$brsec.ports='wan' 2>/dev/null
 			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
 			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done
 			for d in $(uci show dhcp 2>/dev/null | sed -n "s/^dhcp\.\(vlan[0-9]*\)=dhcp/\1/p"); do uci -q delete dhcp.$d; done
@@ -367,9 +370,18 @@ if [ -n "$ACT" ]; then
 			[ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
 			vip="10.$(( (vid/250)%250 )).$(( vid%250 )).1"
 			uci -q set network.$brsec.vlan_filtering='1'
+			# If the operator picked the WAN port, fold it into br-lan as a bridge port
+			# (it is a standalone DSA port by default) so it can carry the VLAN like a
+			# LAN port. Mirrors the wan_apbridge precedent; reverted on VLAN reset.
+			case " $SELP " in *" wan "*)
+				cur="$(uci -q get network.$brsec.ports 2>/dev/null)"
+				case " $cur " in *" wan "*) :;; *) uci -q add_list network.$brsec.ports='wan';; esac
+				MGMTP="lan1 lan2 lan3 lan4 wan";;
+			*) MGMTP="lan1 lan2 lan3 lan4";;
+			esac
 			# VLAN 1 (management) untagged on every port EXCEPT access-mode VLAN-X ports
 			v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
-			for pp in lan1 lan2 lan3 lan4; do
+			for pp in $MGMTP; do
 				skip=0
 				if [ "$pmode" = "access" ]; then case " $SELP " in *" $pp "*) skip=1;; esac; fi
 				[ "$skip" = 0 ] && uci add_list network.$v1.ports="$pp:u*"
@@ -465,6 +477,8 @@ if [ -n "$ACT" ]; then
 			ussid="$(sani "$(getp up_ssid)")"; ubss="$(getp up_bssid | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"
 			np="$(getp newpass | tr -d '\r\n' | cut -c1-64)"; wipe="$(getp wipe | tr -cd '01')"
 			safe="$(getp safe | tr -cd '01')"
+			# broadband (router) WAN credentials: PPPoE user/pass (optional; blank = DHCP)
+			bbu="$(getp pppoe_user | tr -d '\r\n' | cut -c1-128)"; bbp="$(getp pppoe_pass | tr -d '\r\n' | cut -c1-128)"
 			# SAFE APPLY (auto-rollback): snapshot config BEFORE we touch anything, so a
 			# detached watcher can restore it if the operator never confirms (e.g. a bad
 			# IP/VLAN locked them out). Mirrors LuCI's "apply unchecked → confirm" flow.
@@ -541,9 +555,19 @@ if [ -n "$ACT" ]; then
 					;;
 				*) fail "bad_mode";;
 			esac
-			# broadband = router mode: WAN active (DHCP) + NAT; otherwise pure AP.
-			if [ "$pm" = "broadband" ]; then
-				uci -q get network.wan >/dev/null 2>&1 && uci -q set network.wan.proto='dhcp'
+			# broadband = router mode: WAN active + NAT; otherwise pure AP.
+			# If PPPoE user given -> PPPoE (username/password + MTU clamp), else DHCP.
+			if [ "$pm" = "broadband" ] && uci -q get network.wan >/dev/null 2>&1; then
+				if [ -n "$bbu" ]; then
+					uci -q set network.wan.proto='pppoe'
+					uci -q set network.wan.username="$bbu"
+					uci -q set network.wan.password="$bbp"
+					uci -q set network.wan.mtu='1492'
+					uci -q delete network.wan.ipaddr; uci -q delete network.wan.netmask; uci -q delete network.wan.gateway
+				else
+					uci -q set network.wan.proto='dhcp'
+					uci -q delete network.wan.username; uci -q delete network.wan.password
+				fi
 			fi
 			# optional LAN IP change (applied last; operator reconnects on the new IP)
 			[ -n "$ipa" ] && uci -q set network.lan.ipaddr="$ipa"
@@ -1363,9 +1387,22 @@ case "$OP" in
 		# REAL connected-client count: unique associated Wi-Fi station MACs across ALL
 		# radios + distinct wired neighbours on br-lan, deduplicated. (The dashboard
 		# used to show the RADIO count — so one phone read as "2"; this is the truth.)
-		clients="$( { for d in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID.*/\1/p'); do iwinfo "$d" assoclist 2>/dev/null; done; \
-			ip neigh show dev br-lan 2>/dev/null | grep -iE 'REACHABLE|STALE'; } \
-			| grep -oiE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-f' 'A-F' | sort -u | grep -c . )"
+		# CACHED to /tmp/kt412-clients (<=30s old): the iwinfo assoclist sweep is the
+		# single most expensive thing in op=summary, and the dashboard polls often —
+		# running it every poll pinned the single CPU core. Recompute only when stale.
+		CC=/tmp/kt412-clients; now="$(date +%s 2>/dev/null || echo 0)"; clients=""
+		if [ -f "$CC" ]; then
+			cts="$(sed -n 1p "$CC" 2>/dev/null)"; cval="$(sed -n 2p "$CC" 2>/dev/null)"
+			case "$cts" in ''|*[!0-9]*) cts=0;; esac
+			[ $((now - cts)) -lt 30 ] 2>/dev/null && case "$cval" in ''|*[!0-9]*) :;; *) clients="$cval";; esac
+		fi
+		if [ -z "$clients" ]; then
+			clients="$( { for d in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID.*/\1/p'); do iwinfo "$d" assoclist 2>/dev/null; done; \
+				ip neigh show dev br-lan 2>/dev/null | grep -iE 'REACHABLE|STALE'; } \
+				| grep -oiE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-f' 'A-F' | sort -u | grep -c . )"
+			case "$clients" in ''|*[!0-9]*) clients=0;; esac
+			printf '%s\n%s\n' "$now" "$clients" > "$CC" 2>/dev/null
+		fi
 		case "$clients" in ''|*[!0-9]*) clients=0;; esac
 		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s,"cpu_idle":%s,"cpu_total":%s,"cpu_pct":%s,"clients":%s}\n' \
 			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \

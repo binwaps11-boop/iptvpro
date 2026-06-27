@@ -439,7 +439,7 @@ function vlanFlexCard(radios){
 	var vid = E('input', { type:'text', class:'cbi-input-text', maxlength:'4', placeholder:_('2–4094') });
 	var vidField = E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vid ]);
 	var portSel = E('select', { class:'cbi-input-select' },
-		['lan1','lan2','lan3','lan4'].map(function(p){ return E('option', { value:p }, p.toUpperCase()); }));
+		['lan1','lan2','lan3','lan4','wan'].map(function(p){ return E('option', { value:p }, p.toUpperCase()); }));
 	var portField = segField(_('منفذ الدخول'), portSel);
 	function syncMode(){
 		var m = modeSel.value;
@@ -517,6 +517,8 @@ function programModeCard(radios){
 
 	/* fields */
 	var ip    = E('input', { type:'text', class:'cbi-input-text', maxlength:'15', placeholder:_('مثال: 192.168.1.21 (اتركه فارغاً لعدم التغيير)') });
+	var pppoeUser = E('input', { type:'text', class:'cbi-input-text', maxlength:'128', placeholder:_('اسم مستخدم PPPoE من مزود الإنترنت (اتركه فارغاً = DHCP)') });
+	var pppoePass = E('input', { type:'text', class:'cbi-input-text', maxlength:'128', placeholder:_('كلمة مرور PPPoE') });
 	var vid   = E('input', { type:'text', class:'cbi-input-text', maxlength:'4',  placeholder:_('2–4094') });
 	var ssid  = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', placeholder:_('إسم شبكة البث') });
 	var key   = E('input', { type:'text', class:'cbi-input-text', maxlength:'63', placeholder:_('8+ أحرف، فارغ = مفتوح') });
@@ -564,6 +566,8 @@ function programModeCard(radios){
 
 	/* field wrappers (toggled per mode) */
 	var fIp     = fld(_('عنوان IP للجهاز'), ip);
+	var fBbUser = fld(_('اسم مستخدم PPPoE (للبرودباند)'), pppoeUser);
+	var fBbPass = fld(_('كلمة مرور PPPoE'), pppoePass);
 	var fVid    = fld(_('رقم الفيلان (VLAN)'), vid);
 	var fSsid   = fld(_('إسم شبكة البث (SSID)'), ssid);
 	var fKey    = fld(_('كلمة مرور الشبكة'), key);
@@ -584,7 +588,10 @@ function programModeCard(radios){
 		var isVlan  = /vlan$/.test(m);
 		var isMesh  = (m === 'mesh' || m === 'mesh_vlan');
 		var isRx    = (m === 'wds_rx' || m === 'wds_rx_vlan');
+		var isBb    = (m === 'broadband');
 		var hasAp   = !isRx;                                   /* every non-receiver mode broadcasts an SSID */
+		show(fBbUser, isBb);
+		show(fBbPass, isBb);
 		show(fVid,    isVlan);
 		show(fSsid,   hasAp);
 		show(fKey,    true);                                   /* key used for AP psk OR uplink auth */
@@ -662,6 +669,8 @@ function programModeCard(radios){
 		var p = {
 			act:'program_mode', mode:m,
 			ip: ip.value.trim(),
+			pppoe_user: (m === 'broadband') ? pppoeUser.value.trim() : '',
+			pppoe_pass: (m === 'broadband') ? pppoePass.value : '',
 			vid: isVlan ? vid.value : '',
 			ssid: ssid.value, key: key.value,
 			ch24: (ch24.value === 'auto') ? '' : ch24.value,
@@ -685,7 +694,7 @@ function programModeCard(radios){
 	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 		cardHead(ktIc('gear'), _('وضع البرمجة'), _('اختر وظيفة الجهاز — وتُضبط تلقائياً الحقول المطلوبة.'), 'v'),
 		segField(_('وضع البرمجة'), modeSel),
-		fIp, fVid, fRadio, fSsid, fKey, fMeshId, fMeshK, fUpSsid, fUpBss, fScan,
+		fIp, fBbUser, fBbPass, fVid, fRadio, fSsid, fKey, fMeshId, fMeshK, fUpSsid, fUpBss, fScan,
 		E('div', { class:'kt-grid kt-cols-2' }, [ fCh24, fCh5 ]),
 		fNewpass, fWipe, fSafe,
 		E('div', { class:'kt-note info' }, _('AP = نقطة وصول. AP+VLAN = نقطة وصول داخل VLAN. Mesh = ربط لاسلكي بين الأجهزة + خدمة الجوالات على نفس التردد. WDS مُرسِل/مُستقبِل = جسر لاسلكي. برودباند = راوتر بإنترنت WAN. الإدارة تبقى قابلة للوصول.')),

@@ -388,9 +388,9 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* responsive grids */
 .mk-grid{ display:grid; gap:16px; }
 /* FLUID columns (auto-fit) — adapt to any width with no overflow/cramping */
-.mk-cols-3{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
-.mk-cols-2{ grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }
-.mk-cols-6{ grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }
+.mk-cols-3{ grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+.mk-cols-2{ grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }
+.mk-cols-6{ grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); }
 
 /* glass card — translucent slate + backdrop blur */
 .mk-card{
@@ -593,13 +593,13 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   opacity:.6;
 }
 .mk-gring{ position:relative; display:inline-flex; }
-.mk-gring::after{ /* soft glow halo behind the ring */
+.mk-gring::after{ /* soft glow halo behind the ring (toned down for clarity) */
   content:""; position:absolute; inset:8px; border-radius:50%;
-  box-shadow:0 0 34px 2px rgba(6,182,212,.16); pointer-events:none; z-index:0;
+  box-shadow:0 0 18px 1px rgba(6,182,212,.10); pointer-events:none; z-index:0;
 }
 .mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
   display:block; position:relative; z-index:1; }
-.mk-gauge .arc{ filter:drop-shadow(0 0 6px rgba(6,182,212,.45)); }
+.mk-gauge .arc{ filter:none; }
 .mk-gauge .mk-gval{ font-size:30px; }
 .mk-gauge .mk-gunit{ fill:var(--mk-muted); font-weight:700; }
 .mk-gauge .mk-gcap{ fill:var(--mk-muted); font-size:9px; font-weight:800; letter-spacing:2px; }
@@ -730,4 +730,31 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   :root:not([data-mk-skin="off"]) .mk-gauge .track{ stroke:#334155; }
   :root:not([data-mk-skin="off"]) .mk-gauge .arc{ stroke:var(--mk-accent); }
   :root:not([data-mk-skin="off"]) .mk-spark-axis{ stroke:rgba(148,163,184,.18); }
+}
+
+/* ============================================================================
+   DESKTOP / LAPTOP LAYOUT GUARANTEE
+   The custom views render into LuCI's #view. On some laptop layouts #view was
+   handed a narrow content column, so the auto-fit grids collapsed and every card
+   stacked in ONE column ("كلهم تحت بعض"). Force the wrap to the full content
+   width and pin explicit column counts at laptop widths so cards sit side-by-side.
+   Phone rules (max-width 480/600 above) still flatten to a single column.
+   ============================================================================ */
+@media (min-width:992px){
+  #view, #view > div, #maincontent > .container{ width:100%!important; box-sizing:border-box; }
+  .mk-wrap{ width:100%!important; max-width:1200px; margin-left:auto!important; margin-right:auto!important; }
+  /* row header + status chips ALWAYS horizontal on desktop (never a vertical stack) */
+  .mk-topbar{ flex-direction:row!important; flex-wrap:wrap; }
+  .mk-chips{ flex-direction:row!important; flex-wrap:wrap; }
+  /* explicit columns so the grids can't collapse to a single stacked column */
+  .mk-grid.mk-cols-2{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .mk-grid.mk-cols-3{ grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .mk-grid.mk-cols-6{ grid-template-columns:repeat(6,minmax(0,1fr)); }
+  /* keep form inputs a sane width — don't stretch edge-to-edge on a wide screen */
+  .mk-card .cbi-input-text, .mk-card .cbi-input-select, .mk-card input, .mk-card select,
+  .kt-field input, .kt-field select, .cbi-input-text, .cbi-input-select{ max-width:440px; }
+}
+/* mid laptop width: 3-up gauges fit, but drop 6-up portmap to 3 for legibility */
+@media (min-width:992px) and (max-width:1199px){
+  .mk-grid.mk-cols-6{ grid-template-columns:repeat(3,minmax(0,1fr)); }
 }

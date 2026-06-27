@@ -476,11 +476,11 @@ return view.extend({
 		root.innerHTML = shell();
 		wireToggle(root);
 		refresh(root);
-		// Poll every 10s (was 4s). On the single-core QCA9558, each refresh forks
-		// several CGI subprocesses; 4s polling was itself a major CPU consumer that
-		// inflated the very CPU-usage gauge. 10s keeps the dashboard live while cutting
-		// its own CPU footprint ~2.5x for a much lighter idle load.
-		poll.add(function(){ return refresh(root); }, 10);
+		// Poll every 20s. On the single-core QCA9558 each refresh forks several CGI
+		// subprocesses; the expensive client-count iwinfo sweep is now ALSO cached for
+		// 30s in the backend (op=summary), so the heavy work runs at most ~once/30s no
+		// matter how often we poll. 20s keeps the dashboard live with a near-idle CPU.
+		poll.add(function(){ return refresh(root); }, 20);
 		return root;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null
