@@ -9,6 +9,7 @@
 # POSIX sh.
 
 MARK=/etc/kt412-maint.done
+[ -f "$MARK" ] && exit 0
 
 mkdir -p /etc/crontabs
 
