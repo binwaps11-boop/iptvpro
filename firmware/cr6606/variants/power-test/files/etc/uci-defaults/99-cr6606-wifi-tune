@@ -1,0 +1,54 @@
+#!/bin/sh
+# ===========================================================================
+# VARIANT: cr6606-power-test  (TEST ONLY - not for daily use)
+# Same long-range config as the clean build BUT requests txpower 35 to MEASURE
+# whether a higher System/Driver number changes anything. It almost always does
+# NOT exceed the caldata/regulatory ceiling: mt76 clamps it. This is a
+# System/Driver request, NOT real RF. NO caldata/EEPROM/MAC writes.
+# Prove the real value with: iwinfo / sh /root/wifi-perf.sh
+# ===========================================================================
+. /lib/functions.sh
+COUNTRY='US'
+PW='35'        # intentionally above regulatory; driver will clamp - this is the test
+
+set_iface_ssid() {
+	local radio="$1" ssid="$2" sec="cr6606_${radio}"
+	uci -q delete wireless.${sec} 2>/dev/null
+	uci -q set wireless.${sec}='wifi-iface'
+	uci -q set wireless.${sec}.device="$radio"
+	uci -q set wireless.${sec}.mode='ap'
+	uci -q set wireless.${sec}.network='lan'
+	uci -q set wireless.${sec}.ssid="$ssid"
+	uci -q set wireless.${sec}.encryption='psk2'
+	uci -q set wireless.${sec}.key='Cr6606-Change-Me'
+}
+
+[ -s /etc/config/wireless ] || /sbin/wifi config 2>/dev/null || true
+
+for r in $(uci -q show wireless | sed -n 's/^wireless\.\([a-z0-9]*\)=wifi-device/\1/p'); do
+	band="$(uci -q get wireless.${r}.band)"
+	uci -q set wireless.${r}.country="$COUNTRY"
+	uci -q set wireless.${r}.txpower="$PW"
+	uci -q set wireless.${r}.disabled='0'
+	uci -q set wireless.${r}.cell_density='0'
+	uci -q delete wireless.${r}.txantenna 2>/dev/null
+	uci -q delete wireless.${r}.rxantenna 2>/dev/null
+	case "$band" in
+		2g) uci -q set wireless.${r}.htmode='HE20'; uci -q set wireless.${r}.channel='auto'; set_iface_ssid "$r" 'Xiaomi-2G' ;;
+		5g) uci -q set wireless.${r}.htmode='HE80'; uci -q set wireless.${r}.channel='149'; set_iface_ssid "$r" 'Xiaomi-5G' ;;
+	esac
+done
+for i in $(uci -q show wireless | sed -n 's/^wireless\.\(default_[a-z0-9]*\)=wifi-iface/\1/p'); do
+	uci -q delete wireless.${i}
+done
+
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+
+uci -q commit wireless
+uci -q commit firewall
+# enable the boot-time dmesg marker for this test image
+chmod +x /etc/init.d/cr6606-power-marker 2>/dev/null
+[ -x /etc/init.d/cr6606-power-marker ] && /etc/init.d/cr6606-power-marker enable 2>/dev/null
+logger -t cr6606-wifi "POWER-TEST applied: country=US txpower=35(REQUEST ONLY, driver clamps) 2g=HE20 5g=HE80/149"
+exit 0

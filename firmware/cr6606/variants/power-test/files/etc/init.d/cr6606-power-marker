@@ -1,0 +1,10 @@
+#!/bin/sh /etc/rc.common
+# Writes an identifying marker to the kernel log each boot so you can confirm
+# you are running the POWER-TEST image: dmesg | grep CR6606
+# This is purely a label - it changes NOTHING about RF/caldata.
+START=01
+boot() { start; }
+start() {
+	echo "CR6606-POWER-TEST image active (txpower=35 REQUESTED; real RF is clamped by caldata/regdb)" > /dev/kmsg 2>/dev/null
+	logger -t CR6606 "CR6606-POWER-TEST image active (System/Driver request only, not real RF)"
+}
