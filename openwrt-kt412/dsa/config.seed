@@ -135,3 +135,22 @@ CONFIG_PACKAGE_traceroute=y
 CONFIG_PACKAGE_relayd=y
 CONFIG_KERNEL_IKCONFIG=y
 CONFIG_KERNEL_IKCONFIG_PROC=y
+# --- IPTV / multicast pack (the box's core purpose: iptvpro) — all small, in feeds ---
+#   udpxy   : multicast->HTTP unicast relay (~50-80KB) — flagship; :4022 status XML.
+#   igmpproxy: pull provider IGMP multicast onto the LAN/bridge (~30-40KB).
+#   IGMP snooping on br-lan is in-kernel (kmod-bridge, already present) — enabled
+#   at boot by 47-kt412-iptv so multicast does not flood WiFi.
+#   mtr     : per-hop loss/jitter to the IPTV head-end (freezing = upstream loss).
+#   socat   : time-boxed multicast reachability probe ("is the stream arriving?").
+CONFIG_PACKAGE_udpxy=y
+CONFIG_PACKAGE_luci-app-udpxy=y
+CONFIG_PACKAGE_igmpproxy=y
+CONFIG_PACKAGE_mtr=y
+CONFIG_PACKAGE_mtr-packet=y
+CONFIG_PACKAGE_socat=y
+# --- Captive-portal / hotspot billing (user's FUTURE_NET168 coova-chilli stack) ---
+#   TUN-based UAM captive portal + RADIUS auth/accounting/quota. ~150-250KB + tun.
+#   Bind to a dedicated guest VLAN/bridge; keep mgmt VLAN out of the portal.
+CONFIG_PACKAGE_coova-chilli=y
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_luci-app-coovachilli=y

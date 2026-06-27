@@ -90,7 +90,7 @@ uci -q commit network
 
 # --- DNS for many clients: bigger cache + more parallel forwards ---
 dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"
-[ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='1500'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
+[ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='10000'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
 
 # (WiFi range/roaming/QoS are baked into the static /etc/config/wireless.)
 

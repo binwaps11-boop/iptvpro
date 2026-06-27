@@ -1,0 +1,30 @@
+#!/bin/sh
+# KT412 IPTV bring-up: enable bridge IGMP snooping + querier on br-lan so native
+# multicast (IPTV) is delivered ONLY to ports/STAs that joined the group instead
+# of flooding every LAN port + the WLAN at broadcast rate (which would cripple
+# Wi-Fi). In-kernel bridge feature (kmod-bridge) — zero flash/RAM/CPU cost.
+#
+# multicast_querier MUST be on too, otherwise snooping ages out and the bridge
+# falls back to flooding. Idempotent + guarded; never fails boot; touches only
+# the br-lan bridge device (no DSA topology / no power / no reboot).
+MARK=/etc/kt412-iptv.done
+[ -f "$MARK" ] && exit 0
+
+# find the network device section whose name is br-lan
+brsec=""; i=0
+while uci -q get network.@device[$i] >/dev/null 2>&1; do
+	[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"
+	i=$((i+1))
+done
+
+if [ -n "$brsec" ]; then
+	uci -q set "network.$brsec.igmp_snooping=1"
+	uci -q set "network.$brsec.multicast_querier=1"
+	uci -q commit network
+	# apply now without a reboot
+	/etc/init.d/network reload >/dev/null 2>&1
+	logger -t kt412-iptv "bridge IGMP snooping + querier enabled on br-lan"
+fi
+
+: > "$MARK" 2>/dev/null || true
+exit 0

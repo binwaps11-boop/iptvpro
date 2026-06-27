@@ -53,6 +53,19 @@ apply_runtime() {
 		ip link set dev "$ifc" txqueuelen 1000 >/dev/null 2>&1 || true
 	done
 
+	# ----- (2b) NAPI hard-IRQ deferral (single-core IRQ relief) --------------
+	# WHY: on a single 720MHz core, taking a hard IRQ per RX batch burns cycles.
+	# gro_flush_timeout + napi_defer_hard_irqs let the core poll a few more packets
+	# before re-arming IRQs => fewer interrupts, better GRO coalescing, more pps per
+	# CPU-cycle. 50us is conservative (negligible added latency). Per-netdev sysfs;
+	# guarded so a missing path never errors. Source: kernel napi defer docs.
+	for ifc in eth0 br-lan lan1 lan2 lan3 lan4 wan; do
+		gf="/sys/class/net/$ifc/gro_flush_timeout"
+		nd="/sys/class/net/$ifc/napi_defer_hard_irqs"
+		[ -w "$gf" ] && echo 50000 > "$gf" 2>/dev/null || true
+		[ -w "$nd" ] && echo 2 > "$nd" 2>/dev/null || true
+	done
+
 	# ----- (3) CPU scaling governor = performance (ONLY if cpufreq exists) --
 	# WHY: A "performance" governor avoids frequency-ramp latency on routing
 	# bursts. The QCA9558 (ath79) almost certainly does NOT expose cpufreq, so
@@ -132,6 +145,12 @@ if ! grep -q 'kt412-perf-tune-v2' /etc/sysctl.conf 2>/dev/null; then
 net.ipv4.tcp_fastopen=3
 net.core.netdev_max_backlog=2000
 net.core.netdev_budget=600
+# time cap pairing netdev_budget so one RX poll can't hog the single core
+net.core.netdev_budget_usecs=4000
+# cap self-inflicted send-queue bufferbloat for device-terminated TCP
+net.ipv4.tcp_notsent_lowat=131072
+# don't let a prior lossy-WiFi session throttle the next connection
+net.ipv4.tcp_no_metrics_save=1
 SYS
 fi
 # BBR only if the module/algo is present (never error if missing)
@@ -171,7 +190,16 @@ if [ ! -f /etc/kt412-wifi-tuned.v2.done ] && uci -q show wireless >/dev/null 2>&
 		# an explicit channel the config or the program-mode backend chose). Uses
 		# survey-based ACS with extra scans for a representative, least-congested pick.
 		case "$(uci -q get wireless.$wd.channel)" in
-			auto|0|'') uci -q set wireless.$wd.channel='acs_survey'; uci -q set wireless.$wd.acs_num_scans='10';;
+			auto|0|'')
+				uci -q set wireless.$wd.channel='acs_survey'; uci -q set wireless.$wd.acs_num_scans='10'
+				# On 5GHz, pin ACS to NON-DFS channels so 'auto' never lands on a DFS
+				# channel (radar CAC = ~60s black-screen stall + mid-stream radar drops —
+				# fatal for IPTV). 2.4G unaffected. Only set if not already constrained.
+				bnd="$(uci -q get wireless.$wd.band)"; hw="$(uci -q get wireless.$wd.hwmode)"
+				if [ "$bnd" = "5g" ] || echo "$hw" | grep -q 'a'; then
+					[ -n "$(uci -q get wireless.$wd.channels)" ] || uci -q set wireless.$wd.channels='36 40 44 48 149 153 157 161'
+				fi
+				;;
 		esac
 	done
 	for wi in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
