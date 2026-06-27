@@ -41,7 +41,13 @@ CONFIG_PACKAGE_luci-i18n-base-ar=y
 #     name that ever fails to resolve is silently dropped by defconfig (no build
 #     break), and the build gate below confirms the key one (mod-dashboard). ---
 CONFIG_PACKAGE_luci-mod-dashboard=y
+# openwrt-2020 theme: name differs across versions (main = ...openwrt2020,
+# 23.05 opkg showed ...openwrt-2020). List BOTH; the non-existent symbol is
+# silently dropped by defconfig, so whichever exists in the feed gets built.
+# Both install to /www/luci-static/openwrt2020, which is what the runtime
+# fallback in 41-kt412-mk-theme keys on before making it the default theme.
 CONFIG_PACKAGE_luci-theme-openwrt2020=y
+CONFIG_PACKAGE_luci-theme-openwrt-2020=y
 # functional apps copied from the AL-MALAKI package set (user-requested):
 #   WoL (wake devices), Wi-Fi schedule, USB printer server.
 CONFIG_PACKAGE_luci-app-wol=y
