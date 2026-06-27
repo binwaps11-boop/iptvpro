@@ -860,3 +860,25 @@ input[type=number],.kt-mono{ text-align:left; }
 #view table td,#view table th{padding:9px 11px}
 /* buttons: one height/shape family */
 .kt-btn,.cbi-button,button.cbi-button{min-height:38px;border-radius:10px;font-weight:700}
+
+/* ============================================================================
+   FORM TEXT CONTRAST FIX (bug: hidden left-side labels)
+   Stock LuCI form labels (.cbi-value-title and friends) were never recolored, so
+   they kept LuCI's default DARK text on our dark glass => invisible. Force every
+   form text element to the light palette with real contrast. Applies site-wide.
+   ============================================================================ */
+.cbi-value-title,.cbi-value > label,.cbi-value label,form label,fieldset label,
+.cbi-section label,.cbi-map label,.cbi-section-node label,td.cbi-value-title{
+  color:var(--kt-txt)!important; opacity:1!important; font-weight:600;}
+/* secondary/help text: clearly readable but a step quieter than the label */
+.cbi-value-description,.cbi-section-descr,.cbi-map-descr,.cbi-value-field .hint,
+small,.text-muted,.help,.cbi-help{color:var(--kt-txt2)!important; opacity:1!important;}
+/* native dropdown list items render with OS colors — force dark bg + light text */
+select option,optgroup{background:#0F172A!important; color:#F1F5F9!important;}
+/* placeholders readable (not near-invisible) */
+input::placeholder,textarea::placeholder{color:#9FB0C4!important; opacity:1!important;}
+/* any input/select text itself */
+input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
+  color:var(--kt-txt)!important;}
+/* technical values stay LTR even inside RTL labels (port/IP/path) */
+.cbi-value-title code,.cbi-value-field code,.kt-mono{direction:ltr;unicode-bidi:isolate;}

@@ -59,9 +59,13 @@ function iptvCard(){
 	function showStatus(j){
 		out.innerHTML = '';
 		if (j && j.exists !== false && j.url && (j.exists || j.channels)){
+			var portal = String(j.url).replace(/playlist\.m3u$/, '');   /* http://<ip>/iptv/ */
 			out.innerHTML = '<div class="kt-card kt-gcard"><div class="kt-glabel">'+ktIcSvg('tv')+' '+_('قائمة التشغيل جاهزة')+'</div>'
 				+ '<div class="kt-sub">'+_('عدد القنوات')+': <b>'+esc(j.channels||0)+'</b></div>'
-				+ '<div class="kt-sub" style="margin-top:6px">'+_('الرابط لمشغّلك')+':</div>'
+				+ '<div class="kt-sub" style="margin-top:10px">'+_('بوابة القنوات (بث مباشر / أفلام / مسلسلات) — تُفتح في المتصفح')+':</div>'
+				+ '<div class="kt-kv" style="margin-top:4px"><span class="v" dir="ltr" style="direction:ltr;word-break:break-all"><b>'+esc(portal)+'</b></span></div>'
+				+ '<div style="margin-top:8px"><a class="kt-btn" href="'+esc(portal)+'" target="_blank" rel="noopener">'+ktIcSvg('tv')+' '+_('فتح بوابة القنوات')+'</a></div>'
+				+ '<div class="kt-sub" style="margin-top:12px">'+_('رابط مباشر لمشغّل خارجي (VLC / TiviMate)')+':</div>'
 				+ '<div class="kt-kv" style="margin-top:4px"><span class="v" dir="ltr" style="direction:ltr;word-break:break-all"><b>'+esc(j.url)+'</b></span></div></div>';
 		}
 	}
