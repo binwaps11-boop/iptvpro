@@ -169,10 +169,14 @@ function gauge(id, label, icon, pct, meta){
 }
 function updateGauge(root, id, pct, meta){
 	var g = root.querySelector('.mk-gauge[data-gid="'+id+'"]'); if (!g) return;
-	pct = clamp(pct,0,100);
-	var R=52, C=2*Math.PI*R, off=C*(1-pct/100);
-	var arc = g.querySelector('.arc'); arc.setAttribute('stroke-dashoffset', off.toFixed(1)); arc.setAttribute('stroke', gColor(pct,id));
-	g.querySelector('.mk-gval').firstChild.nodeValue = String(Math.round(pct));
+	/* pct null or <0 => "warming up": show "--", grey ring, no % — never a fake number. */
+	var ready = (pct != null && pct >= 0);
+	var p = ready ? clamp(pct,0,100) : 0;
+	var R=52, C=2*Math.PI*R, off=C*(1-p/100);
+	var arc = g.querySelector('.arc'); arc.setAttribute('stroke-dashoffset', off.toFixed(1));
+	arc.setAttribute('stroke', ready ? gColor(p,id) : '#475569');
+	g.querySelector('.mk-gval').firstChild.nodeValue = ready ? String(Math.round(p)) : '--';
+	var unit = g.querySelector('.mk-gunit'); if (unit) unit.style.display = ready ? '' : 'none';
 	if (meta!=null) g.querySelector('.mk-gmeta').textContent = meta;
 }
 
@@ -249,6 +253,7 @@ function shell(){
 	+      chip('users','الأجهزة','—','c-clients')
 	+      chip('wifi','2.4G','—','c-w24')
 	+      chip('wifi','5G','—','c-w5')
+	+      chip('clock','آخر تحديث','—','c-upd')
 	+ '  </div>'
 
 	/* ===== النظام — System gauges ===== */
@@ -340,15 +345,22 @@ function refresh(root){
 		var chipsEl = root.querySelector('.mk-chips');
 		if (chipsEl){ if (ST.fail >= 2) chipsEl.classList.add('mk-stale'); else chipsEl.classList.remove('mk-stale'); }
 
-		/* ----- gauges ----- */
+		/* ----- gauges (truthful readings) ----- */
 		if (sm.ok){
-			var cpu = +sm.cpu_pct||0;
-			var mt=+sm.mem_total||0, mf=+sm.mem_free||0, mb=+sm.mem_buf||0;
-			var used = mt - mf - mb; var ramP = mt>0 ? (100*used/mt) : 0;
+			/* CPU: backend sends -1 = "warming up" (no /proc/stat baseline yet). Show
+			   "--" then, NEVER a fake 100%. loadavg is shown only as a caption, not as %. */
+			var cpu = (sm.cpu_pct==null || +sm.cpu_pct < 0) ? null : +sm.cpu_pct;
+			/* RAM: used = MemTotal - MemAvailable (kernel's real in-use, cache excluded).
+			   Falls back to total-free-buffers only if mem_avail is missing. */
+			var mt=+sm.mem_total||0, mf=+sm.mem_free||0, mb=+sm.mem_buf||0, ma=+sm.mem_avail||0;
+			var used = ma>0 ? (mt-ma) : (mt-mf-mb); if (used<0) used=0;
+			var ramP = mt>0 ? (100*used/mt) : 0;
+			/* Storage = OVERLAY (user-writable). rootfs/squashfs is read-only and always
+			   ~100% by design — backend already reports /overlay, never the firmware image. */
 			var ft=+sm.fs_total||0, fu=+sm.fs_used||0; var dP = ft>0 ? (100*fu/ft) : 0;
-			updateGauge(root,'cpu',cpu,'حِمل '+(sm.load? (sm.load/65536).toFixed(2):'—'));
+			updateGauge(root,'cpu',cpu,'الحِمل '+(sm.load? (sm.load/65536).toFixed(2):'—'));
 			updateGauge(root,'ram',ramP, fmtBytes(used*1024)+' / '+fmtBytes(mt*1024));
-			updateGauge(root,'disk',dP, fmtBytes(fu*1024)+' / '+fmtBytes(ft*1024));
+			updateGauge(root,'disk',dP, 'Overlay · '+fmtBytes(fu*1024)+' / '+fmtBytes(ft*1024));
 		}
 
 		/* ----- header status chips ----- */
@@ -361,6 +373,9 @@ function refresh(root){
 			setChip('c-up', fmtUptime(sm.uptime));
 			setChip('c-model', sm.model ? String(sm.model).replace(/^.*\s/,'').slice(0,18) || sm.model : '—');
 			setChip('c-fw', sm.fw || sm.firmware || sm.release || (sm.openwrt? 'OpenWrt '+sm.openwrt : '—'));
+			/* live "last updated" stamp so the operator sees the data is fresh */
+			var d=new Date(), z=function(n){return (n<10?'0':'')+n;};
+			setChip('c-upd', z(d.getHours())+':'+z(d.getMinutes())+':'+z(d.getSeconds()));
 		}
 		/* radios (2.4G / 5G) presence from traffic ifaces */
 		var radios = (tr.ok && tr.ifaces ? tr.ifaces : []).filter(function(x){ return /^(wlan|ath|phy|wl)/.test(x['if']); });
