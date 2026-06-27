@@ -434,10 +434,23 @@ function vlanFlexCard(radios){
 	var portSel = E('select', { class:'cbi-input-select' },
 		['lan1','lan2','lan3','lan4'].map(function(p){ return E('option', { value:p }, p.toUpperCase()); }));
 	var portField = segField(_('منفذ الدخول'), portSel);
+	/* mesh-mode controls: pick the band/radio + Mesh ID + optional key. The chosen
+	   radio runs the mesh AND serves phone clients on the same band (backend). */
+	var meshRadios = (radios || []).filter(function(r){ return r.radio; });
+	var radioSel = E('select', { class:'cbi-input-select' },
+		meshRadios.map(function(r){ return E('option', { value:r.radio }, (is5g(r.band) ? '5G' : '2.4G') + ' — ' + r.radio); }));
+	var meshId = E('input', { type:'text', class:'cbi-input-text', maxlength:'32', placeholder:_('مثال: mesh-home') });
+	var meshKey = E('input', { type:'text', class:'cbi-input-text', maxlength:'63', placeholder:_('8+ أحرف، فارغ = مفتوح') });
+	var meshFields = E('div', {}, [
+		segField(_('تردد الميش (الراديو)'), radioSel),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('Mesh ID')), meshId ]),
+		E('div', { class:'kt-field' }, [ E('label', {}, _('مفتاح الميش (اختياري)')), meshKey ])
+	]);
 	function syncMode(){
 		var m = modeSel.value;
-		vidField.style.display  = (m === 'bridge') ? 'none' : '';
-		portField.style.display = (m === 'vlan')   ? '' : 'none';
+		vidField.style.display   = (m === 'bridge') ? 'none' : '';
+		portField.style.display  = (m === 'vlan')   ? '' : 'none';
+		meshFields.style.display = (m === 'mesh')   ? '' : 'none';
 	}
 	modeSel.addEventListener('change', syncMode);
 	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('تطبيق') ]);
@@ -452,9 +465,14 @@ function vlanFlexCard(radios){
 				btn.disabled = false;
 				return ui.addNotification(null, E('p', {}, _('أدخل رقم VLAN صحيح (2–4094)')), 'error');
 			}
-			p = { act:'vlan_flex', vid:vid.value, mode:'access', wifi:'0', mesh:'0', ports:'' };
-			if (m === 'vlan')      p.ports = portSel.value;
-			else if (m === 'mesh') p.mesh  = '1';
+			if (m === 'mesh') {
+				if (!meshId.value.trim()){ btn.disabled = false; return ui.addNotification(null, E('p', {}, _('أدخل Mesh ID')), 'error'); }
+				if (!radioSel.value){ btn.disabled = false; return ui.addNotification(null, E('p', {}, _('لا يوجد راديو متاح للميش')), 'error'); }
+				p = { act:'mesh_vlan', vid:vid.value, radio:radioSel.value, mesh_id:meshId.value.trim(), key:meshKey.value };
+			} else {
+				/* VLAN mode: chosen port on the VLAN AND both Wi-Fi bands on it too */
+				p = { act:'vlan_flex', vid:vid.value, mode:'access', wifi:'1', mesh:'0', ports:portSel.value };
+			}
 		}
 		postCall(p).then(function(j){ btn.disabled = false; notify(j); setTimeout(refreshState, 600); })
 			.catch(function(){ btn.disabled = false; notify(null); });
@@ -477,7 +495,8 @@ function vlanFlexCard(radios){
 		segField(_('الوضعية'), modeSel),
 		vidField,
 		portField,
-		E('div', { class:'kt-note info' }, _('بردج = بدون VLAN (LAN عادي). VLAN = يضع منفذ الدخول المختار على الـ VLAN والباقي LAN. Mesh = يضع الميش على الـ VLAN. الإدارة تبقى قابلة للوصول دائماً.')),
+		meshFields,
+		E('div', { class:'kt-note info' }, _('بردج = بدون VLAN. VLAN = يضع المنفذ المختار + الواي‑فاي (2.4G و5G) على الـ VLAN، والباقي LAN. Mesh = يشغّل الميش على التردد المختار ويخدم الجوالات على نفس التردد، الكل على الـ VLAN. الإدارة تبقى قابلة للوصول دائماً.')),
 		stateBox,
 		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً')), btn ])
 	]);

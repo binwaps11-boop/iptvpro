@@ -361,6 +361,60 @@ if [ -n "$ACT" ]; then
 			uci commit
 			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
 			printf '{"ok":true,"msg":"VLAN %s طُبّق (منافذ:%s%s%s) — الإدارة آمنة على %s"}\n' "$vid" "${SELP:- لا شيء}" "$([ "$wifi" = 1 ] && echo ' +واي‑فاي')" "$([ "$mesh" = 1 ] && echo ' +ميش')" "$vip";;
+		mesh_vlan)
+			# MESH on a chosen radio + that radio ALSO serves clients (phones) on the
+			# SAME band, all on VLAN X. The mesh forwards (mesh_fwding) so traffic is
+			# relayed; the AP iface on the same radio accepts client traffic both ways.
+			vid="$(sani_int "$(getp vid)")"
+			radio="$(sani_word "$(getp radio)")"
+			mid="$(printf '%s' "$(getp mesh_id)" | tr -cd 'A-Za-z0-9 _-' | cut -c1-32)"
+			mkey="$(sani "$(getp key)")"
+			[ -n "$radio" ] || fail "no_radio"
+			[ -n "$mid" ] || fail "no_mesh_id"
+			[ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			[ "$(uci -q get wireless.$radio 2>/dev/null)" = "wifi-device" ] || fail "bad_radio"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			uci -q set network.$brsec.vlan_filtering='1'
+			# ensure VLAN 1 (mgmt) untagged on all lan ports so admin is never lost
+			uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='1'" || {
+				v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
+				for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done
+			}
+			# VLAN X bridge-vlan (for br-lan.X) if missing
+			uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='$vid'" || {
+				vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
+			}
+			vip="10.$(( (vid/250)%250 )).$(( vid%250 )).1"
+			uci -q set network.vlan$vid=interface; uci -q set network.vlan$vid.device="br-lan.$vid"
+			uci -q set network.vlan$vid.proto='static'; uci -q set network.vlan$vid.ipaddr="$vip"; uci -q set network.vlan$vid.netmask='255.255.255.0'
+			uci -q set dhcp.vlan$vid=dhcp; uci -q set dhcp.vlan$vid.interface="vlan$vid"; uci -q set dhcp.vlan$vid.start='100'; uci -q set dhcp.vlan$vid.limit='150'; uci -q set dhcp.vlan$vid.leasetime='12h'
+			uci show firewall 2>/dev/null | grep -q "name='vlan$vid'" || {
+				z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"; uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'; uci set firewall.$z.forward='REJECT'
+				fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			}
+			# AP iface on this radio serves clients on the VLAN (both directions)
+			apsec="$(wifi_iface_for "$radio")"
+			[ -n "$apsec" ] && uci -q set wireless.$apsec.network="vlan$vid"
+			# mesh iface on the SAME radio (reuse existing or create), on the VLAN
+			msec=""
+			for w in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+				[ "$(uci -q get wireless.$w.device)" = "$radio" ] && [ "$(uci -q get wireless.$w.mode)" = "mesh" ] && msec="$w"
+			done
+			[ -n "$msec" ] || { msec="kt412mesh${radio}"; uci -q set wireless.$msec=wifi-iface; uci -q set wireless.$msec.device="$radio"; }
+			uci -q set wireless.$msec.mode='mesh'
+			uci -q set wireless.$msec.mesh_id="$mid"
+			uci -q set wireless.$msec.mesh_fwding='1'
+			uci -q set wireless.$msec.network="vlan$vid"
+			if [ -n "$mkey" ] && [ "${#mkey}" -ge 8 ]; then uci -q set wireless.$msec.encryption='sae'; uci -q set wireless.$msec.key="$mkey"
+			else uci -q set wireless.$msec.encryption='none'; uci -q delete wireless.$msec.key; fi
+			uci -q delete wireless.$radio.disabled
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Mesh \"%s\" على %s + خدمة العملاء على VLAN %s (بوابة %s)"}\n' "$(json_esc "$mid")" "$(json_esc "$radio")" "$vid" "$vip";;
 		vlan_reset)
 			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
 			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done

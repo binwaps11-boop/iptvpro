@@ -87,9 +87,16 @@ body:has(input#luci_password)::before{
   mask-image:radial-gradient(circle at 50% 38%, #000 0%, transparent 74%);
 }
 
-/* the actual login card: the CBI map that contains the password field */
-body:has(input#luci_password) .cbi-map,
+/* the OUTER container is just a transparent centering wrapper — NOT a second
+   card (styling it too created the "card-in-card" look). */
+body:has(input#luci_password) #maincontent,
 body:has(input#luci_password) #maincontent > .container,
+body.node-main-login #maincontent > .container{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; max-width:none!important; -webkit-backdrop-filter:none!important; backdrop-filter:none!important;
+}
+/* the ONE login card: the CBI map that contains the password field */
+body:has(input#luci_password) .cbi-map,
 body.node-main-login .cbi-map{
   position:relative; z-index:1;
   max-width:400px; width:min(400px,92vw); margin:auto!important;
@@ -129,6 +136,11 @@ body:has(input#luci_password) .cbi-map h2,
 body:has(input#luci_password) legend,
 body.node-main-login h2,
 body:has(input#luci_password) h2,
+body:has(input#luci_password) #maincontent > h2,
+body:has(input#luci_password) #maincontent > .container > h2,
+body:has(input#luci_password) .cbi-map > h2:first-child,
+body.node-main-login #maincontent > h2,
+body.node-main-login #maincontent > .container > h2,
 body:has(input#luci_password) .cbi-map-descr{ display:none!important; }
 
 /* FLATTEN the inner form: the obsidian section/card styling (from kt412-theme)
