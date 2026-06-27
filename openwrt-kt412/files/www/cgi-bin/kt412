@@ -429,6 +429,16 @@ if [ -n "$ACT" ]; then
 			radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || radio="radio1"
 			ussid="$(sani "$(getp up_ssid)")"; ubss="$(getp up_bssid | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"
 			np="$(getp newpass)"; wipe="$(getp wipe | tr -cd '01')"
+			safe="$(getp safe | tr -cd '01')"
+			# SAFE APPLY (auto-rollback): snapshot config BEFORE we touch anything, so a
+			# detached watcher can restore it if the operator never confirms (e.g. a bad
+			# IP/VLAN locked them out). Mirrors LuCI's "apply unchecked → confirm" flow.
+			# NEVER reboots — it only restores /etc/config and reloads services.
+			if [ "$safe" = "1" ]; then
+				RB=/tmp/kt412-rb; rm -rf "$RB" 2>/dev/null; mkdir -p "$RB"
+				for cf in network wireless dhcp firewall luci; do cp "/etc/config/$cf" "$RB/$cf" 2>/dev/null; done
+				rm -f /tmp/kt412-confirm 2>/dev/null
+			fi
 			# optional "حذف الإعدادات السابقة": clear prior VLAN scaffolding + our mesh
 			# ifaces for a clean slate, WITHOUT touching LAN/management (lockout-safe).
 			if [ "$wipe" = "1" ]; then
@@ -506,7 +516,23 @@ if [ -n "$ACT" ]; then
 			# optional device (root) password change
 			[ -n "$np" ] && printf '%s\n%s\n' "$np" "$np" | passwd root >/dev/null 2>&1
 			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
-			printf '{"ok":true,"msg":"تم تطبيق وضع البرمجة: %s%s%s"}\n' "$(json_esc "$pm")" "$([ -n "$ipa" ] && echo " — IP $ipa")" "$([ "$net" != lan ] && echo " — VLAN $vid")";;
+			# arm the auto-rollback watcher (detached so it survives this CGI exit and the
+			# network reload). If /tmp/kt412-confirm is not created within 90s, restore.
+			if [ "$safe" = "1" ]; then
+				setsid sh -c '
+					i=0; while [ $i -lt 90 ]; do [ -f /tmp/kt412-confirm ] && exit 0; sleep 1; i=$((i+1)); done
+					[ -f /tmp/kt412-confirm ] && exit 0
+					for cf in network wireless dhcp firewall luci; do cp "/tmp/kt412-rb/$cf" "/etc/config/$cf" 2>/dev/null; done
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+					logger -t kt412-prog "auto-rollback: program_mode reverted (no confirm in 90s)"
+				' >/dev/null 2>&1 </dev/null &
+			fi
+			printf '{"ok":true,"safe":"%s","msg":"تم تطبيق وضع البرمجة: %s%s%s"}\n' "${safe:-0}" "$(json_esc "$pm")" "$([ -n "$ipa" ] && echo " — IP $ipa")" "$([ "$net" != lan ] && echo " — VLAN $vid")";;
+		program_confirm)
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			: > /tmp/kt412-confirm
+			rm -rf /tmp/kt412-rb 2>/dev/null
+			printf '{"ok":true,"msg":"تم تثبيت الإعدادات (أُلغي التراجع التلقائي)"}\n';;
 		vlan_reset)
 			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
 			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done
@@ -1510,6 +1536,26 @@ case "$OP" in
 			ss="$(uci -q get wireless.$wif.ssid)"; [ -n "$ss" ] || ss="$(uci -q get wireless.$wif.mesh_id)"
 			[ "$f" = 1 ] || printf ','; f=0
 			printf '{"mode":"%s","ssid":"%s","network":"%s"}' "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "${nw:-lan}")"
+		done
+		printf ']}\n';;
+	program_state)
+		# READ-BACK of the ACTUAL device role after program_mode (real, not fake):
+		# LAN IP, WAN proto, vlan_filtering, and each radio's mode/ssid/channel/network.
+		lanip="$(uci -q get network.lan.ipaddr)"; wanp="$(uci -q get network.wan.proto)"
+		brsec=""; i=0; while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1)); done
+		flt="$(uci -q get network.$brsec.vlan_filtering)"; [ -n "$flt" ] || flt="0"
+		confirm=false; [ -d /tmp/kt412-rb ] && [ ! -f /tmp/kt412-confirm ] && confirm=true
+		printf '{"ok":true,"lan_ip":"%s","wan_proto":"%s","filtering":"%s","pending_rollback":%s,"radios":[' \
+			"$(json_esc "$lanip")" "$(json_esc "${wanp:-none}")" "$flt" "$confirm"
+		f=1
+		for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+			dev="$(uci -q get wireless.$wif.device)"; wm="$(uci -q get wireless.$wif.mode)"
+			ss="$(uci -q get wireless.$wif.ssid)"; [ -n "$ss" ] || ss="$(uci -q get wireless.$wif.mesh_id)"
+			nw="$(uci -q get wireless.$wif.network)"; ch="$(uci -q get wireless.$dev.channel)"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"radio":"%s","mode":"%s","ssid":"%s","channel":"%s","network":"%s"}' \
+				"$(json_esc "$dev")" "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "$ch")" "$(json_esc "${nw:-lan}")"
 		done
 		printf ']}\n';;
 	wscan)   # scan on ONE radio's iface (for the Station uplink picker); returns {ssid,bssid,ch,sig,enc}

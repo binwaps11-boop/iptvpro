@@ -543,6 +543,37 @@ function programModeCard(radios){
 	var upBssid = E('input', { type:'text', class:'cbi-input-text', maxlength:'17', placeholder:_('BSSID اختياري: AA:BB:CC:DD:EE:FF') });
 	var newpass = E('input', { type:'password', class:'cbi-input-password', maxlength:'63', placeholder:_('اتركها فارغة لعدم التغيير') });
 	var wipe    = E('input', { type:'checkbox' });
+	var safe    = E('input', { type:'checkbox' }); safe.checked = true;   /* auto-rollback ON by default */
+
+	/* scan-and-pick for receiver (WDS-rx) modes: list nearby APs, click to fill */
+	var scanResults = E('div', {});
+	var scanBtn = E('button', { class:'kt-btn', type:'button', style:'margin-bottom:8px' }, [ ktIc('search'), ' ' + _('بحث عن الشبكات') ]);
+	scanBtn.addEventListener('click', function(){
+		if (!radioSel.value){ return ui.addNotification(null, E('p', {}, _('اختر التردد أولاً')), 'error'); }
+		scanBtn.disabled = true; var lbl = scanBtn.innerHTML; scanBtn.textContent = _('جارٍ البحث…'); scanResults.innerHTML = '';
+		call({ op:'wscan', radio:radioSel.value }).then(function(j){
+			scanBtn.disabled = false; scanBtn.innerHTML = lbl; scanResults.innerHTML = '';
+			if (!j || !j.ok){ scanResults.appendChild(E('div', { class:'kt-note' }, _('فشل البحث'))); return; }
+			var nets = (j.nets || []).slice().sort(function(a,b){ return (parseInt(b.sig,10)||-999)-(parseInt(a.sig,10)||-999); });
+			if (!nets.length){ scanResults.appendChild(E('div', { class:'kt-note' }, _('لا شبكات'))); return; }
+			nets.forEach(function(n){
+				var nssid = n.ssid || n.essid || '';
+				var row = E('div', { class:'kt-dev', style:'cursor:pointer;align-items:center;gap:8px' }, [
+					E('span', { style:'display:inline-block;width:10px;height:10px;border-radius:50%;background:' + sigColor(n.sig) }),
+					E('span', { style:'flex:1;font-weight:600' }, nssid || _('(مخفية)')),
+					E('span', { class:'kt-badge', dir:'ltr', style:'color:' + sigColor(n.sig) }, (n.sig || '?') + ' dBm'),
+					E('span', { class:'kt-sub', dir:'ltr' }, 'CH ' + (n.ch || '?'))
+				]);
+				row.addEventListener('click', function(){
+					upSsid.value = nssid; upBssid.value = n.bssid || '';
+					Array.prototype.forEach.call(scanResults.children, function(c){ c.style.outline = ''; });
+					row.style.outline = '2px solid var(--kt-ok)';
+				});
+				scanResults.appendChild(row);
+			});
+		}).catch(function(){ scanBtn.disabled = false; scanBtn.innerHTML = lbl; });
+	});
+	var fScan = E('div', { class:'kt-field' }, [ E('label', {}, [ ktIc('radio'), ' ' + _('الشبكات القريبة') ]), scanBtn, scanResults ]);
 
 	/* field wrappers (toggled per mode) */
 	var fIp     = fld(_('عنوان IP للجهاز'), ip);
@@ -558,6 +589,7 @@ function programModeCard(radios){
 	var fUpBss  = fld(_('BSSID المصدر (اختياري)'), upBssid);
 	var fNewpass= fld(_('تغيير كلمة مرور الجهاز'), newpass);
 	var fWipe   = E('div', { class:'kt-field' }, [ togglePill(wipe, _('حذف الإعدادات السابقة')) ]);
+	var fSafe   = E('div', { class:'kt-field' }, [ togglePill(safe, _('تطبيق آمن — تراجع تلقائي خلال 90 ثانية إن لم تؤكد')) ]);
 
 	function show(node, on){ node.style.display = on ? '' : 'none'; }
 	function syncMode(){
@@ -576,9 +608,53 @@ function programModeCard(radios){
 		show(fMeshK,  isMesh);
 		show(fUpSsid, isRx);
 		show(fUpBss,  isRx);
+		show(fScan,   isRx);
 		fKey.querySelector('label').textContent = isRx ? _('كلمة مرور المصدر') : _('كلمة مرور الشبكة');
 	}
 	modeSel.addEventListener('change', syncMode);
+
+	/* live read-back of the ACTUAL device role after apply (proves it is real) */
+	var stateBox = E('div', { class:'kt-note muted', style:'margin-top:10px' }, [ ktIc('search'), ' ' + _('جارٍ قراءة الحالة الفعلية…') ]);
+	function refreshState(){
+		call({ op:'program_state' }).then(function(s){
+			if (!s || !s.ok){ stateBox.textContent = _('تعذّر قراءة الحالة'); return; }
+			var parts = [];
+			if (s.lan_ip) parts.push('IP ' + s.lan_ip);
+			parts.push(s.filtering === '1' ? _('VLAN مفعّل') : _('بدون VLAN'));
+			if (s.wan_proto && s.wan_proto !== 'none') parts.push('WAN ' + s.wan_proto);
+			(s.radios || []).forEach(function(r){
+				if (r.mode) parts.push((r.ssid || r.mode) + ' [' + r.mode + (r.channel ? ('/CH' + r.channel) : '') + (r.network && r.network !== 'lan' ? ('→' + r.network) : '') + ']');
+			});
+			stateBox.textContent = '';
+			stateBox.appendChild(ktIc('check'));
+			stateBox.appendChild(document.createTextNode(' ' + _('المطبّق فعلياً على الجهاز') + ': ' + parts.join(' · ')));
+		}).catch(function(){ stateBox.textContent = _('تعذّر قراءة الحالة'); });
+	}
+
+	/* SAFE-APPLY confirm flow: after a safe apply, show a 90s countdown the operator
+	   must confirm — otherwise the device auto-reverts (handled by the backend). */
+	function confirmDialog(){
+		var sec = 90;
+		var count = E('strong', { dir:'ltr' }, '90');
+		var keepBtn = E('button', { class:'kt-btn', type:'button' }, [ ktIc('check'), ' ' + _('احتفظ بالإعدادات') ]);
+		var note = E('div', { class:'kt-note info', style:'margin-top:10px' }, [
+			ktIc('bolt'), ' ',
+			E('span', {}, _('تم التطبيق. إذا كان كل شيء يعمل اضغط «احتفظ بالإعدادات». سيتراجع الجهاز تلقائياً خلال ')),
+			count, E('span', {}, ' ' + _('ثانية إن لم تؤكد (حماية من قفل الوصول).')),
+			E('div', { style:'margin-top:8px' }, keepBtn)
+		]);
+		stateBox.parentNode.insertBefore(note, stateBox);
+		var t = setInterval(function(){
+			sec--; count.textContent = String(sec);
+			if (sec <= 0){ clearInterval(t); note.parentNode && note.parentNode.removeChild(note); refreshState(); }
+		}, 1000);
+		keepBtn.addEventListener('click', function(){
+			keepBtn.disabled = true; clearInterval(t);
+			postCall({ act:'program_confirm' }).then(function(j){
+				note.parentNode && note.parentNode.removeChild(note); notify(j); refreshState();
+			}).catch(function(){ notify(null); });
+		});
+	}
 
 	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('تطبيق وضع البرمجة') ]);
 	btn.addEventListener('click', function(){
@@ -609,23 +685,28 @@ function programModeCard(radios){
 			up_ssid: isRx ? upSsid.value : '',
 			up_bssid: isRx ? upBssid.value : '',
 			newpass: newpass.value,
-			wipe: wipe.checked ? '1' : '0'
+			wipe: wipe.checked ? '1' : '0',
+			safe: safe.checked ? '1' : '0'
 		};
 		btn.disabled = true;
-		postCall(p).then(function(j){ btn.disabled = false; notify(j); })
-			.catch(function(){ btn.disabled = false; notify(null); });
+		postCall(p).then(function(j){
+			btn.disabled = false; notify(j);
+			if (j && j.ok && safe.checked) confirmDialog(); else setTimeout(refreshState, 800);
+		}).catch(function(){ btn.disabled = false; notify(null); });
 	});
 
 	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
 		cardHead(ktIc('gear'), _('وضع البرمجة'), _('اختر وظيفة الجهاز — وتُضبط تلقائياً الحقول المطلوبة.'), 'v'),
 		segField(_('وضع البرمجة'), modeSel),
-		fIp, fVid, fRadio, fSsid, fKey, fMeshId, fMeshK, fUpSsid, fUpBss,
+		fIp, fVid, fRadio, fSsid, fKey, fMeshId, fMeshK, fUpSsid, fUpBss, fScan,
 		E('div', { class:'kt-grid kt-cols-2' }, [ fCh24, fCh5 ]),
-		fNewpass, fWipe,
+		fNewpass, fWipe, fSafe,
 		E('div', { class:'kt-note info' }, _('AP = نقطة وصول. AP+VLAN = نقطة وصول داخل VLAN. Mesh = ربط لاسلكي بين الأجهزة + خدمة الجوالات على نفس التردد. WDS مُرسِل/مُستقبِل = جسر لاسلكي. برودباند = راوتر بإنترنت WAN. الإدارة تبقى قابلة للوصول.')),
+		stateBox,
 		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً على الجهاز')), btn ])
 	]);
 	syncMode();
+	refreshState();
 	return card;
 }
 
