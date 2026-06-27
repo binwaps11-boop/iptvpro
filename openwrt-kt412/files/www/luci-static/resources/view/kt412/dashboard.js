@@ -476,11 +476,19 @@ return view.extend({
 		root.innerHTML = shell();
 		wireToggle(root);
 		refresh(root);
-		// Poll every 20s. On the single-core QCA9558 each refresh forks several CGI
-		// subprocesses; the expensive client-count iwinfo sweep is now ALSO cached for
-		// 30s in the backend (op=summary), so the heavy work runs at most ~once/30s no
-		// matter how often we poll. 20s keeps the dashboard live with a near-idle CPU.
-		poll.add(function(){ return refresh(root); }, 20);
+		// Poll every 20s with TWO CPU guards the single-core QCA9558 needs:
+		//   1) overlap guard — never start a new refresh while the previous set of
+		//      CGI calls is still in flight (no request pile-up).
+		//   2) visibility guard — skip polling entirely while the tab is hidden
+		//      (background tab / phone screen off) so it consumes zero CPU then.
+		// Backend already caches the heavy iwinfo sweep 30s, so 20s stays live & idle.
+		var inflight = false;
+		poll.add(function(){
+			if (inflight) return Promise.resolve();
+			if (typeof document !== 'undefined' && document.hidden) return Promise.resolve();
+			inflight = true;
+			return refresh(root).then(function(){ inflight = false; }, function(){ inflight = false; });
+		}, 20);
 		return root;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null

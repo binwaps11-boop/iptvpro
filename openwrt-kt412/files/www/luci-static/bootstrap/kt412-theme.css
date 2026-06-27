@@ -833,3 +833,30 @@ input[type=text],input[type=number],input[type=password],select,
 input[type=number],.kt-mono{ text-align:left; }
 /* headers already flex (icon+label aligned); just guard long titles from overflow */
 .kt-card h3>span,.mk-card h3>span{min-width:0}
+
+/* ============================================================================
+   DESIGN SYSTEM — consistent rhythm, page headers and status colors across ALL
+   custom pages (dashboard + WAN/VLAN/Routing/Diagnostics/Logs/Backup/System).
+   8px spacing scale; one card radius; one set of status colors. Lightweight.
+   ============================================================================ */
+:root{
+  --kt-s1:8px; --kt-s2:16px; --kt-s3:24px;   /* 8px spacing scale */
+  --kt-radius:14px;                          /* one card radius   */
+  --kt-on:#34D399; --kt-off:#64748B; --kt-wn:#FBBF24; --kt-er:#F87171; /* status */
+}
+/* every view: title + short description with uniform spacing */
+#view h2{margin:0 0 4px}
+#view .kt-sub,#view .kt-pagesub{color:var(--kt-muted);font-size:13px;margin:0 0 var(--kt-s2)}
+/* consistent gaps between grids/cards (8px scale) */
+.kt-grid{gap:var(--kt-s2);margin-bottom:var(--kt-s2)}
+.kt-card,.mk-card,.cbi-section{border-radius:var(--kt-radius)}
+/* unified status badge system (online/offline/warning/error) used by any view */
+.kt-badge.ok,.kt-st.ok{color:var(--kt-on);border-color:rgba(52,211,153,.45);background:rgba(52,211,153,.10)}
+.kt-badge.off,.kt-st.off{color:var(--kt-off);border-color:rgba(100,116,139,.45);background:rgba(100,116,139,.12)}
+.kt-badge.warn,.kt-st.warn{color:var(--kt-wn);border-color:rgba(251,191,36,.45);background:rgba(251,191,36,.10)}
+.kt-badge.bad,.kt-st.err{color:var(--kt-er);border-color:rgba(248,113,113,.45);background:rgba(248,113,113,.10)}
+/* tables: readable, consistent across pages */
+#view table th{font-weight:700;color:var(--kt-txt2)}
+#view table td,#view table th{padding:9px 11px}
+/* buttons: one height/shape family */
+.kt-btn,.cbi-button,button.cbi-button{min-height:38px;border-radius:10px;font-weight:700}
