@@ -91,16 +91,22 @@ body:has(input#luci_password)::before{
 /* the OUTER container is just a transparent centering wrapper — NOT a second
    card (styling it too created the "card-in-card" look). */
 body:has(input#luci_password) #maincontent,
+body:has(input[name="luci_password"]) #maincontent,
+body.node-main-login #maincontent,
 body:has(input#luci_password) #maincontent > .container,
+body:has(input[name="luci_password"]) #maincontent > .container,
 body.node-main-login #maincontent > .container{
   background:transparent!important; border:0!important; box-shadow:none!important;
   padding:0!important; max-width:none!important; -webkit-backdrop-filter:none!important; backdrop-filter:none!important;
+  /* full width so the centered card (.cbi-map margin:auto) is truly centered, not
+     pushed right by a shrink-to-fit flex item */
+  width:100%!important; display:block!important; flex:1 1 100%!important;
 }
 /* the ONE login card: the CBI map that contains the password field */
 body:has(input#luci_password) .cbi-map,
 body.node-main-login .cbi-map{
   position:relative; z-index:1;
-  max-width:400px; width:min(400px,92vw); margin:auto!important;
+  width:100%; max-width:400px; margin-left:auto!important; margin-right:auto!important; box-sizing:border-box;
   padding:36px 34px 32px!important;
   background:
     linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)),
@@ -112,7 +118,9 @@ body.node-main-login .cbi-map{
     inset 0 1px 0 rgba(255,255,255,.10)!important;
   -webkit-backdrop-filter:blur(16px) saturate(145%)!important;
   backdrop-filter:blur(16px) saturate(145%)!important;
-  direction:rtl; text-align:right;
+  /* login content is English (Username/Password/Log in) -> LTR so labels + fields
+     align consistently left (RTL made them mismatched). Wordmark/subtitle stay centered. */
+  direction:ltr; text-align:left;
 }
 /* "Smart AP" wordmark — cyan -> violet gradient text */
 body:has(input#luci_password) .cbi-map::before,
@@ -181,7 +189,7 @@ body:has(input#luci_password) .cbi-value{
 }
 /* clear labels above each field */
 body:has(input#luci_password) .cbi-value-title{
-  display:block!important; width:auto!important; text-align:right!important;
+  display:block!important; width:auto!important; text-align:left!important;
   color:var(--mk-txt2)!important; font-size:12.5px!important; font-weight:600!important;
   letter-spacing:.2px; margin:0 0 7px!important; padding:0!important;
 }
@@ -276,7 +284,7 @@ body:has(input#luci_password) p.alert{
   body:has(input#luci_password) .cbi-map,
   body:has(input#luci_password) #maincontent > .container,
   body.node-main-login .cbi-map{
-    width:92vw; padding:28px 22px 26px!important; border-radius:20px!important;
+    width:100%; max-width:400px; padding:26px 20px 24px!important; border-radius:20px!important;
   }
   body:has(input#luci_password) .cbi-map::before,
   body.node-main-login .cbi-map::before{ font-size:28px; }
@@ -314,7 +322,7 @@ body:has(input[name="luci_password"]) #maincontent > .container{
   padding:0!important; max-width:none!important; backdrop-filter:none!important; -webkit-backdrop-filter:none!important;
 }
 body:has(input[name="luci_password"]) .cbi-map{
-  position:relative; z-index:1; max-width:400px; width:min(400px,92vw); margin:auto!important;
+  position:relative; z-index:1; width:100%; max-width:400px; margin-left:auto!important; margin-right:auto!important; box-sizing:border-box;
   padding:36px 34px 32px!important;
   background:linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)), rgba(51,65,85,.55)!important;
   border:1px solid rgba(56,189,248,.22)!important; border-radius:24px!important;
@@ -784,4 +792,13 @@ body::after{
   color:#0b1220; background:linear-gradient(135deg,#38bdf8,#0ea5e9);
   padding:5px 9px; border-radius:999px; pointer-events:none; opacity:.92;
   box-shadow:0 4px 12px -3px rgba(56,189,248,.5);
+}
+
+/* ---- login layout safety net: force the form chain full-width so the centered
+   card never overflows the viewport, regardless of LuCI's exact nesting. ---- */
+body:has(input#luci_password), body:has(input[name="luci_password"]), body.node-main-login{ overflow-x:hidden!important; }
+body:has(input#luci_password) form, body:has(input[name="luci_password"]) form, body.node-main-login form,
+body:has(input#luci_password) fieldset, body:has(input[name="luci_password"]) fieldset, body.node-main-login fieldset,
+body:has(input#luci_password) .cbi-section-node, body:has(input[name="luci_password"]) .cbi-section-node{
+  display:block!important; width:100%!important; max-width:100%!important; margin:0!important; padding:0!important; float:none!important;
 }
