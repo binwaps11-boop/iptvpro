@@ -39,6 +39,9 @@ config wifi-iface 'default_radio0'
 	option encryption 'none'
 	option wmm '1'
 	option legacy_rates '0'
+	# deterministic 6 Mbit OFDM mgmt/multicast floor (CCK already off): a far client
+	# still associates and stays connected; not a power change, range preserved.
+	option basic_rate '6000'
 	option disassoc_low_ack '0'
 	option ieee80211k '1'
 	option ieee80211v '1'

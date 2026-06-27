@@ -313,4 +313,22 @@ if [ "$OP" = "iperf3" ]; then
 	exit 0
 fi
 
+# ============================================================
+# op=iperf3_server action=start|stop|status -> local iperf3 -s on :5201 so a
+# phone can run a speed test AGAINST the device with zero external setup.
+# ============================================================
+if [ "$OP" = "iperf3_server" ]; then
+	command -v iperf3 >/dev/null 2>&1 || fail "iperf3_missing"
+	ACT="$(getp action | tr -cd 'a-z')"
+	case "$ACT" in
+		start) pgrep -f 'iperf3 -s' >/dev/null 2>&1 || setsid iperf3 -s -p 5201 >/dev/null 2>&1 </dev/null & ;;
+		stop)  for pid in $(pgrep -f 'iperf3 -s' 2>/dev/null); do kill "$pid" 2>/dev/null; done ;;
+	esac
+	RUN=false; pgrep -f 'iperf3 -s' >/dev/null 2>&1 && RUN=true
+	IP="$(uci -q get network.lan.ipaddr)"
+	[ -n "$IP" ] || IP="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	printf '{"ok":true,"running":%s,"ip":"%s","port":5201}\n' "$RUN" "$(json_esc "$IP")"
+	exit 0
+fi
+
 fail "unknown_op"

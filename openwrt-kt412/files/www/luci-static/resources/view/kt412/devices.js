@@ -108,7 +108,7 @@ function reload(container){
 			+ '<div class="kt-tile kt-t-orange"><div class="ti">'+ktIcSvg('plug')+'</div><div class="tn">'+wired+'</div><div class="tl">سلكية</div></div>'
 			+ '</div>'
 			+ '<div class="kt-card"><h3>'+ktIcSvg('globe')+' كل الأجهزة على الشبكة — النوع · الإشارة · المسافة</h3>'
-			+ (online.length ? online.map(devRow).join('') : '<div class="kt-sub">لا أجهزة متصلة</div>')
+			+ (online.length ? online.map(devRow).join('') : '<div class="kt-empty">'+ktIcSvg('plug')+'<div class="kt-empty-t">لا أجهزة متصلة</div></div>')
 			+ '</div>';
 	});
 }

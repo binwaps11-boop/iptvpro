@@ -10,6 +10,17 @@
 			"acl": [ "luci-app-kt412-plus" ]
 		}
 	},
+	"admin/mkapp/lan": {
+		"title": "إعدادات LAN / DHCP",
+		"order": 16,
+		"action": {
+			"type": "view",
+			"path": "kt412/lan"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	},
 	"admin/mkapp/netcfg": {
 		"title": "الجدولة وشبكة الضيوف",
 		"order": 35,

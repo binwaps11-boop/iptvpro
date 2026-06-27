@@ -387,9 +387,10 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 
 /* responsive grids */
 .mk-grid{ display:grid; gap:16px; }
-.mk-cols-3{ grid-template-columns:repeat(3,1fr); }
-.mk-cols-2{ grid-template-columns:repeat(2,1fr); }
-.mk-cols-6{ grid-template-columns:repeat(6,1fr); }
+/* FLUID columns (auto-fit) — adapt to any width with no overflow/cramping */
+.mk-cols-3{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+.mk-cols-2{ grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }
+.mk-cols-6{ grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }
 
 /* glass card — translucent slate + backdrop blur */
 .mk-card{
@@ -438,7 +439,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-errs .ok{ color:var(--mk-green); font-weight:700; }
 
 /* interface / RJ45 port tiles */
-.mk-iftiles{ display:grid; grid-template-columns:repeat(6,1fr); gap:12px; }
+.mk-iftiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }
 .mk-iftile{
   background:var(--mk-card2); border:1px solid var(--mk-stroke);
   border-radius:14px; padding:14px 10px; text-align:center; position:relative;
@@ -474,17 +475,10 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-power .mk-pwr-text{ color:var(--mk-txt2); font-size:13px; line-height:1.7; }
 .mk-power.alert{ border-color:rgba(239,68,68,.5); box-shadow:0 0 0 1px rgba(239,68,68,.25), var(--mk-shadow); }
 
-/* ===== mobile: stack everything into a single full-width column ===== */
-@media (max-width:900px){
-  .mk-cols-3,.mk-cols-2{ grid-template-columns:1fr; }
-  .mk-cols-6{ grid-template-columns:repeat(3,1fr); }
-  .mk-iftiles{ grid-template-columns:repeat(3,1fr); }
-}
+/* ===== mobile tweaks (grids already reflow via auto-fit minmax above) ===== */
 @media (max-width:600px){
   .mk-wrap{ width:100%!important; max-width:100%!important; }
-  .mk-grid{ grid-template-columns:1fr!important; gap:12px!important; }
-  .mk-cols-6{ grid-template-columns:repeat(2,1fr)!important; }
-  .mk-iftiles{ grid-template-columns:repeat(2,1fr)!important; }
+  .mk-grid{ gap:12px!important; }
   .mk-card{ width:100%!important; max-width:100%!important; padding:14px!important; }
   .mk-gauge svg{ width:96px!important; height:96px!important; max-width:96px!important; }
   .mk-head .mk-logo{ font-size:20px; }
@@ -501,6 +495,8 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 
 /* ---- small inline icon baseline (currentColor) ---- */
 .mk-ic{ width:16px; height:16px; flex:0 0 auto; vertical-align:middle; }
+/* stale/disconnected: dim the chips after repeated failed reads */
+.mk-chips.mk-stale{ opacity:.45; filter:grayscale(.4); transition:opacity .3s ease; }
 
 /* ---- entrance animation (subtle rise + fade) ---- */
 @keyframes mkRise{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:translateY(0); } }
@@ -639,8 +635,8 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* ============================================================================
    PREMIUM PORT MAP — real device-LED tiles
    ============================================================================ */
-.mk-portmap .mk-iftiles{ grid-template-columns:repeat(7,1fr); }
-.mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr); }
+.mk-portmap .mk-iftiles{ grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); }
+.mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
 .mk-iftile{
   padding:15px 8px 13px; border-radius:15px;
   display:flex; flex-direction:column; align-items:center; gap:3px;
@@ -657,7 +653,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* speed / link badge */
 .mk-iftile .spd{ display:inline-flex; align-items:baseline; gap:3px; margin-top:7px;
   padding:3px 9px; border-radius:999px; font-size:11px; font-weight:800; line-height:1;
-  color:#0F172A; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
+  white-space:nowrap; color:#0F172A; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
 .mk-iftile .spd i{ font-style:normal; font-size:8.5px; font-weight:700; opacity:.8; }
 .mk-iftile .spd.gig{ background:var(--mk-green); }
 .mk-iftile .spd.fe{ background:var(--mk-amber); box-shadow:0 0 10px rgba(245,158,11,.45); }
@@ -693,12 +689,8 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* ============================================================================
    RESPONSIVE
    ============================================================================ */
-@media (max-width:980px){
-  .mk-portmap .mk-iftiles{ grid-template-columns:repeat(4,1fr); }
-}
-@media (max-width:900px){
-  .mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr); }
-}
+/* port-map + net-tiles now use auto-fit minmax (above) so they reflow at EVERY
+   width without fixed-count breakpoints; only non-grid phone tweaks remain. */
 @media (max-width:600px){
   .mk-topbar{ padding:13px 14px; }
   .mk-brand-t .mk-logo{ font-size:22px; }
@@ -707,13 +699,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   .mk-chip{ font-size:12px; padding:6px 11px; }
   .mk-sec{ margin:18px 2px 11px; }
   .mk-sec-t .t{ font-size:15px; }
-  .mk-portmap .mk-iftiles{ grid-template-columns:repeat(2,1fr)!important; }
-  .mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(2,1fr)!important; }
   .mk-rate{ min-width:100%; }
-}
-@media (max-width:380px){
-  .mk-portmap .mk-iftiles,
-  .mk-portcard .mk-iftiles-net{ grid-template-columns:1fr!important; }
 }
 
 /* ============================================================================
@@ -738,5 +724,6 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
     --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
   }
   :root:not([data-mk-skin="off"]) .mk-gauge .track{ stroke:#334155; }
+  :root:not([data-mk-skin="off"]) .mk-gauge .arc{ stroke:var(--mk-accent); }
   :root:not([data-mk-skin="off"]) .mk-spark-axis{ stroke:rgba(148,163,184,.18); }
 }

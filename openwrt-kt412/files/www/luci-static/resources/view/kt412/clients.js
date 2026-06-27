@@ -167,7 +167,7 @@ function reload(container){
 			+ '<div class="kt-tile kt-t-orange"><div class="ti">'+ktIcSvg('plug')+'</div><div class="tn">'+wired+'</div><div class="tl">سلكية</div></div>'
 			+ '</div>'
 			+ '<div class="kt-card"><h3>'+ktIcSvg('globe')+' الأجهزة والتحكم — حظر / إلغاء حظر</h3>'
-			+ ((rows||extra) ? (rows+extra) : '<div class="kt-sub">لا أجهزة</div>')
+			+ ((rows||extra) ? (rows+extra) : '<div class="kt-empty">'+ktIcSvg('plug')+'<div class="kt-empty-t">لا أجهزة</div></div>')
 			+ '</div>';
 		wire(container);
 	});

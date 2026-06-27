@@ -229,8 +229,10 @@ function clientsSection(){
 		wrap.innerHTML='';
 		(j.radios||[]).forEach(function(r){
 			var rows = (r.clients||[]).map(function(c){
+				var nm = (c.name && c.name !== '*') ? c.name : '';
+				var label = nm ? (nm + (c.ip ? ' · ' + c.ip : '')) : c.mac;
 				return E('div', { 'class':'kt-kv' }, [
-					E('span',{'class':'k'}, esc(c.mac)),
+					E('span',{'class':'k', title:c.mac}, esc(label)),
 					E('span',{'class':'v', dir:'ltr', style:'color:'+sigColor(c.signal)+';text-align:left;direction:ltr'}, [
 						(c.signal?esc(c.signal)+' dBm':'—')
 						+ ' · ', ktIc('down'), esc(c.rx_mbit||'—')+' ', ktIc('up'), esc(c.tx_mbit||'—')+' Mbit/s'

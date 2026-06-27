@@ -331,6 +331,12 @@ function refresh(root){
 		var pt = (needPorts && res[2] && res[2].ok) ? res[2] : (ST.lastPorts||{});
 		if (needPorts && res[2] && res[2].ok) ST.lastPorts = res[2];
 
+		/* stale/disconnected indicator: after >=2 consecutive failed reads, dim the
+		   header chips so a dead link/device is obvious (no silent stale numbers). */
+		ST.fail = sm.ok ? 0 : ((ST.fail|0) + 1);
+		var chipsEl = root.querySelector('.mk-chips');
+		if (chipsEl){ if (ST.fail >= 2) chipsEl.classList.add('mk-stale'); else chipsEl.classList.remove('mk-stale'); }
+
 		/* ----- gauges ----- */
 		if (sm.ok){
 			var cpu = +sm.cpu_pct||0;

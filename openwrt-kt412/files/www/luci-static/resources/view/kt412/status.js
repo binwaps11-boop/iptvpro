@@ -133,6 +133,10 @@ function reload(container){
 			html += '<div class="kt-card"><h3>'+ktIcSvg('mesh')+' حالة Mesh (802.11s)</h3><div class="kt-sub">لا توجد واجهة Mesh نشطة (الوضع AP حالياً)</div></div>';
 		}
 
+		/* skip the full innerHTML rebuild when nothing changed — avoids reflow
+		   churn on every poll (lighter on the laptop/phone browser). */
+		if (container._ktLast === html) return;
+		container._ktLast = html;
 		container.innerHTML = html;
 	});
 }
@@ -145,7 +149,7 @@ return view.extend({
 		]);
 		var body = box.querySelector('.kt-body');
 		reload(body);
-		poll.add(function(){ return reload(body); }, 8);
+		poll.add(function(){ return reload(body); }, 15);
 		return box;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null

@@ -127,7 +127,7 @@ function netRow(n){
 		+ '</div>';
 }
 function render(box, nets){
-	if (!nets.length){ box.innerHTML = '<div class="kt-sub">'+_('لا شبكات مكتشفة — أعد المسح')+'</div>'; return; }
+	if (!nets.length){ box.innerHTML = '<div class="kt-empty">'+ktIcSvg('wifi')+'<div class="kt-empty-t">'+_('لا شبكات مكتشفة — أعد المسح')+'</div></div>'; return; }
 	var a = analyze(nets);
 	var rec24 = recommend24(a.b24), rec5 = recommend5(a.b5);
 	var sorted = nets.slice().sort(function(x,y){ return (+y.sig)-(+x.sig); });

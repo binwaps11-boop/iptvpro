@@ -375,9 +375,15 @@ if [ "$OP" = "clients" ]; then
 			rxmcs="$(printf '%s' "$line" | cut -f5 | tr -cd '0-9')"
 			txmcs="$(printf '%s' "$line" | cut -f6 | tr -cd '0-9')"
 			[ -n "$mac" ] || continue
+			# resolve a friendly name + IP from the DHCP leases (so the operator sees
+			# device NAMES, not raw MACs). leases line: <exp> <mac> <ip> <host> <cid>.
+			nm=""; ipv=""
+			LN="$(awk -v m="$mac" 'tolower($2)==tolower(m){print $3"\t"$4; exit}' /tmp/dhcp.leases 2>/dev/null)"
+			if [ -n "$LN" ]; then ipv="$(printf '%s' "$LN" | cut -f1)"; nm="$(printf '%s' "$LN" | cut -f2)"; fi
+			[ "$nm" = "*" ] && nm=""
 			[ -n "$CSEP" ] && printf ','
-			printf '{"mac":"%s","signal":"%s","rx_mbit":"%s","tx_mbit":"%s","rx_mcs":"%s","tx_mcs":"%s"}' \
-				"$mac" "${sig:-}" "${rx:-}" "${tx:-}" "${rxmcs:-}" "${txmcs:-}"
+			printf '{"mac":"%s","name":"%s","ip":"%s","signal":"%s","rx_mbit":"%s","tx_mbit":"%s","rx_mcs":"%s","tx_mcs":"%s"}' \
+				"$mac" "$(json_esc "$nm")" "$(json_esc "$ipv")" "${sig:-}" "${rx:-}" "${tx:-}" "${rxmcs:-}" "${txmcs:-}"
 			CSEP=1
 		done
 		IFS="$OLDIFS"

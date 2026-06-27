@@ -216,10 +216,13 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
    KT412 view widgets (used by /luci-static/resources/view/kt412/*.js)
    ============================================================================ */
 .kt-grid{display:grid;gap:16px;margin-bottom:16px}
-.kt-cols-2{grid-template-columns:repeat(2,1fr)}
-.kt-cols-3{grid-template-columns:repeat(3,1fr)}
-.kt-cols-4{grid-template-columns:repeat(4,1fr)}
-@media(max-width:760px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr 1fr}}
+/* FLUID columns: auto-fit + minmax means the grid picks the right number of
+   columns for ANY width (desktop, tablet, phone) with no hard breakpoints and
+   never overflows — a card never gets narrower than its min. This replaces the
+   old fixed 2/3/4 + 760/480 steps that looked cramped at 414–600px. */
+.kt-cols-2{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.kt-cols-3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.kt-cols-4{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
 @media(max-width:480px){.kt-cols-2,.kt-cols-3,.kt-cols-4{grid-template-columns:1fr}}
 
 .kt-card{background:var(--kt-card);border:1px solid var(--kt-stroke);border-radius:12px;padding:1rem;
@@ -518,11 +521,24 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 .kt-sigbar{box-shadow:inset 0 0 0 1px var(--kt-stroke)}
 .kt-sigbar>i{box-shadow:0 0 8px rgba(6,182,212,.4)}
 
-/* ---- conic gauge: glow on the active arc, crisp inner disk ---- */
-.kt-gauge{box-shadow:0 8px 22px rgba(0,0,0,.35)}
+/* ---- conic gauge: glow on the active arc, crisp inner disk (tuned to match the
+   premium SVG gauge on the dashboard for cross-view consistency) ---- */
+.kt-gauge{box-shadow:0 8px 22px rgba(0,0,0,.35);filter:drop-shadow(0 0 7px rgba(34,211,238,.22))}
 .kt-gauge::before{box-shadow:inset 0 0 0 1px var(--kt-stroke),inset 0 4px 12px rgba(0,0,0,.4)}
 .kt-gauge span{font-size:22px;letter-spacing:.3px;text-shadow:0 2px 6px rgba(0,0,0,.4)}
 .kt-glabel{font-size:13px;font-weight:700;letter-spacing:.2px}
+
+/* ---- reusable professional EMPTY STATE (centered icon + line) for the
+   analyzer/devices/clients "no data" cases (was plain unstyled text) ---- */
+.kt-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:10px;padding:30px 18px;text-align:center;color:var(--kt-muted)}
+.kt-empty .kti,.kt-empty svg{width:34px;height:34px;opacity:.55}
+.kt-empty .kt-empty-t{font-size:13.5px;font-weight:600;color:var(--kt-txt2)}
+
+/* ---- analyzer channel bars: keep legible on phones (min width + scroll) ---- */
+.kt-chart{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.kt-chart .kt-bars{display:flex;align-items:flex-end;gap:6px;min-width:max-content}
+.kt-chart .kt-bars>*{min-width:18px}
 
 /* ---- inputs / selects: dark field, hover hint, vivid cyan focus ring ---- */
 .kt-field input,.kt-field select,.kt-field textarea{
@@ -624,10 +640,12 @@ select,.cbi-input-select{text-overflow:ellipsis}
 .kt-btn:active{transform:translateY(0) scale(.99)}
 .kt-btn.sec{background:linear-gradient(180deg,rgba(51,65,85,.7),rgba(30,41,59,.6))!important}
 
-/* tabs: lit active pill with a soft cyan underglow */
-.kt-tab.active,.kt-tab[aria-selected="true"]{
-  background:linear-gradient(180deg,rgba(6,182,212,.18),rgba(6,182,212,.07))!important;
-  color:var(--kt-accent)!important;box-shadow:0 0 0 1px rgba(6,182,212,.35), 0 6px 16px -8px rgba(6,182,212,.55)!important}
+/* active tab: ONE authoritative style — white label on the cyan gradient pill
+   (the tabs set both .is-active and aria-selected; keep them identical so the
+   high-contrast gradient wins instead of the old faint cyan-on-cyan). */
+.kt-tab.active,.kt-tab.is-active,.kt-tab[aria-selected="true"]{
+  background:var(--kt-grad)!important; color:#fff!important; border-color:transparent!important;
+  box-shadow:0 8px 20px -6px rgba(34,211,238,.45)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)}
 
 /* inputs / selects: vivid but tasteful neon focus ring */
 input:focus,select:focus,textarea:focus,.kt-field input:focus,.kt-field select:focus{

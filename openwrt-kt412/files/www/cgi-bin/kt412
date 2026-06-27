@@ -839,9 +839,13 @@ if [ -n "$ACT" ]; then
 			[ -n "$dn" ] && uci set sqm.$sec.download="$dn"
 			[ -n "$up" ] && uci set sqm.$sec.upload="$up"
 			uci set sqm.$sec.qdisc='cake'
-			uci set sqm.$sec.script='piece_of_cake.qos'
+			# layer_cake + per-host fairness (dual-srchost/dual-dsthost) so one device
+			# can't starve the others under load, and DiffServ4 keeps IPTV/VoIP ahead
+			# of bulk — better than plain piece_of_cake for a multi-client AP.
+			uci set sqm.$sec.script='layer_cake.qos'
 			uci set sqm.$sec.linklayer='ethernet'; uci set sqm.$sec.overhead='44'
 			uci set sqm.$sec.qdisc_advanced='1'; uci set sqm.$sec.egress_ecn='NOECN'; uci set sqm.$sec.ingress_ecn='ECN'
+			uci set sqm.$sec.iqdisc_opts='nat dual-dsthost ingress'; uci set sqm.$sec.eqdisc_opts='nat dual-srchost'
 			uci set sqm.$sec.enabled="${en:-0}"
 			uci commit sqm
 			# CRITICAL: software flow-offload BYPASSES the qdisc -> cake shapes nothing.

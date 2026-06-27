@@ -191,12 +191,45 @@ function iperfCard(){
 	]);
 }
 
+/* zero-setup speed test: run iperf3 -s ON THE DEVICE so a phone/PC can test
+   against it directly (iperf3 -c <device-ip>) with no other machine needed. */
+function iperfServerCard(){
+	var stat = E('div', { 'class':'kt-sub', style:'margin-top:8px' }, _('جارٍ القراءة…'));
+	var btn  = E('button', { 'class':'kt-btn' }, _('تشغيل الخادم'));
+	function paint(j){
+		if (!j || !j.ok){ stat.textContent = (j&&j.error==='iperf3_missing') ? _('iperf3 غير مثبّت') : _('غير متاح'); return; }
+		if (j.running){
+			btn.textContent = _('إيقاف الخادم');
+			stat.style.color = 'var(--kt-ok)';
+			stat.innerHTML = ktIcSvg('check') + ' ' + _('الخادم يعمل — على جوالك شغّل:') + ' <b dir="ltr">iperf3 -c ' + esc(j.ip||'') + ' -p ' + esc(j.port||5201) + '</b>';
+		} else {
+			btn.textContent = _('تشغيل الخادم');
+			stat.style.color = 'var(--kt-txt2)';
+			stat.textContent = _('الخادم متوقف. شغّله ثم اختبر من جوالك ضد عنوان الجهاز.');
+		}
+	}
+	function refresh(){ call({op:'iperf3_server', action:'status'}).then(paint); }
+	btn.addEventListener('click', function(){
+		btn.disabled = true;
+		var on = /إيقاف/.test(btn.textContent);
+		call({op:'iperf3_server', action: on?'stop':'start'}).then(function(j){ btn.disabled=false; paint(j); });
+	});
+	refresh();
+	return E('div', { 'class':'kt-card' }, [
+		E('h3', {}, [ktIc('speed'), ' '+_('خادم السرعة على الجهاز (بدون إعداد)')]),
+		E('div', { 'class':'kt-sub' }, _('شغّل خادم iperf3 هنا، ثم على جوالك/حاسوبك نفّذ الأمر الظاهر — تقيس السرعة الفعلية مباشرة ضد الجهاز.')),
+		E('div', { style:'margin-top:10px' }, btn),
+		stat
+	]);
+}
+
 return view.extend({
 	render: function(){
 		return E('div', {}, [
 			E('h2', {}, _('أدوات الشبكة')),
 			E('div', { 'dir':'rtl' }, [
 				E('div', { 'class':'kt-grid' }, [ pingCard() ]),
+				E('div', { 'class':'kt-grid', style:'margin-top:14px' }, [ iperfServerCard() ]),
 				E('div', { 'class':'kt-grid', style:'margin-top:14px' }, [ iperfCard() ])
 			])
 		]);
