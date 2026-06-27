@@ -276,6 +276,15 @@ jobs:
             ${{ steps.cachekey.outputs.ccache_key }}-
 
       - name: "Add files overlay (dashboard + variant power default)"
+        env:
+          # Pass these in as env vars so the (very large) run: block below contains
+          # NO ${{ }} expressions. GitHub compiles ANY run block that contains a
+          # ${{ }} into a single templated expression capped at 21000 chars; this
+          # block is big enough that one extra ${{ }} pushed it over the limit ->
+          # startup_failure (PyYAML does not enforce that cap, so it passed locally).
+          # With the values in env the block is a plain string: no template, no cap.
+          VARIANT: ${{ matrix.variant }}
+          GH_SHA: ${{ github.sha }}
         run: |
           cd openwrt
           # ALWAYS runs (hit or miss): the overlay is the only thing that changes on
@@ -342,7 +351,7 @@ jobs:
           chmod 0644 files/etc/modules-boot.d/00-kt412-wifi 2>/dev/null || true
           chmod 0755 files/www/cgi-bin/* || true
           chmod 0755 files/root/*.sh 2>/dev/null || true
-          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+          if [ "$VARIANT" = "system-30dbm-extreme-full" ]; then
             # bake 2.4G default to 30 (extreme); clean-stable-full keeps the 24 default
             sed -i "s/option txpower '24'/option txpower '30'/" files/etc/config/wireless
             echo "EXTREME: 2.4G default txpower set to 30"
@@ -350,9 +359,9 @@ jobs:
           grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
           mkdir -p files/etc
           {
-            echo "commit=${{ github.sha }}"
-            echo "variant=${{ matrix.variant }}"
-            echo "image=openwrt-kt412-${{ matrix.variant }}-sysupgrade.bin"
+            echo "commit=$GH_SHA"
+            echo "variant=$VARIANT"
+            echo "image=openwrt-kt412-$VARIANT-sysupgrade.bin"
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "target=ath79/nand"
             echo "soc=QCA9558"
@@ -366,7 +375,7 @@ jobs:
           # ship an explicit kernel-config snapshot in the image (device may lack /proc/config.gz path)
           {
             echo "# KT412 kernel/wireless config snapshot (from build .config)"
-            echo "# variant=${{ matrix.variant }} commit=${{ github.sha }}"
+            echo "# variant=$VARIANT commit=$GH_SHA"
             grep -E '^(CONFIG_ATH_USER_REGD|CONFIG_PACKAGE_kmod-ath9k|CONFIG_PACKAGE_kmod-ath10k|CONFIG_PACKAGE_kmod-mac80211|CONFIG_PACKAGE_kmod-cfg80211|CONFIG_PACKAGE_ath10k-firmware|CONFIG_KERNEL_IKCONFIG|CONFIG_KERNEL_CFG80211|CONFIG_KERNEL_MAC80211|CONFIG_PACKAGE_wpad)' .config 2>/dev/null | sort
             echo "# (ath9k debugfs is enabled by the mac80211 package default; verify on device with"
             echo "#  ls /sys/kernel/debug/ieee80211/phy1/ath9k/ )"
@@ -514,7 +523,7 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-mod-network=y' "$S" \
             && echo "TX POWER VIA LUCI WIRELESS (luci-mod-network) INCLUDED" \
             || { echo "FATAL: luci-mod-network missing -> no native Wireless/txpower UI"; exit 1; }
-          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+          if [ "$VARIANT" = "system-30dbm-extreme-full" ]; then
             grep -q "option txpower '30'" files/etc/config/wireless && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
           else
             echo "TX POWER DEFAULT 30 INCLUDED (extreme only; clean-stable default = 24)"
