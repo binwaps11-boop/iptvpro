@@ -130,6 +130,16 @@ input::placeholder,textarea::placeholder{color:var(--kt-muted)!important}
 input:focus,select:focus,textarea:focus{
   border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(6,182,212,.25)!important;outline:none
 }
+/* selects: the base theme gives the control a small FIXED height, which cropped
+   the chosen option text top & bottom (the "MB 10" / "2.4G — KT412" / "DHCP"
+   dropdowns showed only a middle slice). Force height:auto + a comfortable
+   min-height + line-height so the option text is always fully visible. Padding
+   is intentionally non-!important so .kt-wz-seg's icon padding still wins. */
+select,.cbi-input-select{
+  height:auto!important;min-height:44px!important;line-height:1.5!important;
+  font-size:14px!important;box-sizing:border-box!important;
+  text-overflow:ellipsis;padding:10px 13px
+}
 
 /* ---- buttons ---- */
 .btn,.cbi-button,button,input[type=submit],input[type=button]{

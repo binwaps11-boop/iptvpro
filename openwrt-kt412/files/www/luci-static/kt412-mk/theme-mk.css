@@ -127,7 +127,26 @@ body.node-main-login .cbi-map::after{
 }
 body:has(input#luci_password) .cbi-map h2,
 body:has(input#luci_password) legend,
+body.node-main-login h2,
+body:has(input#luci_password) h2,
 body:has(input#luci_password) .cbi-map-descr{ display:none!important; }
+
+/* FLATTEN the inner form: the obsidian section/card styling (from kt412-theme)
+   was painting the fieldset that wraps Username/Password as a SECOND card inside
+   the login card (the "card-in-card" blue panel). On the login page strip every
+   inner surface so the fields sit directly on the one card. */
+body.node-main-login form,
+body:has(input#luci_password) form,
+body.node-main-login fieldset,
+body:has(input#luci_password) fieldset,
+body.node-main-login .cbi-section,
+body:has(input#luci_password) .cbi-section,
+body.node-main-login .cbi-section-node,
+body:has(input#luci_password) .cbi-section-node{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; margin:0!important; border-radius:0!important;
+  -webkit-backdrop-filter:none!important; backdrop-filter:none!important;
+}
 
 /* comfortable vertical rhythm between Username / Password */
 body:has(input#luci_password) .cbi-value{

@@ -275,9 +275,17 @@ function wireToggle(root){
 }
 
 function refresh(root){
-	return Promise.all([ call({op:'summary'}), call({op:'traffic'}), call({op:'ports'}) ])
+	/* CPU saver: gauges + traffic need a live read every cycle, but the RJ45
+	   port map (operstate per port) changes rarely. Fetch op=ports only every
+	   3rd cycle (~30s) and reuse the cached result in between, so each idle
+	   refresh forks 2 CGIs instead of 3 -> ~33% fewer forks on the 720MHz core. */
+	var needPorts = ((ST.cyc|0) % 3) === 0; ST.cyc = (ST.cyc|0) + 1;
+	return Promise.all([ call({op:'summary'}), call({op:'traffic'}),
+		needPorts ? call({op:'ports'}) : Promise.resolve(ST.lastPorts||{}) ])
 	.then(function(res){
-		var sm = res[0]||{}, tr = res[1]||{}, pt = res[2]||{};
+		var sm = res[0]||{}, tr = res[1]||{};
+		var pt = (needPorts && res[2] && res[2].ok) ? res[2] : (ST.lastPorts||{});
+		if (needPorts && res[2] && res[2].ok) ST.lastPorts = res[2];
 
 		/* ----- gauges ----- */
 		if (sm.ok){

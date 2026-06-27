@@ -985,18 +985,33 @@ case "$OP" in
 		mt="$(gv "$INF" '@.memory.total')"; mf="$(gv "$INF" '@.memory.free')"
 		mb="$(gv "$INF" '@.memory.buffered')"
 		ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ -n "$ncpu" ] || ncpu=1
-		# REAL CPU% computed SERVER-SIDE from the /proc/stat delta vs the previous
-		# call (stored in /tmp). Reliable: no fragile browser-side jiffie diffing.
+		# REAL CPU% from the /proc/stat delta vs a stored baseline (in /tmp).
+		# CRITICAL: only ADVANCE the baseline when the measured window is >= 2s.
+		# The old code re-wrote the baseline on EVERY call, so two summary polls
+		# arriving close together (the dashboard fetches summary+traffic+ports at
+		# once, and LuCI re-renders) produced a sub-second window where the idle
+		# delta rounded to 0 -> a bogus 100%. Now a too-short window REUSES the
+		# last computed value and keeps the old baseline, so every real
+		# measurement spans the full ~10s poll interval -> stable, truthful %.
+		now_s="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$now_s" in ''|*[!0-9]*) now_s=0;; esac
 		set -- $(awk '/^cpu /{i=$5+$6; t=0; for(n=2;n<=NF;n++)t+=$n; print i, t; exit}' /proc/stat 2>/dev/null)
 		cpu_idle="${1:-0}"; cpu_total="${2:-0}"; cpu_pct=0
 		CPF=/tmp/kt_cpustat
 		if [ -f "$CPF" ]; then
-			read pi pt < "$CPF" 2>/dev/null
+			read pi pt pts ppct < "$CPF" 2>/dev/null
 			dt=$(( cpu_total - ${pt:-0} )); di=$(( cpu_idle - ${pi:-0} ))
-			[ "$dt" -gt 0 ] && cpu_pct=$(( (100 * (dt - di)) / dt ))
-			[ "$cpu_pct" -lt 0 ] && cpu_pct=0; [ "$cpu_pct" -gt 100 ] && cpu_pct=100
+			win=$(( now_s - ${pts:-0} ))
+			if [ "$dt" -gt 0 ] && [ "$win" -ge 2 ]; then
+				cpu_pct=$(( (100 * (dt - di)) / dt ))
+				[ "$cpu_pct" -lt 0 ] && cpu_pct=0; [ "$cpu_pct" -gt 100 ] && cpu_pct=100
+				echo "$cpu_idle $cpu_total $now_s $cpu_pct" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
+			else
+				# window too short (or clock went backwards): reuse last %, keep baseline
+				cpu_pct="${ppct:-0}"; case "$cpu_pct" in ''|*[!0-9]*) cpu_pct=0;; esac
+			fi
+		else
+			echo "$cpu_idle $cpu_total $now_s 0" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
 		fi
-		echo "$cpu_idle $cpu_total" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
 		# WRITABLE space = the overlay (rootfs_data), not the read-only squashfs /rom
 		# (which is always ~100% full). Parse by NF so a wrapped device name doesn't shift columns.
 		ovl="$(df -k /overlay 2>/dev/null | awk 'NR>1 && NF>=5 {print $(NF-4)","$(NF-3); exit}')"
