@@ -115,6 +115,34 @@ SYS
 fi
 sysctl -p >/dev/null 2>&1 || true
 
+# ----- (5b) MAX-PERF network sysctls + BBR (NEW v2 block) --------------------
+# WHY: squeeze more out of the single 720 MHz core by reducing per-packet/per-
+# connection overhead and using a better congestion controller for the device's
+# OWN TCP (built-in speed test, downloads, any proxied/terminated traffic):
+#   * tcp_congestion_control=bbr : best throughput on lossy/far/interference
+#     links (loaded from kmod-tcp-bbr; only applied if actually available).
+#   * tcp_fastopen=3 : 0-RTT connection setup both directions => snappier.
+#   * netdev_max_backlog/netdev_budget : absorb RX bursts on one core without
+#     drops (helps many-client / high-pps moments stay smooth).
+# Separate v2 marker so it ALSO applies on a keep-settings upgrade (the original
+# kt412-perf-tune block may already be present from an older flash).
+if ! grep -q 'kt412-perf-tune-v2' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-perf-tune-v2 (max-perf; additive)
+net.ipv4.tcp_fastopen=3
+net.core.netdev_max_backlog=2000
+net.core.netdev_budget=600
+SYS
+fi
+# BBR only if the module/algo is present (never error if missing)
+modprobe tcp_bbr >/dev/null 2>&1 || true
+if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+	if ! grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf 2>/dev/null; then
+		echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
+	fi
+fi
+sysctl -p >/dev/null 2>&1 || true
+
 # ----- (6) Wireless micro-tuning (SAFE: NO power/htmode/channel/mcast_rate) ----
 # Applied once, idempotently. Improves real-world throughput + smoothness + how
 # well a FAR client (low bars) holds a usable link, WITHOUT lowering range or
