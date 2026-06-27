@@ -307,9 +307,24 @@ body:has(input[name="luci_password"]) .cbi-map{
   -webkit-backdrop-filter:blur(16px) saturate(145%)!important; backdrop-filter:blur(16px) saturate(145%)!important;
   direction:rtl; text-align:right;
 }
-body:has(input[name="luci_password"]) .cbi-map h2,
+/* hide EVERY heading on the login page — the stray "Authorization Required" is a
+   BARE h2 OUTSIDE .cbi-map, so '.cbi-map h2' missed it. Hit all heading forms,
+   matched via the name-based selector (the one that actually applies here) AND
+   the id/class companions, so it dies regardless of LuCI markup. */
+body:has(input[name="luci_password"]) h1,
+body:has(input[name="luci_password"]) h2,
+body:has(input[name="luci_password"]) h3,
 body:has(input[name="luci_password"]) legend,
-body:has(input[name="luci_password"]) .cbi-map-descr{ display:none!important; }
+body:has(input[name="luci_password"]) .cbi-map-descr,
+body:has(input[name="luci_password"]) #maincontent > h2,
+body:has(input[name="luci_password"]) .container > h2,
+body:has(input#luci_password) h1,
+body:has(input#luci_password) h2,
+body:has(input#luci_password) h3,
+body.node-main-login h1,
+body.node-main-login h2,
+body.node-main-login h3,
+body.node-login h1, body.node-login h2, body.node-login h3{ display:none!important; }
 body:has(input[name="luci_password"]) form,
 body:has(input[name="luci_password"]) fieldset,
 body:has(input[name="luci_password"]) .cbi-section,
