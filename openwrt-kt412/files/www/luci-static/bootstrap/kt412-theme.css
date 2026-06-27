@@ -882,3 +882,59 @@ input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
   color:var(--kt-txt)!important;}
 /* technical values stay LTR even inside RTL labels (port/IP/path) */
 .cbi-value-title code,.cbi-value-field code,.kt-mono{direction:ltr;unicode-bidi:isolate;}
+
+/* ============================================================================
+   FINAL UNIFICATION POLISH — one layer applied to EVERY custom page at once.
+   All 18 views already share the kt-card system; this standardizes the page
+   header, notes, rows, tables, loading/empty states and mobile behavior so every
+   page reads as one product. CSS only — appended last so it wins.
+   ============================================================================ */
+/* --- unified page header: accent bar + consistent rhythm on every view's h2 --- */
+#view h2{position:relative;padding-inline-start:14px;margin:2px 0 4px;font-size:22px;font-weight:800;line-height:1.25}
+#view h2::before{content:"";position:absolute;inset-inline-start:0;top:50%;transform:translateY(-50%);
+  width:5px;height:22px;border-radius:3px;background:var(--kt-grad)}
+#view > [dir] > h2, #view h2 + .kt-sub, #view h2 + .kt-body{margin-top:6px}
+/* a short page description directly under the title (uniform muted) */
+#view h2 + .kt-sub, #view .kt-pagesub{color:var(--kt-muted);font-size:13px;margin-bottom:16px}
+
+/* --- card heads: uniform icon-accented h3 across every card --- */
+.kt-card h3{font-size:15px;font-weight:800;margin:0 0 12px;gap:8px}
+.kt-card h3 .kti{color:var(--kt-accent)}
+
+/* --- notes / inline status: complete the set (info/ok/warn/error) uniformly --- */
+.kt-note{font-size:12.5px;line-height:1.6;padding:10px 13px;border-radius:11px;border:1px solid var(--kt-stroke)}
+.kt-note.ok{color:var(--kt-ok);background:rgba(52,211,153,.10);border-color:rgba(52,211,153,.4)}
+.kt-note.warn{color:var(--kt-warn);background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.4)}
+.kt-note.bad,.kt-note.error{color:var(--kt-bad);background:rgba(248,113,113,.10);border-color:rgba(248,113,113,.4)}
+
+/* --- key/value + device rows: consistent alignment everywhere --- */
+.kt-kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--kt-stroke)}
+.kt-kv:last-child{border-bottom:0}
+.kt-kv .k{color:var(--kt-txt2);font-size:12.5px}
+.kt-kv .v{color:var(--kt-txt);font-weight:700;font-size:13px}
+.kt-dev{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px solid var(--kt-stroke)}
+.kt-dev:last-child{border-bottom:0}
+
+/* --- tables: one readable style across every page --- */
+#view table{width:100%;border-collapse:collapse}
+#view table th{background:rgba(13,20,38,.6);font-weight:700;color:var(--kt-txt2);text-align:start}
+#view table tr:nth-child(even)>td{background:rgba(255,255,255,.02)}
+#view table td,#view table th{border-bottom:1px solid var(--kt-stroke)}
+
+/* --- uniform loading + empty states --- */
+.kt-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:40px 16px;color:var(--kt-muted);text-align:center}
+.kt-empty .kti,.kt-empty svg{width:38px;height:38px;opacity:.6}
+.kt-sub{color:var(--kt-muted);font-size:13px}
+
+/* --- FINAL responsive pass: everything stacks cleanly + stays readable on phones --- */
+@media (max-width:600px){
+  #view h2{font-size:19px}
+  .kt-grid{gap:12px}
+  .kt-card{padding:1rem}
+  .kt-wz-foot{flex-direction:column;align-items:stretch;gap:10px}
+  .kt-wz-foot .kt-btn,.kt-card .kt-btn{width:100%;justify-content:center}
+  .kt-tabs{overflow-x:auto;flex-wrap:nowrap}
+  .kt-tab{flex:0 0 auto}
+  .kt-kv{flex-wrap:wrap;gap:4px}
+  table,thead,tbody,th,td,tr{font-size:12.5px}
+}
