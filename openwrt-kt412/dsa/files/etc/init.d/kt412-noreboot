@@ -29,5 +29,22 @@ _strip() {
 	logger -t kt412-noreboot "auto-reboot sources stripped (reboot cron + watchcat disabled)"
 }
 
-boot()  { _strip; }
-start() { _strip; }
+# THEME LOCK: force the custom dark "Smart AP" skin (luci-theme-bootstrap, which
+# carries the kt412-theme.css + theme-mk.css @imports) on EVERY boot. A keep-
+# settings sysupgrade preserves /etc/config/luci, so a previously-saved
+# mediaurlbase (e.g. /luci-static/openwrt2020) would otherwise stick and the
+# Smart AP dashboard would never come back. Re-assert it here so the user's
+# interface is ALWAYS the Smart AP skin regardless of what was saved.
+_themelock() {
+	cur="$(uci -q get luci.main.mediaurlbase)"
+	if [ "$cur" != "/luci-static/bootstrap" ]; then
+		uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
+		uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+		uci -q set luci.main.lang='ar'
+		uci -q commit luci
+		logger -t kt412-noreboot "theme reset to Smart AP (bootstrap) from '$cur'"
+	fi
+}
+
+boot()  { _strip; _themelock; }
+start() { _strip; _themelock; }
