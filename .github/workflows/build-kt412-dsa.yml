@@ -126,27 +126,12 @@ jobs:
             !openwrt/bin
           key: ${{ steps.cachekey.outputs.tree_key }}
 
-      # (b) Download cache: source tarballs. Safe to reuse broadly across config/
-      #     patch changes, so it is keyed only on the pin. Restored on hit AND
-      #     miss (downloads are reused either way).
-      - name: Cache OpenWrt downloads (dl/)
-        uses: actions/cache@v4
-        with:
-          path: openwrt/dl
-          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ steps.cachekey.outputs.dl_key }}-
-
-      # (c) ccache: object cache for the host/cross compilers. Keyed loosely
-      #     (pin+variant) and always updated via run_id suffix so it grows warm.
-      #     Used on a tree-cache MISS to accelerate the full rebuild.
-      - name: Cache ccache (openwrt/.ccache)
-        uses: actions/cache@v4
-        with:
-          path: openwrt/.ccache
-          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ steps.cachekey.outputs.ccache_key }}-
+      # NOTE: the dl/ and .ccache caches are restored LATER (after the clone),
+      # NOT here. They each live under openwrt/ and would CREATE that directory;
+      # restoring them before the clone makes `git clone openwrt` abort with
+      # "destination path 'openwrt' already exists". By the time they run below,
+      # openwrt/ always exists (from the tree cache on a hit, or the clone on a
+      # miss), so they restore cleanly. They are only needed by Download/Build.
 
       - name: "Checkout OpenWrt + apply PR 21837 (DSA) + fix DTS"
         if: steps.treecache.outputs.cache-hit != 'true'
@@ -266,6 +251,29 @@ jobs:
           sed -i 's/ $(tool.*\/stamp-compile)//;' Makefile
           sed -i 's/ $(tool.*\/stamp-install)//;' Makefile
           echo "Toolchain stamp prerequisites stripped from Makefile (cache hit -> incremental image-only make)."
+
+      # (b) Download cache: source tarballs. Safe to reuse broadly across config/
+      #     patch changes, so it is keyed only on the pin. Restored on hit AND
+      #     miss (downloads are reused either way). Placed AFTER the clone so
+      #     openwrt/ already exists and the restore cannot pre-create it.
+      - name: Cache OpenWrt downloads (dl/)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.dl_key }}-
+
+      # (c) ccache: object cache for the host/cross compilers. Keyed loosely
+      #     (pin+variant) and always updated via run_id suffix so it grows warm.
+      #     Used on a tree-cache MISS to accelerate the full rebuild.
+      - name: Cache ccache (openwrt/.ccache)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.ccache_key }}-
 
       - name: "Add files overlay (dashboard + variant power default)"
         run: |
