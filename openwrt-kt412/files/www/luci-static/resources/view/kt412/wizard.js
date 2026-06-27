@@ -421,43 +421,44 @@ function wanCard(curProto){
    bound to every Wi-Fi SSID (both bands) together — not a per-SSID toggle.
    Management stays on the untagged LAN (the backend keeps VLAN 1 untagged on
    all ports) so applying a VLAN can never lock the operator out. */
+/* SIMPLE 3-mode VLAN: (1) one port on VLAN, rest LAN; (2) all ports on VLAN;
+   (3) Wi-Fi + Mesh on VLAN. Empty VLAN ID = no VLAN. Maps to the vlan_flex
+   backend; management always stays reachable via the VLAN gateway. */
 function vlanFlexCard(radios){
-	var chkStyle = 'display:inline-flex;align-items:center;gap:7px;margin:0;cursor:pointer;font-weight:600;color:var(--kt-txt2)';
 	var vid = E('input', { type:'text', class:'cbi-input-text', maxlength:'4', placeholder:_('2–4094، فارغ = بدون VLAN') });
-	var portBoxes = ['lan1','lan2','lan3','lan4'].map(function(p){
-		var cb = E('input', { type:'checkbox', value:p });
-		return { p:p, cb:cb, el:E('label', { style:chkStyle }, [ cb, E('span', {}, p.toUpperCase()) ]) };
-	});
 	var modeSel = E('select', { class:'cbi-input-select' }, [
-		E('option', { value:'tag' },    _('موسوم (trunk) — يبقى LAN أيضاً')),
-		E('option', { value:'access' }, _('غير موسوم (access) — المنفذ داخل VLAN فقط'))
+		E('option', { value:'oneport' },  _('منفذ واحد في الـ VLAN — الباقي LAN')),
+		E('option', { value:'allports' }, _('كل المنافذ في الـ VLAN')),
+		E('option', { value:'wireless' }, _('الواي‑فاي والميش في الـ VLAN'))
 	]);
-	var wifiCb = E('input', { type:'checkbox' });
-	var meshCb = E('input', { type:'checkbox' });
-	var hasMesh = !!(radios && radios.some(function(r){ return r.mode === 'mesh'; }));
+	var portSel = E('select', { class:'cbi-input-select' },
+		['lan1','lan2','lan3','lan4'].map(function(p){ return E('option', { value:p }, p.toUpperCase()); }));
+	var portField = segField(_('منفذ الدخول'), portSel);
+	function syncMode(){ portField.style.display = (modeSel.value === 'oneport') ? '' : 'none'; }
+	modeSel.addEventListener('change', syncMode);
 	var btn = E('button', { class:'kt-btn' }, [ ktIc('check'), ' ' + _('تطبيق') ]);
 	btn.addEventListener('click', function(){
 		if (!validVid(vid.value)) return ui.addNotification(null, E('p', {}, _('VLAN ID يجب أن يكون 1–4094 أو فارغاً')), 'error');
-		var ports = portBoxes.filter(function(b){ return b.cb.checked; }).map(function(b){ return b.p; }).join(',');
+		var ports = '', wifi = '0', mesh = '0';
+		if (modeSel.value === 'oneport')       ports = portSel.value;
+		else if (modeSel.value === 'allports') ports = 'lan1,lan2,lan3,lan4';
+		else { wifi = '1'; mesh = '1'; }          /* wireless */
 		btn.disabled = true;
-		postCall({ act:'vlan_flex', vid:vid.value, ports:ports, mode:modeSel.value,
-			wifi:(wifiCb.checked ? '1' : '0'), mesh:(meshCb.checked ? '1' : '0') })
+		postCall({ act:'vlan_flex', vid:vid.value, ports:ports, mode:'access', wifi:wifi, mesh:mesh })
 			.then(function(j){ btn.disabled = false; notify(j); })
 			.catch(function(){ btn.disabled = false; notify(null); });
 	});
-	var kids = [
-		cardHead(ktIc('tag'), _('VLAN مرن — اختر ما يدخل الـ VLAN'),
-			_('حدّد المنافذ و/أو الوايرلس و/أو الميش التي تدخل هذا الـ VLAN — والباقي يبقى LAN'), 'v'),
+	var card = E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, [
+		cardHead(ktIc('tag'), _('VLAN — ثلاث وضعيات بسيطة'),
+			_('اكتب رقم الـ VLAN واختر الوضعية. الباقي يبقى LAN.'), 'v'),
 		E('div', { class:'kt-field' }, [ E('label', {}, _('VLAN ID')), vid ]),
-		E('div', { class:'kt-field' }, [ E('label', {}, _('المنافذ الداخلة في الـ VLAN')),
-			E('div', { style:'display:flex;flex-wrap:wrap;gap:16px;padding:6px 2px' }, portBoxes.map(function(b){ return b.el; })) ]),
-		segField(_('نوع المنفذ'), modeSel),
-		E('div', { class:'kt-field' }, [ E('label', { style:chkStyle }, [ wifiCb, E('span', {}, _('ضمّ كل الوايرلس (AP) إلى الـ VLAN')) ]) ])
-	];
-	if (hasMesh) kids.push(E('div', { class:'kt-field' }, [ E('label', { style:chkStyle }, [ meshCb, E('span', {}, _('ضمّ الميش (Mesh) إلى الـ VLAN')) ]) ]));
-	kids.push(E('div', { class:'kt-note info' }, _('فارغ أو 1 = إلغاء الـ VLAN (الكل LAN). أمثلة: منفذ واحد فقط (والباقي LAN)، أو كل المنافذ، أو منفذ + واي‑فاي، أو الميش فقط. الإدارة تبقى قابلة للوصول دائماً عبر بوابة الـ VLAN.')));
-	kids.push(E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً')), btn ]));
-	return E('div', { class:'kt-card kt-wz-card kt-wz-anim' }, kids);
+		segField(_('الوضعية'), modeSel),
+		portField,
+		E('div', { class:'kt-note info' }, _('1) منفذ واحد في الـ VLAN والباقي LAN. 2) كل المنافذ في الـ VLAN. 3) الواي‑فاي والميش في الـ VLAN. فارغ = إلغاء الـ VLAN. الإدارة تبقى قابلة للوصول دائماً.')),
+		E('div', { class:'kt-wz-foot' }, [ E('span', { class:'fhint' }, _('يطبّق فوراً')), btn ])
+	]);
+	syncMode();
+	return card;
 }
 
 return view.extend({
