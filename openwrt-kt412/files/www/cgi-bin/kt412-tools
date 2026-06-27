@@ -158,9 +158,19 @@ fi
 # ============================================================
 if [ "$OP" = "getpower" ]; then
 	out_radio() {  # $1 = radio
-		local radio="$1" phy band uci_pow phy_max netdev_pow ifn chan
+		local radio="$1" phy band uci_pow phy_max netdev_pow ifn ifphy chan main_if
+		# Resolve the REAL phy name. wireless.<radio>.phy is almost never set on
+		# modern (DSA/mac80211) OpenWrt, and the old fallback used the radio name
+		# ("radio0") which is NOT a valid `iw phy` target -> iw failed -> phy_max
+		# and netdev both came back empty ("—"). Resolve it authoritatively:
+		# ubus network.wireless status -> running ifname -> /sys .../phy80211/name.
 		phy="$(uci -q get wireless.$radio.phy)"
-		[ -n "$phy" ] || phy="$radio"
+		main_if="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+		if [ -z "$phy" ] && [ -n "$main_if" ]; then
+			phy="$(cat /sys/class/net/$main_if/phy80211/name 2>/dev/null)"
+		fi
+		# last-resort guesses so a valid phy is almost always found
+		[ -n "$phy" ] || { case "$radio" in radio0) phy=phy0;; radio1) phy=phy1;; *) phy="$radio";; esac; }
 		band="$(uci -q get wireless.$radio.band)"
 		[ -n "$band" ] || band="$(uci -q get wireless.$radio.hwmode)"
 		uci_pow="$(uci -q get wireless.$radio.txpower)"
@@ -169,14 +179,20 @@ if [ "$OP" = "getpower" ]; then
 		# live phy ceiling (max tx power) from iw phy info
 		phy_max="$(iw phy "$phy" info 2>/dev/null | sed -n 's/.*(\([0-9.]*\) dBm).*/\1/p' | sort -rn | head -n1)"
 		[ -n "$phy_max" ] || phy_max=""
-		# applied netdev txpower: find a wlan iface bound to this phy
+		# applied netdev txpower: prefer the running ifname from ubus; else scan
+		# every wlan iface and match it to this phy via /sys.
 		netdev_pow=""
-		for ifn in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
-			ifphy="$(cat /sys/class/net/$ifn/phy80211/name 2>/dev/null)"
-			[ "$ifphy" = "$phy" ] || continue
-			netdev_pow="$(iw dev $ifn info 2>/dev/null | sed -n 's/.*txpower \([0-9.]*\) dBm.*/\1/p' | head -n1)"
-			[ -n "$netdev_pow" ] && break
-		done
+		if [ -n "$main_if" ]; then
+			netdev_pow="$(iw dev "$main_if" info 2>/dev/null | sed -n 's/.*txpower \([0-9.]*\) dBm.*/\1/p' | head -n1)"
+		fi
+		if [ -z "$netdev_pow" ]; then
+			for ifn in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+				ifphy="$(cat /sys/class/net/$ifn/phy80211/name 2>/dev/null)"
+				[ "$ifphy" = "$phy" ] || continue
+				netdev_pow="$(iw dev $ifn info 2>/dev/null | sed -n 's/.*txpower \([0-9.]*\) dBm.*/\1/p' | head -n1)"
+				[ -n "$netdev_pow" ] && break
+			done
+		fi
 		printf '{"radio":"%s","phy":"%s","band":"%s","channel":"%s","uci_txpower":"%s","phy_max":"%s","netdev_txpower":"%s"}' \
 			"$(json_esc "$radio")" "$(json_esc "$phy")" "$(json_esc "$band")" "$(json_esc "$chan")" \
 			"$(json_esc "$uci_pow")" "$(json_esc "$phy_max")" "$(json_esc "$netdev_pow")"
