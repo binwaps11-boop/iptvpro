@@ -1382,6 +1382,18 @@ case "$OP" in
 		else
 			echo "$cpu_idle $cpu_total $now_s -1" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
 		fi
+		# PREFER the background sampler's TRUE 1-minute-averaged CPU% (/tmp/kt412-hist,
+		# written by kt412-sampler via cron). It is measured independently of the
+		# dashboard's own polling, so it reflects real device load — not the cost of
+		# the gauge measuring itself on the single core (which inflated it to ~76%).
+		if [ -f /tmp/kt412-hist ]; then
+			hline="$(tail -n1 /tmp/kt412-hist 2>/dev/null)"
+			hts="${hline%% *}"; hcpu="$(printf '%s' "$hline" | awk '{print $2}')"
+			now2="$(date +%s 2>/dev/null || echo 0)"
+			case "$hts" in ''|*[!0-9]*) hts=0;; esac
+			case "$hcpu" in ''|*[!0-9]*) hcpu="";; esac
+			[ -n "$hcpu" ] && [ $((now2 - hts)) -lt 150 ] 2>/dev/null && cpu_pct="$hcpu"
+		fi
 		# WRITABLE space = the overlay (rootfs_data), not the read-only squashfs /rom
 		# (which is always ~100% full). Parse by NF so a wrapped device name doesn't shift columns.
 		ovl="$(df -k /overlay 2>/dev/null | awk 'NR>1 && NF>=5 {print $(NF-4)","$(NF-3); exit}')"

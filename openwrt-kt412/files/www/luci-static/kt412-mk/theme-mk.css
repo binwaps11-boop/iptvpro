@@ -7,9 +7,9 @@
      2) the modern MK dashboard home (view/kt412/dashboard.js),
      3) reusable gauges / sparklines / interface tiles, RTL + mobile-responsive.
 
-   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0F172A base
+   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0b1220 base
    with translucent slate glass panels (rgba(51,65,85,.55) + backdrop blur), light
-   text (#E2E8F0), neon accents — cyan #06B6D4 (wifi/active/links), green #22C55E
+   text (#E2E8F0), neon accents — cyan #38bdf8 (wifi/active/links), green #22C55E
    (healthy), amber #F59E0B (warning), crimson #EF4444 (error), purple #8B5CF6
    (storage/flash). All class NAMES preserved exactly.
 
@@ -26,23 +26,23 @@
 :root{
   /* PRO refinement — richer near-black surfaces, cleaner glass, brighter text,
      refined accent + softer shadows (synced with kt412-theme.css). */
-  --mk-bg0:#0A0F1C; --mk-bg1:#111A2E; --mk-bg2:#1B2840;
+  --mk-bg0:#0b1220; --mk-bg1:#111c2e; --mk-bg2:#16243a;
   --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
 
   /* accent family — refined bright cyan primary */
-  --mk-accent:#22D3EE; --mk-accent2:#22D3EE; --mk-violet:#A78BFA;
-  --mk-blue:#22D3EE; --mk-cyan:#22D3EE;        /* legacy aliases now cyan      */
-  --mk-grad:linear-gradient(135deg,#22D3EE 0%,#0891B2 55%,#0E7490 100%);
+  --mk-accent:#38bdf8; --mk-accent2:#38bdf8; --mk-violet:#A78BFA;
+  --mk-blue:#38bdf8; --mk-cyan:#38bdf8;        /* legacy aliases now cyan      */
+  --mk-grad:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%);
 
   /* status colours — refined on dark */
   --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
 
   /* glass surfaces / strokes */
   --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
-  --mk-stroke:rgba(148,163,184,0.14); --mk-stroke2:rgba(34,211,238,0.50);
+  --mk-stroke:rgba(255,255,255,0.12); --mk-stroke2:rgba(56,189,248,0.50);
 
   /* text — brighter, high contrast on dark */
-  --mk-txt:#F1F5F9; --mk-txt2:#C3CEDE; --mk-muted:#8693A8;
+  --mk-txt:#F1F5F9; --mk-txt2:#e2e8f0; --mk-muted:#cbd5e1;
 
   --mk-shadow:0 4px 18px rgba(0,0,0,.40);
   --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
@@ -70,10 +70,10 @@ body:has(input#luci_password){
   display:flex; align-items:center; justify-content:center;
   padding:24px!important; box-sizing:border-box;
   background:
-    radial-gradient(1100px 760px at 12% -12%, rgba(6,182,212,.22) 0%, transparent 56%),
+    radial-gradient(1100px 760px at 12% -12%, rgba(56,189,248,.22) 0%, transparent 56%),
     radial-gradient(960px 760px at 112% -4%, rgba(139,92,246,.20) 0%, transparent 54%),
     radial-gradient(820px 820px at 50% 124%, rgba(34,197,94,.12) 0%, transparent 56%),
-    linear-gradient(160deg,#0F172A,#1E293B 55%,#0F172A)!important;
+    linear-gradient(160deg,#0b1220,#16243a 55%,#0b1220)!important;
   background-attachment:fixed!important;
 }
 /* faint circuit-grid overlay for the network-engineer vibe */
@@ -105,7 +105,7 @@ body.node-main-login .cbi-map{
   background:
     linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)),
     rgba(51,65,85,0.55)!important;
-  border:1px solid rgba(6,182,212,0.22)!important; border-radius:24px!important;
+  border:1px solid rgba(56,189,248,0.22)!important; border-radius:24px!important;
   box-shadow:
     0 30px 70px -20px rgba(0,0,0,.65),
     0 0 0 1px rgba(15,23,42,.40),
@@ -120,7 +120,7 @@ body.node-main-login .cbi-map::before{
   content:"Smart AP"; display:block; text-align:center;
   font-size:32px; font-weight:800; letter-spacing:.5px; line-height:1.1;
   margin:0 0 10px;
-  background:linear-gradient(90deg,#22D3EE 10%,#A78BFA 90%);
+  background:linear-gradient(90deg,#38bdf8 10%,#A78BFA 90%);
   -webkit-background-clip:text; background-clip:text; color:transparent;
   -webkit-text-fill-color:transparent;
 }
@@ -133,16 +133,30 @@ body.node-main-login .cbi-map::after{
   margin:0 0 24px; padding-top:14px; line-height:1.6;
   border-top:1px solid rgba(148,163,184,.15);
 }
-body:has(input#luci_password) .cbi-map h2,
-body:has(input#luci_password) legend,
-body.node-main-login h2,
-body:has(input#luci_password) h2,
-body:has(input#luci_password) #maincontent > h2,
-body:has(input#luci_password) #maincontent > .container > h2,
-body:has(input#luci_password) .cbi-map > h2:first-child,
-body.node-main-login #maincontent > h2,
-body.node-main-login #maincontent > .container > h2,
-body:has(input#luci_password) .cbi-map-descr{ display:none!important; }
+/* HIDE every LuCI heading on the login page ("Authorization Required" slipped
+   through because it is not always an <h2>). Our "Smart AP" wordmark is a ::before
+   pseudo (not a real heading) so it survives. Also kill stray divider lines. */
+body:has(input#luci_password) h1, body:has(input#luci_password) h2,
+body:has(input#luci_password) h3, body:has(input#luci_password) h4,
+body:has(input#luci_password) h5, body:has(input#luci_password) legend,
+body:has(input#luci_password) .cbi-map-descr,
+body:has(input[name="luci_password"]) h1, body:has(input[name="luci_password"]) h2,
+body:has(input[name="luci_password"]) h3, body:has(input[name="luci_password"]) h4,
+body:has(input[name="luci_password"]) h5, body:has(input[name="luci_password"]) legend,
+body:has(input[name="luci_password"]) .cbi-map-descr,
+body.node-main-login h1, body.node-main-login h2, body.node-main-login h3,
+body.node-main-login h4, body.node-main-login h5, body.node-main-login legend,
+body.node-main-login .cbi-map-descr{ display:none!important; }
+/* stray divider lines / inner borders inside the one login card */
+body:has(input#luci_password) hr, body:has(input[name="luci_password"]) hr,
+body.node-main-login hr{ display:none!important; }
+body:has(input#luci_password) .cbi-value, body:has(input[name="luci_password"]) .cbi-value,
+body.node-main-login .cbi-value{ border:0!important; box-shadow:none!important; }
+/* left-align the English Username/Password labels so they sit over their inputs
+   (RTL was pushing them to the right edge => looked misaligned) */
+body:has(input#luci_password) .cbi-value-title,
+body:has(input[name="luci_password"]) .cbi-value-title,
+body.node-main-login .cbi-value-title{ text-align:left!important; }
 
 /* FLATTEN the inner form: the obsidian section/card styling (from kt412-theme)
    was painting the fieldset that wraps Username/Password as a SECOND card inside
@@ -189,8 +203,8 @@ body:has(input#luci_password) input[type="password"]{
 body:has(input#luci_password) input[type="text"]:focus,
 body:has(input#luci_password) input[type="password"]:focus{
   background:rgba(15,23,42,0.80)!important;
-  border-color:rgba(34,211,238,.65)!important;
-  box-shadow:0 0 0 3px rgba(34,211,238,.22), 0 0 16px rgba(34,211,238,.16)!important;
+  border-color:rgba(56,189,248,.65)!important;
+  box-shadow:0 0 0 3px rgba(56,189,248,.22), 0 0 16px rgba(56,189,248,.16)!important;
   outline:none!important;
 }
 body:has(input#luci_password) input::placeholder{ color:var(--mk-muted)!important; }
@@ -215,15 +229,15 @@ body:has(input#luci_password) button[type="submit"]{
   width:100%!important; padding:14px 16px!important; margin-top:8px!important;
   font-size:15.5px!important; font-weight:700!important; letter-spacing:.4px;
   color:#fff!important; border:0!important; border-radius:13px!important; cursor:pointer;
-  background:linear-gradient(135deg,#22D3EE 0%,#0EA5C4 55%,#0E7490 100%)!important;
-  box-shadow:0 12px 26px -6px rgba(34,211,238,.45), inset 0 1px 0 rgba(255,255,255,.20)!important;
+  background:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%)!important;
+  box-shadow:0 12px 26px -6px rgba(56,189,248,.45), inset 0 1px 0 rgba(255,255,255,.20)!important;
   transition:transform .2s ease, box-shadow .25s ease, filter .25s ease;
 }
 body:has(input#luci_password) .cbi-button-apply:hover,
 body:has(input#luci_password) button[type="submit"]:hover,
 body:has(input#luci_password) .cbi-button:hover{
   transform:translateY(-2px); filter:brightness(1.06);
-  box-shadow:0 18px 36px -8px rgba(6,182,212,.62), inset 0 1px 0 rgba(255,255,255,.25)!important;
+  box-shadow:0 18px 36px -8px rgba(56,189,248,.62), inset 0 1px 0 rgba(255,255,255,.25)!important;
 }
 body:has(input#luci_password) button[type="submit"]:active{
   transform:translateY(0); filter:brightness(.98);
@@ -281,9 +295,9 @@ body:has(input[name="luci_password"]){
   min-height:100vh!important; display:flex!important; align-items:center!important;
   justify-content:center!important; padding:24px!important; box-sizing:border-box;
   background:
-    radial-gradient(1100px 760px at 12% -12%, rgba(6,182,212,.22) 0%, transparent 56%),
+    radial-gradient(1100px 760px at 12% -12%, rgba(56,189,248,.22) 0%, transparent 56%),
     radial-gradient(960px 760px at 112% -4%, rgba(139,92,246,.20) 0%, transparent 54%),
-    linear-gradient(160deg,#0F172A,#1E293B 55%,#0F172A)!important;
+    linear-gradient(160deg,#0b1220,#16243a 55%,#0b1220)!important;
 }
 body:has(input[name="luci_password"]) header,
 body:has(input[name="luci_password"]) #header,
@@ -303,7 +317,7 @@ body:has(input[name="luci_password"]) .cbi-map{
   position:relative; z-index:1; max-width:400px; width:min(400px,92vw); margin:auto!important;
   padding:36px 34px 32px!important;
   background:linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)), rgba(51,65,85,.55)!important;
-  border:1px solid rgba(6,182,212,.22)!important; border-radius:24px!important;
+  border:1px solid rgba(56,189,248,.22)!important; border-radius:24px!important;
   box-shadow:0 30px 70px -20px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.10)!important;
   -webkit-backdrop-filter:blur(16px) saturate(145%)!important; backdrop-filter:blur(16px) saturate(145%)!important;
   direction:rtl; text-align:right;
@@ -341,7 +355,7 @@ body:has(input[name="luci_password"]) input[type="password"]{
 }
 body:has(input[name="luci_password"]) input[type="text"]:focus,
 body:has(input[name="luci_password"]) input[type="password"]:focus{
-  border-color:rgba(6,182,212,.65)!important; box-shadow:0 0 0 3px rgba(6,182,212,.22)!important; outline:none!important;
+  border-color:rgba(56,189,248,.65)!important; box-shadow:0 0 0 3px rgba(56,189,248,.22)!important; outline:none!important;
 }
 body:has(input[name="luci_password"]) .cbi-button,
 body:has(input[name="luci_password"]) .cbi-button-apply,
@@ -349,8 +363,8 @@ body:has(input[name="luci_password"]) button[type="submit"]{
   width:100%!important; padding:14px 16px!important; margin-top:8px!important;
   font-size:15.5px!important; font-weight:700!important; color:#fff!important; border:0!important;
   border-radius:13px!important; cursor:pointer;
-  background:linear-gradient(135deg,#06B6D4 0%,#0891b2 60%,#0e7490 100%)!important;
-  box-shadow:0 12px 26px -6px rgba(6,182,212,.50)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)!important;
+  background:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 60%,#0284c7 100%)!important;
+  box-shadow:0 12px 26px -6px rgba(56,189,248,.50)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)!important;
 }
 body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important; }
 
@@ -363,7 +377,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-head{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:4px 0 18px; }
 .mk-head .mk-logo{
   font-size:24px; font-weight:800; letter-spacing:.5px;
-  background:linear-gradient(90deg,#06B6D4,#8b5cf6);
+  background:linear-gradient(90deg,#38bdf8,#8b5cf6);
   -webkit-background-clip:text; background-clip:text; color:transparent;
   -webkit-text-fill-color:transparent;
 }
@@ -401,7 +415,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   padding:1rem; position:relative; overflow:hidden;
   transition:all .3s ease;
 }
-.mk-card:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow-lg); border-color:rgba(6,182,212,.35); }
+.mk-card:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow-lg); border-color:rgba(56,189,248,.35); }
 .mk-card h3{ margin:0 0 14px; font-size:15px; color:var(--mk-txt); font-weight:800; display:flex; align-items:center; gap:8px; }
 .mk-card .mk-hint{ color:var(--mk-muted); font-size:12px; }
 
@@ -457,7 +471,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-iftile.up .nm{ color:var(--mk-green); }
 /* small speed badge for plugged ports */
 .mk-iftile .spd{ display:inline-block; margin-top:5px; padding:2px 8px; border-radius:999px;
-  font-size:10px; font-weight:800; color:#0F172A; background:var(--mk-green);
+  font-size:10px; font-weight:800; color:#0b1220; background:var(--mk-green);
   box-shadow:0 0 8px rgba(34,197,94,.5); }
 /* unplugged / down = dark slate grey, dim */
 .mk-iftile.down{ background:rgba(30,41,59,0.45); border-color:var(--mk-stroke); opacity:.55; }
@@ -470,7 +484,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   display:inline-block; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:700;
   margin-bottom:10px;
 }
-.mk-power .mk-pwr-badge.info{ color:#06B6D4; background:rgba(6,182,212,.12); border:1px solid rgba(6,182,212,.4); }
+.mk-power .mk-pwr-badge.info{ color:#38bdf8; background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.4); }
 .mk-power .mk-pwr-badge.bad{ color:#fff; background:linear-gradient(135deg,var(--mk-red),#f43f5e); box-shadow:0 6px 16px rgba(239,68,68,.45); }
 .mk-power .mk-pwr-text{ color:var(--mk-txt2); font-size:13px; line-height:1.7; }
 .mk-power.alert{ border-color:rgba(239,68,68,.5); box-shadow:0 0 0 1px rgba(239,68,68,.25), var(--mk-shadow); }
@@ -525,7 +539,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   margin:2px 0 14px; padding:14px 18px; border-radius:16px;
   background:
     radial-gradient(420px 160px at 92% -40%, rgba(139,92,246,.20), transparent 70%),
-    radial-gradient(520px 200px at 0% -30%, rgba(6,182,212,.20), transparent 70%),
+    radial-gradient(520px 200px at 0% -30%, rgba(56,189,248,.20), transparent 70%),
     var(--mk-card);
   border:1px solid var(--mk-stroke);
   box-shadow:var(--mk-shadow), inset 0 1px 0 rgba(255,255,255,.05);
@@ -535,13 +549,13 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-mark{
   width:46px; height:46px; flex:0 0 auto; border-radius:13px;
   display:flex; align-items:center; justify-content:center; color:#fff;
-  background:linear-gradient(135deg,#06B6D4,#8b5cf6);
-  box-shadow:0 8px 20px -6px rgba(6,182,212,.55), inset 0 1px 0 rgba(255,255,255,.30);
+  background:linear-gradient(135deg,#38bdf8,#8b5cf6);
+  box-shadow:0 8px 20px -6px rgba(56,189,248,.55), inset 0 1px 0 rgba(255,255,255,.30);
 }
 .mk-mark .mk-ic{ width:26px; height:26px; }
 .mk-brand-t .mk-logo{
   font-size:26px; font-weight:800; letter-spacing:.4px; line-height:1.05;
-  background:linear-gradient(90deg,#06B6D4,#8b5cf6);
+  background:linear-gradient(90deg,#38bdf8,#8b5cf6);
   -webkit-background-clip:text; background-clip:text; color:transparent;
   -webkit-text-fill-color:transparent;
 }
@@ -556,7 +570,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
   -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
   transition:border-color .25s ease, transform .2s ease, box-shadow .25s ease;
 }
-.mk-chip:hover{ transform:translateY(-1px); border-color:rgba(6,182,212,.4); box-shadow:var(--mk-shadow); }
+.mk-chip:hover{ transform:translateY(-1px); border-color:rgba(56,189,248,.4); box-shadow:var(--mk-shadow); }
 .mk-chip .mk-ic{ color:var(--mk-muted); }
 .mk-chip .ck{ color:var(--mk-muted); }
 .mk-chip .cv{ color:var(--mk-txt); font-weight:800; letter-spacing:.2px; }
@@ -570,8 +584,8 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-sec{ display:flex; align-items:center; gap:11px; margin:22px 2px 13px; }
 .mk-sec > .mk-ic{
   width:34px; height:34px; padding:8px; border-radius:10px; color:var(--mk-accent);
-  background:rgba(6,182,212,.12); border:1px solid rgba(6,182,212,.30);
-  box-shadow:inset 0 0 12px rgba(6,182,212,.12);
+  background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.30);
+  box-shadow:inset 0 0 12px rgba(56,189,248,.12);
 }
 .mk-sec-t{ display:flex; flex-direction:column; line-height:1.15; }
 .mk-sec-t .t{ font-size:16.5px; font-weight:800; color:var(--mk-txt); letter-spacing:.2px; }
@@ -589,13 +603,13 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-gcard{ padding:18px 14px 16px; }
 .mk-gcard::before{ /* faint top accent line */
   content:""; position:absolute; inset:0 0 auto 0; height:2px;
-  background:linear-gradient(90deg, transparent, rgba(6,182,212,.5), transparent);
+  background:linear-gradient(90deg, transparent, rgba(56,189,248,.5), transparent);
   opacity:.6;
 }
 .mk-gring{ position:relative; display:inline-flex; }
 .mk-gring::after{ /* soft glow halo behind the ring (toned down for clarity) */
   content:""; position:absolute; inset:8px; border-radius:50%;
-  box-shadow:0 0 18px 1px rgba(6,182,212,.10); pointer-events:none; z-index:0;
+  box-shadow:0 0 18px 1px rgba(56,189,248,.10); pointer-events:none; z-index:0;
 }
 .mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
   display:block; position:relative; z-index:1; }
@@ -626,7 +640,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-rate .ri{ width:30px; height:30px; flex:0 0 auto; border-radius:9px;
   display:flex; align-items:center; justify-content:center; }
 .mk-rate .ri .mk-ic{ width:17px; height:17px; }
-.mk-rate.rx .ri{ color:var(--mk-accent); background:rgba(6,182,212,.14); border:1px solid rgba(6,182,212,.35); }
+.mk-rate.rx .ri{ color:var(--mk-accent); background:rgba(56,189,248,.14); border:1px solid rgba(56,189,248,.35); }
 .mk-rate.tx .ri{ color:var(--mk-violet); background:rgba(139,92,246,.14); border:1px solid rgba(139,92,246,.35); }
 .mk-rate .rl{ color:var(--mk-muted); font-size:12px; }
 .mk-rate b{ margin-inline-start:auto; font-size:18px; font-weight:800; letter-spacing:.2px; }
@@ -657,12 +671,12 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* speed / link badge */
 .mk-iftile .spd{ display:inline-flex; align-items:baseline; gap:3px; margin-top:7px;
   padding:3px 9px; border-radius:999px; font-size:11px; font-weight:800; line-height:1;
-  white-space:nowrap; color:#0F172A; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
+  white-space:nowrap; color:#0b1220; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
 .mk-iftile .spd i{ font-style:normal; font-size:8.5px; font-weight:700; opacity:.8; }
 .mk-iftile .spd.gig{ background:var(--mk-green); }
 .mk-iftile .spd.fe{ background:var(--mk-amber); box-shadow:0 0 10px rgba(245,158,11,.45); }
-.mk-iftile .spd.link{ background:rgba(6,182,212,.18); color:var(--mk-accent);
-  border:1px solid rgba(6,182,212,.4); box-shadow:none; }
+.mk-iftile .spd.link{ background:rgba(56,189,248,.18); color:var(--mk-accent);
+  border:1px solid rgba(56,189,248,.4); box-shadow:none; }
 .mk-iftile .spd.off{ background:rgba(100,116,139,.18); color:var(--mk-muted); box-shadow:none; }
 /* plugged / up = neon green tile + lit LED */
 .mk-iftile.up{ border-color:rgba(34,197,94,.50);
@@ -671,12 +685,12 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-iftile.up .led{ background:var(--mk-green); box-shadow:0 0 10px 1px rgba(34,197,94,.85), 0 0 0 3px rgba(34,197,94,.18); }
 .mk-iftile.up .nm{ color:var(--mk-green); }
 /* radios (wifi) lit in cyan when active */
-.mk-iftile.radio.up{ border-color:rgba(6,182,212,.50);
-  background:linear-gradient(180deg, rgba(6,182,212,.16), rgba(6,182,212,.05)); }
+.mk-iftile.radio.up{ border-color:rgba(56,189,248,.50);
+  background:linear-gradient(180deg, rgba(56,189,248,.16), rgba(56,189,248,.05)); }
 .mk-iftile.radio.up .ico{ color:var(--mk-accent); }
-.mk-iftile.radio.up .led{ background:var(--mk-accent); box-shadow:0 0 10px 1px rgba(6,182,212,.85), 0 0 0 3px rgba(6,182,212,.18); }
+.mk-iftile.radio.up .led{ background:var(--mk-accent); box-shadow:0 0 10px 1px rgba(56,189,248,.85), 0 0 0 3px rgba(56,189,248,.18); }
 .mk-iftile.radio.up .nm{ color:var(--mk-accent); }
-.mk-iftile.radio.up .spd.link{ background:rgba(6,182,212,.18); }
+.mk-iftile.radio.up .spd.link{ background:rgba(56,189,248,.18); }
 /* WAN highlight ring when up */
 .mk-iftile.wan.up{ box-shadow:inset 0 0 0 1px rgba(34,197,94,.30), var(--mk-shadow); }
 /* unplugged / down = dim slate */
@@ -716,13 +730,13 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 :root{color-scheme:dark}
 @media (prefers-color-scheme: light){
   :root:not([data-mk-skin="off"]){
-    --mk-bg0:#0A0F1C; --mk-bg1:#111A2E; --mk-bg2:#1B2840;
+    --mk-bg0:#0b1220; --mk-bg1:#111c2e; --mk-bg2:#16243a;
     --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
     --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
-    --mk-stroke:rgba(148,163,184,0.14); --mk-stroke2:rgba(34,211,238,0.50);
-    --mk-txt:#F1F5F9; --mk-txt2:#C3CEDE; --mk-muted:#8693A8;
-    --mk-accent:#22D3EE; --mk-accent2:#22D3EE; --mk-violet:#A78BFA;
-    --mk-blue:#22D3EE; --mk-cyan:#22D3EE;
+    --mk-stroke:rgba(255,255,255,0.12); --mk-stroke2:rgba(56,189,248,0.50);
+    --mk-txt:#F1F5F9; --mk-txt2:#e2e8f0; --mk-muted:#cbd5e1;
+    --mk-accent:#38bdf8; --mk-accent2:#38bdf8; --mk-violet:#A78BFA;
+    --mk-blue:#38bdf8; --mk-cyan:#38bdf8;
     --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
     --mk-shadow:0 4px 18px rgba(0,0,0,.40);
     --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
@@ -757,4 +771,17 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 /* mid laptop width: 3-up gauges fit, but drop 6-up portmap to 3 for legibility */
 @media (min-width:992px) and (max-width:1199px){
   .mk-grid.mk-cols-6{ grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+
+/* ============================================================================
+   UI REDESIGN v2 — visible build marker. Confirms the NEW theme is actually
+   loaded (not a stale browser cache / old flash). Small, fixed, unobtrusive.
+   ============================================================================ */
+body::after{
+  content:"UI Redesign v2";
+  position:fixed; inset-block-end:8px; inset-inline-start:8px; z-index:9999;
+  font:700 10px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:.4px;
+  color:#0b1220; background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+  padding:5px 9px; border-radius:999px; pointer-events:none; opacity:.92;
+  box-shadow:0 4px 12px -3px rgba(56,189,248,.5);
 }

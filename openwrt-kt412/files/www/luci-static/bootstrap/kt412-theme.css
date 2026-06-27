@@ -4,9 +4,9 @@
    cascade.css on every LuCI page (see /etc/uci-defaults/40-kt412-luci-theme),
    so EVERY LuCI page inherits the custom look. Append-only overrides.
 
-   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0F172A base
+   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0b1220 base
    with translucent slate glass panels (rgba(51,65,85,.55) + backdrop blur), light
-   text (#E2E8F0 / muted #94A3B8), neon accents — cyan #06B6D4 (wifi/active/links),
+   text (#E2E8F0 / muted #94A3B8), neon accents — cyan #38bdf8 (wifi/active/links),
    green #22C55E (healthy), amber #F59E0B (warning), crimson #EF4444 (error/down),
    purple #8B5CF6 (storage/flash). All class NAMES preserved exactly — only colours
    / spacing / shadows / radii were changed, so the JS views keep working.
@@ -19,38 +19,36 @@
   /* ---- core palette — PRO refinement: richer near-black base, cleaner glass,
      crisper borders, brighter text, restrained accent + softer shadows (less
      neon glow = more professional). Identity (obsidian + cyan) preserved. ---- */
-  --kt-bg0:#0A0F1C;            /* page base — deeper, richer obsidian        */
-  --kt-bg1:#111A2E;           /* secondary panel tint for gradients          */
-  --kt-bg2:#1B2840;
+  /* ===== UI REDESIGN v2 PALETTE (sky accent, visible borders, readable text) ===== */
+  --kt-bg0:#0b1220;           /* page base                                   */
+  --kt-bg1:#111c2e;           /* secondary panel tint                         */
+  --kt-bg2:#16243a;
 
-  /* surfaces firmed up (higher opacity) so text reads cleanly and we can use a
-     LIGHTER blur — heavy backdrop-filter blur was both a browser-CPU cost and a
-     readability problem ("الزجاج يضعف القراءة"). */
-  --kt-card:rgba(22,32,52,0.90);   /* near-opaque slate — crisp text          */
-  --kt-card2:rgba(13,20,38,0.92);  /* deeper surface (card heads)            */
-  --kt-glass:rgba(22,32,52,0.90);  /* glass panel                            */
-  --kt-glass-strong:rgba(11,18,34,0.94);
+  --kt-card:#111c2e;          /* solid surface — crisp text, no wash-out      */
+  --kt-card2:#16243a;         /* raised surface (card heads / chips)          */
+  --kt-glass:#111c2e;
+  --kt-glass-strong:#0e1a2c;
 
-  --kt-stroke:rgba(148,163,184,0.14);        /* crisp, subtle hairline border */
-  --kt-stroke-2:rgba(148,163,184,0.22);      /* slightly stronger separator   */
-  --kt-stroke-strong:rgba(6,182,212,0.50);   /* cyan focus ring base          */
+  --kt-stroke:rgba(255,255,255,0.12);        /* VISIBLE hairline border       */
+  --kt-stroke-2:rgba(255,255,255,0.18);      /* stronger separator            */
+  --kt-stroke-strong:rgba(56,189,248,0.55);  /* sky focus ring base           */
 
-  --kt-txt:#F1F5F9;           /* primary text — brighter, high contrast      */
-  --kt-txt2:#C3CEDE;          /* secondary text                             */
-  --kt-muted:#8693A8;         /* muted / hints                              */
+  --kt-txt:#f8fafc;           /* primary text                                */
+  --kt-txt2:#e2e8f0;          /* secondary text — clearly readable            */
+  --kt-muted:#cbd5e1;         /* muted / hints — readable, not faint          */
 
-  --kt-accent:#22D3EE;        /* refined bright cyan — links / active        */
-  --kt-accent2:#22D3EE;       /* cyan (gradient start)                      */
-  --kt-accent3:#0E7490;       /* deep teal (gradient end)                   */
-  --kt-accent-soft:rgba(34,211,238,0.10);    /* cyan tinted bg (chips/hover)  */
+  --kt-accent:#38bdf8;        /* SKY accent — links / active (new look)       */
+  --kt-accent2:#38bdf8;       /* gradient start                              */
+  --kt-accent3:#0ea5e9;       /* deeper sky (gradient end)                   */
+  --kt-accent-soft:rgba(56,189,248,0.12);    /* accent-tinted bg              */
 
-  --kt-ok:#34D399;            /* refined emerald — healthy / success         */
-  --kt-warn:#FBBF24;          /* refined amber — warning / high load         */
-  --kt-bad:#F87171;           /* refined coral-red — error / down            */
-  --kt-violet:#A78BFA;        /* refined violet — storage / flash            */
+  --kt-ok:#22c55e;            /* success                                     */
+  --kt-warn:#f59e0b;          /* warning                                     */
+  --kt-bad:#ef4444;           /* error / down                                */
+  --kt-violet:#a78bfa;        /* storage / flash accent                      */
 
   /* smoother, single-family premium gradient (cyan -> deep teal) */
-  --kt-grad:linear-gradient(135deg,#22D3EE 0%,#0891B2 55%,#0E7490 100%);
+  --kt-grad:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%);
   /* softer, deeper shadows (depth without the heavy neon halo) */
   --kt-shadow:0 4px 18px rgba(0,0,0,.40);
   --kt-shadow-lg:0 12px 34px rgba(0,0,0,.50);
@@ -74,7 +72,7 @@ html,body{
 }
 body{
   background-image:
-    radial-gradient(1000px 680px at 12% -12%, rgba(34,211,238,.06) 0%, transparent 58%),
+    radial-gradient(1000px 680px at 12% -12%, rgba(56,189,248,.06) 0%, transparent 58%),
     radial-gradient(900px 680px at 110% 6%, rgba(167,139,250,.05) 0%, transparent 55%),
     linear-gradient(160deg,var(--kt-bg0),var(--kt-bg1) 62%,var(--kt-bg0))!important;
   background-attachment:fixed!important;
@@ -91,9 +89,9 @@ h1,h2,h3,h4,h5,legend{color:var(--kt-txt)!important}
 
 /* ---- top header / navigation bar — the cyan accent gradient bar ---- */
 header,.header,#header,.navbar,#topmenu,.main > .loading{
-  background:linear-gradient(135deg,#0891b2,#06B6D4)!important;
+  background:linear-gradient(135deg,#0ea5e9,#38bdf8)!important;
   border-color:transparent!important;color:#fff!important;
-  box-shadow:0 6px 20px rgba(6,182,212,.30)!important
+  box-shadow:0 6px 20px rgba(56,189,248,.30)!important
 }
 .navbar,.navbar a,header a,.fill a,.brand,.navbar-brand{color:#fff!important}
 .navbar-nav>li>a:hover,.nav>li>a:hover{background:rgba(255,255,255,.18)!important;color:#fff!important;border-radius:9px}
@@ -108,7 +106,7 @@ header,.header,#header,.navbar,#topmenu,.main > .loading{
 .main-left a:hover,.nav-sidebar a:hover{background:var(--kt-accent-soft)!important;color:var(--kt-accent)!important;border-radius:9px}
 .main-left .active>a,.nav-sidebar .active>a,li.active>a{
   background:var(--kt-grad)!important;color:#fff!important;
-  box-shadow:0 6px 16px rgba(6,182,212,.35)!important;border-radius:10px
+  box-shadow:0 6px 16px rgba(56,189,248,.35)!important;border-radius:10px
 }
 
 /* ---- content cards / CBI sections / fieldsets — translucent glass ---- */
@@ -135,7 +133,7 @@ input,select,textarea,.cbi-input-text,.cbi-input-password,.cbi-input-select{
 }
 input::placeholder,textarea::placeholder{color:var(--kt-muted)!important}
 input:focus,select:focus,textarea:focus{
-  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(6,182,212,.25)!important;outline:none
+  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(56,189,248,.25)!important;outline:none
 }
 /* selects: the base theme gives the control a small FIXED height, which cropped
    the chosen option text top & bottom (the "MB 10" / "2.4G — KT412" / "DHCP"
@@ -153,15 +151,15 @@ select,.cbi-input-select{
   border-radius:10px!important;font-weight:700!important;border:1px solid var(--kt-stroke)!important;
   background:rgba(51,65,85,0.55)!important;color:var(--kt-accent)!important;transition:all .3s ease
 }
-.btn:hover,.cbi-button:hover,button:hover{background:var(--kt-accent-soft)!important;border-color:var(--kt-accent)!important;box-shadow:0 6px 18px rgba(6,182,212,.25)!important}
+.btn:hover,.cbi-button:hover,button:hover{background:var(--kt-accent-soft)!important;border-color:var(--kt-accent)!important;box-shadow:0 6px 18px rgba(56,189,248,.25)!important}
 .cbi-button-save,.cbi-button-apply,.cbi-button-positive,.btn.cbi-button-action,
 input[type=submit]{
   background:var(--kt-grad)!important;color:#fff!important;
-  border-color:transparent!important;box-shadow:0 8px 20px rgba(6,182,212,.32)!important
+  border-color:transparent!important;box-shadow:0 8px 20px rgba(56,189,248,.32)!important
 }
 .cbi-button-save:hover,.cbi-button-apply:hover,.cbi-button-positive:hover,
 .btn.cbi-button-action:hover,input[type=submit]:hover{
-  color:#fff!important;box-shadow:0 12px 26px rgba(6,182,212,.45)!important;transform:translateY(-1px)
+  color:#fff!important;box-shadow:0 12px 26px rgba(56,189,248,.45)!important;transform:translateY(-1px)
 }
 .cbi-button-remove,.cbi-button-reset,.cbi-button-negative,.btn.danger{
   background:linear-gradient(135deg,#dc2626,#EF4444)!important;color:#fff!important;border-color:transparent!important
@@ -174,7 +172,7 @@ input[type=submit]{
 
 /* ---- LuCI status indicators ---- */
 .label,.badge{border-radius:999px!important}
-.cbi-tooltip,.tooltip-inner{background:#1E293B!important;color:#fff!important;border:1px solid var(--kt-accent)!important}
+.cbi-tooltip,.tooltip-inner{background:#16243a!important;color:#fff!important;border:1px solid var(--kt-accent)!important}
 
 /* ============================================================================
    PC / wide-screen WHITE-LEAK coverage. On a laptop the user saw white blocks +
@@ -236,7 +234,7 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 .kt-card{background:var(--kt-card);border:1px solid var(--kt-stroke);border-radius:12px;padding:1rem;
   -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
   box-shadow:var(--kt-shadow);position:relative;overflow:hidden;transition:all .3s ease}
-.kt-card:hover{transform:translateY(-2px);box-shadow:var(--kt-shadow-lg);border-color:rgba(6,182,212,.35)}
+.kt-card:hover{transform:translateY(-2px);box-shadow:var(--kt-shadow-lg);border-color:rgba(56,189,248,.35)}
 .kt-card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;
   background:var(--kt-grad);opacity:.9}
 .kt-card h3{font-size:14px;color:var(--kt-txt);font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:8px}
@@ -255,9 +253,9 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 .kt-tile{border-radius:12px;padding:16px 14px;text-align:center;color:#fff;
   border:0;box-shadow:0 8px 20px rgba(0,0,0,.35)}
 .kt-tile .ti{font-size:20px}.kt-tile .tn{font-size:30px;font-weight:800;line-height:1.15}.kt-tile .tl{font-size:12px;opacity:.95}
-.kt-t-blue{background:linear-gradient(135deg,#0891b2,#06B6D4)}
+.kt-t-blue{background:linear-gradient(135deg,#0ea5e9,#38bdf8)}
 .kt-t-green{background:linear-gradient(135deg,#16a34a,#22C55E)}
-.kt-t-cyan{background:linear-gradient(135deg,#0e7490,#06B6D4)}
+.kt-t-cyan{background:linear-gradient(135deg,#0284c7,#38bdf8)}
 .kt-t-orange{background:linear-gradient(135deg,#d97706,#F59E0B)}
 
 /* circular gauges (conic-gradient donut used by status/nettools views)
@@ -266,7 +264,7 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 .kt-gauge{position:relative;width:108px;height:108px;border-radius:50%;display:grid;place-items:center;
   background:conic-gradient(var(--gc,var(--kt-accent)) calc(var(--p,0)*3.6deg),#334155 0)}
 .kt-gauge::before{content:"";position:absolute;width:80px;height:80px;border-radius:50%;
-  background:#1E293B;box-shadow:inset 0 0 0 1px var(--kt-stroke)}
+  background:#16243a;box-shadow:inset 0 0 0 1px var(--kt-stroke)}
 .kt-gauge span{position:relative;font-size:21px;font-weight:800;color:var(--kt-txt)}
 .kt-glabel{font-size:13px;color:var(--kt-txt2);font-weight:700}
 
@@ -288,7 +286,7 @@ input[type=range].wpow,input[type=range].kt-range{-webkit-appearance:none;appear
   background:#334155!important;outline:none;border:0!important;width:100%}
 input[type=range].wpow::-webkit-slider-thumb,input[type=range].kt-range::-webkit-slider-thumb{
   -webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;
-  background:var(--kt-grad);cursor:pointer;box-shadow:0 2px 8px rgba(6,182,212,.55)}
+  background:var(--kt-grad);cursor:pointer;box-shadow:0 2px 8px rgba(56,189,248,.55)}
 input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-thumb{
   width:18px;height:18px;border:0;border-radius:50%;background:var(--kt-grad);cursor:pointer}
 .kt-pwval{font-weight:800;font-size:18px;color:var(--kt-accent)}
@@ -296,8 +294,8 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 /* primary action button used by views */
 .kt-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;border:0;border-radius:10px;
   cursor:pointer;font-size:14px;font-weight:700;color:#fff;background:var(--kt-grad);
-  box-shadow:0 8px 20px rgba(6,182,212,.32);transition:all .3s ease}
-.kt-btn:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(6,182,212,.45)}
+  box-shadow:0 8px 20px rgba(56,189,248,.32);transition:all .3s ease}
+.kt-btn:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(56,189,248,.45)}
 .kt-btn.sec{background:rgba(51,65,85,0.55);border:1px solid var(--kt-stroke);color:var(--kt-accent);box-shadow:none}
 .kt-btn.sec:hover{background:var(--kt-accent-soft)}
 .kt-field label,.kt-field .kt-flabel{display:block;margin:11px 0 5px;font-size:12.5px;color:var(--kt-txt2);font-weight:600}
@@ -337,13 +335,13 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 @media (prefers-color-scheme: light){
   :root:not([data-mk-skin="off"]){
     /* re-assert the refined DARK obsidian palette (no light flip) */
-    --kt-bg0:#0A0F1C; --kt-bg1:#111A2E; --kt-bg2:#1B2840;
+    --kt-bg0:#0b1220; --kt-bg1:#111c2e; --kt-bg2:#16243a;
     --kt-card:rgba(24,34,54,0.62); --kt-card2:rgba(15,23,42,0.66);
     --kt-glass:rgba(24,34,54,0.62); --kt-glass-strong:rgba(13,20,36,0.74);
-    --kt-stroke:rgba(148,163,184,0.14); --kt-stroke-2:rgba(148,163,184,0.22); --kt-stroke-strong:rgba(6,182,212,0.50);
-    --kt-txt:#F1F5F9; --kt-txt2:#C3CEDE; --kt-muted:#8693A8;
-    --kt-accent:#22D3EE; --kt-accent2:#22D3EE; --kt-accent3:#0E7490;
-    --kt-accent-soft:rgba(34,211,238,0.10);
+    --kt-stroke:rgba(255,255,255,0.12); --kt-stroke-2:rgba(148,163,184,0.22); --kt-stroke-strong:rgba(56,189,248,0.50);
+    --kt-txt:#F1F5F9; --kt-txt2:#e2e8f0; --kt-muted:#cbd5e1;
+    --kt-accent:#38bdf8; --kt-accent2:#38bdf8; --kt-accent3:#0284c7;
+    --kt-accent-soft:rgba(56,189,248,0.10);
     --kt-ok:#34D399; --kt-warn:#FBBF24; --kt-bad:#F87171; --kt-violet:#A78BFA;
     --kt-shadow:0 4px 18px rgba(0,0,0,.40);
     --kt-shadow-lg:0 12px 34px rgba(0,0,0,.50);
@@ -361,15 +359,15 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 
 /* ---- top header banner ---- */
 .kt-wz-hero{position:relative;overflow:hidden;border-radius:16px;padding:22px 22px;margin-bottom:20px;
-  background:linear-gradient(135deg,rgba(6,182,212,.16),rgba(139,92,246,.14) 60%,rgba(15,23,42,.2));
+  background:linear-gradient(135deg,rgba(56,189,248,.16),rgba(139,92,246,.14) 60%,rgba(15,23,42,.2));
   border:1px solid var(--kt-stroke);box-shadow:var(--kt-shadow);
   -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .kt-wz-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:var(--kt-grad);opacity:.95}
 .kt-wz-hero::after{content:"";position:absolute;width:240px;height:240px;border-radius:50%;right:-70px;top:-120px;
-  background:radial-gradient(circle,rgba(6,182,212,.25),transparent 70%);pointer-events:none}
+  background:radial-gradient(circle,rgba(56,189,248,.25),transparent 70%);pointer-events:none}
 .kt-wz-hero-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .kt-wz-hero-ic{width:58px;height:58px;flex:0 0 58px;border-radius:16px;display:grid;place-items:center;font-size:28px;
-  background:var(--kt-grad);box-shadow:0 8px 22px rgba(6,182,212,.4)}
+  background:var(--kt-grad);box-shadow:0 8px 22px rgba(56,189,248,.4)}
 .kt-wz-hero-txt{flex:1;min-width:200px}
 .kt-wz-hero-txt h2{margin:0 0 4px!important;font-size:21px;font-weight:800;letter-spacing:.2px}
 .kt-wz-hero-txt p{margin:0;font-size:13px;color:var(--kt-txt2);line-height:1.7}
@@ -380,7 +378,7 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 .kt-wz-head{display:flex;align-items:flex-start;gap:13px;margin-bottom:16px;padding-bottom:14px;
   border-bottom:1px solid var(--kt-stroke)}
 .kt-wz-ic{width:44px;height:44px;flex:0 0 44px;border-radius:13px;display:grid;place-items:center;font-size:22px;
-  background:var(--kt-accent-soft);border:1px solid var(--kt-stroke);box-shadow:inset 0 0 0 1px rgba(6,182,212,.12)}
+  background:var(--kt-accent-soft);border:1px solid var(--kt-stroke);box-shadow:inset 0 0 0 1px rgba(56,189,248,.12)}
 .kt-wz-ic.v{background:rgba(139,92,246,.14)}
 .kt-wz-ic.g{background:rgba(34,197,94,.14)}
 .kt-wz-htxt{flex:1;min-width:0}
@@ -394,25 +392,25 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   width:100%;padding:10px 14px;padding-inline-start:34px;font-weight:600;cursor:pointer;
   background:rgba(15,23,42,.6)!important;border:1px solid var(--kt-stroke)!important;border-radius:10px!important;
   color:var(--kt-txt)!important;transition:all .25s ease}
-.kt-wz-seg select:hover{border-color:rgba(6,182,212,.4)!important}
+.kt-wz-seg select:hover{border-color:rgba(56,189,248,.4)!important}
 .kt-wz-seg::after{content:"▾";position:absolute;inset-inline-start:13px;top:50%;transform:translateY(-50%);
   pointer-events:none;color:var(--kt-accent);font-size:12px}
 
 /* ---- styled txpower slider with live neon bubble ---- */
 .kt-wz-pwr{margin-top:6px;padding:14px 16px;border-radius:13px;
-  background:linear-gradient(135deg,rgba(6,182,212,.06),rgba(15,23,42,.25));
+  background:linear-gradient(135deg,rgba(56,189,248,.06),rgba(15,23,42,.25));
   border:1px solid var(--kt-stroke)}
 .kt-wz-pwr-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:11px}
 .kt-wz-pwr-top .lbl{font-size:12.5px;font-weight:700;color:var(--kt-txt2);display:flex;align-items:center;gap:7px}
 .kt-wz-bubble{position:relative;font-weight:800;font-size:15px;color:#fff;padding:5px 13px;border-radius:999px;
-  background:var(--kt-grad);box-shadow:0 4px 14px rgba(6,182,212,.5);min-width:74px;text-align:center}
+  background:var(--kt-grad);box-shadow:0 4px 14px rgba(56,189,248,.5);min-width:74px;text-align:center}
 .kt-wz-scale{display:flex;justify-content:space-between;margin-top:7px;font-size:10.5px;color:var(--kt-muted);font-weight:600}
 
 /* ---- toggle pills (hide ssid / enable radio) ---- */
 .kt-wz-toggles{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
 .kt-wz-toggle{display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:11px;cursor:pointer;flex:1;min-width:150px;
   background:var(--kt-card2);border:1px solid var(--kt-stroke);transition:all .25s ease}
-.kt-wz-toggle:hover{border-color:rgba(6,182,212,.35);background:var(--kt-accent-soft)}
+.kt-wz-toggle:hover{border-color:rgba(56,189,248,.35);background:var(--kt-accent-soft)}
 .kt-wz-toggle span.lab{font-size:12.5px;font-weight:600;color:var(--kt-txt2)}
 .kt-wz-toggle input[type=checkbox]{width:18px;height:18px;accent-color:var(--kt-accent);cursor:pointer;flex:0 0 18px;margin:0}
 .kt-wz-toggle .sp{flex:1}
@@ -450,11 +448,11 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   transition:color .2s ease,background .25s ease,box-shadow .25s ease,transform .15s ease;white-space:nowrap}
 .kt-tab .kt-tab-ic{font-size:16px;line-height:1}
 .kt-tab:hover{color:var(--kt-txt);background:var(--kt-accent-soft)}
-.kt-tab:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(6,182,212,.3)}
+.kt-tab:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,189,248,.3)}
 .kt-tab.is-active{color:#fff;background:var(--kt-grad);border-color:transparent;
-  box-shadow:0 8px 20px rgba(6,182,212,.35)}
+  box-shadow:0 8px 20px rgba(56,189,248,.35)}
 .kt-tab.is-active::after{content:"";position:absolute;left:18%;right:18%;bottom:-7px;height:3px;border-radius:3px;
-  background:var(--kt-grad);box-shadow:0 2px 10px rgba(6,182,212,.7)}
+  background:var(--kt-grad);box-shadow:0 2px 10px rgba(56,189,248,.7)}
 /* tab panels: only .is-active is shown; all stay in the DOM so handles survive */
 .kt-tab-body{position:relative}
 .kt-tab-panel{display:none}
@@ -472,10 +470,10 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 .kt-card{padding:1.15rem 1.25rem;border-radius:14px;
   background:linear-gradient(180deg,rgba(51,65,85,.62),rgba(30,41,59,.5));
   box-shadow:var(--kt-shadow),inset 0 1px 0 rgba(255,255,255,.04)}
-.kt-card:hover{transform:translateY(-3px);border-color:rgba(6,182,212,.4);
+.kt-card:hover{transform:translateY(-3px);border-color:rgba(56,189,248,.4);
   box-shadow:var(--kt-shadow-lg),inset 0 1px 0 rgba(255,255,255,.06)}
 .kt-card::before{height:3px;background:var(--kt-grad);opacity:.95;
-  box-shadow:0 1px 8px rgba(6,182,212,.45)}
+  box-shadow:0 1px 8px rgba(56,189,248,.45)}
 .kt-card h3{font-size:14.5px;font-weight:800;letter-spacing:.2px;margin:0 0 14px;padding-bottom:11px;
   border-bottom:1px solid var(--kt-stroke);position:relative}
 .kt-card h3::before{content:"";position:absolute;inset-inline-start:-1.25rem;top:1px;bottom:9px;width:3px;
@@ -483,7 +481,7 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 
 /* ---- key/value rows: hairline separators, aligned, muted key / strong value -- */
 .kt-kv{padding:9px 2px;font-size:13.5px;align-items:baseline}
-.kt-kv:hover{background:rgba(6,182,212,.05);border-radius:8px}
+.kt-kv:hover{background:rgba(56,189,248,.05);border-radius:8px}
 .kt-kv .k{color:var(--kt-muted);font-weight:600;letter-spacing:.1px}
 .kt-kv .v{color:var(--kt-txt);font-weight:700}
 
@@ -493,20 +491,20 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 .kt-badge.ok{background:rgba(34,197,94,.16);color:var(--kt-ok);border-color:rgba(34,197,94,.32)}
 .kt-badge.bad{background:rgba(239,68,68,.16);color:var(--kt-bad);border-color:rgba(239,68,68,.32)}
 .kt-badge.warn{background:rgba(245,158,11,.16);color:var(--kt-warn);border-color:rgba(245,158,11,.32)}
-.kt-badge.info,.kt-badge.cyan{background:var(--kt-accent-soft);color:var(--kt-accent);border-color:rgba(6,182,212,.32)}
+.kt-badge.info,.kt-badge.cyan{background:var(--kt-accent-soft);color:var(--kt-accent);border-color:rgba(56,189,248,.32)}
 .kt-badge.violet{background:rgba(139,92,246,.16);color:var(--kt-violet);border-color:rgba(139,92,246,.32)}
 
 /* ---- buttons: gradient sheen + lift glow; refined secondary variant ---- */
 .kt-btn{padding:11px 20px;letter-spacing:.2px;position:relative;overflow:hidden}
 .kt-btn::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
   background:linear-gradient(180deg,rgba(255,255,255,.18),transparent 45%);opacity:.7}
-.kt-btn:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(6,182,212,.48)}
-.kt-btn:active{transform:translateY(0);box-shadow:0 6px 16px rgba(6,182,212,.4)}
-.kt-btn:disabled{opacity:.6;cursor:default;transform:none;box-shadow:0 4px 12px rgba(6,182,212,.2)}
+.kt-btn:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(56,189,248,.48)}
+.kt-btn:active{transform:translateY(0);box-shadow:0 6px 16px rgba(56,189,248,.4)}
+.kt-btn:disabled{opacity:.6;cursor:default;transform:none;box-shadow:0 4px 12px rgba(56,189,248,.2)}
 .kt-btn.sec{background:rgba(51,65,85,.55);border:1px solid var(--kt-stroke);color:var(--kt-accent);box-shadow:none}
 .kt-btn.sec::after{display:none}
 .kt-btn.sec:hover{background:var(--kt-accent-soft);border-color:var(--kt-accent);
-  box-shadow:0 6px 16px rgba(6,182,212,.22)}
+  box-shadow:0 6px 16px rgba(56,189,248,.22)}
 
 /* ---- stat tiles: vivid but tasteful — soft inner sheen + subtle hover ---- */
 .kt-tile{padding:18px 14px;border-radius:14px;position:relative;overflow:hidden;
@@ -522,16 +520,16 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
 .kt-dev{padding:12px 13px;border-radius:13px;
   background:linear-gradient(180deg,rgba(30,41,59,.6),rgba(30,41,59,.42));
   transition:border-color .2s ease,background .25s ease,transform .15s ease}
-.kt-dev:hover{border-color:rgba(6,182,212,.32);background:var(--kt-accent-soft);transform:translateY(-1px)}
-.kt-dev .dic{box-shadow:inset 0 0 0 1px rgba(6,182,212,.18)}
+.kt-dev:hover{border-color:rgba(56,189,248,.32);background:var(--kt-accent-soft);transform:translateY(-1px)}
+.kt-dev .dic{box-shadow:inset 0 0 0 1px rgba(56,189,248,.18)}
 .kt-dev .dname{font-weight:700;font-size:14px;letter-spacing:.1px}
 .kt-dev .dmeta{font-size:11.5px;color:var(--kt-muted);margin-top:3px;line-height:1.5}
 .kt-sigbar{box-shadow:inset 0 0 0 1px var(--kt-stroke)}
-.kt-sigbar>i{box-shadow:0 0 8px rgba(6,182,212,.4)}
+.kt-sigbar>i{box-shadow:0 0 8px rgba(56,189,248,.4)}
 
 /* ---- conic gauge: glow on the active arc, crisp inner disk (tuned to match the
    premium SVG gauge on the dashboard for cross-view consistency) ---- */
-.kt-gauge{box-shadow:0 8px 22px rgba(0,0,0,.35);filter:drop-shadow(0 0 7px rgba(34,211,238,.22))}
+.kt-gauge{box-shadow:0 8px 22px rgba(0,0,0,.35);filter:drop-shadow(0 0 7px rgba(56,189,248,.22))}
 .kt-gauge::before{box-shadow:inset 0 0 0 1px var(--kt-stroke),inset 0 4px 12px rgba(0,0,0,.4)}
 .kt-gauge span{font-size:22px;letter-spacing:.3px;text-shadow:0 2px 6px rgba(0,0,0,.4)}
 .kt-glabel{font-size:13px;font-weight:700;letter-spacing:.2px}
@@ -553,16 +551,16 @@ input[type=range].wpow::-moz-range-thumb,input[type=range].kt-range::-moz-range-
   width:100%;padding:10px 12px;border-radius:10px;font-size:13.5px;
   background:rgba(15,23,42,.6);color:var(--kt-txt);border:1px solid var(--kt-stroke);
   transition:border-color .2s ease,box-shadow .2s ease,background .2s ease}
-.kt-field input:hover,.kt-field select:hover,.kt-field textarea:hover{border-color:rgba(6,182,212,.4)}
+.kt-field input:hover,.kt-field select:hover,.kt-field textarea:hover{border-color:rgba(56,189,248,.4)}
 .kt-field input:focus,.kt-field select:focus,.kt-field textarea:focus{
-  border-color:var(--kt-accent);box-shadow:0 0 0 3px rgba(6,182,212,.25);outline:none;
+  border-color:var(--kt-accent);box-shadow:0 0 0 3px rgba(56,189,248,.25);outline:none;
   background:rgba(15,23,42,.78)}
 .kt-field label,.kt-field .kt-flabel{margin:12px 0 6px;font-size:12.5px;font-weight:600;
   color:var(--kt-txt2);letter-spacing:.1px}
 
 /* ---- note: keep amber default; add neutral/info tints for callouts ---- */
 .kt-note{font-size:12px;line-height:1.6;padding:10px 13px;border-radius:11px}
-.kt-note.info{color:var(--kt-accent);background:var(--kt-accent-soft);border:1px solid rgba(6,182,212,.4)}
+.kt-note.info{color:var(--kt-accent);background:var(--kt-accent-soft);border:1px solid rgba(56,189,248,.4)}
 .kt-note.muted{color:var(--kt-txt2);background:rgba(51,65,85,.4);border:1px solid var(--kt-stroke)}
 
 /* ---- consistent section spacing helper (optional, used by some views) ---- */
@@ -630,21 +628,21 @@ select,.cbi-input-select{text-overflow:ellipsis}
 /* refined depth: a faint corner light + crisper inset edge on every glass card */
 .kt-card{
   background:
-    radial-gradient(120% 80% at 100% 0%, rgba(6,182,212,.07), transparent 60%),
+    radial-gradient(120% 80% at 100% 0%, rgba(56,189,248,.07), transparent 60%),
     linear-gradient(180deg, rgba(51,65,85,.62), rgba(30,41,59,.5));
   border:1px solid var(--kt-stroke);
   box-shadow:var(--kt-shadow), inset 0 1px 0 rgba(255,255,255,.05);
 }
-.kt-card:hover{box-shadow:var(--kt-shadow-lg), 0 0 0 1px rgba(6,182,212,.18), inset 0 1px 0 rgba(255,255,255,.07)}
+.kt-card:hover{box-shadow:var(--kt-shadow-lg), 0 0 0 1px rgba(56,189,248,.18), inset 0 1px 0 rgba(255,255,255,.07)}
 
 /* primary action: deep cyan gradient so the WHITE label always has contrast
    (the earlier light-cyan start washed the text out -> button looked empty). */
 .kt-btn,.cbi-button-save,.cbi-button-apply,.cbi-button-positive,.btn.cbi-button-action{
-  background:linear-gradient(135deg,#06B6D4 0%,#0891b2 55%,#0e7490 100%)!important;
+  background:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%)!important;
   color:#fff!important;text-shadow:0 1px 2px rgba(0,0,0,.35);
-  box-shadow:0 8px 22px -6px rgba(6,182,212,.5), inset 0 1px 0 rgba(255,255,255,.22)!important;
+  box-shadow:0 8px 22px -6px rgba(56,189,248,.5), inset 0 1px 0 rgba(255,255,255,.22)!important;
 }
-.kt-btn:hover{box-shadow:0 14px 30px -8px rgba(6,182,212,.62), inset 0 1px 0 rgba(255,255,255,.3)!important}
+.kt-btn:hover{box-shadow:0 14px 30px -8px rgba(56,189,248,.62), inset 0 1px 0 rgba(255,255,255,.3)!important}
 .kt-btn:active{transform:translateY(0) scale(.99)}
 .kt-btn.sec{background:linear-gradient(180deg,rgba(51,65,85,.7),rgba(30,41,59,.6))!important}
 
@@ -653,33 +651,33 @@ select,.cbi-input-select{text-overflow:ellipsis}
    high-contrast gradient wins instead of the old faint cyan-on-cyan). */
 .kt-tab.active,.kt-tab.is-active,.kt-tab[aria-selected="true"]{
   background:var(--kt-grad)!important; color:#fff!important; border-color:transparent!important;
-  box-shadow:0 8px 20px -6px rgba(34,211,238,.45)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)}
+  box-shadow:0 8px 20px -6px rgba(56,189,248,.45)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)}
 
 /* inputs / selects: vivid but tasteful neon focus ring */
 input:focus,select:focus,textarea:focus,.kt-field input:focus,.kt-field select:focus{
   border-color:var(--kt-accent)!important;
-  box-shadow:0 0 0 3px rgba(6,182,212,.22), 0 0 16px -2px rgba(6,182,212,.35)!important;outline:none}
+  box-shadow:0 0 0 3px rgba(56,189,248,.22), 0 0 16px -2px rgba(56,189,248,.35)!important;outline:none}
 
 /* badges: subtle top-sheen so the pills read as glass, not flat fills */
 .kt-badge{background-image:linear-gradient(180deg,rgba(255,255,255,.07),transparent)}
 
 /* section heading accent bar gets a soft glow to match the gauges */
-.kt-card h3::before{box-shadow:0 0 10px rgba(6,182,212,.5)}
+.kt-card h3::before{box-shadow:0 0 10px rgba(56,189,248,.5)}
 
 /* professional custom scrollbar (webkit) — slim, on-theme */
 *::-webkit-scrollbar{width:10px;height:10px}
 *::-webkit-scrollbar-track{background:rgba(15,23,42,.5)}
 *::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#334155,#1e293b);border-radius:8px;
   border:2px solid rgba(15,23,42,.6)}
-*::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#06B6D4,#0891b2)}
+*::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#38bdf8,#0ea5e9)}
 
 /* navbar: richer cyan→teal gradient with a hairline bottom glow */
 header,.header,#header,.navbar,#topmenu{
-  background:linear-gradient(120deg,#0891b2,#06B6D4 55%,#0e7490)!important;
-  box-shadow:0 2px 18px -4px rgba(6,182,212,.5)!important}
+  background:linear-gradient(120deg,#0ea5e9,#38bdf8 55%,#0284c7)!important;
+  box-shadow:0 2px 18px -4px rgba(56,189,248,.5)!important}
 
 /* tiles: gentle inner glow ring on hover for a premium tactile feel */
-.kt-tile:hover{box-shadow:var(--kt-shadow), 0 0 0 1px rgba(6,182,212,.22)}
+.kt-tile:hover{box-shadow:var(--kt-shadow), 0 0 0 1px rgba(56,189,248,.22)}
 
 /* professional inline icon set (replaces emoji): inherits text colour, optically
    aligned to the baseline, never shrinks in flex rows. */
@@ -739,26 +737,26 @@ header,.header,#header,.navbar,#topmenu{
 /* ============================================================================
    DESKTOP COLOR COHESION — expert pass
    The computer (LuCI desktop) chrome mixed two cyans: links/accents used the
-   refined #22D3EE while the navbar, active menu and primary buttons hard-coded
-   the older, louder #06B6D4 / #0891b2. That cyan-vs-cyan mismatch + a full-bright
+   refined #38bdf8 while the navbar, active menu and primary buttons hard-coded
+   the older, louder #38bdf8 / #0ea5e9. That cyan-vs-cyan mismatch + a full-bright
    navbar slab is what read as "غير متنسقة". This block makes ONE accent system:
    a calm obsidian-glass navbar with a single cyan accent line, and every active /
    primary / focus state aligned to the same refined cyan→teal family.
    Appended last in this file (theme-mk.css doesn't touch desktop chrome) so it wins.
    ============================================================================ */
 :root{
-  --kt-accent:#22D3EE;                 /* single source-of-truth cyan          */
-  --kt-accent-deep:#0E7490;            /* teal end of the one gradient         */
-  --kt-grad:linear-gradient(135deg,#22D3EE 0%,#0EA5C4 52%,#0E7490 100%);
-  --kt-glow:rgba(34,211,238,.28);      /* unified accent glow (was 6,182,212)  */
+  --kt-accent:#38bdf8;                 /* single source-of-truth cyan          */
+  --kt-accent-deep:#0284c7;            /* teal end of the one gradient         */
+  --kt-grad:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 52%,#0284c7 100%);
+  --kt-glow:rgba(56,189,248,.28);      /* unified accent glow (was 6,182,212)  */
 }
 
 /* ---- NAVBAR: integrated deep-obsidian glass with a single cyan accent line,
    instead of a loud bright-cyan slab. Reads coordinated with the dark surfaces. */
 header,.header,#header,.navbar,#topmenu{
   background:linear-gradient(180deg,rgba(17,26,46,.92),rgba(10,15,28,.92))!important;
-  border-bottom:1px solid rgba(34,211,238,.28)!important;
-  box-shadow:0 2px 18px -6px rgba(0,0,0,.6), 0 1px 0 rgba(34,211,238,.18)!important;
+  border-bottom:1px solid rgba(56,189,248,.28)!important;
+  box-shadow:0 2px 18px -6px rgba(0,0,0,.6), 0 1px 0 rgba(56,189,248,.18)!important;
   -webkit-backdrop-filter:blur(12px) saturate(140%);backdrop-filter:blur(12px) saturate(140%);
   color:#EAF6FA!important;
 }
@@ -788,7 +786,7 @@ input[type=submit],.kt-btn,.kt-tab.is-active{
   background:rgba(30,41,59,.6)!important;color:var(--kt-accent)!important;
   border:1px solid var(--kt-stroke)!important}
 .btn:hover,.cbi-button:hover,button:hover,input[type=button]:hover{
-  background:var(--kt-accent-soft)!important;border-color:rgba(34,211,238,.45)!important;
+  background:var(--kt-accent-soft)!important;border-color:rgba(56,189,248,.45)!important;
   box-shadow:0 6px 16px -6px var(--kt-glow)!important}
 /* keep destructive semantics but align its red to the palette's coral */
 .cbi-button-remove,.cbi-button-reset,.cbi-button-negative,.btn.danger{
@@ -804,11 +802,11 @@ input[type=submit],.kt-btn,.kt-tab.is-active{
 
 /* ---- card accent bar + section heads: one cyan, calmer glow ---- */
 .kt-card::before,.cbi-section::before{background:var(--kt-grad)!important;box-shadow:none!important}
-.kt-card:hover{border-color:rgba(34,211,238,.4)!important}
+.kt-card:hover{border-color:rgba(56,189,248,.4)!important}
 a{color:var(--kt-accent)}a:hover{color:#67E8F9}
 /* focus ring: single consistent cyan everywhere */
 input:focus,select:focus,textarea:focus,.cbi-input-text:focus,.cbi-input-select:focus{
-  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(34,211,238,.22)!important}
+  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(56,189,248,.22)!important}
 
 /* ---- LIGHTER glass: surfaces are near-opaque now, so a heavy blur is wasted
    browser CPU and only hurt text clarity. Cap blur low everywhere. ---- */
@@ -874,7 +872,7 @@ input[type=number],.kt-mono{ text-align:left; }
 .cbi-value-description,.cbi-section-descr,.cbi-map-descr,.cbi-value-field .hint,
 small,.text-muted,.help,.cbi-help{color:var(--kt-txt2)!important; opacity:1!important;}
 /* native dropdown list items render with OS colors — force dark bg + light text */
-select option,optgroup{background:#0F172A!important; color:#F1F5F9!important;}
+select option,optgroup{background:#0b1220!important; color:#F1F5F9!important;}
 /* placeholders readable (not near-invisible) */
 input::placeholder,textarea::placeholder{color:#9FB0C4!important; opacity:1!important;}
 /* any input/select text itself */
