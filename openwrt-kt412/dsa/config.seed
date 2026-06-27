@@ -33,21 +33,12 @@ CONFIG_PACKAGE_luci-theme-bootstrap=y
 # Arabic translation for the LuCI chrome (menus/labels). Best-effort: the custom
 # CSS already forces RTL; if this package is unavailable the UI stays English-RTL.
 CONFIG_PACKAGE_luci-i18n-base-ar=y
-# --- AL-MALAKI ("نظام الملكي") parity: the look there is NOT custom code, it is
-#     the OFFICIAL OpenWrt LuCI dashboard + the openwrt-2020 theme + a few stock
-#     luci apps. Ship them ALONGSIDE the custom Smart AP UI so the user gets the
-#     official card dashboard (/admin/dashboard) and can switch theme in
-#     System > System > Language and Style. These are upstream feed packages; a
-#     name that ever fails to resolve is silently dropped by defconfig (no build
-#     break), and the build gate below confirms the key one (mod-dashboard). ---
-CONFIG_PACKAGE_luci-mod-dashboard=y
-# openwrt-2020 theme: name differs across versions (main = ...openwrt2020,
-# 23.05 opkg showed ...openwrt-2020). List BOTH; the non-existent symbol is
-# silently dropped by defconfig, so whichever exists in the feed gets built.
-# Both install to /www/luci-static/openwrt2020, which is what the runtime
-# fallback in 41-kt412-mk-theme keys on before making it the default theme.
-CONFIG_PACKAGE_luci-theme-openwrt2020=y
-CONFIG_PACKAGE_luci-theme-openwrt-2020=y
+# --- REMOVED: luci-mod-dashboard + openwrt-2020 theme. The official LuCI
+#     dashboard renders a giant white Wi-Fi watermark page that floods the screen
+#     on a laptop (the user's "ابيض/رسومات سيئة" complaint) and adds a redundant
+#     English "Dashboard" menu. The ONE interface is the custom Smart AP dashboard
+#     (/admin/mkapp/dashboard, the landing). Dropping both also frees flash.
+#     (luci-theme-bootstrap stays as the active theme carrying our @import skin.)
 # functional apps copied from the AL-MALAKI package set (user-requested):
 #   WoL (wake devices), Wi-Fi schedule, USB printer server.
 CONFIG_PACKAGE_luci-app-wol=y

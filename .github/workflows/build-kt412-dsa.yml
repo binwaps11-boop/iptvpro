@@ -542,11 +542,12 @@ jobs:
           # --- no Terminal (security); LuCI is now REQUIRED (official admin UI) ---
           grep -q 'CONFIG_PACKAGE_ttyd=y' "$S" && { echo "FATAL: ttyd terminal present"; exit 1; } || echo "NO TERMINAL OK"
           grep -q 'CONFIG_PACKAGE_luci=y' "$S" && echo "LUCI REQUIRED OK (official admin UI included)" || { echo "FATAL: luci missing -> official sections absent"; exit 1; }
-          # AL-MALAKI parity: the official LuCI dashboard is the key piece (the card
-          # sections). Require it; soft-note the optional stock apps + theme (a feed
-          # rename would only drop the extra, never break the image).
-          grep -q 'CONFIG_PACKAGE_luci-mod-dashboard=y' "$S" && echo "OFFICIAL DASHBOARD (luci-mod-dashboard) INCLUDED OK" || { echo "FATAL: luci-mod-dashboard not selected -> no official card dashboard"; exit 1; }
-          for opt in luci-theme-openwrt2020 luci-app-wol luci-app-wifischedule luci-app-p910nd; do
+          # The ONE interface is the custom Smart AP dashboard (admin/mkapp/dashboard).
+          # luci-mod-dashboard + openwrt2020 were REMOVED (giant white watermark page
+          # that flooded the laptop view); assert they can't creep back in.
+          grep -q 'CONFIG_PACKAGE_luci-mod-dashboard=y' "$S" && { echo "FATAL: luci-mod-dashboard re-added (giant-watermark page)"; exit 1; } || echo "NO luci-mod-dashboard OK (custom Smart AP dashboard is the one UI)"
+          grep -q 'CONFIG_PACKAGE_luci-i18n-base-ar=y' "$S" && echo "ARABIC LuCI CORE OK" || echo "NOTE: luci-i18n-base-ar not selected (chrome stays English)"
+          for opt in luci-app-wol luci-app-wifischedule luci-app-p910nd; do
             grep -q "CONFIG_PACKAGE_${opt}=y" "$S" && echo "AL-MALAKI APP SELECTED: $opt" || echo "NOTE: $opt not selected (optional)"
           done
           echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"

@@ -1,7 +1,7 @@
 {
 	"admin/mkapp": {
-		"title": "Quick Config",
-		"order": 6,
+		"title": "لوحة التحكم",
+		"order": 1,
 		"action": {
 			"type": "firstchild"
 		},
@@ -10,8 +10,8 @@
 		}
 	},
 	"admin/mkapp/wizard": {
-		"title": "إعدادات سريعة",
-		"order": 1,
+		"title": "الإعدادات السريعة",
+		"order": 2,
 		"action": {
 			"type": "view",
 			"path": "kt412/wizard"
