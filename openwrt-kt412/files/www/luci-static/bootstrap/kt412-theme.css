@@ -732,3 +732,77 @@ header,.header,#header,.navbar,#topmenu{
 @media (min-width:992px) and (max-width:1199px){
   .kt-grid.kt-cols-4{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+
+/* ============================================================================
+   DESKTOP COLOR COHESION — expert pass
+   The computer (LuCI desktop) chrome mixed two cyans: links/accents used the
+   refined #22D3EE while the navbar, active menu and primary buttons hard-coded
+   the older, louder #06B6D4 / #0891b2. That cyan-vs-cyan mismatch + a full-bright
+   navbar slab is what read as "غير متنسقة". This block makes ONE accent system:
+   a calm obsidian-glass navbar with a single cyan accent line, and every active /
+   primary / focus state aligned to the same refined cyan→teal family.
+   Appended last in this file (theme-mk.css doesn't touch desktop chrome) so it wins.
+   ============================================================================ */
+:root{
+  --kt-accent:#22D3EE;                 /* single source-of-truth cyan          */
+  --kt-accent-deep:#0E7490;            /* teal end of the one gradient         */
+  --kt-grad:linear-gradient(135deg,#22D3EE 0%,#0EA5C4 52%,#0E7490 100%);
+  --kt-glow:rgba(34,211,238,.28);      /* unified accent glow (was 6,182,212)  */
+}
+
+/* ---- NAVBAR: integrated deep-obsidian glass with a single cyan accent line,
+   instead of a loud bright-cyan slab. Reads coordinated with the dark surfaces. */
+header,.header,#header,.navbar,#topmenu{
+  background:linear-gradient(180deg,rgba(17,26,46,.92),rgba(10,15,28,.92))!important;
+  border-bottom:1px solid rgba(34,211,238,.28)!important;
+  box-shadow:0 2px 18px -6px rgba(0,0,0,.6), 0 1px 0 rgba(34,211,238,.18)!important;
+  -webkit-backdrop-filter:blur(12px) saturate(140%);backdrop-filter:blur(12px) saturate(140%);
+  color:#EAF6FA!important;
+}
+.navbar,.navbar a,header a,.fill a,.brand,.navbar-brand{color:#EAF6FA!important}
+.navbar-brand,.brand{font-weight:800;letter-spacing:.3px}
+.navbar-nav>li>a:hover,.nav>li>a:hover{
+  background:var(--kt-accent-soft)!important;color:var(--kt-accent)!important;border-radius:9px}
+/* active top-menu item: cyan underline accent, not a filled loud block */
+.navbar-nav>li.active>a,#topmenu .active>a,.nav>li.active>a{
+  background:transparent!important;color:var(--kt-accent)!important;
+  box-shadow:inset 0 -3px 0 var(--kt-accent)!important;border-radius:8px 8px 0 0!important}
+
+/* ---- unify every active/primary/focus glow to the one accent family ---- */
+.main-left .active>a,.nav-sidebar .active>a,li.active>a,
+.cbi-button-save,.cbi-button-apply,.cbi-button-positive,.btn.cbi-button-action,
+input[type=submit],.kt-btn,.kt-tab.is-active{
+  background:var(--kt-grad)!important;color:#fff!important;border-color:transparent!important;
+  box-shadow:0 8px 20px -6px var(--kt-glow)!important}
+.cbi-button-save:hover,.cbi-button-apply:hover,.cbi-button-positive:hover,
+.btn.cbi-button-action:hover,input[type=submit]:hover,.kt-btn:hover{
+  box-shadow:0 12px 26px -6px var(--kt-glow)!important;transform:translateY(-1px)}
+.main-left a:hover,.nav-sidebar a:hover,#mainmenu a:hover{
+  background:var(--kt-accent-soft)!important;color:var(--kt-accent)!important}
+
+/* secondary buttons: calm neutral glass, cyan on hover (coordinated, not loud) */
+.btn,.cbi-button,button,input[type=button]{
+  background:rgba(30,41,59,.6)!important;color:var(--kt-accent)!important;
+  border:1px solid var(--kt-stroke)!important}
+.btn:hover,.cbi-button:hover,button:hover,input[type=button]:hover{
+  background:var(--kt-accent-soft)!important;border-color:rgba(34,211,238,.45)!important;
+  box-shadow:0 6px 16px -6px var(--kt-glow)!important}
+/* keep destructive semantics but align its red to the palette's coral */
+.cbi-button-remove,.cbi-button-reset,.cbi-button-negative,.btn.danger{
+  background:linear-gradient(135deg,#F87171,#EF4444)!important;color:#fff!important;border-color:transparent!important}
+
+/* ---- tables: calm, coordinated — dark header, hairline grid, subtle zebra ---- */
+.cbi-section-table-titles .th,.tr.table-titles .th,th,.th{
+  background:rgba(13,20,36,.7)!important;color:var(--kt-txt2)!important;
+  border-color:var(--kt-stroke)!important;font-weight:700}
+.tr.cbi-section-table-row:nth-child(even)>.td,table tr:nth-child(even)>td{
+  background:rgba(255,255,255,.025)!important}
+.tr:hover .td,table tr:hover td{background:var(--kt-accent-soft)!important}
+
+/* ---- card accent bar + section heads: one cyan, calmer glow ---- */
+.kt-card::before,.cbi-section::before{background:var(--kt-grad)!important;box-shadow:none!important}
+.kt-card:hover{border-color:rgba(34,211,238,.4)!important}
+a{color:var(--kt-accent)}a:hover{color:#67E8F9}
+/* focus ring: single consistent cyan everywhere */
+input:focus,select:focus,textarea:focus,.cbi-input-text:focus,.cbi-input-select:focus{
+  border-color:var(--kt-accent)!important;box-shadow:0 0 0 3px rgba(34,211,238,.22)!important}
