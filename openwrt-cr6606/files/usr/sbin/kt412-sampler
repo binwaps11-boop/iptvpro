@@ -1,37 +1,62 @@
 #!/bin/sh
-# KT412 resource sampler — appends one CPU%/MEM%/RX-bps/TX-bps sample per run to a
-# small ring buffer (last 60 samples) for the dashboard history graphs. Read-only
-# w.r.t. config; writes only to /tmp. Meant to be run once a minute by cron.
+# KT412 resource sampler — appends one CPU%/MEM%/RX-bps/TX-bps sample to a small ring
+# buffer (last 60 samples) for the dashboard history graphs. Read-only w.r.t. config;
+# writes only to /tmp.
+#
+# Two modes:
+#   kt412-sampler          -> single-shot (one sample, then exit; legacy/cron path)
+#   kt412-sampler daemon   -> infinite loop, one sample every $INTERVAL s (procd)
+# Daemon mode gives the dashboard ~3s history granularity so CPU/RAM/traffic feel LIVE
+# instead of the old 60s cron cadence (the "needs page reload to update" complaint).
 F=/tmp/kt412-hist
 P=/tmp/kt412-hist.prev
+INTERVAL=3
 
-IF=br-lan
-[ -e "/sys/class/net/$IF" ] || IF=eth0
-[ -e "/sys/class/net/$IF" ] || IF=lan
+# one sample: compute deltas vs the previous snapshot ($P), append to the ring ($F),
+# then refresh $P. CPU% is measured over the real wall-clock gap between snapshots
+# (the daemon's ~3s window), so it reflects load now — not a self-measurement spike.
+sample() {
+	IF=br-lan
+	[ -e "/sys/class/net/$IF" ] || IF=eth0
+	[ -e "/sys/class/net/$IF" ] || IF=lan
 
-now="$(date +%s)"
-rx="$(cat /sys/class/net/$IF/statistics/rx_bytes 2>/dev/null || echo 0)"
-tx="$(cat /sys/class/net/$IF/statistics/tx_bytes 2>/dev/null || echo 0)"
+	now="$(date +%s)"
+	rx="$(cat /sys/class/net/$IF/statistics/rx_bytes 2>/dev/null || echo 0)"
+	tx="$(cat /sys/class/net/$IF/statistics/tx_bytes 2>/dev/null || echo 0)"
 
-# CPU jiffies (user+nice+system vs total) from /proc/stat
-read -r _ u n s i rest < /proc/stat
-tot=$((u+n+s+i)); used=$((u+n+s))
+	# CPU jiffies (user+nice+system vs total) from /proc/stat
+	read -r _ u n s i rest < /proc/stat
+	tot=$((u+n+s+i)); used=$((u+n+s))
 
-# memory used %
-mem="$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{ if(t>0) printf "%d",(t-a)*100/t; else print 0 }' /proc/meminfo 2>/dev/null)"
-[ -n "$mem" ] || mem=0
+	# memory used %
+	mem="$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{ if(t>0) printf "%d",(t-a)*100/t; else print 0 }' /proc/meminfo 2>/dev/null)"
+	[ -n "$mem" ] || mem=0
 
-if [ -f "$P" ]; then
-	read -r ptot pused prx ptx pnow < "$P"
-	dt=$((tot-ptot)); du=$((used-pused))
-	cpu=0; [ "$dt" -gt 0 ] && cpu=$(( du*100/dt ))
-	[ "$cpu" -lt 0 ] && cpu=0; [ "$cpu" -gt 100 ] && cpu=100
-	dts=$((now-pnow)); [ "$dts" -lt 1 ] && dts=1
-	rxbps=$(( (rx-prx)*8/dts )); txbps=$(( (tx-ptx)*8/dts ))
-	[ "$rxbps" -lt 0 ] && rxbps=0; [ "$txbps" -lt 0 ] && txbps=0
-	printf '%s %s %s %s %s\n' "$now" "$cpu" "$mem" "$rxbps" "$txbps" >> "$F"
-	tail -n 60 "$F" > "$F.t" 2>/dev/null && mv "$F.t" "$F"
+	if [ -f "$P" ]; then
+		read -r ptot pused prx ptx pnow < "$P"
+		dt=$((tot-ptot)); du=$((used-pused))
+		cpu=0; [ "$dt" -gt 0 ] && cpu=$(( du*100/dt ))
+		[ "$cpu" -lt 0 ] && cpu=0; [ "$cpu" -gt 100 ] && cpu=100
+		dts=$((now-pnow)); [ "$dts" -lt 1 ] && dts=1
+		rxbps=$(( (rx-prx)*8/dts )); txbps=$(( (tx-ptx)*8/dts ))
+		[ "$rxbps" -lt 0 ] && rxbps=0; [ "$txbps" -lt 0 ] && txbps=0
+		printf '%s %s %s %s %s\n' "$now" "$cpu" "$mem" "$rxbps" "$txbps" >> "$F"
+		tail -n 60 "$F" > "$F.t" 2>/dev/null && mv "$F.t" "$F"
+	fi
+
+	printf '%s %s %s %s %s\n' "$tot" "$used" "$rx" "$tx" "$now" > "$P"
+}
+
+if [ "$1" = "daemon" ]; then
+	# prime the previous-snapshot file so the first interval yields a real delta,
+	# then sample forever. procd respawns us if we ever die.
+	sample
+	while :; do
+		sleep "$INTERVAL"
+		sample
+	done
 fi
 
-printf '%s %s %s %s %s\n' "$tot" "$used" "$rx" "$tx" "$now" > "$P"
+# legacy single-shot
+sample
 exit 0

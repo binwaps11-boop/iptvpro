@@ -1,0 +1,43 @@
+#!/bin/sh
+# =============================================================================
+# 49-cr6608-eee-off  —  disable EEE (Energy Efficient Ethernet) on the switch
+# -----------------------------------------------------------------------------
+# Documented mt7621/mt7530 link-negotiation bug on the kernel-6.6 line used by
+# OpenWrt 24.10 (openwrt/openwrt #15348, #16551; fix RFT #22647): EEE can leave a
+# port stuck at 100M or flapping instead of negotiating 1G. Turning EEE OFF is a
+# legitimate, standard mitigation — it's a power-saving feature, NOT a forced speed
+# and NOT a fake number. We do NOT force a link speed (forcing 1G on a 2-pair/bad
+# cable just drops the link); auto-negotiation is left intact, only EEE is disabled.
+#
+# Safe + idempotent: needs `ethtool`; only touches ports that exist; harmless on a
+# down port. Re-applies on every boot via a small hotplug-free helper is overkill,
+# so we also persist a tiny boot hook so EEE stays off after carrier changes.
+# =============================================================================
+[ -x /usr/sbin/ethtool ] || [ -x /usr/bin/ethtool ] || command -v ethtool >/dev/null 2>&1 || exit 0
+
+eee_off() {
+	for p in lan1 lan2 lan3 lan4 wan eth0 eth1; do
+		[ -e "/sys/class/net/$p" ] || continue
+		ethtool --set-eee "$p" eee off >/dev/null 2>&1
+	done
+}
+
+eee_off
+
+# Persist: re-disable EEE on link-up so a re-negotiation can't re-enable it.
+HK=/etc/hotplug.d/net/30-eee-off
+if [ ! -f "$HK" ]; then
+	mkdir -p /etc/hotplug.d/net
+	cat > "$HK" <<'EOF'
+#!/bin/sh
+# Keep EEE off on mt7530 ports (gigabit negotiation stability). See 49-cr6608-eee-off.
+[ "$ACTION" = "add" ] || exit 0
+case "$INTERFACE" in
+	lan*|wan|eth*) command -v ethtool >/dev/null 2>&1 && ethtool --set-eee "$INTERFACE" eee off >/dev/null 2>&1 ;;
+esac
+exit 0
+EOF
+	chmod 0755 "$HK"
+fi
+
+exit 0

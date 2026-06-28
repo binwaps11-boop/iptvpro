@@ -496,14 +496,17 @@ return view.extend({
 		//      CGI calls is still in flight (no request pile-up).
 		//   2) visibility guard — skip polling entirely while the tab is hidden
 		//      (background tab / phone screen off) so it consumes zero CPU then.
-		// Backend already caches the heavy iwinfo sweep 30s, so 20s stays live & idle.
+		// Poll every 5s so CPU/RAM/traffic update LIVE without reopening the page.
+		// The sampler daemon writes a fresh point every 3s and the backend caches the
+		// heavy iwinfo sweep 30s, so 5s stays responsive yet cheap. Guards below keep
+		// it from piling up (inflight) and from polling a hidden tab (document.hidden).
 		var inflight = false;
 		poll.add(function(){
 			if (inflight) return Promise.resolve();
 			if (typeof document !== 'undefined' && document.hidden) return Promise.resolve();
 			inflight = true;
 			return refresh(root).then(function(){ inflight = false; }, function(){ inflight = false; });
-		}, 20);
+		}, 5);
 		return root;
 	},
 	handleSave: null, handleSaveApply: null, handleReset: null

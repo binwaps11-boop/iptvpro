@@ -80,6 +80,7 @@ jobs:
             echo 'CONFIG_PACKAGE_ip-bridge=y'
             echo 'CONFIG_PACKAGE_arping=y'
             echo 'CONFIG_PACKAGE_irqbalance=y'
+            echo 'CONFIG_PACKAGE_ethtool=y'
           } > .config
           make defconfig
           echo "=== verify cr6608 selected ==="
