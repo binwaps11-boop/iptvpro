@@ -66,6 +66,8 @@ jobs:
             echo 'CONFIG_TARGET_ramips=y'
             echo 'CONFIG_TARGET_ramips_mt7621=y'
             echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6606=y'
+            echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y'
+            echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6609=y'
             echo 'CONFIG_PACKAGE_luci=y'
             echo 'CONFIG_PACKAGE_luci-ssl=y'
             echo 'CONFIG_PACKAGE_luci-i18n-base-ar=y'
