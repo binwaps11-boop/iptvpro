@@ -18,6 +18,12 @@
 COUNTRY="US"          # change here if your actual country gives a better legal table
 KEY="Smart@12345"     # default WPA2 key (>=8) — change from the dashboard after flash
 
+# Wipe EVERY existing wifi-iface FIRST so no stray/duplicate/OPEN/OWE AP can survive
+# from the board's default wireless config. A leftover open/OWE iface on a radio is
+# exactly how the 2.4G ended up shown as "Enhanced Open" (OWE, no password). We then
+# create exactly ONE secured (WPA2) AP per radio below.
+while uci -q delete wireless.@wifi-iface[0]; do :; done
+
 for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
 	uci -q set wireless.$dev.country="$COUNTRY"
 	uci -q set wireless.$dev.disabled='0'
@@ -26,9 +32,9 @@ for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/
 	band="$(uci -q get wireless.$dev.band)"
 	case "$band" in 6g) ssfx='-6G';; 5g) ssfx='-5G';; *) ssfx='';; esac
 
-	# find this radio's first wifi-iface, or create one
-	ifc="$(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)\.device='$dev'/\1/p" | head -1)"
-	[ -n "$ifc" ] || { ifc="$(uci add wireless wifi-iface)"; uci -q set wireless.$ifc.device="$dev"; }
+	# create exactly ONE fresh AP iface for this radio (all old ifaces wiped above)
+	ifc="$(uci add wireless wifi-iface)"
+	uci -q set wireless.$ifc.device="$dev"
 	uci -q set wireless.$ifc.mode='ap'
 	uci -q set wireless.$ifc.network='lan'
 	uci -q set wireless.$ifc.ssid="Smart-AP$ssfx"

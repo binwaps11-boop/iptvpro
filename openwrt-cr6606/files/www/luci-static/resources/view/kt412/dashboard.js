@@ -491,7 +491,7 @@ return view.extend({
 		root.innerHTML = shell();
 		wireToggle(root);
 		refresh(root);
-		// Poll every 20s with TWO CPU guards the single-core QCA9558 needs:
+		// Poll with TWO CPU guards (kind to the dual-core MT7621):
 		//   1) overlap guard — never start a new refresh while the previous set of
 		//      CGI calls is still in flight (no request pile-up).
 		//   2) visibility guard — skip polling entirely while the tab is hidden
