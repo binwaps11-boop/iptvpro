@@ -81,6 +81,8 @@ jobs:
             echo 'CONFIG_PACKAGE_arping=y'
             echo 'CONFIG_PACKAGE_irqbalance=y'
             echo 'CONFIG_PACKAGE_ethtool=y'
+            echo 'CONFIG_PACKAGE_kmod-sched-cake=y'
+            echo 'CONFIG_PACKAGE_luci-app-sqm=y'
           } > .config
           make defconfig
           echo "=== verify cr6608 selected ==="

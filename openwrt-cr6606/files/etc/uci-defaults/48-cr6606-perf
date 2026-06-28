@@ -38,5 +38,13 @@ if [ -x /etc/init.d/irqbalance ]; then
 	/etc/init.d/irqbalance start >/dev/null 2>&1
 fi
 
+# Apply the network-stack tuning now so it's active on first boot without waiting
+# for a reboot. nf_conntrack must be loaded for its sysctls to exist; the firewall
+# loads it anyway, but we nudge it here so the conntrack keys are present.
+modprobe nf_conntrack 2>/dev/null
+if [ -f /etc/sysctl.d/99-cr6608-tuning.conf ]; then
+	sysctl -p /etc/sysctl.d/99-cr6608-tuning.conf >/dev/null 2>&1
+fi
+
 touch /etc/cr6606-perf.done
 exit 0

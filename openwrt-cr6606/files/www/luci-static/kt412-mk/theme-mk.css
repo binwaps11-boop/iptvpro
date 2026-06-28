@@ -24,31 +24,54 @@
    ============================================================================ */
 
 :root{
-  /* PRO refinement — richer near-black surfaces, cleaner glass, brighter text,
-     refined accent + softer shadows (synced with kt412-theme.css). */
-  --mk-bg0:#0b1220; --mk-bg1:#111c2e; --mk-bg2:#16243a;
-  --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
+  /* ===== UI REDESIGN v4 — SOLID high-contrast pro dark (no translucency) =====
+     The previous build used 62%-opacity "glass" cards that rely on a dark page
+     behind them; on the dashboard route the LuCI content canvas can render light,
+     so the glass cards washed out to faint grey. v4 makes every surface SOLID and
+     opaque, paints its own dark canvas (see body:has(.mk-wrap) below), and brightens
+     text — so contrast is guaranteed regardless of what's behind the view. */
+  --mk-bg0:#0a0f1c; --mk-bg1:#0f1626; --mk-bg2:#16203a;
+  --mk-card:#172238;            /* SOLID surface — crisp readable frame          */
+  --mk-card2:#1f2c46;           /* SOLID raised surface (chips / heads / tiles)  */
 
-  /* accent family — refined bright cyan primary */
-  --mk-accent:#2dd4bf; --mk-accent2:#2dd4bf; --mk-violet:#A78BFA;
-  --mk-blue:#2dd4bf; --mk-cyan:#2dd4bf;        /* legacy aliases now cyan      */
+  /* accent family — refined bright teal primary */
+  --mk-accent:#2dd4bf; --mk-accent2:#2dd4bf; --mk-violet:#a78bfa;
+  --mk-blue:#2dd4bf; --mk-cyan:#2dd4bf;        /* legacy aliases now teal       */
   --mk-grad:linear-gradient(135deg,#2dd4bf 0%,#14b8a6 55%,#0d9488 100%);
 
   /* status colours — refined on dark */
-  --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
+  --mk-green:#34d399; --mk-amber:#fbbf24; --mk-red:#f87171; --mk-grey:#64748b;
 
-  /* glass surfaces / strokes */
-  --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
-  --mk-stroke:rgba(255,255,255,0.12); --mk-stroke2:rgba(45,212,191,0.50);
+  /* SOLID surfaces / crisper strokes */
+  --mk-glass:#172238; --mk-glass2:#1f2c46;
+  --mk-stroke:rgba(255,255,255,0.17); --mk-stroke2:rgba(45,212,191,0.55);
 
-  /* text — brighter, high contrast on dark */
-  --mk-txt:#F1F5F9; --mk-txt2:#e2e8f0; --mk-muted:#cbd5e1;
+  /* text — max contrast on dark */
+  --mk-txt:#f8fafc; --mk-txt2:#e7eef7; --mk-muted:#aab8cc;
 
-  --mk-shadow:0 4px 18px rgba(0,0,0,.40);
-  --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
+  --mk-shadow:0 4px 18px rgba(0,0,0,.45);
+  --mk-shadow-lg:0 14px 36px rgba(0,0,0,.55);
   --mk-radius:14px;
   color-scheme:dark;
 }
+
+/* ===== DASHBOARD CANVAS: guarantee a SOLID dark backdrop behind the dashboard so
+   the opaque cards always have high contrast — even if the global kt412-theme.css
+   body paint isn't applied on this route (the white-background bug). Scoped to pages
+   that actually render the dashboard (.mk-wrap), so other LuCI pages are untouched. */
+body:has(.mk-wrap){
+  background:
+    radial-gradient(1100px 700px at 12% -12%, rgba(45,212,191,.07) 0%, transparent 56%),
+    radial-gradient(900px 700px at 112% 4%, rgba(167,139,250,.06) 0%, transparent 54%),
+    linear-gradient(160deg,#0a0f1c,#0f1626 60%,#0a0f1c)!important;
+  background-attachment:fixed!important;
+}
+body:has(.mk-wrap) #maincontent,
+body:has(.mk-wrap) #view,
+body:has(.mk-wrap) #view > div,
+body:has(.mk-wrap) .container,
+body:has(.mk-wrap) .main,
+body:has(.mk-wrap) .main-right{ background:transparent!important; }
 
 /* ===== kill-switch: when skin is off, drop the custom surfaces ===== */
 :root[data-mk-skin="off"] .mk-login-card,
@@ -622,9 +645,9 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
 .mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
   display:block; position:relative; z-index:1; }
 .mk-gauge .arc{ filter:none; }
-.mk-gauge .mk-gval{ font-size:30px; }
-.mk-gauge .mk-gunit{ fill:var(--mk-muted); font-weight:700; }
-.mk-gauge .mk-gcap{ fill:var(--mk-muted); font-size:9px; font-weight:800; letter-spacing:2px; }
+.mk-gauge .mk-gval{ font-size:30px; fill:#ffffff; }
+.mk-gauge .mk-gunit{ fill:var(--mk-txt2); font-weight:700; }
+.mk-gauge .mk-gcap{ fill:var(--mk-txt2); font-size:9px; font-weight:800; letter-spacing:2px; opacity:.92; }
 .mk-gauge .mk-glabel{ display:flex; align-items:center; justify-content:center; gap:7px; margin-top:2px; }
 .mk-gauge .mk-glabel .mk-ic{ color:var(--mk-accent); }
 .mk-gcard[data-none]{}
@@ -786,7 +809,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
    loaded (not a stale browser cache / old flash). Small, fixed, unobtrusive.
    ============================================================================ */
 body::after{
-  content:"Pro v3";
+  content:"Pro v4";
   position:fixed; inset-block-end:8px; inset-inline-start:8px; z-index:9999;
   font:700 10px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:.4px;
   color:#0b1220; background:linear-gradient(135deg,#2dd4bf,#14b8a6);
