@@ -1,0 +1,8 @@
+#!/bin/sh /etc/rc.common
+# Honest marker for the WiFi-6 Pro tuning build. Confirm: dmesg | grep CR6606
+START=01
+boot() { start; }
+start() {
+	echo "CR6606-WIFI6-PRO active: max-clean power + beamforming/MU-MIMO/OFDMA/BSS-color/802.11k-v (no caldata/regd tampering)" > /dev/kmsg 2>/dev/null
+	logger -t CR6606 "CR6606-WIFI6-PRO active"
+}

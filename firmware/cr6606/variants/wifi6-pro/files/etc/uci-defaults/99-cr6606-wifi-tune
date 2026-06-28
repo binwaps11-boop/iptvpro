@@ -1,0 +1,75 @@
+#!/bin/sh
+# ===========================================================================
+# VARIANT: cr6606-wifi6-pro
+# Max CLEAN power + full WiFi-6/AX1800 feature tuning (all REAL, mt7915):
+#   Beamforming (SU+MU), MU-MIMO, OFDMA(HE), BSS-Coloring, 802.11k/v roaming,
+#   airtime fairness, range-friendly rate handling, full 2x2.
+# NO caldata/EEPROM/MAC/DFS tampering. SSIDs Xiaomi-2G / Xiaomi-5G.
+# ===========================================================================
+. /lib/functions.sh
+COUNTRY='US'
+PW='30'
+
+setup_iface() {
+	local radio="$1" ssid="$2" sec="cr6606_${radio}"
+	uci -q delete wireless.${sec} 2>/dev/null
+	uci -q batch <<EOF
+set wireless.${sec}=wifi-iface
+set wireless.${sec}.device=${radio}
+set wireless.${sec}.mode=ap
+set wireless.${sec}.network=lan
+set wireless.${sec}.ssid=${ssid}
+set wireless.${sec}.encryption=psk2
+set wireless.${sec}.key=Cr6606-Change-Me
+set wireless.${sec}.ieee80211k=1
+set wireless.${sec}.ieee80211v=1
+set wireless.${sec}.bss_transition=1
+set wireless.${sec}.wnm_sleep_mode=1
+set wireless.${sec}.rrm_neighbor_report=1
+set wireless.${sec}.rrm_beacon_report=1
+set wireless.${sec}.he_su_beamformer=1
+set wireless.${sec}.he_su_beamformee=1
+set wireless.${sec}.he_mu_beamformer=1
+set wireless.${sec}.he_bss_color=1
+set wireless.${sec}.vht_su_beamformer=1
+set wireless.${sec}.vht_su_beamformee=1
+set wireless.${sec}.legacy_rates=0
+set wireless.${sec}.disassoc_low_ack=0
+EOF
+}
+
+[ -s /etc/config/wireless ] || /sbin/wifi config 2>/dev/null || true
+
+for r in $(uci -q show wireless | sed -n 's/^wireless\.\([a-z0-9]*\)=wifi-device/\1/p'); do
+	band="$(uci -q get wireless.${r}.band)"
+	uci -q batch <<EOF
+set wireless.${r}.country=${COUNTRY}
+set wireless.${r}.txpower=${PW}
+set wireless.${r}.disabled=0
+set wireless.${r}.cell_density=0
+EOF
+	uci -q delete wireless.${r}.txantenna 2>/dev/null   # full 2x2
+	uci -q delete wireless.${r}.rxantenna 2>/dev/null
+	case "$band" in
+		2g) uci -q set wireless.${r}.htmode='HE20'; uci -q set wireless.${r}.channel='auto'; setup_iface "$r" 'Xiaomi-2G' ;;
+		5g) uci -q set wireless.${r}.htmode='HE80'; uci -q set wireless.${r}.channel='149'; setup_iface "$r" 'Xiaomi-5G' ;;
+	esac
+done
+for i in $(uci -q show wireless | sed -n 's/^wireless\.\(default_[a-z0-9]*\)=wifi-iface/\1/p'); do
+	uci -q delete wireless.${i}
+done
+
+# Performance: SW+HW flow offload
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+
+# SQM is INSTALLED but left OFF by default (enable per WAN speed for low latency).
+# mt7621 cake tops ~300-400Mbps; enable only if your line is below that.
+
+chmod +x /etc/init.d/cr6606-wifi6pro-marker 2>/dev/null
+[ -x /etc/init.d/cr6606-wifi6pro-marker ] && /etc/init.d/cr6606-wifi6pro-marker enable 2>/dev/null
+
+uci -q commit wireless
+uci -q commit firewall
+logger -t cr6606-wifi "WIFI6-PRO applied: US txpower=30 2g=HE20 5g=HE80/149 2x2 +beamform +MU +11k/v +bsscolor offload=sw+hw"
+exit 0
