@@ -1,0 +1,16 @@
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ TEST-ONLY ceiling raise + dmesg marker. NOT a real-30dBm change. @@
+@@ Locate __mt7915_init_txpower() and the line:
+@@     chan->max_power = min_t(int, chan->max_reg_power, target_power);
+@@ Replace with the block below. This lets the driver REQUEST up to the
+@@ regulatory max instead of clamping to the EEPROM cal target, so you can
+@@ measure (Phase 4) whether ANY real headroom exists before the PA clips.
+@@ Expectation: number rises, clean RF does NOT reach 30 -> revert.
+@@
+-		chan->max_power = min_t(int, chan->max_reg_power, target_power);
++		/* CR6608-RF-30DBM-TEST: bypass EEPROM cal-target clamp for measurement only.
++		 * Physical PA P1dB still applies; verify with Phase-4 station/survey, not iwinfo. */
++		chan->max_power = chan->max_reg_power;
++		pr_info("CR6608-RF-30DBM-TEST: chan=%d max_reg=%d eeprom_target=%d -> max_power=%d\n",
++			chan->hw_value, chan->max_reg_power, target_power, chan->max_power);
