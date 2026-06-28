@@ -65,9 +65,7 @@ jobs:
           {
             echo 'CONFIG_TARGET_ramips=y'
             echo 'CONFIG_TARGET_ramips_mt7621=y'
-            echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6606=y'
             echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y'
-            echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6609=y'
             echo 'CONFIG_PACKAGE_luci=y'
             echo 'CONFIG_PACKAGE_luci-ssl=y'
             echo 'CONFIG_PACKAGE_luci-i18n-base-ar=y'
@@ -83,8 +81,8 @@ jobs:
             echo 'CONFIG_PACKAGE_arping=y'
           } > .config
           make defconfig
-          echo "=== verify cr6606 selected ==="
-          grep -E "DEVICE_xiaomi_mi-router-cr6606=y" .config || { echo "FATAL: cr6606 not selected"; exit 1; }
+          echo "=== verify cr6608 selected ==="
+          grep -E "DEVICE_xiaomi_mi-router-cr6608=y" .config || { echo "FATAL: cr6608 not selected"; exit 1; }
           grep -E "CONFIG_TARGET_ramips_mt7621=y" .config
 
       - name: Add Smart AP overlay (shared base + variant system-30dbm-measured-test)
@@ -113,9 +111,9 @@ jobs:
           set -eux
           cd openwrt
           OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
-          SRC="$(ls bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin | head -1)"
+          SRC="$(ls bin/targets/ramips/mt7621/*cr6608*sysupgrade.bin | head -1)"
           test -s "$SRC" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
-          cp "$SRC" "$OUT/cr6606-${VARIANT}-sysupgrade.bin"
+          cp "$SRC" "$OUT/cr6608-${VARIANT}-sysupgrade.bin"
           cd "$OUT"; ls -la
           sha256sum *.bin > "sha256-${VARIANT}.txt"; cat "sha256-${VARIANT}.txt"
 
@@ -140,6 +138,6 @@ jobs:
             NO regulatory/caldata patch, NO MAC change, NO foreign firmware, NO fake numbers.
             Flash: sysupgrade -n /tmp/cr6606.bin
           files: |
-            out/cr6606-system-30dbm-measured-test-sysupgrade.bin
+            out/cr6608-system-30dbm-measured-test-sysupgrade.bin
             out/sha256-system-30dbm-measured-test.txt
           fail_on_unmatched_files: false
