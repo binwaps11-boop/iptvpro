@@ -1,20 +1,24 @@
-name: Build CR6606 Smart AP (Xiaomi AX1800 WiFi6 + dashboard)
+name: Build CR6606 FAST (ImageBuilder · system-30dbm-measured-test)
 
 # Xiaomi Mi Router CR6606 — ramips/mt7621, MT7621AT + MT7915 (WiFi6 AX1800), NAND.
-# Officially supported in OpenWrt => no source patches needed. We use the stock
-# OpenWrt ImageBuilder (fast, clean) and bake in the Smart AP dashboard/theme/CGI
-# overlay (reused from KT412 — platform-independent web files) + LuCI.
-# NO power/regulatory edits (mt76 respects regdb; WiFi6 AX1800 is native).
+# We apply NO kernel/driver/source patches (DSA is native, power is UCI-only), so the
+# official OpenWrt ImageBuilder produces a functionally IDENTICAL image to the source
+# build in ~10 min instead of ~50. Bakes the same Smart AP overlay + variant uci-defaults
+# (all audit fixes + modal fix) + the same package set. SYSUPGRADE only.
 
 on:
-  workflow_dispatch:   # manual only — the SOURCE build (build-cr6606-src.yml) is primary
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: cr6606-build
+  group: cr6606-fast-build
   cancel-in-progress: true
+
+env:
+  VARIANT: system-30dbm-measured-test
+  TAG: cr6606-30dbm-measured
 
 jobs:
   build:
@@ -40,52 +44,57 @@ jobs:
           tar --zstd -xf ib.tar.zst
           mv "$IB" ib
 
-      - name: Build CR6606 image (Smart AP overlay)
+      - name: Merge overlay (shared base + variant)
+        run: |
+          set -eux
+          MERGED="$GITHUB_WORKSPACE/merged"; rm -rf "$MERGED"; mkdir -p "$MERGED"
+          cp -a "$GITHUB_WORKSPACE/openwrt-cr6606/files/." "$MERGED/"
+          cp -a "$GITHUB_WORKSPACE/openwrt-cr6606/variants/${VARIANT}/." "$MERGED/"
+          echo "=== merged overlay ==="; find "$MERGED" -type f | sort | head -80
+          echo "=== uci-defaults ==="; ls -la "$MERGED/etc/uci-defaults/"
+
+      - name: Build CR6606 image (Smart AP + all packages)
         run: |
           set -eux
           cd ib
-          # confirm the device profile exists in this ImageBuilder
           make info 2>/dev/null | grep -i "cr6606" || { echo "FATAL: cr6606 profile not found"; exit 1; }
           make image \
             PROFILE="xiaomi_mi-router-cr6606" \
-            PACKAGES="luci luci-i18n-base-ar curl" \
-            FILES="$GITHUB_WORKSPACE/openwrt-cr6606/files" \
-            EXTRA_IMAGE_NAME="smartap"
+            PACKAGES="luci luci-ssl luci-i18n-base-ar curl wpad-openssl -wpad-basic-mbedtls kmod-mt7915e kmod-mt7915-firmware iw iwinfo kmod-nft-offload ip-full ip-bridge arping" \
+            FILES="$GITHUB_WORKSPACE/merged" \
+            EXTRA_IMAGE_NAME="${VARIANT}"
           echo "=== built images ==="
           ls -la bin/targets/ramips/mt7621/ | grep -i cr6606 || ls -la bin/targets/ramips/mt7621/
 
-      - name: Collect + checksum
+      - name: Collect SYSUPGRADE only + checksum
         run: |
           set -eux
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          cp ib/bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp ib/bin/targets/ramips/mt7621/*cr6606*factory.bin     "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp ib/bin/targets/ramips/mt7621/*cr6606*initramfs*.bin  "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp ib/bin/targets/ramips/mt7621/*cr6606*.manifest       "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE/out"
-          ls -la
-          sha256sum *.bin > sha256-cr6606.txt || true
-          cat sha256-cr6606.txt
-          test -s "$(ls *sysupgrade.bin 2>/dev/null | head -1)" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          SRC="$(ls ib/bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin | head -1)"
+          test -s "$SRC" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+          cp "$SRC" "$OUT/cr6606-${VARIANT}-sysupgrade.bin"
+          cd "$OUT"; ls -la
+          sha256sum *.bin > "sha256-${VARIANT}.txt"; cat "sha256-${VARIANT}.txt"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
-        with:
-          name: cr6606-smartap
-          path: out/*
-          if-no-files-found: warn
+        with: { name: "cr6606-${{ env.VARIANT }}-fast", path: out/*, if-no-files-found: warn }
 
-      - name: Publish to Release
+      - name: Publish to Release (sysupgrade only)
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cr6606-smartap
-          name: CR6606 Smart AP (Xiaomi AX1800 WiFi6 + dashboard)
+          tag_name: ${{ env.TAG }}
+          name: "CR6606 system-30dbm-measured-test — FAST (ImageBuilder, all-channels proof)"
           body: |
-            Xiaomi Mi Router CR6606 (ramips/mt7621, MT7621AT + MT7915 WiFi6 AX1800).
-            OpenWrt 24.10.0 ImageBuilder + Smart AP dashboard/theme/CGI overlay + LuCI.
-            No power/regulatory edits. Flashing requires the official OpenWrt CR660x
-            install method (bootloader unlock) — see the OpenWrt device wiki.
-          files: out/*
+            Xiaomi CR6606 (ramips/mt7621, MT7915 WiFi6 AX1800 2x2/2x2). DSA native.
+            OpenWrt 24.10.0 ImageBuilder (functionally identical to the source build — we
+            apply no kernel/driver patches). Smart AP UI + LuCI + SSH + flow offload (SW)
+            + the in-system proof scripts + all audit fixes + modal dark-fix.
+            txpower=30 request on 2.4G+5G; NO regdb/caldata patch, NO MAC change.
+            Flash: sysupgrade -n /tmp/cr6606.bin
+          files: |
+            out/cr6606-system-30dbm-measured-test-sysupgrade.bin
+            out/sha256-system-30dbm-measured-test.txt
           fail_on_unmatched_files: false
