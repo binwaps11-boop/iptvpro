@@ -1,0 +1,43 @@
+#!/bin/sh
+# =============================================================================
+# 45-cr6606-wifi-base  —  SHARED Wi-Fi base for ALL CR6606 variants
+# -----------------------------------------------------------------------------
+# Brings BOTH MT7915 radios up (2.4G + 5G), sets a country, SSID + WPA2 per band,
+# and 802.11k/v. Does NOT set channel/htmode/txpower here — those are owned by the
+# per-variant file (50-cr6606-variant) so each build can differ.
+#
+# 2x2 CHAINS: we deliberately DO NOT set txantenna/rxantenna. mt76 uses both chains
+# by default (full 2x2). Restricting them would CUT a chain; not touching them keeps
+# the radio at 2x2. Chains are PROVEN at runtime (iw phy "Available Antennas" = 0x3,
+# station NSS=2) by /root/cr6606_all_channels_test.sh — never faked.
+#
+# NO EEPROM/caldata write, NO MAC change. Idempotent (guard file). UCI only.
+# =============================================================================
+[ -f /etc/cr6606-wifi.done ] && exit 0
+
+COUNTRY="US"          # change here if your actual country gives a better legal table
+KEY="Smart@12345"     # default WPA2 key (>=8) — change from the dashboard after flash
+
+for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+	uci -q set wireless.$dev.country="$COUNTRY"
+	uci -q set wireless.$dev.disabled='0'
+	uci -q set wireless.$dev.cell_density='0'   # no extra distance-based power back-off
+
+	band="$(uci -q get wireless.$dev.band)"
+	case "$band" in 6g) ssfx='-6G';; 5g) ssfx='-5G';; *) ssfx='';; esac
+
+	# find this radio's first wifi-iface, or create one
+	ifc="$(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)\.device='$dev'/\1/p" | head -1)"
+	[ -n "$ifc" ] || { ifc="$(uci add wireless wifi-iface)"; uci -q set wireless.$ifc.device="$dev"; }
+	uci -q set wireless.$ifc.mode='ap'
+	uci -q set wireless.$ifc.network='lan'
+	uci -q set wireless.$ifc.ssid="Smart-AP$ssfx"
+	uci -q set wireless.$ifc.encryption='psk2'
+	uci -q set wireless.$ifc.key="$KEY"
+	uci -q set wireless.$ifc.ieee80211k='1'
+	uci -q set wireless.$ifc.ieee80211v='1'
+done
+
+uci -q commit wireless
+touch /etc/cr6606-wifi.done
+exit 0

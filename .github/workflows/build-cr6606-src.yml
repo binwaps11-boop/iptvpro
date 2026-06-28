@@ -1,11 +1,15 @@
-name: Build CR6606 from SOURCE (Xiaomi AX1800 WiFi6 · DSA · Smart AP)
+name: Build CR6606 from SOURCE (2 variants · all-channels power-measured · DSA)
 
 # FULL SOURCE build (من الصفر) of OpenWrt for the Xiaomi Mi Router CR6606.
-#   target  : ramips/mt7621  (MT7621AT dual-core)  -- DSA is NATIVE here (mt7530)
-#   radios  : MT7915 WiFi6 AX1800 (mt76 / kmod-mt7915e), pulled by the device profile
-#   profile : xiaomi_mi-router-cr6606  (officially supported -> no source patches)
-# Bakes in the Smart AP dashboard/theme/CGI overlay (openwrt-cr6606/files).
-# NO power/regulatory edits. Branch openwrt-24.10 = latest stable that reliably works.
+#   target  : ramips/mt7621 (MT7621AT)  -- DSA is NATIVE here (mt7530), no patches
+#   radios  : MT7915 WiFi6 AX1800 (mt76 / kmod-mt7915e), 2x2/2x2
+#   profile : xiaomi_mi-router-cr6606 (officially supported)
+# Builds TWO variants via matrix, each = shared Smart-AP overlay + a per-variant
+# uci-defaults overlay + the in-system measurement scripts:
+#   - clean-stable-longrange       -> release tag cr6606-clean-stable
+#   - system-30dbm-measured-test   -> release tag cr6606-30dbm-measured (markers + tools)
+# NO power/regulatory/caldata patches. txpower=30 is an honest UCI request; the bundled
+# scripts MEASURE the real per-channel output (no fake numbers).
 
 on:
   workflow_dispatch:
@@ -14,6 +18,7 @@ on:
     paths:
       - ".github/workflows/build-cr6606-src.yml"
       - "openwrt-cr6606/files/**"
+      - "openwrt-cr6606/variants/**"
 
 permissions:
   contents: write
@@ -26,6 +31,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: clean-stable-longrange
+            tag:  cr6606-clean-stable
+            title: "CR6606 clean-stable-longrange — SOURCE (AX1800 · DSA)"
+          - name: system-30dbm-measured-test
+            tag:  cr6606-30dbm-measured
+            title: "CR6606 system-30dbm-measured-test — SOURCE (all-channels proof)"
     steps:
       - name: Checkout repo (overlay)
         uses: actions/checkout@v4
@@ -51,10 +66,9 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure (.config seed for cr6606 + Smart AP packages)
+      - name: Configure (.config seed for cr6606 + Smart AP + measurement tools)
         run: |
           cd openwrt
-          # build .config with clean (un-indented) KConfig lines
           {
             echo 'CONFIG_TARGET_ramips=y'
             echo 'CONFIG_TARGET_ramips_mt7621=y'
@@ -66,19 +80,25 @@ jobs:
             echo 'CONFIG_PACKAGE_wpad-openssl=y'
             echo 'CONFIG_PACKAGE_kmod-mt7915e=y'
             echo 'CONFIG_PACKAGE_kmod-mt7915-firmware=y'
+            echo 'CONFIG_PACKAGE_iw=y'
+            echo 'CONFIG_PACKAGE_iwinfo=y'
+            echo 'CONFIG_PACKAGE_kmod-nft-offload=y'
           } > .config
           make defconfig
           echo "=== verify cr6606 selected ==="
           grep -E "DEVICE_xiaomi_mi-router-cr6606=y" .config || { echo "FATAL: cr6606 not selected"; exit 1; }
-          echo "=== verify DSA (mt7621 uses DSA natively) ==="
           grep -E "CONFIG_TARGET_ramips_mt7621=y" .config
 
-      - name: Add Smart AP files overlay
+      - name: Add Smart AP overlay (shared base + variant ${{ matrix.name }})
         run: |
+          set -eux
           cd openwrt
-          mkdir -p files
+          rm -rf files; mkdir -p files
           cp -a "$GITHUB_WORKSPACE/kt/openwrt-cr6606/files/." files/
-          echo "=== overlay contents ==="; find files -type f | head -60; echo "total: $(find files -type f | wc -l)"
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-cr6606/variants/${{ matrix.name }}/." files/
+          echo "=== overlay contents (variant ${{ matrix.name }}) ==="
+          find files -type f | sort | head -80; echo "total: $(find files -type f | wc -l)"
+          echo "=== uci-defaults present ==="; ls -la files/etc/uci-defaults/
 
       - name: Download sources
         run: |
@@ -88,36 +108,40 @@ jobs:
       - name: Build firmware
         run: |
           cd openwrt
-          make -j$(nproc) V=s 2>&1 | tail -200 || { echo "parallel failed, retry single-thread for clear error"; make -j1 V=s 2>&1 | tail -200; exit 1; }
+          make -j$(nproc) V=s 2>&1 | tail -200 || { echo "parallel failed, retry single-thread"; make -j1 V=s 2>&1 | tail -200; exit 1; }
 
-      - name: Collect + checksum
+      - name: Collect + checksum (rename to variant name)
         run: |
           set -eux
           cd openwrt
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          cp bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp bin/targets/ramips/mt7621/*cr6606*factory.bin     "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp bin/targets/ramips/mt7621/*cr6606*initramfs*.bin  "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp bin/targets/ramips/mt7621/*cr6606*.manifest       "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE/out"; ls -la
-          sha256sum *.bin > sha256-cr6606-src.txt; cat sha256-cr6606-src.txt
-          test -s "$(ls *sysupgrade.bin 2>/dev/null | head -1)" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          SRC="$(ls bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin | head -1)"
+          test -s "$SRC" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+          cp "$SRC" "$OUT/cr6606-${{ matrix.name }}-sysupgrade.bin"
+          cp bin/targets/ramips/mt7621/*cr6606*factory.bin    "$OUT/cr6606-${{ matrix.name }}-factory.bin" 2>/dev/null || true
+          cp bin/targets/ramips/mt7621/*cr6606*.manifest      "$OUT/cr6606-${{ matrix.name }}.manifest" 2>/dev/null || true
+          cd "$OUT"; ls -la
+          sha256sum *.bin > "sha256-${{ matrix.name }}.txt"; cat "sha256-${{ matrix.name }}.txt"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
-        with: { name: cr6606-smartap-src, path: out/*, if-no-files-found: warn }
+        with: { name: "cr6606-${{ matrix.name }}", path: out/*, if-no-files-found: warn }
 
       - name: Publish to Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cr6606-smartap-src
-          name: CR6606 Smart AP — SOURCE build (Xiaomi AX1800 WiFi6 · DSA)
+          tag_name: ${{ matrix.tag }}
+          name: ${{ matrix.title }}
           body: |
             Full SOURCE build of OpenWrt openwrt-24.10 for Xiaomi CR6606
-            (ramips/mt7621, MT7621AT + MT7915 WiFi6 AX1800). DSA native (mt7530).
-            Smart AP dashboard/theme/CGI overlay + LuCI. No power/regulatory edits.
-            Already-OpenWrt device: flash sysupgrade.bin directly (sysupgrade -n).
+            (ramips/mt7621, MT7915 WiFi6 AX1800 2x2/2x2). DSA native (mt7530).
+            Variant: ${{ matrix.name }}. Smart AP UI + LuCI + SSH + flow offloading.
+            txpower=30 request on both radios; NO regulatory/caldata patch, NO MAC change.
+            In-system proof tools: /root/cr6606_power_truth.sh and
+            /root/cr6606_all_channels_test.sh (measure every 2.4G+5G channel).
+            See openwrt-cr6606/CR6606-POWER-REPORT.md for the clamp analysis.
+            Flash: sysupgrade -n /tmp/cr6606.bin
           files: out/*
           fail_on_unmatched_files: false
