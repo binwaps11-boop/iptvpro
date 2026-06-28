@@ -12,7 +12,6 @@ config wifi-device 'radio0'
 	option channel 'auto'        # أو 36 / 149 لقناة ثابتة نظيفة
 	option htmode 'HE80'         # 80MHz - أعلى تدفق
 	option country 'SA'          # *** ضع رمز دولتك ***
-	option txpower '30'         # يُقصّ تلقائياً للحد المسموح قانونياً
 	option cell_density '0'
 
 config wifi-iface 'default_radio0'
@@ -33,7 +32,6 @@ config wifi-device 'radio1'
 	option channel 'auto'        # أو 1 / 6 / 11
 	option htmode 'HE20'         # 20MHz لتقليل التداخل بالباند المزدحم
 	option country 'SA'          # *** ضع رمز دولتك ***
-	option txpower '30'
 	option cell_density '0'
 
 config wifi-iface 'default_radio1'

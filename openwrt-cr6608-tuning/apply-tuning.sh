@@ -47,7 +47,6 @@ if [ -n "$RADIO_5" ]; then
     uci set wireless.$R.country="$COUNTRY"
     uci set wireless.$R.htmode='HE80'        # عرض قناة 80MHz = أعلى تدفق (مفتاح الـ300)
     uci set wireless.$R.channel='auto'       # أو ضع قناة ثابتة نظيفة مثل 36 أو 149
-    uci set wireless.$R.txpower='30'         # سيُقصّ تلقائياً للحد المسموح للدولة/الهاردوير
     uci set wireless.$R.cell_density='0'      # لا تتجاهل العملاء البعيدين
     uci set wireless.$R.disabled='0'
     uci -q delete wireless.$R.legacy_rates   # لا rates قديمة بطيئة
@@ -64,7 +63,6 @@ if [ -n "$RADIO_24" ]; then
     uci set wireless.$R.country="$COUNTRY"
     uci set wireless.$R.htmode='HE20'        # 20MHz = أقل تداخل بالباند المزدحم
     uci set wireless.$R.channel='auto'       # أو ثبّت 1 / 6 / 11
-    uci set wireless.$R.txpower='30'         # يُقصّ للحد المسموح
     uci set wireless.$R.cell_density='0'
     uci set wireless.$R.disabled='0'
 fi
@@ -81,28 +79,58 @@ done
 
 uci commit wireless
 
-# ---------------------------------------------------------------------------
-#  إصلاح لغة LuCI الإنجليزية (لا تتحول) + تسريع الواجهة على الجوال
-# ---------------------------------------------------------------------------
-echo "==> ضبط لغة الواجهة وتثبيت حزمة الإنجليزية إن نقصت"
-uci -q set luci.main.lang='en' || true
-uci -q commit luci || true
-# ثبّت حزمة اللغة الإنجليزية إن وُجد إنترنت (سبب عدم التحويل غالباً نقص الحزمة)
-if opkg list-installed 2>/dev/null | grep -q luci-i18n-base-en; then
-    echo "    حزمة الإنجليزية موجودة."
-else
-    opkg update 2>/dev/null && opkg install luci-i18n-base-en 2>/dev/null \
-        && echo "    تم تثبيت luci-i18n-base-en" \
-        || echo "    تعذّر التثبيت (تحقق من الإنترنت) - الواجهة ستستخدم الإنجليزية الافتراضية"
+# ===========================================================================
+#  إصلاح واجهة الإدارة LuCI : الصفحات + الواجهات + خانات الإدخال على الجوال
+# ===========================================================================
+HAVE_NET=0
+if opkg update >/dev/null 2>&1; then HAVE_NET=1; fi
+[ "$HAVE_NET" = 1 ] && echo "==> الإنترنت متاح، سيتم تثبيت/تحديث الحزم الناقصة" \
+                    || echo "==> لا إنترنت: سيُطبّق ما أمكن بدون تثبيت حزم"
+
+# --- 1) قالب خفيف ومتجاوب مع الجوال (يحل بطء/تكسّر الصفحات) ---
+#     القالب الافتراضي ثقيل أحياناً على المتصفح بالجوال. material أخف وأوضح.
+if [ "$HAVE_NET" = 1 ]; then
+    if ! opkg list-installed | grep -q luci-theme-material; then
+        opkg install luci-theme-material >/dev/null 2>&1 \
+            && echo "    تم تثبيت قالب material" \
+            || echo "    تعذّر تثبيت material - سيبقى القالب الحالي"
+    fi
+fi
+# اجعله الافتراضي إن وُجد
+if [ -d /www/luci-static/material ] || opkg list-installed 2>/dev/null | grep -q luci-theme-material; then
+    uci -q set luci.themes.Material='/luci-static/material'
+    uci -q set luci.main.mediaurlbase='/luci-static/material'
 fi
 
-# تسريع صفحة الإعدادات على الجوال: ضغط gzip + مهلات أطول لـ uhttpd
-echo "==> تسريع واجهة الإعدادات (uhttpd)"
+# --- 2) حزم اللغة: إنجليزي (لا يتحول) + عربي إن رغبت ---
+uci -q set luci.main.lang='en'      # غيّرها إلى 'ar' لو تبي الواجهة عربية
+if [ "$HAVE_NET" = 1 ]; then
+    for pkg in luci-i18n-base-en luci-i18n-base-ar; do
+        opkg list-installed | grep -q "$pkg" || opkg install "$pkg" >/dev/null 2>&1 \
+            && echo "    حزمة اللغة: $pkg جاهزة"
+    done
+fi
+uci -q commit luci
+
+# --- 3) خادم الويب uhttpd: تسريع التحميل + منع توقف خانات الإدخال ---
+#     gzip يصغّر الصفحات، والمهلات الأطول تمنع فشل حفظ النماذج على اتصال بطيء.
 uci -q set uhttpd.main.gzip='1'
-uci -q set uhttpd.main.script_timeout='120'
-uci -q set uhttpd.main.network_timeout='60'
+uci -q set uhttpd.main.script_timeout='120'   # وقت كافٍ لتنفيذ صفحات الإعدادات الثقيلة
+uci -q set uhttpd.main.network_timeout='60'    # لا يقطع أثناء كتابة/حفظ الإدخالات
+uci -q set uhttpd.main.max_requests='5'        # طلبات متوازية أكثر = صفحات أسرع
+uci -q set uhttpd.main.max_connections='100'
+uci -q set uhttpd.main.http_keepalive='20'
 uci -q commit uhttpd
 /etc/init.d/uhttpd restart 2>/dev/null || true
+
+# --- 4) مهلة جلسة أطول حتى لا تُطرد وأنت تعبّي الحقول على الجوال ---
+#     الافتراضي 5 دقائق؛ نرفعها لساعة لتفادي "انتهت الجلسة" وضياع الإدخالات.
+uci -q set rpcd.@login[0].timeout='3600' 2>/dev/null \
+    && uci -q commit rpcd && /etc/init.d/rpcd restart 2>/dev/null || true
+
+# --- 5) تنظيف الكاش حتى تظهر الواجهة الجديدة فوراً ---
+rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null || true
+echo "==> تم ضبط واجهة الإدارة (قالب + لغة + خادم + جلسة)"
 
 # ---------------------------------------------------------------------------
 #  تطبيق إعدادات الواي-فاي
