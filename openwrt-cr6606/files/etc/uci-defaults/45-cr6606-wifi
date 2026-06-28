@@ -7,6 +7,9 @@
 KEY="Smart@12345"   # default WPA2 key (>=8 chars) — change it from the dashboard
 for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
 	uci -q set wireless.$dev.country='US'
+	# request the US legal maximum (30 dBm). mt76 clamps to min(this, regdb, EEPROM
+	# calibration) => real CLEAN output up to 30, never an illegal/clipped boost.
+	uci -q set wireless.$dev.txpower='30'
 	uci -q set wireless.$dev.disabled='0'
 	band="$(uci -q get wireless.$dev.band)"
 	case "$band" in 6g) ssfx='-6G';; 5g) ssfx='-5G';; *) ssfx='';; esac
