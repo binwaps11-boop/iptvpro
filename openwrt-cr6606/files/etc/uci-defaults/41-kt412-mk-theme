@@ -1,0 +1,19 @@
+#!/bin/sh
+# KT412 / MK APP — modern dashboard + login skin (theme-mk.css).
+#
+# NOTE: the cascade.css injection now lives ENTIRELY in 40-kt412-luci-theme, which
+# inserts BOTH @import lines at the TOP of cascade.css in the correct order
+# (kt412-theme.css then ../kt412-mk/theme-mk.css, the latter winning). This script
+# used to *append* the theme-mk.css @import to the END of cascade.css, which is
+# INVALID CSS (an @import after style rules is ignored) and is exactly why the
+# dashboard gauges + login card were never styled. That append is removed.
+#
+# Kept only as a belt-and-suspenders to re-assert the UCI theme/lang in case this
+# default runs in isolation. It performs no cascade.css edits.
+
+uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
+uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+uci -q set luci.main.lang='ar'
+uci -q commit luci
+
+exit 0

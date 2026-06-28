@@ -1,0 +1,96 @@
+name: Build CR6606 Smart AP (Xiaomi AX1800 WiFi6 + dashboard)
+
+# Xiaomi Mi Router CR6606 — ramips/mt7621, MT7621AT + MT7915 (WiFi6 AX1800), NAND.
+# Officially supported in OpenWrt => no source patches needed. We use the stock
+# OpenWrt ImageBuilder (fast, clean) and bake in the Smart AP dashboard/theme/CGI
+# overlay (reused from KT412 — platform-independent web files) + LuCI.
+# NO power/regulatory edits (mt76 respects regdb; WiFi6 AX1800 is native).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
+    paths:
+      - ".github/workflows/build-cr6606.yml"
+      - "openwrt-cr6606/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cr6606-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repo (overlay)
+        uses: actions/checkout@v4
+
+      - name: Install ImageBuilder host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev zlib1g-dev gawk \
+            git gettext libssl-dev xsltproc rsync wget unzip python3 file zstd
+
+      - name: Download OpenWrt ImageBuilder (ramips/mt7621, 24.10.0)
+        run: |
+          set -eux
+          VER=24.10.0
+          IB="openwrt-imagebuilder-${VER}-ramips-mt7621.Linux-x86_64"
+          URL="https://downloads.openwrt.org/releases/${VER}/targets/ramips/mt7621/${IB}.tar.zst"
+          wget -q "$URL" -O ib.tar.zst
+          tar --zstd -xf ib.tar.zst
+          mv "$IB" ib
+
+      - name: Build CR6606 image (Smart AP overlay)
+        run: |
+          set -eux
+          cd ib
+          # confirm the device profile exists in this ImageBuilder
+          make info 2>/dev/null | grep -i "cr6606" || { echo "FATAL: cr6606 profile not found"; exit 1; }
+          make image \
+            PROFILE="xiaomi_mi-router-cr6606" \
+            PACKAGES="luci luci-i18n-base-ar curl" \
+            FILES="$GITHUB_WORKSPACE/openwrt-cr6606/files" \
+            EXTRA_IMAGE_NAME="smartap"
+          echo "=== built images ==="
+          ls -la bin/targets/ramips/mt7621/ | grep -i cr6606 || ls -la bin/targets/ramips/mt7621/
+
+      - name: Collect + checksum
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp ib/bin/targets/ramips/mt7621/*cr6606*sysupgrade.bin "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          cp ib/bin/targets/ramips/mt7621/*cr6606*factory.bin     "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          cp ib/bin/targets/ramips/mt7621/*cr6606*initramfs*.bin  "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          cp ib/bin/targets/ramips/mt7621/*cr6606*.manifest       "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE/out"
+          ls -la
+          sha256sum *.bin > sha256-cr6606.txt || true
+          cat sha256-cr6606.txt
+          test -s "$(ls *sysupgrade.bin 2>/dev/null | head -1)" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cr6606-smartap
+          path: out/*
+          if-no-files-found: warn
+
+      - name: Publish to Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cr6606-smartap
+          name: CR6606 Smart AP (Xiaomi AX1800 WiFi6 + dashboard)
+          body: |
+            Xiaomi Mi Router CR6606 (ramips/mt7621, MT7621AT + MT7915 WiFi6 AX1800).
+            OpenWrt 24.10.0 ImageBuilder + Smart AP dashboard/theme/CGI overlay + LuCI.
+            No power/regulatory edits. Flashing requires the official OpenWrt CR660x
+            install method (bootloader unlock) — see the OpenWrt device wiki.
+          files: out/*
+          fail_on_unmatched_files: false

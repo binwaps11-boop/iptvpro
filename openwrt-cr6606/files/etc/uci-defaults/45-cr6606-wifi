@@ -1,0 +1,25 @@
+#!/bin/sh
+# CR6606 first-boot Wi-Fi: enable BOTH radios (WiFi6 mt7915 2.4G+5G), set country,
+# WPA2, and a per-band SSID. Generic — iterates the radios so it works regardless
+# of mt7915 radio ordering. Idempotent (guard file). NO txpower/regdomain override
+# beyond the standard country setting (stays within regulatory; mt76 caps anyway).
+[ -f /etc/cr6606-wifi.done ] && exit 0
+KEY="Smart@12345"   # default WPA2 key (>=8 chars) — change it from the dashboard
+for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+	uci -q set wireless.$dev.country='US'
+	uci -q set wireless.$dev.disabled='0'
+	band="$(uci -q get wireless.$dev.band)"
+	case "$band" in 6g) ssfx='-6G';; 5g) ssfx='-5G';; *) ssfx='';; esac
+	ifc="$(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)\.device='$dev'/\1/p" | head -1)"
+	[ -n "$ifc" ] || { ifc="$(uci add wireless wifi-iface)"; uci -q set wireless.$ifc.device="$dev"; }
+	uci -q set wireless.$ifc.mode='ap'
+	uci -q set wireless.$ifc.network='lan'
+	uci -q set wireless.$ifc.ssid="Smart-AP$ssfx"
+	uci -q set wireless.$ifc.encryption='psk2'
+	uci -q set wireless.$ifc.key="$KEY"
+	uci -q set wireless.$ifc.ieee80211k='1'
+	uci -q set wireless.$ifc.ieee80211v='1'
+done
+uci -q commit wireless
+touch /etc/cr6606-wifi.done
+exit 0

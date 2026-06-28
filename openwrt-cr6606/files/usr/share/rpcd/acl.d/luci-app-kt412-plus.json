@@ -1,0 +1,19 @@
+{
+	"luci-app-kt412-plus": {
+		"description": "Grant access to the KT412 MK APP plus (clients / scheduling & guest / speed & graphs) views",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"network.wireless": [ "status" ],
+				"system": [ "info", "board" ]
+			},
+			"uci": [ "wireless", "system", "dhcp" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			},
+			"uci": [ "wireless" ]
+		}
+	}
+}

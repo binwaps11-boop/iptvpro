@@ -1,0 +1,13 @@
+#!/bin/sh
+# Install the resource-history sampler cron (once a minute) for the dashboard CPU/
+# RAM/traffic history + the true-CPU gauge reading. Idempotent. /tmp + crontab only.
+SAMP=/usr/sbin/kt412-sampler
+[ -x "$SAMP" ] || chmod 0755 "$SAMP" 2>/dev/null
+CR=/etc/crontabs/root
+touch "$CR"
+if ! grep -q 'kt412-sampler' "$CR" 2>/dev/null; then
+	printf '* * * * * %s # kt412-sampler\n' "$SAMP" >> "$CR"
+fi
+/etc/init.d/cron enable >/dev/null 2>&1
+/etc/init.d/cron restart >/dev/null 2>&1
+exit 0

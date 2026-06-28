@@ -1,0 +1,47 @@
+#!/bin/sh
+# KT412 — make the custom dark "Obsidian + neon" re-skin apply to EVERY LuCI page.
+#
+# Mechanism (overlay-only, no theme package compile): luci-theme-bootstrap loads
+#   /www/luci-static/bootstrap/cascade.css
+# on every single LuCI page. We inject our two overlay stylesheets via @import at
+# the TOP of that cascade.css so every LuCI page (Status, Network, System, our
+# Smart AP views, ...) pulls in the custom palette/cards + the modern dashboard /
+# login skin.
+#
+# IMPORTANT (this was the bug): a CSS `@import` is only valid when it PRECEDES every
+# style rule. A previous version *appended* the theme-mk.css import to the END of
+# cascade.css (after bootstrap's rules) -> invalid -> silently ignored by the
+# browser -> the dashboard gauges + login card were never styled. So here we put
+# BOTH imports at the very top, in order:
+#     @import "kt412-theme.css";              <- base palette/cards (loads first)
+#     @import "../kt412-mk/theme-mk.css";     <- modern dashboard+login (loads last => wins)
+# (theme-mk.css lives one dir up at /www/luci-static/kt412-mk/, hence ../).
+#
+# Self-healing + idempotent: we strip ANY prior kt412 import lines (valid-at-top OR
+# the old invalid-at-EOF one) and re-insert both at the top in the correct order, so
+# re-runs / sysupgrade-with-kept-settings always converge to a valid cascade.
+
+CASCADE="/www/luci-static/bootstrap/cascade.css"
+
+if [ -f "$CASCADE" ]; then
+	# drop any previously-inserted kt412 import lines (both files), wherever they are
+	grep -v 'kt412-theme.css' "$CASCADE" 2>/dev/null \
+		| grep -v 'kt412-mk/theme-mk.css' > "$CASCADE.kt412.tmp"
+	# prepend both imports at the very top; theme-mk LAST among imports so it wins.
+	{
+		printf '%s\n' '@import "kt412-theme.css";'
+		printf '%s\n' '@import "../kt412-mk/theme-mk.css";'
+		cat "$CASCADE.kt412.tmp"
+	} > "$CASCADE"
+	rm -f "$CASCADE.kt412.tmp"
+fi
+
+# Ensure bootstrap is the active theme so the cascade.css above is the one loaded,
+# and the LuCI chrome is Arabic (LuCI itself sets dir=rtl from the language; the
+# CSS no longer forces RTL on the page shell, so the native responsive layout works).
+uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
+uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
+uci -q set luci.main.lang='ar'
+uci -q commit luci
+
+exit 0

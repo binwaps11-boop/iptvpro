@@ -1,0 +1,17 @@
+{
+	"luci-app-kt412-dash": {
+		"description": "Grant access to the KT412 / MK modern dashboard home",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"system": [ "info", "board" ]
+			},
+			"uci": [ "luci", "system", "network" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			}
+		}
+	}
+}

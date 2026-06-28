@@ -1,0 +1,334 @@
+#!/bin/sh
+# KT412 "MK APP" tools backend -- specs / power(dBm) / ping / iperf3.
+# Separate CGI from the shared kt412 dashboard API. Real commands only.
+# Auth model copied from the kt412 CGI: a LuCI view "adopts" its own
+# authenticated ubus session id (must hold uci write access), we mark it
+# kt412tok=1 and accept that id as the token on every later op. The CGI runs
+# as root under uhttpd; the token check is the only gate. Port 80 is LAN-only
+# via the firewall (same model LuCI uses).
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	local want="$1" pair rest
+	local IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; urldecode "$rest"; return 0;;
+		esac
+	done
+	return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# host/server: only DNS hostnames + IPv4/IPv6 chars. NO shell metacharacters
+# can survive -> safe to pass to ping/iperf3. Empty if it had anything else.
+sani_host() { printf '%s' "$1" | tr -cd 'A-Za-z0-9.:_-' | sed 's/^-*//' | cut -c1-64; }
+sani_int()  { printf '%s' "$1" | tr -cd '0-9' | cut -c1-4; }
+sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-64; }
+sani_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-24; }
+fail()      { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- adopt (bootstrap from an existing LuCI session, no password) ------
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	[ -n "$SID" ] || fail "no_token"
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412tok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid session ----------
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412tok' 2>/dev/null)"
+[ "$MARK" = "1" ] || fail "unauthorized"
+
+# helper: map a radio (radio0/radio1) to its phy name
+phy_for() {  # $1 = radio
+	local p
+	p="$(uci -q get wireless."$1".phy)"
+	if [ -z "$p" ]; then
+		p="$(iwinfo "$(uci -q get wireless."$1".path >/dev/null 2>&1; echo)" 2>/dev/null)"
+	fi
+	[ -z "$p" ] && p="$(cat "/sys/class/ieee80211/$1/index" >/dev/null 2>&1 && echo "$1")"
+	echo "$p"
+}
+
+# ============================================================
+# op=specs  -> device overview / specifications
+# ============================================================
+if [ "$OP" = "specs" ]; then
+	# CPU model + frequency from /proc/cpuinfo
+	CPU_MODEL="$(sed -n 's/^\(cpu model\|model name\|machine\|system type\)[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n1)"
+	CPU_CORES="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"
+	[ -n "$CPU_CORES" ] || CPU_CORES=1
+	CPU_BMIPS="$(sed -n 's/^BogoMIPS[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n1)"
+	# frequency: try cpufreq, else 0
+	CPU_FREQ="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"
+	[ -n "$CPU_FREQ" ] && CPU_FREQ=$((CPU_FREQ/1000))   # kHz->MHz
+	[ -n "$CPU_FREQ" ] || CPU_FREQ=0
+	ARCH="$(uname -m 2>/dev/null)"
+	# target (ath79/nand etc.) from board.json or release
+	TARGET="$(jsonfilter -i /etc/board.json -e '@.model.id' 2>/dev/null)"
+	BOARD_NAME="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	MODEL="$(cat /tmp/sysinfo/model 2>/dev/null)"
+	[ -n "$MODEL" ] || MODEL="$(jsonfilter -i /etc/board.json -e '@.model.name' 2>/dev/null)"
+	KERNEL="$(uname -r 2>/dev/null)"
+	# OpenWrt version + target/subtarget from os-release
+	OWRT_REL=""; OWRT_TARGET=""
+	if [ -r /etc/os-release ]; then
+		OWRT_REL="$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")"
+		OWRT_TARGET="$(. /etc/os-release 2>/dev/null; echo "$OPENWRT_BOARD")"
+	fi
+	[ -n "$OWRT_REL" ] || OWRT_REL="$(cat /etc/openwrt_release 2>/dev/null | sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p")"
+	# uptime (exact d:h:m:s) + boot epoch
+	UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$UP" in ''|*[!0-9]*) UP=0;; esac
+	UD=$((UP/86400)); UH=$((UP%86400/3600)); UM=$((UP%3600/60)); US=$((UP%60))
+	# RAM totals (kB)
+	MEM_TOTAL="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+	MEM_FREE="$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+	[ -n "$MEM_TOTAL" ] || MEM_TOTAL=0
+	[ -n "$MEM_FREE" ] || MEM_FREE=0
+	# flash total: rootfs overlay or whole mtd; use df on / and /overlay (kB)
+	ROOT_TOTAL="$(df -k / 2>/dev/null | awk 'NR==2{print $2}')"
+	ROOT_USED="$(df -k / 2>/dev/null | awk 'NR==2{print $3}')"
+	OVL_TOTAL="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $2}')"
+	OVL_USED="$(df -k /overlay 2>/dev/null | awk 'NR==2{print $3}')"
+	[ -n "$ROOT_TOTAL" ] || ROOT_TOTAL=0
+	[ -n "$ROOT_USED" ] || ROOT_USED=0
+	[ -n "$OVL_TOTAL" ] || OVL_TOTAL=0
+	[ -n "$OVL_USED" ] || OVL_USED=0
+	# primary MAC (br-lan or eth0)
+	MAC="$(cat /sys/class/net/br-lan/address 2>/dev/null)"
+	[ -n "$MAC" ] || MAC="$(cat /sys/class/net/eth0/address 2>/dev/null)"
+	[ -n "$MAC" ] || MAC="$(cat /sys/class/net/eth0.1/address 2>/dev/null)"
+	# wifi phys
+	PHYS=""
+	for d in /sys/class/ieee80211/*; do
+		[ -e "$d" ] || continue
+		pn="$(basename "$d")"
+		PHYS="$PHYS${PHYS:+,}\"$(json_esc "$pn")\""
+	done
+
+	printf '{"ok":true,'
+	printf '"cpu_model":"%s",' "$(json_esc "$CPU_MODEL")"
+	printf '"cpu_cores":%s,' "$CPU_CORES"
+	printf '"cpu_freq_mhz":%s,' "$CPU_FREQ"
+	printf '"cpu_bogomips":"%s",' "$(json_esc "$CPU_BMIPS")"
+	printf '"arch":"%s",' "$(json_esc "$ARCH")"
+	printf '"target":"%s",' "$(json_esc "$OWRT_TARGET")"
+	printf '"board_name":"%s",' "$(json_esc "$BOARD_NAME")"
+	printf '"model":"%s",' "$(json_esc "$MODEL")"
+	printf '"kernel":"%s",' "$(json_esc "$KERNEL")"
+	printf '"release":"%s",' "$(json_esc "$OWRT_REL")"
+	printf '"uptime":%s,' "$UP"
+	printf '"up_d":%s,"up_h":%s,"up_m":%s,"up_s":%s,' "$UD" "$UH" "$UM" "$US"
+	printf '"mem_total_kb":%s,"mem_avail_kb":%s,' "$MEM_TOTAL" "$MEM_FREE"
+	printf '"root_total_kb":%s,"root_used_kb":%s,' "$ROOT_TOTAL" "$ROOT_USED"
+	printf '"ovl_total_kb":%s,"ovl_used_kb":%s,' "$OVL_TOTAL" "$OVL_USED"
+	printf '"mac":"%s",' "$(json_esc "$MAC")"
+	printf '"phys":[%s]}\n' "$PHYS"
+	exit 0
+fi
+
+# ============================================================
+# op=getpower  -> per-radio txpower (uci + live phy ceiling + netdev)
+# ============================================================
+if [ "$OP" = "getpower" ]; then
+	out_radio() {  # $1 = radio
+		local radio="$1" phy band uci_pow phy_max netdev_pow ifn ifphy chan main_if
+		# Resolve the REAL phy name. wireless.<radio>.phy is almost never set on
+		# modern (DSA/mac80211) OpenWrt, and the old fallback used the radio name
+		# ("radio0") which is NOT a valid `iw phy` target -> iw failed -> phy_max
+		# and netdev both came back empty ("—"). Resolve it authoritatively:
+		# ubus network.wireless status -> running ifname -> /sys .../phy80211/name.
+		phy="$(uci -q get wireless.$radio.phy)"
+		main_if="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+		if [ -z "$phy" ] && [ -n "$main_if" ]; then
+			phy="$(cat /sys/class/net/$main_if/phy80211/name 2>/dev/null)"
+		fi
+		# last-resort guesses so a valid phy is almost always found
+		[ -n "$phy" ] || { case "$radio" in radio0) phy=phy0;; radio1) phy=phy1;; *) phy="$radio";; esac; }
+		band="$(uci -q get wireless.$radio.band)"
+		[ -n "$band" ] || band="$(uci -q get wireless.$radio.hwmode)"
+		uci_pow="$(uci -q get wireless.$radio.txpower)"
+		[ -n "$uci_pow" ] || uci_pow=""
+		chan="$(uci -q get wireless.$radio.channel)"
+		# live phy ceiling (max tx power) from iw phy info
+		phy_max="$(iw phy "$phy" info 2>/dev/null | sed -n 's/.*(\([0-9.]*\) dBm).*/\1/p' | sort -rn | head -n1)"
+		[ -n "$phy_max" ] || phy_max=""
+		# applied netdev txpower: prefer the running ifname from ubus; else scan
+		# every wlan iface and match it to this phy via /sys.
+		netdev_pow=""
+		if [ -n "$main_if" ]; then
+			netdev_pow="$(iw dev "$main_if" info 2>/dev/null | sed -n 's/.*txpower \([0-9.]*\) dBm.*/\1/p' | head -n1)"
+		fi
+		if [ -z "$netdev_pow" ]; then
+			for ifn in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+				ifphy="$(cat /sys/class/net/$ifn/phy80211/name 2>/dev/null)"
+				[ "$ifphy" = "$phy" ] || continue
+				netdev_pow="$(iw dev $ifn info 2>/dev/null | sed -n 's/.*txpower \([0-9.]*\) dBm.*/\1/p' | head -n1)"
+				[ -n "$netdev_pow" ] && break
+			done
+		fi
+		printf '{"radio":"%s","phy":"%s","band":"%s","channel":"%s","uci_txpower":"%s","phy_max":"%s","netdev_txpower":"%s"}' \
+			"$(json_esc "$radio")" "$(json_esc "$phy")" "$(json_esc "$band")" "$(json_esc "$chan")" \
+			"$(json_esc "$uci_pow")" "$(json_esc "$phy_max")" "$(json_esc "$netdev_pow")"
+	}
+	FIRST=1
+	printf '{"ok":true,"radios":['
+	for r in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+		[ "$FIRST" = 1 ] || printf ','
+		FIRST=0
+		out_radio "$r"
+	done
+	printf ']}\n'
+	exit 0
+fi
+
+# ============================================================
+# op=setpower  -> set txpower (0-30 dBm) via uci + iw phy set txpower
+# state changing -> POST only. Re-pins via uci; does NOT re-patch driver.
+# ============================================================
+if [ "$OP" = "setpower" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	RADIO="$(sani_word "$(getp radio)")"
+	POW="$(sani_int "$(getp dbm)")"
+	[ -n "$RADIO" ] || fail "no_radio"
+	[ -n "$POW" ] || fail "no_dbm"
+	# validate radio actually exists as a wifi-device
+	TYPE="$(uci -q get wireless.$RADIO 2>/dev/null)"
+	[ "$TYPE" = "wifi-device" ] || fail "bad_radio"
+	# validate range 0..30
+	if [ "$POW" -lt 0 ] || [ "$POW" -gt 30 ]; then
+		fail "range_0_30"
+	fi
+	# enforce regulatory country US (safety) if unset
+	CC="$(uci -q get wireless.$RADIO.country)"
+	[ -n "$CC" ] || uci set wireless.$RADIO.country='US'
+	# re-pin uci txpower
+	uci set wireless.$RADIO.txpower="$POW"
+	uci commit wireless
+	# apply live to the phy (fixed power). Best-effort; reload to be sure.
+	PHY="$(uci -q get wireless.$RADIO.phy)"
+	[ -n "$PHY" ] || PHY="$RADIO"
+	# txpower in iw is mBm (1 dBm = 100 mBm)
+	MBM=$((POW*100))
+	iw phy "$PHY" set txpower fixed "$MBM" >/dev/null 2>&1
+	# reload wifi so the uci value is the persistent applied state
+	wifi reload >/dev/null 2>&1 &
+	printf '{"ok":true,"radio":"%s","dbm":%s,"phy":"%s"}\n' "$(json_esc "$RADIO")" "$POW" "$(json_esc "$PHY")"
+	exit 0
+fi
+
+# ============================================================
+# op=ping host=.. count=..  -> N pings, parse min/avg/max + per-packet RTT
+# ============================================================
+if [ "$OP" = "ping" ]; then
+	HOST="$(sani_host "$(getp host)")"
+	CNT="$(sani_int "$(getp count)")"
+	[ -n "$HOST" ] || fail "bad_host"
+	case "$CNT" in ''|*[!0-9]*) CNT=5;; esac
+	[ "$CNT" -lt 1 ] && CNT=1
+	[ "$CNT" -gt 30 ] && CNT=30
+	# -w overall deadline to never hang the CGI
+	OUT="$(ping -c "$CNT" -w $((CNT+5)) "$HOST" 2>&1)"
+	# per-packet rtt list (time=XX.X ms)
+	RTTS="$(printf '%s\n' "$OUT" | sed -n 's/.*time[=<]\([0-9.]*\)[[:space:]]*ms.*/\1/p')"
+	# summary line: round-trip min/avg/max = a/b/c ms  (busybox/iputils)
+	SUMM="$(printf '%s\n' "$OUT" | sed -n 's#.*= *\([0-9.]*\)/\([0-9.]*\)/\([0-9.]*\).*#\1 \2 \3#p' | head -n1)"
+	PMIN="$(echo "$SUMM" | awk '{print $1}')"
+	PAVG="$(echo "$SUMM" | awk '{print $2}')"
+	PMAX="$(echo "$SUMM" | awk '{print $3}')"
+	# packet loss %
+	LOSS="$(printf '%s\n' "$OUT" | sed -n 's/.*[, ]\([0-9]*\)% packet loss.*/\1/p' | head -n1)"
+	[ -n "$LOSS" ] || LOSS=100
+	# transmitted/received
+	TX="$(printf '%s\n' "$OUT" | sed -n 's/^\([0-9]*\) packets transmitted.*/\1/p' | head -n1)"
+	RX="$(printf '%s\n' "$OUT" | sed -n 's/.* \([0-9]*\) \(packets received\|received\).*/\1/p' | head -n1)"
+	# build rtt json array
+	ARR=""
+	for v in $RTTS; do ARR="$ARR${ARR:+,}$v"; done
+	printf '{"ok":true,"host":"%s","count":%s,' "$(json_esc "$HOST")" "$CNT"
+	printf '"loss":%s,"tx":%s,"rx":%s,' "$LOSS" "${TX:-0}" "${RX:-0}"
+	printf '"min":"%s","avg":"%s","max":"%s",' "$(json_esc "$PMIN")" "$(json_esc "$PAVG")" "$(json_esc "$PMAX")"
+	printf '"rtts":[%s]}\n' "$ARR"
+	exit 0
+fi
+
+# ============================================================
+# op=iperf3 server=.. [reverse=1]  -> run iperf3 client, parse TX/RX Mbps
+# ============================================================
+if [ "$OP" = "iperf3" ]; then
+	if ! command -v iperf3 >/dev/null 2>&1; then
+		fail "iperf3_missing"
+	fi
+	SRV="$(sani_host "$(getp server)")"
+	REV="$(sani_int "$(getp reverse)")"
+	[ -n "$SRV" ] || fail "no_server"
+	REVFLAG=""
+	[ "$REV" = "1" ] && REVFLAG="-R"
+	# -J JSON, -t 5s test, --connect-timeout to fail fast on unreachable server
+	OUT="$(iperf3 -c "$SRV" $REVFLAG -t 5 -J --connect-timeout 4000 2>&1)"
+	# error from iperf3 json
+	ERR="$(printf '%s' "$OUT" | jsonfilter -e '@.error' 2>/dev/null)"
+	if [ -n "$ERR" ]; then
+		printf '{"ok":false,"error":"iperf3_error","detail":"%s"}\n' "$(json_esc "$ERR")"
+		exit 0
+	fi
+	# sum_sent / sum_received bits_per_second
+	BPS_SENT="$(printf '%s' "$OUT" | jsonfilter -e '@.end.sum_sent.bits_per_second' 2>/dev/null)"
+	BPS_RECV="$(printf '%s' "$OUT" | jsonfilter -e '@.end.sum_received.bits_per_second' 2>/dev/null)"
+	if [ -z "$BPS_SENT" ] && [ -z "$BPS_RECV" ]; then
+		fail "parse_failed"
+	fi
+	# convert to Mbps (integer)
+	mbps() { awk -v b="$1" 'BEGIN{ if(b==""){print "0";exit} printf "%.2f", b/1000000 }'; }
+	TX_MBPS="$(mbps "$BPS_SENT")"
+	RX_MBPS="$(mbps "$BPS_RECV")"
+	printf '{"ok":true,"server":"%s","reverse":%s,"tx_mbps":%s,"rx_mbps":%s}\n' \
+		"$(json_esc "$SRV")" "${REV:-0}" "${TX_MBPS:-0}" "${RX_MBPS:-0}"
+	exit 0
+fi
+
+# ============================================================
+# op=iperf3_server action=start|stop|status -> local iperf3 -s on :5201 so a
+# phone can run a speed test AGAINST the device with zero external setup.
+# ============================================================
+if [ "$OP" = "iperf3_server" ]; then
+	command -v iperf3 >/dev/null 2>&1 || fail "iperf3_missing"
+	ACT="$(getp action | tr -cd 'a-z')"
+	case "$ACT" in
+		start) pgrep -f 'iperf3 -s' >/dev/null 2>&1 || setsid iperf3 -s -p 5201 >/dev/null 2>&1 </dev/null & ;;
+		stop)  for pid in $(pgrep -f 'iperf3 -s' 2>/dev/null); do kill "$pid" 2>/dev/null; done ;;
+	esac
+	RUN=false; pgrep -f 'iperf3 -s' >/dev/null 2>&1 && RUN=true
+	IP="$(uci -q get network.lan.ipaddr)"
+	[ -n "$IP" ] || IP="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	printf '{"ok":true,"running":%s,"ip":"%s","port":5201}\n' "$RUN" "$(json_esc "$IP")"
+	exit 0
+fi
+
+fail "unknown_op"

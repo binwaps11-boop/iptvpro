@@ -1,0 +1,804 @@
+/* ============================================================================
+   KT412 / MK APP — DARK "Deep Obsidian + neon glassmorphism" re-skin (theme-mk.css)
+   Owner: visual-core agent. NEW file, @import-ed AFTER kt412-theme.css into
+   luci-theme-bootstrap's cascade.css (see /etc/uci-defaults/41-kt412-mk-theme),
+   so it is the LAST override layer on every LuCI page. It restyles:
+     1) the LuCI sysauth LOGIN form into a centered translucent glass card,
+     2) the modern MK dashboard home (view/kt412/dashboard.js),
+     3) reusable gauges / sparklines / interface tiles, RTL + mobile-responsive.
+
+   Redesign 2026 (Al-Malaki V3.2 / Sakhr / Al-Husam): deep obsidian #0b1220 base
+   with translucent slate glass panels (rgba(51,65,85,.55) + backdrop blur), light
+   text (#E2E8F0), neon accents — cyan #38bdf8 (wifi/active/links), green #22C55E
+   (healthy), amber #F59E0B (warning), crimson #EF4444 (error), purple #8B5CF6
+   (storage/flash). All class NAMES preserved exactly.
+
+   RESPONSIVE LOCK: this dark theme applies UNCONDITIONALLY (it is NOT gated behind
+   prefers-color-scheme). box-sizing/full-width guards + @media(max-width:600px)
+   single-column rules are preserved. Gauges keep fill:none (never a black disk).
+
+   Troubleshooting kill-switch: the dashboard theme-switch sets
+   <html data-mk-skin="off"> (persisted in localStorage 'kt412_mk_skin'); every
+   rule here is scoped so :root[data-mk-skin="off"] neutralises the custom skin
+   and falls back to plain bootstrap. Non-destructive / append-only.
+   ============================================================================ */
+
+:root{
+  /* PRO refinement — richer near-black surfaces, cleaner glass, brighter text,
+     refined accent + softer shadows (synced with kt412-theme.css). */
+  --mk-bg0:#0b1220; --mk-bg1:#111c2e; --mk-bg2:#16243a;
+  --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
+
+  /* accent family — refined bright cyan primary */
+  --mk-accent:#38bdf8; --mk-accent2:#38bdf8; --mk-violet:#A78BFA;
+  --mk-blue:#38bdf8; --mk-cyan:#38bdf8;        /* legacy aliases now cyan      */
+  --mk-grad:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%);
+
+  /* status colours — refined on dark */
+  --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
+
+  /* glass surfaces / strokes */
+  --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
+  --mk-stroke:rgba(255,255,255,0.12); --mk-stroke2:rgba(56,189,248,0.50);
+
+  /* text — brighter, high contrast on dark */
+  --mk-txt:#F1F5F9; --mk-txt2:#e2e8f0; --mk-muted:#cbd5e1;
+
+  --mk-shadow:0 4px 18px rgba(0,0,0,.40);
+  --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
+  --mk-radius:14px;
+  color-scheme:dark;
+}
+
+/* ===== kill-switch: when skin is off, drop the custom surfaces ===== */
+:root[data-mk-skin="off"] .mk-login-card,
+:root[data-mk-skin="off"] .mk-card{
+  background:#fff!important;color:#222!important;border:1px solid #ccc!important;
+  box-shadow:none!important;backdrop-filter:none!important;
+}
+:root[data-mk-skin="off"] body{background:#f3f3f3!important;}
+
+/* ============================================================================
+   1) CUSTOM LOGIN — restyle LuCI's existing /cgi-bin/luci sysauth form into a
+   clean, premium card floating on a deep "Obsidian + neon" obsidian field.
+   Works with :has() AND with the body.node-main-login fallback (older webkit).
+   ============================================================================ */
+body.node-main-login,
+body:has(form[action*="/cgi-bin/luci"] input[name="luci_password"]),
+body:has(input#luci_password){
+  min-height:100vh;
+  display:flex; align-items:center; justify-content:center;
+  padding:24px!important; box-sizing:border-box;
+  background:
+    radial-gradient(1100px 760px at 12% -12%, rgba(56,189,248,.22) 0%, transparent 56%),
+    radial-gradient(960px 760px at 112% -4%, rgba(139,92,246,.20) 0%, transparent 54%),
+    radial-gradient(820px 820px at 50% 124%, rgba(34,197,94,.12) 0%, transparent 56%),
+    linear-gradient(160deg,#0b1220,#16243a 55%,#0b1220)!important;
+  background-attachment:fixed!important;
+}
+/* faint circuit-grid overlay for the network-engineer vibe */
+body.node-main-login::before,
+body:has(input#luci_password)::before{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:.45;
+  background-image:
+    linear-gradient(rgba(148,163,184,.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,.09) 1px, transparent 1px);
+  background-size:44px 44px;
+  -webkit-mask-image:radial-gradient(circle at 50% 38%, #000 0%, transparent 74%);
+  mask-image:radial-gradient(circle at 50% 38%, #000 0%, transparent 74%);
+}
+
+/* the OUTER container is just a transparent centering wrapper — NOT a second
+   card (styling it too created the "card-in-card" look). */
+body:has(input#luci_password) #maincontent,
+body:has(input[name="luci_password"]) #maincontent,
+body.node-main-login #maincontent,
+body:has(input#luci_password) #maincontent > .container,
+body:has(input[name="luci_password"]) #maincontent > .container,
+body.node-main-login #maincontent > .container{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; max-width:none!important; -webkit-backdrop-filter:none!important; backdrop-filter:none!important;
+  /* full width so the centered card (.cbi-map margin:auto) is truly centered, not
+     pushed right by a shrink-to-fit flex item */
+  width:100%!important; display:block!important; flex:1 1 100%!important;
+}
+/* the ONE login card: the CBI map that contains the password field */
+body:has(input#luci_password) .cbi-map,
+body.node-main-login .cbi-map{
+  position:relative; z-index:1;
+  width:100%; max-width:400px; margin-left:auto!important; margin-right:auto!important; box-sizing:border-box;
+  padding:36px 34px 32px!important;
+  background:
+    linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)),
+    rgba(51,65,85,0.55)!important;
+  border:1px solid rgba(56,189,248,0.22)!important; border-radius:24px!important;
+  box-shadow:
+    0 30px 70px -20px rgba(0,0,0,.65),
+    0 0 0 1px rgba(15,23,42,.40),
+    inset 0 1px 0 rgba(255,255,255,.10)!important;
+  -webkit-backdrop-filter:blur(16px) saturate(145%)!important;
+  backdrop-filter:blur(16px) saturate(145%)!important;
+  /* login content is English (Username/Password/Log in) -> LTR so labels + fields
+     align consistently left (RTL made them mismatched). Wordmark/subtitle stay centered. */
+  direction:ltr; text-align:left;
+}
+/* "Smart AP" wordmark — cyan -> violet gradient text */
+body:has(input#luci_password) .cbi-map::before,
+body.node-main-login .cbi-map::before{
+  content:"Smart AP"; display:block; text-align:center;
+  font-size:32px; font-weight:800; letter-spacing:.5px; line-height:1.1;
+  margin:0 0 10px;
+  background:linear-gradient(90deg,#38bdf8 10%,#A78BFA 90%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  -webkit-text-fill-color:transparent;
+}
+/* thin divider + muted device-info subtitle below the wordmark */
+body:has(input#luci_password) .cbi-map::after,
+body.node-main-login .cbi-map::after{
+  content:"Chipset QCA9558 · Access Point";
+  display:block; text-align:center;
+  color:var(--mk-muted); font-size:12px; letter-spacing:.2px;
+  margin:0 0 24px; padding-top:14px; line-height:1.6;
+  border-top:1px solid rgba(148,163,184,.15);
+}
+/* HIDE every LuCI heading on the login page ("Authorization Required" slipped
+   through because it is not always an <h2>). Our "Smart AP" wordmark is a ::before
+   pseudo (not a real heading) so it survives. Also kill stray divider lines. */
+body:has(input#luci_password) h1, body:has(input#luci_password) h2,
+body:has(input#luci_password) h3, body:has(input#luci_password) h4,
+body:has(input#luci_password) h5, body:has(input#luci_password) legend,
+body:has(input#luci_password) .cbi-map-descr,
+body:has(input[name="luci_password"]) h1, body:has(input[name="luci_password"]) h2,
+body:has(input[name="luci_password"]) h3, body:has(input[name="luci_password"]) h4,
+body:has(input[name="luci_password"]) h5, body:has(input[name="luci_password"]) legend,
+body:has(input[name="luci_password"]) .cbi-map-descr,
+body.node-main-login h1, body.node-main-login h2, body.node-main-login h3,
+body.node-main-login h4, body.node-main-login h5, body.node-main-login legend,
+body.node-main-login .cbi-map-descr{ display:none!important; }
+/* stray divider lines / inner borders inside the one login card */
+body:has(input#luci_password) hr, body:has(input[name="luci_password"]) hr,
+body.node-main-login hr{ display:none!important; }
+body:has(input#luci_password) .cbi-value, body:has(input[name="luci_password"]) .cbi-value,
+body.node-main-login .cbi-value{ border:0!important; box-shadow:none!important; }
+/* left-align the English Username/Password labels so they sit over their inputs
+   (RTL was pushing them to the right edge => looked misaligned) */
+body:has(input#luci_password) .cbi-value-title,
+body:has(input[name="luci_password"]) .cbi-value-title,
+body.node-main-login .cbi-value-title{ text-align:left!important; }
+
+/* FLATTEN the inner form: the obsidian section/card styling (from kt412-theme)
+   was painting the fieldset that wraps Username/Password as a SECOND card inside
+   the login card (the "card-in-card" blue panel). On the login page strip every
+   inner surface so the fields sit directly on the one card. */
+body.node-main-login form,
+body:has(input#luci_password) form,
+body.node-main-login fieldset,
+body:has(input#luci_password) fieldset,
+body.node-main-login .cbi-section,
+body:has(input#luci_password) .cbi-section,
+body.node-main-login .cbi-section-node,
+body:has(input#luci_password) .cbi-section-node{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; margin:0!important; border-radius:0!important;
+  -webkit-backdrop-filter:none!important; backdrop-filter:none!important;
+}
+
+/* comfortable vertical rhythm between Username / Password */
+body:has(input#luci_password) .cbi-value{
+  display:block!important; margin:0 0 18px!important; width:100%!important;
+}
+/* clear labels above each field */
+body:has(input#luci_password) .cbi-value-title{
+  display:block!important; width:auto!important; text-align:left!important;
+  color:var(--mk-txt2)!important; font-size:12.5px!important; font-weight:600!important;
+  letter-spacing:.2px; margin:0 0 7px!important; padding:0!important;
+}
+body:has(input#luci_password) .cbi-value-field{
+  display:block!important; width:100%!important; margin:0!important; padding:0!important;
+}
+/* dark rounded fields, no harsh borders */
+body:has(input#luci_password) input[type="text"],
+body:has(input#luci_password) input[type="password"]{
+  width:100%!important; box-sizing:border-box;
+  padding:13px 15px!important; font-size:15px!important; line-height:1.3!important;
+  color:var(--mk-txt)!important;
+  background:rgba(15,23,42,0.65)!important;
+  border:1px solid rgba(148,163,184,.16)!important; border-radius:13px!important;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.30)!important;
+  transition:border-color .25s ease, box-shadow .25s ease, background .25s ease;
+}
+/* crisp neon-cyan focus ring */
+body:has(input#luci_password) input[type="text"]:focus,
+body:has(input#luci_password) input[type="password"]:focus{
+  background:rgba(15,23,42,0.80)!important;
+  border-color:rgba(56,189,248,.65)!important;
+  box-shadow:0 0 0 3px rgba(56,189,248,.22), 0 0 16px rgba(56,189,248,.16)!important;
+  outline:none!important;
+}
+body:has(input#luci_password) input::placeholder{ color:var(--mk-muted)!important; }
+/* keep browser autofill (saved credentials) on the dark glass, not a white box */
+body.node-main-login input:-webkit-autofill,
+body:has(input#luci_password) input:-webkit-autofill,
+body:has(input#luci_password) input:-webkit-autofill:focus{
+  -webkit-box-shadow:0 0 0 1000px rgba(15,23,42,.78) inset!important;
+  -webkit-text-fill-color:var(--mk-txt)!important;
+  caret-color:var(--mk-txt)!important; border-radius:13px!important;
+}
+
+body:has(input#luci_password) .cbi-page-actions,
+body:has(input#luci_password) .right{
+  text-align:center!important; margin-top:8px!important; background:transparent!important;
+  border:0!important; padding:0!important;
+}
+/* full-width cyan -> deeper-cyan gradient submit */
+body:has(input#luci_password) .cbi-button,
+body:has(input#luci_password) .cbi-button-apply,
+body:has(input#luci_password) button[type="submit"]{
+  width:100%!important; padding:14px 16px!important; margin-top:8px!important;
+  font-size:15.5px!important; font-weight:700!important; letter-spacing:.4px;
+  color:#fff!important; border:0!important; border-radius:13px!important; cursor:pointer;
+  background:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 55%,#0284c7 100%)!important;
+  box-shadow:0 12px 26px -6px rgba(56,189,248,.45), inset 0 1px 0 rgba(255,255,255,.20)!important;
+  transition:transform .2s ease, box-shadow .25s ease, filter .25s ease;
+}
+body:has(input#luci_password) .cbi-button-apply:hover,
+body:has(input#luci_password) button[type="submit"]:hover,
+body:has(input#luci_password) .cbi-button:hover{
+  transform:translateY(-2px); filter:brightness(1.06);
+  box-shadow:0 18px 36px -8px rgba(56,189,248,.62), inset 0 1px 0 rgba(255,255,255,.25)!important;
+}
+body:has(input#luci_password) button[type="submit"]:active{
+  transform:translateY(0); filter:brightness(.98);
+}
+/* hide the bootstrap reset/cancel button on the login page */
+body:has(input#luci_password) .cbi-button-reset{ display:none!important; }
+
+/* hide ALL LuCI chrome on the login page (top navbar/header, side menu, footer)
+   so the centered glass card floats alone on the obsidian field — no stray cyan
+   navbar or "Powered by" footer above/below it. */
+body.node-main-login header, body.node-main-login #header,
+body.node-main-login .navbar, body.node-main-login #topmenu,
+body.node-main-login #mainmenu, body.node-main-login .main-left,
+body.node-main-login footer, body.node-main-login #footer, body.node-main-login .footer,
+body:has(input#luci_password) header, body:has(input#luci_password) #header,
+body:has(input#luci_password) .navbar, body:has(input#luci_password) #topmenu,
+body:has(input#luci_password) #mainmenu, body:has(input#luci_password) .main-left,
+body:has(input#luci_password) footer, body:has(input#luci_password) #footer,
+body:has(input#luci_password) .footer{ display:none!important; }
+
+/* style a wrong-password / error message cleanly INSIDE the card (not raw text) */
+body.node-main-login .alert-message,
+body:has(input#luci_password) .alert-message,
+body:has(input#luci_password) .error,
+body:has(input#luci_password) p.alert{
+  background:rgba(239,68,68,.12)!important; color:#fca5a5!important;
+  border:1px solid rgba(239,68,68,.35)!important; border-radius:11px!important;
+  padding:11px 13px!important; margin:0 0 16px!important; font-size:13px!important;
+  text-align:center!important; box-shadow:none!important;
+}
+
+/* phones: card ~92vw, scaled padding, fonts stay legible */
+@media (max-width:480px){
+  body.node-main-login,
+  body:has(input#luci_password){ padding:16px!important; }
+  body:has(input#luci_password) .cbi-map,
+  body:has(input#luci_password) #maincontent > .container,
+  body.node-main-login .cbi-map{
+    width:100%; max-width:400px; padding:26px 20px 24px!important; border-radius:20px!important;
+  }
+  body:has(input#luci_password) .cbi-map::before,
+  body.node-main-login .cbi-map::before{ font-size:28px; }
+  body:has(input#luci_password) input[type="text"],
+  body:has(input#luci_password) input[type="password"]{ font-size:16px!important; }
+}
+
+/* ============================================================================
+   RADICAL LOGIN FALLBACK — name-based (NOT id, NOT :has-only). Current LuCI may
+   render the password field without id="luci_password" or the body class may
+   differ; this block keys off input[name="luci_password"] (login-only marker)
+   so the glass-card login styling applies regardless of id/class/markup drift.
+   ============================================================================ */
+body:has(form[action*="cgi-bin/luci"] input[name="luci_password"]),
+body:has(input[name="luci_password"]){
+  min-height:100vh!important; display:flex!important; align-items:center!important;
+  justify-content:center!important; padding:24px!important; box-sizing:border-box;
+  background:
+    radial-gradient(1100px 760px at 12% -12%, rgba(56,189,248,.22) 0%, transparent 56%),
+    radial-gradient(960px 760px at 112% -4%, rgba(139,92,246,.20) 0%, transparent 54%),
+    linear-gradient(160deg,#0b1220,#16243a 55%,#0b1220)!important;
+}
+body:has(input[name="luci_password"]) header,
+body:has(input[name="luci_password"]) #header,
+body:has(input[name="luci_password"]) .navbar,
+body:has(input[name="luci_password"]) #topmenu,
+body:has(input[name="luci_password"]) #mainmenu,
+body:has(input[name="luci_password"]) .main-left,
+body:has(input[name="luci_password"]) footer,
+body:has(input[name="luci_password"]) #footer,
+body:has(input[name="luci_password"]) .footer{ display:none!important; }
+body:has(input[name="luci_password"]) #maincontent,
+body:has(input[name="luci_password"]) #maincontent > .container{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; max-width:none!important; backdrop-filter:none!important; -webkit-backdrop-filter:none!important;
+}
+body:has(input[name="luci_password"]) .cbi-map{
+  position:relative; z-index:1; width:100%; max-width:400px; margin-left:auto!important; margin-right:auto!important; box-sizing:border-box;
+  padding:36px 34px 32px!important;
+  background:linear-gradient(180deg, rgba(71,85,105,.30), rgba(51,65,85,.20)), rgba(51,65,85,.55)!important;
+  border:1px solid rgba(56,189,248,.22)!important; border-radius:24px!important;
+  box-shadow:0 30px 70px -20px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.10)!important;
+  -webkit-backdrop-filter:blur(16px) saturate(145%)!important; backdrop-filter:blur(16px) saturate(145%)!important;
+  direction:rtl; text-align:right;
+}
+/* hide EVERY heading on the login page — the stray "Authorization Required" is a
+   BARE h2 OUTSIDE .cbi-map, so '.cbi-map h2' missed it. Hit all heading forms,
+   matched via the name-based selector (the one that actually applies here) AND
+   the id/class companions, so it dies regardless of LuCI markup. */
+body:has(input[name="luci_password"]) h1,
+body:has(input[name="luci_password"]) h2,
+body:has(input[name="luci_password"]) h3,
+body:has(input[name="luci_password"]) legend,
+body:has(input[name="luci_password"]) .cbi-map-descr,
+body:has(input[name="luci_password"]) #maincontent > h2,
+body:has(input[name="luci_password"]) .container > h2,
+body:has(input#luci_password) h1,
+body:has(input#luci_password) h2,
+body:has(input#luci_password) h3,
+body.node-main-login h1,
+body.node-main-login h2,
+body.node-main-login h3,
+body.node-login h1, body.node-login h2, body.node-login h3{ display:none!important; }
+body:has(input[name="luci_password"]) form,
+body:has(input[name="luci_password"]) fieldset,
+body:has(input[name="luci_password"]) .cbi-section,
+body:has(input[name="luci_password"]) .cbi-section-node{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  padding:0!important; margin:0!important; border-radius:0!important;
+}
+body:has(input[name="luci_password"]) input[type="text"],
+body:has(input[name="luci_password"]) input[type="password"]{
+  width:100%!important; box-sizing:border-box; padding:13px 15px!important; font-size:15px!important;
+  color:var(--mk-txt)!important; background:rgba(15,23,42,.65)!important;
+  border:1px solid rgba(148,163,184,.16)!important; border-radius:13px!important; margin-bottom:14px!important;
+}
+body:has(input[name="luci_password"]) input[type="text"]:focus,
+body:has(input[name="luci_password"]) input[type="password"]:focus{
+  border-color:rgba(56,189,248,.65)!important; box-shadow:0 0 0 3px rgba(56,189,248,.22)!important; outline:none!important;
+}
+body:has(input[name="luci_password"]) .cbi-button,
+body:has(input[name="luci_password"]) .cbi-button-apply,
+body:has(input[name="luci_password"]) button[type="submit"]{
+  width:100%!important; padding:14px 16px!important; margin-top:8px!important;
+  font-size:15.5px!important; font-weight:700!important; color:#fff!important; border:0!important;
+  border-radius:13px!important; cursor:pointer;
+  background:linear-gradient(135deg,#38bdf8 0%,#0ea5e9 60%,#0284c7 100%)!important;
+  box-shadow:0 12px 26px -6px rgba(56,189,248,.50)!important; text-shadow:0 1px 2px rgba(0,0,0,.25)!important;
+}
+body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important; }
+
+/* ============================================================================
+   2) MK DASHBOARD widgets (used by view/kt412/dashboard.js)
+   ============================================================================ */
+.mk-wrap{ direction:rtl; text-align:right; color:var(--mk-txt);
+  width:100%; max-width:100%; box-sizing:border-box; }
+.mk-wrap *{ box-sizing:border-box; }
+.mk-head{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:4px 0 18px; }
+.mk-head .mk-logo{
+  font-size:24px; font-weight:800; letter-spacing:.5px;
+  background:linear-gradient(90deg,#38bdf8,#8b5cf6);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  -webkit-text-fill-color:transparent;
+}
+.mk-head .mk-sub{ color:var(--mk-txt2); font-size:13px; }
+.mk-head .mk-spacer{ flex:1; }
+
+/* theme toggle pill */
+.mk-toggle{
+  display:inline-flex; align-items:center; gap:8px; cursor:pointer; user-select:none;
+  padding:8px 14px; border-radius:999px; font-size:13px; color:var(--mk-txt2);
+  background:var(--mk-card); border:1px solid var(--mk-stroke);
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  transition:all .3s ease;
+}
+.mk-toggle .sw{ width:38px; height:20px; border-radius:999px; position:relative;
+  background:#334155; transition:background .3s ease; }
+.mk-toggle .sw i{ position:absolute; top:2px; inset-inline-start:2px; width:16px; height:16px;
+  border-radius:50%; background:#E2E8F0; box-shadow:0 1px 3px rgba(0,0,0,.4); transition:inset-inline-start .3s ease; }
+.mk-toggle.on .sw{ background:var(--mk-grad); }
+.mk-toggle.on .sw i{ inset-inline-start:20px; }
+
+/* responsive grids */
+.mk-grid{ display:grid; gap:16px; }
+/* FLUID columns (auto-fit) — adapt to any width with no overflow/cramping */
+.mk-cols-3{ grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+.mk-cols-2{ grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }
+.mk-cols-6{ grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); }
+
+/* glass card — translucent slate + backdrop blur */
+.mk-card{
+  background:var(--mk-card);
+  border:1px solid var(--mk-stroke); border-radius:var(--mk-radius);
+  box-shadow:var(--mk-shadow);
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  padding:1rem; position:relative; overflow:hidden;
+  transition:all .3s ease;
+}
+.mk-card:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow-lg); border-color:rgba(56,189,248,.35); }
+.mk-card h3{ margin:0 0 14px; font-size:15px; color:var(--mk-txt); font-weight:800; display:flex; align-items:center; gap:8px; }
+.mk-card .mk-hint{ color:var(--mk-muted); font-size:12px; }
+
+/* circular gauge (SVG: .track + .arc, value via .mk-gval)
+   ROBUST: every <circle> is fill:none so we NEVER get a solid black disk on
+   mobile webkit. Only the track ring (dark slate) and the value arc
+   (neon cyan/green/purple/status) are stroked; the % text sits centered in
+   light text. */
+.mk-gauge{ display:flex; flex-direction:column; align-items:center; gap:10px;
+  width:100%; max-width:100%; }
+/* HARD small size — never 60vw (that rendered a ~324px giant disk on phones).
+   NO rotation on the svg: the arc itself is rotated via a transform attribute, so the
+   centered % text stays upright and visible. */
+.mk-gauge svg{ width:112px!important; height:112px!important; max-width:112px!important;
+  display:block; }
+.mk-gauge circle{ fill:none!important; }                 /* kill any default black fill */
+.mk-gauge .track{ fill:none!important; stroke:#334155; stroke-width:11; }
+.mk-gauge .arc{ fill:none!important; stroke:var(--mk-accent); stroke-width:11;
+  stroke-linecap:round; transition:stroke-dashoffset .7s ease, stroke .4s ease; }
+.mk-gauge .mk-gval{ font-size:26px; font-weight:800; fill:var(--mk-txt); stroke:none; }
+.mk-gauge .mk-glabel{ color:var(--mk-txt2); font-size:13px; font-weight:700; }
+.mk-gauge .mk-gmeta{ color:var(--mk-muted); font-size:11px; }
+
+/* traffic sparkline */
+.mk-spark{ width:100%; height:96px; display:block; }
+.mk-spark-axis{ stroke:rgba(148,163,184,.18); stroke-width:1; }
+.mk-traffic-rates{ display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; }
+.mk-rate{ display:flex; align-items:center; gap:8px; font-size:14px; }
+.mk-rate b{ font-size:18px; font-weight:800; }
+.mk-rate .dot{ width:10px; height:10px; border-radius:50%; }
+.mk-rate.rx .dot{ background:var(--mk-accent); } .mk-rate.rx b{ color:var(--mk-accent); }
+.mk-rate.tx .dot{ background:var(--mk-violet); } .mk-rate.tx b{ color:var(--mk-violet); }
+.mk-errs{ margin-top:10px; color:var(--mk-txt2); font-size:12px; }
+.mk-errs .bad{ color:var(--mk-red); font-weight:700; }
+.mk-errs .ok{ color:var(--mk-green); font-weight:700; }
+
+/* interface / RJ45 port tiles */
+.mk-iftiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }
+.mk-iftile{
+  background:var(--mk-card2); border:1px solid var(--mk-stroke);
+  border-radius:14px; padding:14px 10px; text-align:center; position:relative;
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  transition:all .3s ease;
+}
+.mk-iftile:hover{ transform:translateY(-2px); box-shadow:var(--mk-shadow); }
+.mk-iftile .ico{ font-size:22px; }
+.mk-iftile .nm{ font-weight:700; font-size:14px; margin-top:4px; color:var(--mk-txt); }
+.mk-iftile .st{ font-size:11px; color:var(--mk-muted); margin-top:2px; }
+.mk-iftile .led{ position:absolute; top:9px; inset-inline-start:9px; width:9px; height:9px; border-radius:50%; }
+/* plugged / up = neon green tile */
+.mk-iftile.up{ border-color:rgba(34,197,94,.55); background:rgba(34,197,94,.12); }
+.mk-iftile.up .led{ background:var(--mk-green); box-shadow:0 0 8px rgba(34,197,94,.8); }
+.mk-iftile.up .nm{ color:var(--mk-green); }
+/* small speed badge for plugged ports */
+.mk-iftile .spd{ display:inline-block; margin-top:5px; padding:2px 8px; border-radius:999px;
+  font-size:10px; font-weight:800; color:#0b1220; background:var(--mk-green);
+  box-shadow:0 0 8px rgba(34,197,94,.5); }
+/* unplugged / down = dark slate grey, dim */
+.mk-iftile.down{ background:rgba(30,41,59,0.45); border-color:var(--mk-stroke); opacity:.55; }
+.mk-iftile.down .led{ background:var(--mk-grey); }
+
+.mk-load{ color:var(--mk-muted); font-size:13px; padding:14px; text-align:center; }
+
+/* power / voltage advisory card */
+.mk-power .mk-pwr-badge{
+  display:inline-block; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:700;
+  margin-bottom:10px;
+}
+.mk-power .mk-pwr-badge.info{ color:#38bdf8; background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.4); }
+.mk-power .mk-pwr-badge.bad{ color:#fff; background:linear-gradient(135deg,var(--mk-red),#f43f5e); box-shadow:0 6px 16px rgba(239,68,68,.45); }
+.mk-power .mk-pwr-text{ color:var(--mk-txt2); font-size:13px; line-height:1.7; }
+.mk-power.alert{ border-color:rgba(239,68,68,.5); box-shadow:0 0 0 1px rgba(239,68,68,.25), var(--mk-shadow); }
+
+/* ===== mobile tweaks (grids already reflow via auto-fit minmax above) ===== */
+@media (max-width:600px){
+  .mk-wrap{ width:100%!important; max-width:100%!important; }
+  .mk-grid{ gap:12px!important; }
+  .mk-card{ width:100%!important; max-width:100%!important; padding:14px!important; }
+  .mk-gauge svg{ width:96px!important; height:96px!important; max-width:96px!important; }
+  .mk-head .mk-logo{ font-size:20px; }
+}
+
+/* ============================================================================
+   PREMIUM DASHBOARD UPGRADE (2026 — control-panel home, append-only)
+   Reuses the existing palette vars (NO recolor). Adds: a real top header bar,
+   status-chip row, styled section headers, glow-ring gauges, a refined traffic
+   card, real device-LED port tiles, entrance animation + hover lift. RTL.
+   Every rule below is still neutralised by :root[data-mk-skin="off"] because it
+   only restyles .mk-* surfaces that the kill-switch already overrides.
+   ============================================================================ */
+
+/* ---- small inline icon baseline (currentColor) ---- */
+.mk-ic{ width:16px; height:16px; flex:0 0 auto; vertical-align:middle; }
+/* HARD cap so an icon SVG can never balloon to fill the screen (the giant-plug
+   bug) even if a more specific size rule is missing. Gauges/sparklines are NOT
+   .mk-ic/.kti so they keep their own sizes. */
+.mk-ic, svg.kti{ max-width:48px!important; max-height:48px!important; }
+/* stale/disconnected: dim the chips after repeated failed reads */
+.mk-chips.mk-stale{ opacity:.45; filter:grayscale(.4); transition:opacity .3s ease; }
+
+/* ---- entrance animation (subtle rise + fade) ---- */
+@keyframes mkRise{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:translateY(0); } }
+@keyframes mkSheen{ from{ background-position:0 0; } to{ background-position:-200% 0; } }
+.mk-wrap > *{ animation:mkRise .5s cubic-bezier(.22,.61,.36,1) both; }
+.mk-wrap > *:nth-child(2){ animation-delay:.04s; }
+.mk-wrap > *:nth-child(3){ animation-delay:.08s; }
+.mk-wrap > *:nth-child(4){ animation-delay:.12s; }
+.mk-wrap > *:nth-child(5){ animation-delay:.16s; }
+.mk-wrap > *:nth-child(6){ animation-delay:.20s; }
+.mk-wrap > *:nth-child(7){ animation-delay:.24s; }
+.mk-wrap > *:nth-child(n+8){ animation-delay:.28s; }
+@media (prefers-reduced-motion: reduce){ .mk-wrap > *{ animation:none; } }
+
+.mk-wrap{ max-width:1160px; margin:0 auto; padding:6px 2px 24px; }
+
+/* ============================================================================
+   TOP HEADER BAR — device identity + theme toggle
+   ============================================================================ */
+.mk-topbar{
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  margin:2px 0 14px; padding:14px 18px; border-radius:16px;
+  background:
+    radial-gradient(420px 160px at 92% -40%, rgba(139,92,246,.20), transparent 70%),
+    radial-gradient(520px 200px at 0% -30%, rgba(56,189,248,.20), transparent 70%),
+    var(--mk-card);
+  border:1px solid var(--mk-stroke);
+  box-shadow:var(--mk-shadow), inset 0 1px 0 rgba(255,255,255,.05);
+  -webkit-backdrop-filter:blur(14px) saturate(140%); backdrop-filter:blur(14px) saturate(140%);
+}
+.mk-brand{ display:flex; align-items:center; gap:13px; }
+.mk-mark{
+  width:46px; height:46px; flex:0 0 auto; border-radius:13px;
+  display:flex; align-items:center; justify-content:center; color:#fff;
+  background:linear-gradient(135deg,#38bdf8,#8b5cf6);
+  box-shadow:0 8px 20px -6px rgba(56,189,248,.55), inset 0 1px 0 rgba(255,255,255,.30);
+}
+.mk-mark .mk-ic{ width:26px; height:26px; }
+.mk-brand-t .mk-logo{
+  font-size:26px; font-weight:800; letter-spacing:.4px; line-height:1.05;
+  background:linear-gradient(90deg,#38bdf8,#8b5cf6);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  -webkit-text-fill-color:transparent;
+}
+.mk-brand-t .mk-sub{ color:var(--mk-txt2); font-size:12.5px; margin-top:2px; }
+
+/* ---- status chip row ---- */
+.mk-chips{ display:flex; flex-wrap:wrap; gap:10px; margin:0 0 6px; }
+.mk-chip{
+  display:inline-flex; align-items:center; gap:7px; min-height:34px;
+  padding:6px 13px; border-radius:11px; font-size:12.5px; color:var(--mk-txt2);
+  background:var(--mk-card2); border:1px solid var(--mk-stroke);
+  -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+  transition:border-color .25s ease, transform .2s ease, box-shadow .25s ease;
+}
+.mk-chip:hover{ transform:translateY(-1px); border-color:rgba(56,189,248,.4); box-shadow:var(--mk-shadow); }
+.mk-chip .mk-ic{ color:var(--mk-muted); }
+.mk-chip .ck{ color:var(--mk-muted); }
+.mk-chip .cv{ color:var(--mk-txt); font-weight:800; letter-spacing:.2px; }
+.mk-chip.ok{ border-color:rgba(34,197,94,.40); background:rgba(34,197,94,.10); }
+.mk-chip.ok .mk-ic{ color:var(--mk-green); }
+.mk-chip.ok .cv{ color:var(--mk-green); }
+
+/* ============================================================================
+   SECTION HEADERS — icon + title + subtle divider
+   ============================================================================ */
+.mk-sec{ display:flex; align-items:center; gap:11px; margin:22px 2px 13px; }
+.mk-sec > .mk-ic{
+  width:34px; height:34px; padding:8px; border-radius:10px; color:var(--mk-accent);
+  background:rgba(56,189,248,.12); border:1px solid rgba(56,189,248,.30);
+  box-shadow:inset 0 0 12px rgba(56,189,248,.12);
+}
+.mk-sec-t{ display:flex; flex-direction:column; line-height:1.15; }
+.mk-sec-t .t{ font-size:16.5px; font-weight:800; color:var(--mk-txt); letter-spacing:.2px; }
+.mk-sec-t .s{ font-size:11px; color:var(--mk-muted); letter-spacing:.3px; }
+.mk-sec-rule{ flex:1; height:1px; margin-inline-start:6px;
+  background:linear-gradient(90deg, rgba(148,163,184,.28), transparent); }
+
+/* card heading icon alignment (h3 already flex) */
+.mk-card h3 .mk-ic{ color:var(--mk-accent); width:18px; height:18px; }
+.mk-card h3 span{ display:inline-flex; align-items:center; }
+
+/* ============================================================================
+   PREMIUM GAUGE CARDS — larger, centered, glow ring, bold %, trend caption
+   ============================================================================ */
+.mk-gcard{ padding:18px 14px 16px; }
+.mk-gcard::before{ /* faint top accent line */
+  content:""; position:absolute; inset:0 0 auto 0; height:2px;
+  background:linear-gradient(90deg, transparent, rgba(56,189,248,.5), transparent);
+  opacity:.6;
+}
+.mk-gring{ position:relative; display:inline-flex; }
+.mk-gring::after{ /* soft glow halo behind the ring (toned down for clarity) */
+  content:""; position:absolute; inset:8px; border-radius:50%;
+  box-shadow:0 0 18px 1px rgba(56,189,248,.10); pointer-events:none; z-index:0;
+}
+.mk-gauge svg{ width:124px!important; height:124px!important; max-width:124px!important;
+  display:block; position:relative; z-index:1; }
+.mk-gauge .arc{ filter:none; }
+.mk-gauge .mk-gval{ font-size:30px; }
+.mk-gauge .mk-gunit{ fill:var(--mk-muted); font-weight:700; }
+.mk-gauge .mk-gcap{ fill:var(--mk-muted); font-size:9px; font-weight:800; letter-spacing:2px; }
+.mk-gauge .mk-glabel{ display:flex; align-items:center; justify-content:center; gap:7px; margin-top:2px; }
+.mk-gauge .mk-glabel .mk-ic{ color:var(--mk-accent); }
+.mk-gcard[data-none]{}
+.mk-gauge[data-gid="ram"] + .mk-glabel,
+.mk-gauge[data-gid="ram"] .mk-glabel .mk-ic{ color:var(--mk-green); }
+.mk-gauge[data-gid="disk"] .mk-glabel .mk-ic{ color:var(--mk-violet); }
+.mk-gauge[data-gid="ram"] .mk-gring::after{ box-shadow:0 0 34px 2px rgba(34,197,94,.16); }
+.mk-gauge[data-gid="disk"] .mk-gring::after{ box-shadow:0 0 34px 2px rgba(139,92,246,.16); }
+
+/* ============================================================================
+   PREMIUM TRAFFIC CARD
+   ============================================================================ */
+.mk-traffic .mk-spark{ height:118px; margin-top:4px; }
+.mk-spark-grid line{ stroke:rgba(148,163,184,.10); stroke-width:1; stroke-dasharray:3 5; }
+.mk-traffic-rates{ gap:12px; margin-top:14px; }
+.mk-rate{
+  flex:1 1 0; min-width:130px; display:flex; align-items:center; gap:9px;
+  padding:11px 13px; border-radius:13px; background:var(--mk-card2);
+  border:1px solid var(--mk-stroke);
+}
+.mk-rate .ri{ width:30px; height:30px; flex:0 0 auto; border-radius:9px;
+  display:flex; align-items:center; justify-content:center; }
+.mk-rate .ri .mk-ic{ width:17px; height:17px; }
+.mk-rate.rx .ri{ color:var(--mk-accent); background:rgba(56,189,248,.14); border:1px solid rgba(56,189,248,.35); }
+.mk-rate.tx .ri{ color:var(--mk-violet); background:rgba(139,92,246,.14); border:1px solid rgba(139,92,246,.35); }
+.mk-rate .rl{ color:var(--mk-muted); font-size:12px; }
+.mk-rate b{ margin-inline-start:auto; font-size:18px; font-weight:800; letter-spacing:.2px; }
+.mk-errs{
+  margin-top:13px; padding:9px 13px; border-radius:11px; font-size:12.5px;
+  background:var(--mk-card2); border:1px solid var(--mk-stroke);
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+
+/* ============================================================================
+   PREMIUM PORT MAP — real device-LED tiles
+   ============================================================================ */
+.mk-portmap .mk-iftiles{ grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); }
+.mk-portcard .mk-iftiles-net{ grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+.mk-iftile{
+  padding:15px 8px 13px; border-radius:15px;
+  display:flex; flex-direction:column; align-items:center; gap:3px;
+  background:linear-gradient(180deg, rgba(51,65,85,.30), var(--mk-card2));
+}
+.mk-iftile .ico{ display:flex; align-items:center; justify-content:center; color:var(--mk-muted); }
+.mk-iftile .ico .mk-ic{ width:26px; height:26px; }
+.mk-iftile .led{
+  top:10px; inset-inline-start:10px; width:9px; height:9px; border-radius:50%;
+  background:var(--mk-grey); box-shadow:0 0 0 3px rgba(100,116,139,.12);
+}
+.mk-iftile .nm{ font-weight:800; font-size:13px; margin-top:5px; }
+.mk-iftile .st{ font-size:10.5px; }
+/* speed / link badge */
+.mk-iftile .spd{ display:inline-flex; align-items:baseline; gap:3px; margin-top:7px;
+  padding:3px 9px; border-radius:999px; font-size:11px; font-weight:800; line-height:1;
+  white-space:nowrap; color:#0b1220; background:var(--mk-green); box-shadow:0 0 10px rgba(34,197,94,.5); }
+.mk-iftile .spd i{ font-style:normal; font-size:8.5px; font-weight:700; opacity:.8; }
+.mk-iftile .spd.gig{ background:var(--mk-green); }
+.mk-iftile .spd.fe{ background:var(--mk-amber); box-shadow:0 0 10px rgba(245,158,11,.45); }
+.mk-iftile .spd.link{ background:rgba(56,189,248,.18); color:var(--mk-accent);
+  border:1px solid rgba(56,189,248,.4); box-shadow:none; }
+.mk-iftile .spd.off{ background:rgba(100,116,139,.18); color:var(--mk-muted); box-shadow:none; }
+/* plugged / up = neon green tile + lit LED */
+.mk-iftile.up{ border-color:rgba(34,197,94,.50);
+  background:linear-gradient(180deg, rgba(34,197,94,.16), rgba(34,197,94,.06)); }
+.mk-iftile.up .ico{ color:var(--mk-green); }
+.mk-iftile.up .led{ background:var(--mk-green); box-shadow:0 0 10px 1px rgba(34,197,94,.85), 0 0 0 3px rgba(34,197,94,.18); }
+.mk-iftile.up .nm{ color:var(--mk-green); }
+/* radios (wifi) lit in cyan when active */
+.mk-iftile.radio.up{ border-color:rgba(56,189,248,.50);
+  background:linear-gradient(180deg, rgba(56,189,248,.16), rgba(56,189,248,.05)); }
+.mk-iftile.radio.up .ico{ color:var(--mk-accent); }
+.mk-iftile.radio.up .led{ background:var(--mk-accent); box-shadow:0 0 10px 1px rgba(56,189,248,.85), 0 0 0 3px rgba(56,189,248,.18); }
+.mk-iftile.radio.up .nm{ color:var(--mk-accent); }
+.mk-iftile.radio.up .spd.link{ background:rgba(56,189,248,.18); }
+/* WAN highlight ring when up */
+.mk-iftile.wan.up{ box-shadow:inset 0 0 0 1px rgba(34,197,94,.30), var(--mk-shadow); }
+/* unplugged / down = dim slate */
+.mk-iftile.down{ background:rgba(30,41,59,0.42); border-color:var(--mk-stroke); opacity:.62; }
+.mk-iftile.down .ico{ color:var(--mk-grey); }
+.mk-iftile.down .led{ background:var(--mk-grey); box-shadow:0 0 0 3px rgba(100,116,139,.10); }
+
+/* ============================================================================
+   POWER CARD
+   ============================================================================ */
+.mk-power{ padding:16px 18px; }
+.mk-power .mk-pwr-badge{ display:inline-flex; align-items:center; gap:6px; }
+
+/* ============================================================================
+   RESPONSIVE
+   ============================================================================ */
+/* port-map + net-tiles now use auto-fit minmax (above) so they reflow at EVERY
+   width without fixed-count breakpoints; only non-grid phone tweaks remain. */
+@media (max-width:600px){
+  .mk-topbar{ padding:13px 14px; }
+  .mk-brand-t .mk-logo{ font-size:22px; }
+  .mk-mark{ width:42px; height:42px; }
+  .mk-chips{ gap:8px; }
+  .mk-chip{ font-size:12px; padding:6px 11px; }
+  .mk-sec{ margin:18px 2px 11px; }
+  .mk-sec-t .t{ font-size:15px; }
+  .mk-rate{ min-width:100%; }
+}
+
+/* ============================================================================
+   DARK-MODE LOCK. This skin is ALWAYS the deep-obsidian dark palette (never a
+   light flip). The dark palette applies UNCONDITIONALLY and is NOT gated behind
+   prefers-color-scheme, so it renders identically whether the phone OS is in
+   dark OR light mode. We RE-ASSERT the dark palette under both light and dark OS
+   preferences so the look can never flip. NO light/white surface values remain.
+   ============================================================================ */
+:root{color-scheme:dark}
+@media (prefers-color-scheme: light){
+  :root:not([data-mk-skin="off"]){
+    --mk-bg0:#0b1220; --mk-bg1:#111c2e; --mk-bg2:#16243a;
+    --mk-card:rgba(24,34,54,0.62); --mk-card2:rgba(15,23,42,0.66);
+    --mk-glass:rgba(24,34,54,0.62); --mk-glass2:rgba(15,23,42,0.66);
+    --mk-stroke:rgba(255,255,255,0.12); --mk-stroke2:rgba(56,189,248,0.50);
+    --mk-txt:#F1F5F9; --mk-txt2:#e2e8f0; --mk-muted:#cbd5e1;
+    --mk-accent:#38bdf8; --mk-accent2:#38bdf8; --mk-violet:#A78BFA;
+    --mk-blue:#38bdf8; --mk-cyan:#38bdf8;
+    --mk-green:#34D399; --mk-amber:#FBBF24; --mk-red:#F87171; --mk-grey:#64748B;
+    --mk-shadow:0 4px 18px rgba(0,0,0,.40);
+    --mk-shadow-lg:0 12px 34px rgba(0,0,0,.50);
+  }
+  :root:not([data-mk-skin="off"]) .mk-gauge .track{ stroke:#334155; }
+  :root:not([data-mk-skin="off"]) .mk-gauge .arc{ stroke:var(--mk-accent); }
+  :root:not([data-mk-skin="off"]) .mk-spark-axis{ stroke:rgba(148,163,184,.18); }
+}
+
+/* ============================================================================
+   DESKTOP / LAPTOP LAYOUT GUARANTEE
+   The custom views render into LuCI's #view. On some laptop layouts #view was
+   handed a narrow content column, so the auto-fit grids collapsed and every card
+   stacked in ONE column ("كلهم تحت بعض"). Force the wrap to the full content
+   width and pin explicit column counts at laptop widths so cards sit side-by-side.
+   Phone rules (max-width 480/600 above) still flatten to a single column.
+   ============================================================================ */
+@media (min-width:992px){
+  #view, #view > div, #maincontent > .container{ width:100%!important; box-sizing:border-box; }
+  .mk-wrap{ width:100%!important; max-width:1200px; margin-left:auto!important; margin-right:auto!important; }
+  /* row header + status chips ALWAYS horizontal on desktop (never a vertical stack) */
+  .mk-topbar{ flex-direction:row!important; flex-wrap:wrap; }
+  .mk-chips{ flex-direction:row!important; flex-wrap:wrap; }
+  /* explicit columns so the grids can't collapse to a single stacked column */
+  .mk-grid.mk-cols-2{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .mk-grid.mk-cols-3{ grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .mk-grid.mk-cols-6{ grid-template-columns:repeat(6,minmax(0,1fr)); }
+  /* keep form inputs a sane width — don't stretch edge-to-edge on a wide screen */
+  .mk-card .cbi-input-text, .mk-card .cbi-input-select, .mk-card input, .mk-card select,
+  .kt-field input, .kt-field select, .cbi-input-text, .cbi-input-select{ max-width:440px; }
+}
+/* mid laptop width: 3-up gauges fit, but drop 6-up portmap to 3 for legibility */
+@media (min-width:992px) and (max-width:1199px){
+  .mk-grid.mk-cols-6{ grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+
+/* ============================================================================
+   UI REDESIGN v2 — visible build marker. Confirms the NEW theme is actually
+   loaded (not a stale browser cache / old flash). Small, fixed, unobtrusive.
+   ============================================================================ */
+body::after{
+  content:"UI Redesign v2";
+  position:fixed; inset-block-end:8px; inset-inline-start:8px; z-index:9999;
+  font:700 10px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:.4px;
+  color:#0b1220; background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+  padding:5px 9px; border-radius:999px; pointer-events:none; opacity:.92;
+  box-shadow:0 4px 12px -3px rgba(56,189,248,.5);
+}
+
+/* ---- login layout safety net: force the form chain full-width so the centered
+   card never overflows the viewport, regardless of LuCI's exact nesting. ---- */
+body:has(input#luci_password), body:has(input[name="luci_password"]), body.node-main-login{ overflow-x:hidden!important; }
+body:has(input#luci_password) form, body:has(input[name="luci_password"]) form, body.node-main-login form,
+body:has(input#luci_password) fieldset, body:has(input[name="luci_password"]) fieldset, body.node-main-login fieldset,
+body:has(input#luci_password) .cbi-section-node, body:has(input[name="luci_password"]) .cbi-section-node{
+  display:block!important; width:100%!important; max-width:100%!important; margin:0!important; padding:0!important; float:none!important;
+}
