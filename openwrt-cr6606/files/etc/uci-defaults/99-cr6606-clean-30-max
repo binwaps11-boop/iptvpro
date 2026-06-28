@@ -1,0 +1,77 @@
+#!/bin/sh
+# =============================================================================
+# 99-cr6606-clean-30-max  —  Xiaomi CR6606 (MT7915 / mt76) "clean 30 max" tuning
+# -----------------------------------------------------------------------------
+# Goal: drive the radios to their MAXIMUM *CLEAN* (legal, un-clipped) output by
+#       requesting the US legal maximum (30 dBm) with correct channels, correct
+#       HE width, and 2x2 spatial streams — then let the mt76 driver clamp it to
+#       min(30, regdb, EEPROM caldata). Whatever the chip actually emits IS the
+#       real maximum it can do cleanly. We do NOT fake the number.
+#
+# HARD RULES (per request — enforced by NOT doing any of these):
+#   * NO regulatory patch / no regdb edit       -> we only set country='US'
+#   * NO EEPROM / caldata edit                  -> we never touch /lib/firmware or art
+#   * NO MAC change                             -> wireless MAC left untouched
+#   * NO firmware from another device           -> stock OpenWrt mt7915 firmware
+#   * NO fake number                            -> txpower is a REQUEST; the driver
+#                                                  clamps it. Verify with the check
+#                                                  script (/root/cr6606_power_check.sh).
+#
+# Wireless target:
+#   2.4G : HE20 (HT20 fallback), channel 1 (alt 6/11), txpower 30, 2x2
+#   5G   : HE80,                 channel 149 (alt 157), txpower 30, 2x2
+#
+# Idempotent (guard file). Runs after 45-cr6606-wifi (SSID/security) so this layer
+# only refines band/channel/width/power. UCI only — no binary/caldata writes.
+# =============================================================================
+[ -f /etc/cr6606-clean30.done ] && exit 0
+
+# --- per-band tuning targets (edit channel here if you want 6/11 or 157) -----
+CH_24="1"        # 2.4G non-overlapping: 1, 6 or 11
+CH_5="149"       # 5G UNII-3: 149 or 157  (clean high-power channels in US)
+HT_24="HE20"     # WiFi6 20 MHz on 2.4G (driver falls back to HT20 if needed)
+HT_5="HE80"      # WiFi6 80 MHz on 5G
+TXP="30"         # US legal maximum REQUEST (dBm). mt76 clamps to regdb/caldata.
+
+set_radio() {
+	dev="$1"
+	band="$(uci -q get wireless.$dev.band)"
+
+	# country + clean max-power request + keep the radio enabled
+	uci -q set wireless.$dev.country='US'
+	uci -q set wireless.$dev.txpower="$TXP"
+	uci -q set wireless.$dev.disabled='0'
+
+	# Some images set a conservative cell_density; 0 = no extra power back-off.
+	uci -q set wireless.$dev.cell_density='0'
+
+	case "$band" in
+		2g)
+			uci -q set wireless.$dev.channel="$CH_24"
+			uci -q set wireless.$dev.htmode="$HT_24"
+			;;
+		5g)
+			uci -q set wireless.$dev.channel="$CH_5"
+			uci -q set wireless.$dev.htmode="$HT_5"
+			;;
+		*)
+			# unknown/6g radio: leave channel auto, still request clean max power
+			:
+			;;
+	esac
+
+	# NOTE on 2x2 chains: the MT7915 in the CR6606 is a 2x2 part and mt76 uses
+	# BOTH chains by default (NSS=2). There is no UCI chainmask knob for mt76, and
+	# inventing one would be a fake setting — so we deliberately set NOTHING here
+	# and instead PROVE 2x2 at runtime (station dump NSS / iw phy antenna mask) via
+	# /root/cr6606_power_check.sh. Not restricting chains == full 2x2.
+}
+
+# Apply to every detected radio (order-independent).
+for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+	set_radio "$dev"
+done
+
+uci -q commit wireless
+touch /etc/cr6606-clean30.done
+exit 0
