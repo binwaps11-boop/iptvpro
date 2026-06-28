@@ -204,6 +204,40 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 [style*="background-color: #fff"]{ background:var(--kt-card)!important; }
 
 /* ============================================================================
+   NATIVE LuCI WIDGETS that stayed WHITE on the dark theme (reported on the
+   Wireless overview + device-config pages): the interface/signal BADGE boxes,
+   the tab bar, and checkboxes/radios. COLOUR ONLY — no layout.
+   ============================================================================ */
+/* .ifacebadge = the white radio0/radio1 boxes + the signal-strength boxes +
+   the wifi "Status" preview box on the device page. Darken them all. */
+.ifacebadge,.ifacebadge-small,.cbi-value .ifacebadge,.network-status-table .ifacebadge,
+.wifibadge,.cbi-section .ifacebadge{
+  background:var(--kt-card2)!important; color:var(--kt-txt)!important;
+  border:1px solid var(--kt-stroke)!important; border-radius:10px!important;
+}
+.ifacebadge *{ color:var(--kt-txt)!important; }
+/* signal-bar / icon images sit on dark now — lift them so they read clearly */
+.ifacebadge img,.ifacebadge svg{ filter:brightness(1.5) contrast(1.1); }
+
+/* tab bar (الإعداد العام / الإعدادات المتقدمة) — was a white strip */
+.cbi-tabmenu,.nav-tabs{
+  background:var(--kt-card)!important; border:1px solid var(--kt-stroke)!important;
+  border-radius:10px!important; overflow:hidden; }
+.cbi-tabmenu li,.nav-tabs li,.cbi-tabmenu li a,.nav-tabs li a,.cbi-tabmenu li.cbi-tab a{
+  background:transparent!important; color:var(--kt-txt2)!important;
+  border-color:var(--kt-stroke)!important; }
+.cbi-tabmenu li.cbi-tab a,.cbi-tabmenu li.cbi-tab-disabled a{ background:var(--kt-card2)!important; }
+.cbi-tabmenu li.cbi-tab-disabled a{ color:var(--kt-muted)!important; }
+.cbi-tabmenu li.cbi-tab a,.cbi-tabmenu li a.active,.nav-tabs li.active a,
+.cbi-tabmenu li.cbi-tab.cbi-tab a{ color:#fff!important; }
+/* the SELECTED/active tab gets the accent gradient so it's obviously current */
+.cbi-tabmenu li.cbi-tab > a,.nav-tabs li.active > a{ background:var(--kt-grad)!important; color:#fff!important; }
+.cbi-tabmenu li.cbi-tab-disabled > a{ background:var(--kt-card2)!important; color:var(--kt-muted)!important; }
+
+/* checkboxes / radios — themed accent instead of a stark white square */
+input[type=checkbox],input[type=radio]{ accent-color:var(--kt-accent)!important; }
+
+/* ============================================================================
    MODAL / DROPDOWN POPUP dark fix. LuCI's showModal() dialog and the CBI dropdown
    popup were left white with light text (invisible). Force dark surfaces + readable
    text on the overlay backdrop, the dialog, its inner header/labels/sections, and
