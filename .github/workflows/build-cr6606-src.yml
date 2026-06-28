@@ -83,6 +83,9 @@ jobs:
             echo 'CONFIG_PACKAGE_ethtool=y'
             echo 'CONFIG_PACKAGE_kmod-sched-cake=y'
             echo 'CONFIG_PACKAGE_luci-app-sqm=y'
+            echo 'CONFIG_PACKAGE_iperf3=y'
+            echo 'CONFIG_PACKAGE_conntrack-tools=y'
+            echo 'CONFIG_PACKAGE_zram-swap=y'
           } > .config
           make defconfig
           echo "=== verify cr6608 selected ==="

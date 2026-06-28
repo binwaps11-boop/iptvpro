@@ -8,6 +8,7 @@
 # in two bridges and KILL LAN/management). Ports: lan1-3 -> br-lan; wan standalone.
 # Runs once via uci-defaults (frozen in SquashFS), then is removed on exit 0.
 # =============================================================================
+[ -f /etc/cr6606-dsa.done ] && exit 0
 
 # 1) drop any legacy swconfig sections (no-op on a pure-DSA build, kept for safety)
 while uci -q delete network.@switch_vlan[0]; do :; done
@@ -42,6 +43,15 @@ uci set network.wan.device='wan'
 # 5) IGMP snooping on br-lan: keep IPTV multicast off ports that didn't join the
 #    group (efficient wired IPTV; pairs with Wi-Fi multicast_to_unicast).
 uci set network.$brsec.igmp_snooping='1'
+# multicast querier: keep the IGMP-snooping MDB populated so wired IPTV multicast keeps
+# flowing (snooping without a querier lets group state time out). Bridge default is off.
+uci set network.$brsec.multicast_querier='1'
+# Optional loop protection (opt-in): uncomment for classic STP with a short forward-delay
+# so a freshly plugged port blacks out only ~2-4s (default ~30s would hurt management):
+#   uci set network.$brsec.stp='1'
+#   uci set network.$brsec.forward_delay='2'
 
 uci commit network
+# guard: don't re-run on sysupgrade-with-settings (would clobber user bridge/port edits)
+touch /etc/cr6606-dsa.done
 exit 0

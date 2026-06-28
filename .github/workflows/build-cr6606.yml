@@ -62,7 +62,7 @@ jobs:
             echo "=== building $P ==="
             make image \
               PROFILE="$P" \
-              PACKAGES="luci luci-ssl luci-i18n-base-ar curl wpad-openssl -wpad-basic-mbedtls kmod-mt7915e kmod-mt7915-firmware iw iwinfo kmod-nft-offload ip-full ip-bridge irqbalance ethtool kmod-sched-cake luci-app-sqm" \
+              PACKAGES="luci luci-ssl luci-i18n-base-ar curl wpad-openssl -wpad-basic-mbedtls kmod-mt7915e kmod-mt7915-firmware iw iwinfo kmod-nft-offload ip-full ip-bridge irqbalance ethtool kmod-sched-cake luci-app-sqm iperf3 arping conntrack-tools zram-swap" \
               FILES="$GITHUB_WORKSPACE/merged" \
               EXTRA_IMAGE_NAME="${VARIANT}"
           done

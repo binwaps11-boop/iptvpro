@@ -748,6 +748,37 @@ header,.header,#header,.navbar,#topmenu{
   background:linear-gradient(120deg,#14b8a6,#2dd4bf 55%,#0d9488)!important;
   box-shadow:0 2px 18px -4px rgba(45,212,191,.5)!important}
 
+/* ============================================================================
+   EXPERT-AUDIT theme fixes — remaining native LuCI light/low-contrast widgets
+   (RAM/flash/swap/conntrack progress bars, zebra table rows, form validation).
+   COLOUR ONLY, reuse --kt-* vars.
+   ============================================================================ */
+/* progress bars (Status overview RAM/flash, upload, etc.): the 24.10 bar renders a
+   white pill with a near-invisible dark label (content:attr(title) on ::before). */
+.cbi-progressbar{
+  background:var(--kt-bg1)!important; border:1px solid var(--kt-stroke)!important;
+  border-radius:999px!important; overflow:hidden; position:relative;
+}
+.cbi-progressbar > div{ background:var(--kt-grad)!important; height:100%; }
+.cbi-progressbar::before{ color:var(--kt-txt)!important; }
+
+/* zebra table rows (DHCP leases / wireless assoc / firewall / routes): the base theme
+   paints .cbi-rowstyle-2 with a light medium bg that bleeds through transparent cells. */
+.cbi-rowstyle-1,.cbi-rowstyle-2,tr.cbi-rowstyle-1,tr.cbi-rowstyle-2,
+.tr.cbi-rowstyle-1,.tr.cbi-rowstyle-2{ background:transparent!important; color:var(--kt-txt)!important; }
+.cbi-rowstyle-2,tr.cbi-rowstyle-2,.tr.cbi-rowstyle-2{ background:rgba(255,255,255,.025)!important; }
+.cbi-rowstyle-1 .td,.cbi-rowstyle-2 .td,.cbi-rowstyle-1 td,.cbi-rowstyle-2 td{
+  background:transparent!important; color:var(--kt-txt)!important; }
+
+/* form validation error state (native Network/Firewall pages): replace the near-invisible
+   pale-pink-with-dark-text invalid look with a clear dark-theme red. */
+input.cbi-input-invalid,select.cbi-input-invalid,textarea.cbi-input-invalid{
+  background:rgba(239,68,68,.12)!important; border-color:rgba(239,68,68,.55)!important;
+  color:var(--kt-txt)!important; box-shadow:0 0 0 2px rgba(239,68,68,.25)!important; }
+.cbi-value-error,.cbi-section-error{
+  color:var(--kt-bad)!important; background:rgba(239,68,68,.10)!important;
+  border:1px solid rgba(239,68,68,.4)!important; border-radius:8px!important; padding:2px 6px; }
+
 /* tiles: gentle inner glow ring on hover for a premium tactile feel */
 .kt-tile:hover{box-shadow:var(--kt-shadow), 0 0 0 1px rgba(45,212,191,.22)}
 

@@ -108,7 +108,7 @@ function speedCard(){
 	var btn  = E('button', { 'class':'kt-btn' }, _('ابدأ الاختبار'));
 	var stat = E('div', { 'class':'kt-sub', style:'margin:8px 0' }, '');
 	var res  = E('div', {}, '');
-	var timer = null;
+	var pollFn = null;
 
 	function showResult(mbps){
 		if (String(mbps) === '-1'){
@@ -119,19 +119,26 @@ function speedCard(){
 	}
 
 	btn.addEventListener('click', function(){
-		if (timer){ clearInterval(timer); timer=null; }
+		if (pollFn){ poll.remove(pollFn); pollFn=null; }
 		btn.disabled = true; stat.style.color='var(--kt-txt2)'; stat.textContent=_('جارٍ الاختبار…'); res.innerHTML='';
 		postCall({act:'speedtest', size: size.value}).then(function(j){
 			if (!(j && j.ok)){ btn.disabled=false; stat.style.color='var(--kt-bad)'; stat.textContent=_('تعذّر بدء الاختبار'); return; }
-			timer = setInterval(function(){
-				call({op:'spd'}).then(function(s){
+			var tries = 0;
+			pollFn = function(){
+				if (++tries > 60){   /* 60 * 2s = 120s hard cap, then stop (no runaway loop / leak) */
+					poll.remove(pollFn); pollFn=null;
+					btn.disabled=false; stat.style.color='var(--kt-bad)'; stat.textContent=_('انتهت المهلة');
+					return Promise.resolve();
+				}
+				return call({op:'spd'}).then(function(s){
 					if (s && s.ok && s.done){
-						clearInterval(timer); timer=null;
+						poll.remove(pollFn); pollFn=null;
 						btn.disabled=false; stat.textContent='';
 						showResult(s.mbps);
 					}
 				});
-			}, 2000);
+			};
+			poll.add(pollFn, 2);
 		});
 	});
 

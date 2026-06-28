@@ -11,9 +11,9 @@
 #     accelerates routed/NAT Ethernet traffic via the mt7621 PPE, never the Wi-Fi
 #     path -- and on 24.10 the mt7621 PPE has a conntrack bug that drops long-lived
 #     UDP (IPTV), so the variant keeps hw offload OFF (software offload + RPS only).
-# Idempotent (guard). UCI only.
+# CONVERGENT (no guard): deterministic uci set + commit, so it safely RE-ASSERTS RPS /
+# software-offload / HW-offload-OFF on every boot incl. sysupgrade-with-settings. UCI only.
 # =============================================================================
-[ -f /etc/cr6606-perf.done ] && exit 0
 
 # RPS across both cores
 if uci -q get network.@globals[0] >/dev/null 2>&1; then
@@ -26,6 +26,9 @@ uci -q commit network
 # software flow offloading (hw offload added by the variant); harmless if repeated
 if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
 	uci -q set firewall.@defaults[0].flow_offloading='1'
+	# HW PPE offload OFF (IPTV-critical invariant, also set per-variant): mt7621 24.10 PPE
+	# drops long-lived UDP (multicast) — assert it in the shared base too so it can't slip.
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q commit firewall
 fi
 
@@ -42,9 +45,25 @@ fi
 # for a reboot. nf_conntrack must be loaded for its sysctls to exist; the firewall
 # loads it anyway, but we nudge it here so the conntrack keys are present.
 modprobe nf_conntrack 2>/dev/null
+# pin conntrack hash buckets via SYSFS (live rehash works whether the module was just
+# loaded here or preloaded by the firewall; a modprobe hashsize= param is ignored on a
+# preloaded module). 8192 buckets vs nf_conntrack_max 32768 => load factor ~4.
+if [ -w /sys/module/nf_conntrack/parameters/hashsize ]; then
+	echo 8192 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+fi
 if [ -f /etc/sysctl.d/99-cr6608-tuning.conf ]; then
 	sysctl -p /etc/sysctl.d/99-cr6608-tuning.conf >/dev/null 2>&1
 fi
 
-touch /etc/cr6606-perf.done
+# zram swap: small compressed-RAM swap (lzo) gives the 256MB SoC headroom under load with
+# ZERO NAND wear (no flash swapfile). Set via system.@system[0] (the section the 24.10
+# zram init actually reads). No-op if the zram-swap package isn't installed.
+if [ -x /etc/init.d/zram ]; then
+	uci -q set system.@system[0].zram_size_mb='64'
+	uci -q set system.@system[0].zram_comp_algo='lzo'
+	uci -q commit system
+	/etc/init.d/zram enable >/dev/null 2>&1
+	/etc/init.d/zram start >/dev/null 2>&1
+fi
+
 exit 0

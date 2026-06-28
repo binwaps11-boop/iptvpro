@@ -17,6 +17,7 @@
 
 COUNTRY="US"          # change here if your actual country gives a better legal table
 KEY="Smart@12345"     # default WPA2 key (>=8) — change from the dashboard after flash
+did=""                # set once >=1 radio is normalized (first-boot ordering guard)
 
 # Wipe EVERY existing wifi-iface FIRST so no stray/duplicate/OPEN/OWE AP can survive
 # from the board's default wireless config. A leftover open/OWE iface on a radio is
@@ -25,6 +26,7 @@ KEY="Smart@12345"     # default WPA2 key (>=8) — change from the dashboard aft
 while uci -q delete wireless.@wifi-iface[0]; do :; done
 
 for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+	did=1
 	uci -q set wireless.$dev.country="$COUNTRY"
 	uci -q set wireless.$dev.disabled='0'
 	uci -q set wireless.$dev.cell_density='0'   # no extra distance-based power back-off
@@ -57,8 +59,15 @@ for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/
 	# IPTV/streaming over Wi-Fi: convert multicast -> per-client unicast (much higher
 	# effective rate + reliability for live streams). Big win for IPTV on Wi-Fi.
 	uci -q set wireless.$ifc.multicast_to_unicast='1'
+	# IPTV/PS latency floor: deliver buffered multicast every beacon (~100ms) vs default 2.
+	uci -q set wireless.$ifc.dtim_period='1'
+	# explicitly assert WMM/WME QoS (needed for HE AMPDU aggregation + AC_VI video priority).
+	uci -q set wireless.$ifc.wmm='1'
 done
 
+# first-boot ordering race: if /etc/config/wireless wasn't generated yet, no radio was
+# normalized — exit WITHOUT writing the guard so this retries on the next boot.
+[ -n "$did" ] || exit 0
 uci -q commit wireless
 touch /etc/cr6606-wifi.done
 exit 0

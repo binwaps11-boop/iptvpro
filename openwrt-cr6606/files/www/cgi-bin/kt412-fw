@@ -22,7 +22,12 @@ TOK="$(getq token | tr -cd 'a-f0-9' | cut -c1-32)"
 [ -n "$TOK" ] || TOK="$(cookie_sid)"
 [ -n "$TOK" ] || fail "no_token"
 MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
-[ "$MARK" = "1" ] || fail "unauthorized"
+# accept either our adopt mark OR a live LuCI session with uci-write access (matches the
+# main kt412 CGI), so a logged-in admin with an unmarked session isn't dead-ended at flash.
+[ "$MARK" = "1" ] || {
+	ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	[ "$ACC" = "true" ] || fail "unauthorized"
+}
 fi
 
 ACT="$(getq act | tr -cd 'a-z_')"

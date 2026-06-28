@@ -60,6 +60,7 @@ function ktIc(n){var d=document.createElement('div');d.innerHTML=ktIcSvg(n);retu
 
 var API = '/cgi-bin/kt412';
 var TOKEN = '';
+var ADOPTING = null;
 var SKIN_KEY = 'kt412_mk_skin';
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
@@ -67,17 +68,21 @@ function clamp(n,a,b){ n=+n; if(isNaN(n)) n=a; return n<a?a:(n>b?b:n); }
 
 function adopt(){
 	if (TOKEN) return Promise.resolve(TOKEN);
+	if (ADOPTING) return ADOPTING;   /* single-flight: coalesce the concurrent first-paint adopts into one POST */
 	var sid = (L.env && L.env.sessionid) ? L.env.sessionid : '';
-	return fetch(API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'op=adopt&token='+encodeURIComponent(sid)})
+	ADOPTING = fetch(API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'op=adopt&token='+encodeURIComponent(sid)})
 		.then(function(r){ return r.json(); })
-		.then(function(j){ if (j && j.ok && j.token) TOKEN = j.token; return TOKEN; })
-		.catch(function(){ return ''; });
+		.then(function(j){ if (j && j.ok && j.token) TOKEN = j.token; ADOPTING = null; return TOKEN; })
+		.catch(function(){ ADOPTING = null; return ''; });
+	return ADOPTING;
 }
+/* if the LuCI session expired, clear the token so the next call re-adopts (no permanently stale page) */
+function authReset(j){ if (j && j.ok===false && (j.error==='unauthorized'||j.error==='no_token')) TOKEN=''; return j; }
 function call(params){
 	return adopt().then(function(){
 		var usp = new URLSearchParams(params);
 		if (TOKEN) usp.set('token', TOKEN);
-		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).catch(function(){ return {ok:false}; });
+		return fetch(API + '?' + usp.toString()).then(function(r){ return r.json(); }).then(authReset).catch(function(){ return {ok:false}; });
 	});
 }
 
@@ -382,13 +387,10 @@ function refresh(root){
 		setChip('c-w24', radios.length>=1 ? 'يعمل' : 'مغلق', radios.length>=1);
 		setChip('c-w5',  radios.length>=2 ? 'يعمل' : (radios.length>=1?'—':'مغلق'), radios.length>=2);
 		/* connected clients: REAL count (unique associated Wi-Fi stations + wired
-		   neighbours) from op=summary — was wrongly showing the RADIO count, so one
-		   device read as "2". Fall back to the old estimate only if the field is absent. */
+		   neighbours) from op=summary ONLY. No fallback — counting lit LAN ports as
+		   "devices" is a fake number; leave the chip at '—' when the count is unknown. */
 		if (sm.ok && sm.clients != null){
 			setChip('c-clients', String(sm.clients));
-		} else if (pt.ok && Array.isArray(pt.ports)){
-			var linkedLan = pt.ports.filter(function(p){ return /^lan/.test(p.name) && p.link==='up'; }).length;
-			setChip('c-clients', String(linkedLan));
 		}
 
 		/* ----- power / voltage advisory ----- */
