@@ -1159,3 +1159,24 @@ h1,h2,h3,h4,h5,legend,.mk-logo,.kt-card h3,.mk-card h3,.mk-sec-t .t,.cbi-value-t
   font-weight:800!important;
 }
 *,*::before,*::after{ -webkit-backdrop-filter:none!important; backdrop-filter:none!important; }
+
+/* ============================================================================
+   EXPERT-AUDIT LAYOUT FIX — native LuCI pages: full-width, no cramp, no overlap.
+   Appended LAST so it wins the source-order tie against bootstrap's .container.
+   ROOT CAUSE: #maincontent IS .container (max-width:940px) on native pages; the
+   theme's old widen rules targeted descendants and were dead.
+   ============================================================================ */
+@media(min-width:1025px){
+  #maincontent.container,#maincontent{ max-width:1240px!important; width:auto!important;
+    margin-left:auto!important; margin-right:auto!important; }
+}
+@media(min-width:1600px){ #maincontent.container,#maincontent{ max-width:1360px!important; } }
+/* single-level side padding (was doubled on #maincontent AND #view => 36px) */
+@media(min-width:992px){ #view{ padding-left:0!important; padding-right:0!important; } }
+/* don't inflate inputs packed into dense native section-tables (the overlap trigger) */
+table.cbi-section-table input,table.cbi-section-table select,
+.td.cbi-section-table-cell input,.td.cbi-section-table-cell select,
+.cbi-section-table .td input,.cbi-section-table .td select{
+  min-height:0!important; height:auto!important; }
+/* keep editable CBI grids as REAL tables on narrow widths (alignment/overlap) */
+@media(max-width:760px){ #view table.cbi-section-table{ display:table!important; width:100%!important; } }

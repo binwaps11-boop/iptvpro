@@ -863,3 +863,18 @@ html.kt-night body:has(input[name="luci_password"]){
 
 /* NIGHT MODE REMOVED (both devices) — hide the header toggle entirely; UI stays LIGHT. */
 .mk-toggle{ display:none!important; }
+
+/* ============================================================================
+   EXPERT-AUDIT DASHBOARD FIX — kill backdrop/overlap, gauges fit phone cards.
+   ============================================================================ */
+/* backdrop sits BEHIND content via isolation (no fixed/z-index stacking battle) */
+.mk-wrap{ position:relative!important; isolation:isolate!important; z-index:auto!important; }
+.mk-wrap::before{ position:absolute!important; inset:0!important; z-index:-1!important; border-radius:inherit; }
+/* one fluid gauge size at every viewport (was 3 competing !important sizes) */
+.mk-gauge svg{ width:clamp(96px,40vw,124px)!important; height:auto!important; aspect-ratio:1/1; max-width:124px!important; }
+/* phones: force clean single/two-column grids, no tile collision */
+@media(max-width:600px){
+  .mk-grid.mk-cols-2,.mk-grid.mk-cols-3{ grid-template-columns:1fr!important; }
+  .mk-grid.mk-cols-6{ grid-template-columns:repeat(2,minmax(0,1fr))!important; }
+  .mk-rate{ min-width:0!important; }
+}
