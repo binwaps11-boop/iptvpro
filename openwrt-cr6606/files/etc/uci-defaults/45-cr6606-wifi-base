@@ -63,6 +63,10 @@ for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/
 	uci -q set wireless.$ifc.dtim_period='1'
 	# explicitly assert WMM/WME QoS (needed for HE AMPDU aggregation + AC_VI video priority).
 	uci -q set wireless.$ifc.wmm='1'
+	# THROUGHPUT: drop legacy 802.11b rates (1/2/5.5/11). With 11b off the basic/mgmt
+	# frames go out at OFDM speed and beacons/ACKs eat far less airtime -> the AP spends
+	# more time on actual HE data. Pure airtime efficiency, no power/regulatory change.
+	uci -q set wireless.$ifc.legacy_rates='0'
 done
 
 # first-boot ordering race: if /etc/config/wireless wasn't generated yet, no radio was
