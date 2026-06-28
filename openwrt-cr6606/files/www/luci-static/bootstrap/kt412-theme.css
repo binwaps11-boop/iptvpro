@@ -779,6 +779,16 @@ input.cbi-input-invalid,select.cbi-input-invalid,textarea.cbi-input-invalid{
   color:var(--kt-bad)!important; background:rgba(239,68,68,.10)!important;
   border:1px solid rgba(239,68,68,.4)!important; border-radius:8px!important; padding:2px 6px; }
 
+/* the bottom Save / Save&Apply action bar rendered as a big WHITE strip — make it blend
+   into the dark page (buttons keep their own accent styling). */
+.cbi-page-actions{
+  background:transparent!important; border:0!important; box-shadow:none!important;
+  border-top:1px solid var(--kt-stroke)!important; padding-top:12px!important;
+}
+/* any remaining native section/table surface that slipped through to white */
+.cbi-section-table,.cbi-section-table-cell,.table.cbi-section-table,
+.cbi-section-create,.cbi-value,.cbi-value-field{ background:transparent!important; color:var(--kt-txt)!important; }
+
 /* tiles: gentle inner glow ring on hover for a premium tactile feel */
 .kt-tile:hover{box-shadow:var(--kt-shadow), 0 0 0 1px rgba(45,212,191,.22)}
 

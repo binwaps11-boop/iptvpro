@@ -73,6 +73,17 @@ body:has(.mk-wrap) .container,
 body:has(.mk-wrap) .main,
 body:has(.mk-wrap) .main-right{ background:transparent!important; }
 
+/* BULLETPROOF canvas (no :has() dependency): paint a FIXED full-viewport dark backdrop
+   behind the dashboard content. Even if LuCI's #view/#maincontent render light on some
+   browser, this fixed layer covers the whole viewport and the opaque cards sit on top.
+   .mk-wrap gets its own stacking context so the ::before (z-index -1) stays BEHIND the
+   cards/text but ABOVE the white #view background. */
+.mk-wrap{ position:relative; z-index:0; }
+.mk-wrap::before{
+  content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:linear-gradient(160deg,#0a0f1c,#0f1626 60%,#0a0f1c);
+}
+
 /* ===== kill-switch: when skin is off, drop the custom surfaces ===== */
 :root[data-mk-skin="off"] .mk-login-card,
 :root[data-mk-skin="off"] .mk-card{
@@ -809,7 +820,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
    loaded (not a stale browser cache / old flash). Small, fixed, unobtrusive.
    ============================================================================ */
 body::after{
-  content:"Pro v4";
+  content:"Pro v5";
   position:fixed; inset-block-end:8px; inset-inline-start:8px; z-index:9999;
   font:700 10px/1 'Segoe UI',system-ui,sans-serif; letter-spacing:.4px;
   color:#0b1220; background:linear-gradient(135deg,#2dd4bf,#14b8a6);
