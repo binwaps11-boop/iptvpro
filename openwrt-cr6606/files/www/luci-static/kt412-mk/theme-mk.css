@@ -47,7 +47,7 @@
   --mk-stroke:rgba(15,23,42,0.12); --mk-stroke2:rgba(124,58,237,0.55);
 
   /* text — near-black on light */
-  --mk-txt:#0f172a; --mk-txt2:#334155; --mk-muted:#64748b;
+  --mk-txt:#0f172a; --mk-txt2:#1f2937; --mk-muted:#475569;
 
   --mk-shadow:0 4px 16px rgba(15,23,42,.10);
   --mk-shadow-lg:0 14px 36px rgba(15,23,42,.16);
@@ -774,7 +774,7 @@ body:has(input[name="luci_password"]) .cbi-button-reset{ display:none!important;
     --mk-card:#ffffff; --mk-card2:#f3f5fa;
     --mk-glass:#ffffff; --mk-glass2:#f3f5fa;
     --mk-stroke:rgba(15,23,42,0.12); --mk-stroke2:rgba(124,58,237,0.50);
-    --mk-txt:#0f172a; --mk-txt2:#334155; --mk-muted:#64748b;
+    --mk-txt:#0f172a; --mk-txt2:#1f2937; --mk-muted:#475569;
     --mk-accent:#7c3aed; --mk-accent2:#8b5cf6; --mk-violet:#7c3aed;
     --mk-blue:#2563eb; --mk-cyan:#7c3aed;
     --mk-green:#16a34a; --mk-amber:#d97706; --mk-red:#dc2626; --mk-grey:#64748B;
@@ -860,3 +860,6 @@ html.kt-night body:has(input#luci_password),
 html.kt-night body:has(input[name="luci_password"]){
   background:linear-gradient(160deg,#0a0f1c,#16203a 55%,#0a0f1c)!important;
 }
+
+/* NIGHT MODE REMOVED (both devices) — hide the header toggle entirely; UI stays LIGHT. */
+.mk-toggle{ display:none!important; }

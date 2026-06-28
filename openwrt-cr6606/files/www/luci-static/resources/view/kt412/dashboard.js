@@ -488,7 +488,7 @@ return view.extend({
 	load: function(){ return Promise.resolve(); },
 	render: function(){
 		// apply persisted skin preference immediately
-		applyNight(localStorage.getItem(NIGHT_KEY)==='on');
+		applyNight(false);  /* night mode removed - always light */
 		var root = E('div', {});
 		root.innerHTML = shell();
 		wireToggle(root);
