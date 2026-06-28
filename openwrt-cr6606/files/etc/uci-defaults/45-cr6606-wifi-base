@@ -48,6 +48,9 @@ for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/
 	uci -q set wireless.$ifc.he_su_beamformer='1'
 	uci -q set wireless.$ifc.he_su_beamformee='1'
 	uci -q set wireless.$ifc.he_mu_beamformer='1'
+	# IPTV/streaming over Wi-Fi: convert multicast -> per-client unicast (much higher
+	# effective rate + reliability for live streams). Big win for IPTV on Wi-Fi.
+	uci -q set wireless.$ifc.multicast_to_unicast='1'
 done
 
 uci -q commit wireless

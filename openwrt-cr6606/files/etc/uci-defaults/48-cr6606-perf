@@ -29,5 +29,14 @@ if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
 	uci -q commit firewall
 fi
 
+# irqbalance: spread NIC/Wi-Fi IRQs across both MT7621 cores (pairs with RPS) for
+# higher sustained throughput. Enable if the package is present (no-op otherwise).
+if [ -x /etc/init.d/irqbalance ]; then
+	uci -q set irqbalance.irqbalance.enabled='1' 2>/dev/null
+	uci -q commit irqbalance 2>/dev/null
+	/etc/init.d/irqbalance enable >/dev/null 2>&1
+	/etc/init.d/irqbalance start >/dev/null 2>&1
+fi
+
 touch /etc/cr6606-perf.done
 exit 0

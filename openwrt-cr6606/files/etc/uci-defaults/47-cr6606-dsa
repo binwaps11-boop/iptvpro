@@ -39,5 +39,9 @@ uci add_list network.$brsec.ports='lan3'
 uci set network.lan.device='br-lan'
 uci set network.wan.device='wan'
 
+# 5) IGMP snooping on br-lan: keep IPTV multicast off ports that didn't join the
+#    group (efficient wired IPTV; pairs with Wi-Fi multicast_to_unicast).
+uci set network.$brsec.igmp_snooping='1'
+
 uci commit network
 exit 0
