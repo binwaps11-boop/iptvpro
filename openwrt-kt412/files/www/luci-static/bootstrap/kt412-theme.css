@@ -203,6 +203,44 @@ svg, canvas, .cbi-section svg, .dashboard svg{ background:transparent!important;
 [style*="background:#FFF"],[style*="background-color:#fff"],
 [style*="background-color: #fff"]{ background:var(--kt-card)!important; }
 
+/* ============================================================================
+   MODAL / DROPDOWN POPUP dark fix. LuCI's showModal() dialog and the CBI dropdown
+   popup were left white with light text (invisible). Force dark surfaces + readable
+   text on the overlay backdrop, the dialog, its inner header/labels/sections, and
+   the dropdown list. COLOUR ONLY — no layout.
+   ============================================================================ */
+#modal_overlay{ background:rgba(2,6,23,.72)!important; }
+#modal_overlay .modal, .modal, .cbi-modal{
+  background:var(--kt-card)!important; color:var(--kt-txt)!important;
+  border:1px solid var(--kt-stroke)!important; border-radius:14px!important;
+  box-shadow:0 18px 50px rgba(0,0,0,.55)!important;
+}
+.modal *, .cbi-modal *{ color:var(--kt-txt)!important; }
+.modal h1,.modal h2,.modal h3,.modal h4,.modal legend,.modal label,
+.modal strong,.modal b,.modal .cbi-value-title{ color:var(--kt-txt)!important; }
+.modal p,.modal li,.modal td,.modal th,.modal small,.modal .cbi-value-description{
+  color:var(--kt-txt2)!important; }
+.modal .cbi-section,.modal .cbi-section-node,.modal fieldset,.modal .cbi-map,
+.modal .panel-body,.modal .well,.modal form{ background:transparent!important; }
+.modal a,.modal .cbi-value a{ color:var(--kt-accent)!important; }
+/* CBI custom dropdown popup list */
+.cbi-dropdown,.cbi-dropdown > ul.dropdown,.cbi-dropdown ul.dropdown{
+  background:var(--kt-card)!important; color:var(--kt-txt)!important;
+  border:1px solid var(--kt-stroke)!important; }
+.cbi-dropdown ul.dropdown li,.cbi-dropdown ul li{
+  background:var(--kt-card)!important; color:var(--kt-txt)!important; }
+.cbi-dropdown ul.dropdown li.focus,.cbi-dropdown ul.dropdown li:hover,
+.cbi-dropdown ul.dropdown li[selected],.cbi-dropdown ul li.selected{
+  background:rgba(56,189,248,.18)!important; color:#fff!important; }
+/* buttons inside modal keep accent */
+.modal .btn,.modal .cbi-button,.modal button{ color:#fff!important; }
+.modal .cbi-button-positive,.modal .cbi-button-action,.modal .cbi-button-save{
+  background:var(--kt-accent)!important; border-color:var(--kt-accent)!important; }
+/* last-resort: any inline white inside a modal/overlay */
+.modal [style*="#fff"],.modal [style*="#FFF"],
+#modal_overlay [style*="#fff"],#modal_overlay [style*="#FFF"]{
+  background:var(--kt-card)!important; }
+
 /* DESKTOP layout: our JS views render into #view (a plain div). Without a width
    cap the cards stretch edge-to-edge on a wide monitor and read as "unformatted".
    Cap + center the view container on desktop and give comfortable side padding so
