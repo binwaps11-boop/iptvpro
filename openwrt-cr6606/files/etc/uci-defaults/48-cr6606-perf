@@ -5,9 +5,12 @@
 # Real software performance levers only — no power/regdb/caldata tricks:
 #   * packet_steering: spread network RX/TX processing across BOTH MT7621 cores
 #     (RPS) -> markedly higher routing/Wi-Fi throughput on this dual-core SoC.
-#   * software flow offloading on (hardware offload is set per-variant via the
-#     firewall defaults; WED hardware WLAN offload is auto-enabled by the mt7915
-#     driver on 24.10 where supported).
+#   * software flow offloading on (hw eth/NAT offload set per-variant via the
+#     firewall defaults). NOTE: this SoC is ramips/mt7621 -- there is NO WED WLAN
+#     hardware offload (WED requires MT7622/Filogic). flow_offloading_hw only
+#     accelerates routed/NAT Ethernet traffic via the mt7621 PPE, never the Wi-Fi
+#     path -- and on 24.10 the mt7621 PPE has a conntrack bug that drops long-lived
+#     UDP (IPTV), so the variant keeps hw offload OFF (software offload + RPS only).
 # Idempotent (guard). UCI only.
 # =============================================================================
 [ -f /etc/cr6606-perf.done ] && exit 0

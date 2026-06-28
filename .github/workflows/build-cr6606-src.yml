@@ -76,6 +76,9 @@ jobs:
             echo 'CONFIG_PACKAGE_iw=y'
             echo 'CONFIG_PACKAGE_iwinfo=y'
             echo 'CONFIG_PACKAGE_kmod-nft-offload=y'
+            echo 'CONFIG_PACKAGE_ip-full=y'
+            echo 'CONFIG_PACKAGE_ip-bridge=y'
+            echo 'CONFIG_PACKAGE_arping=y'
           } > .config
           make defconfig
           echo "=== verify cr6606 selected ==="
@@ -101,7 +104,7 @@ jobs:
       - name: Build firmware
         run: |
           cd openwrt
-          make -j$(nproc) V=s 2>&1 | tail -200 || { echo "parallel failed, retry single-thread"; make -j1 V=s 2>&1 | tail -200; exit 1; }
+          make -j$(nproc) V=s 2>&1 | tail -200 || { echo "parallel failed, retry single-thread"; make -j1 V=s 2>&1 | tail -200; }
 
       - name: Collect SYSUPGRADE only + checksum
         run: |
