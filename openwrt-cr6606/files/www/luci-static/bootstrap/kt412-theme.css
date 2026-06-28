@@ -1145,3 +1145,17 @@ html.kt-night body{ background:linear-gradient(160deg,#0a0e17,#0f1626 62%,#0a0e1
 html.kt-night .kt-card{ background:#131c2e!important; }
 html.kt-night .cbi-rowstyle-2,html.kt-night tr.cbi-rowstyle-2,html.kt-night .tr.cbi-rowstyle-2{ background:rgba(255,255,255,.03)!important; }
 html.kt-night pre,html.kt-night code{ background:#0f1626!important; }
+
+/* ============================================================================
+   READABILITY + MOBILE SMOOTHNESS (user: font too faint, phone slow/overlapping)
+   - heavier, crisper text everywhere (was too thin/faint)
+   - KILL backdrop-filter blur globally: it's GPU-heavy on phones (cause of the
+     lag + visual overlap) and useless now that cards are SOLID opaque.
+   ============================================================================ */
+html,body,.mk-wrap,.cbi-section,.cbi-map,.kt-card,.mk-card,p,td,th,li,label,span,div{
+  font-weight:500;
+}
+h1,h2,h3,h4,h5,legend,.mk-logo,.kt-card h3,.mk-card h3,.mk-sec-t .t,.cbi-value-title,b,strong{
+  font-weight:800!important;
+}
+*,*::before,*::after{ -webkit-backdrop-filter:none!important; backdrop-filter:none!important; }
