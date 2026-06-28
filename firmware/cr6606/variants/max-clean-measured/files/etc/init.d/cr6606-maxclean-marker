@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# Honest marker: this is the MAX-CLEAN build (no caldata/regd tampering).
+# Confirm with: dmesg | grep CR6606
+START=01
+boot() { start; }
+start() {
+	echo "CR6606-MAX-CLEAN active: txpower=30 requested, applied up to caldata/PA ceiling (no clamp removal, no caldata edit)" > /dev/kmsg 2>/dev/null
+	logger -t CR6606 "CR6606-MAX-CLEAN active (highest honest power; real value = iwinfo)"
+}

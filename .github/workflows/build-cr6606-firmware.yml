@@ -73,7 +73,7 @@ jobs:
           echo "Packages: $PKGS"
           mkdir -p ../dist
           OUT="bin/targets/ramips/mt7621"
-          for V in clean-stable-longrange power-test; do
+          for V in clean-stable-longrange power-test max-clean-measured; do
             echo "==================== building $V ===================="
             rm -rf merged; mkdir merged
             cp -a ../firmware/cr6606/files/. merged/
