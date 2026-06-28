@@ -89,6 +89,40 @@ AU: 20 / 17 / 24 / 24 / 30      GB: 20 / 20 / 20 / 27 /  -
 The `--countries` mode (US CA GB DE FR JP AU NZ PA BO BZ NG CN 00) reproduces this table on
 your own device with `iw phy` — so the limits are measured, not quoted.
 
+### 3c. Per-channel 5 GHz matrix (US vs PA vs the breadth leaders MO/KR)
+
+`D` = DFS (CAC/radar applies). dBm values are the official regdb ceilings.
+
+| ch | US | PA | MO | KR |
+|----|----|----|----|----|
+| 36–48 | **23** | 17 | 23 | 20 |
+| 52–64 | 23D | 23D | 23D | 20D |
+| 100–144 | 23D | – | **30D** | **30D** |
+| 149–165 | **30** | 30 | **30** | **30** |
+| #channels @30 | 5 | 5 | **17** | 16 |
+| **2.4 GHz** | **30** | 30 | 23 | 20 |
+
+**Tradeoff (you choose at runtime — `cr6606_set_region.sh`):**
+- **US** → 2.4 GHz = 30 (1 W) + 5 GHz 30 on ch149–165. Best 2.4 GHz. *(build default)*
+- **MO** → 5 GHz 30 on **17** channels (ch100–144 DFS + 149–165), but 2.4 GHz drops to 23.
+- **KR** → 5 GHz 30 on 16 channels, but 2.4 GHz = 20 (worst).
+- **ch36–48 = 30 is impossible in every country** (global max 23, in US) — no edit-free path,
+  and we do not patch regdb.
+
+### 3d. Switching region live (no rebuild, no patch)
+
+The build defaults to **US**. To trade 2.4 GHz power for more 5 GHz 30-channels, switch on
+the device — this is the standard regdomain option (DFS stays active, no caldata/regdb edit):
+
+```sh
+sh /root/cr6606_set_region.sh MO     # 5G 30 on 17 ch (DFS), 2.4G -> 23
+sh /root/cr6606_set_region.sh US     # back to 2.4G = 30 + 5G 149-165 = 30
+sh /root/cr6606_set_region.sh        # show current + the guide
+```
+It prints the REAL `iwinfo` Tx-Power after applying. Then run
+`sh /root/cr6606_all_channels_test.sh` to see the full per-channel table under that region.
+Choosing a country you are not physically located in is your regulatory responsibility.
+
 ---
 
 ## 4. 2×2 chain proof (not a config you can fake)
