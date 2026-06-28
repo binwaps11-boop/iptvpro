@@ -1,0 +1,30 @@
+#!/bin/sh
+# =============================================================================
+# 48-cr6606-perf  —  STRONG build: clean throughput/latency tuning (mt7621)
+# -----------------------------------------------------------------------------
+# Real software performance levers only — no power/regdb/caldata tricks:
+#   * packet_steering: spread network RX/TX processing across BOTH MT7621 cores
+#     (RPS) -> markedly higher routing/Wi-Fi throughput on this dual-core SoC.
+#   * software flow offloading on (hardware offload is set per-variant via the
+#     firewall defaults; WED hardware WLAN offload is auto-enabled by the mt7915
+#     driver on 24.10 where supported).
+# Idempotent (guard). UCI only.
+# =============================================================================
+[ -f /etc/cr6606-perf.done ] && exit 0
+
+# RPS across both cores
+if uci -q get network.@globals[0] >/dev/null 2>&1; then
+	uci -q set network.@globals[0].packet_steering='1'
+else
+	g="$(uci add network globals)"; uci -q set network.$g.packet_steering='1'
+fi
+uci -q commit network
+
+# software flow offloading (hw offload added by the variant); harmless if repeated
+if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
+	uci -q set firewall.@defaults[0].flow_offloading='1'
+	uci -q commit firewall
+fi
+
+touch /etc/cr6606-perf.done
+exit 0

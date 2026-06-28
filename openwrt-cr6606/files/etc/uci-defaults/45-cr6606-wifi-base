@@ -36,6 +36,18 @@ for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/
 	uci -q set wireless.$ifc.key="$KEY"
 	uci -q set wireless.$ifc.ieee80211k='1'
 	uci -q set wireless.$ifc.ieee80211v='1'
+
+	# --- STRONG build: clean range/throughput boosters (real, not power) ---
+	# keep distant/weak clients connected instead of kicking them (wider felt range)
+	uci -q set wireless.$ifc.disassoc_low_ack='0'
+	# explicit beamforming: focuses energy toward each client => more effective range.
+	# (OpenWrt drops any option the driver/hostapd doesn't support, so this is safe.)
+	uci -q set wireless.$ifc.vht_su_beamformer='1'
+	uci -q set wireless.$ifc.vht_su_beamformee='1'
+	uci -q set wireless.$ifc.vht_mu_beamformer='1'
+	uci -q set wireless.$ifc.he_su_beamformer='1'
+	uci -q set wireless.$ifc.he_su_beamformee='1'
+	uci -q set wireless.$ifc.he_mu_beamformer='1'
 done
 
 uci -q commit wireless
