@@ -14,10 +14,12 @@ getq() {
 	return 1
 }
 fail() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
-root_open() { p="$(sed -n 's/^root:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null)"; [ -z "$p" ] || [ "$p" = "!" ] || [ "$p" = "*" ] || [ "$p" = "x" ]; }
 
+cookie_sid() { echo "${HTTP_COOKIE:-}" | grep -o 'sysauth[A-Za-z_]*=[A-Fa-f0-9]*' | head -1 | sed 's/^[^=]*=//'; }
+root_open() { p="$(sed -n 's/^root:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null)"; [ -z "$p" ]; }
 if ! root_open; then
 TOK="$(getq token | tr -cd 'a-f0-9' | cut -c1-32)"
+[ -n "$TOK" ] || TOK="$(cookie_sid)"
 [ -n "$TOK" ] || fail "no_token"
 MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
 [ "$MARK" = "1" ] || fail "unauthorized"
