@@ -1,0 +1,48 @@
+# ============================================================================
+#  مثال إعدادات /etc/config/wireless لراوتر Xiaomi CR6608 (OpenWRT 24.10)
+#  ملاحظة: أسماء radio0/radio1 وأي باند قد تختلف على جهازك.
+#  الأفضل تستخدم سكربت apply-tuning.sh لأنه يكتشفها تلقائياً.
+#  هذا الملف للمرجع فقط - لا تنسخه أعمى فوق ملفك.
+# ============================================================================
+
+# ----- راديو 5GHz : السرعة العالية (مفتاح الوصول لـ ~300 Mbit/s) -----
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option band '5g'
+	option channel 'auto'        # أو 36 / 149 لقناة ثابتة نظيفة
+	option htmode 'HE80'         # 80MHz - أعلى تدفق
+	option country 'SA'          # *** ضع رمز دولتك ***
+	option txpower '30'         # يُقصّ تلقائياً للحد المسموح قانونياً
+	option cell_density '0'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt-5G'
+	option encryption 'sae-mixed'   # WPA2/WPA3
+	option key 'ضع-كلمة-السر-هنا'
+	option wmm '1'
+	option ieee80211k '1'
+	option ieee80211v '1'
+
+# ----- راديو 2.4GHz : أوسع تغطية + أقل تداخل على الجوال -----
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option band '2g'
+	option channel 'auto'        # أو 1 / 6 / 11
+	option htmode 'HE20'         # 20MHz لتقليل التداخل بالباند المزدحم
+	option country 'SA'          # *** ضع رمز دولتك ***
+	option txpower '30'
+	option cell_density '0'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt-2G'
+	option encryption 'sae-mixed'
+	option key 'ضع-كلمة-السر-هنا'
+	option wmm '1'
+	option ieee80211k '1'
+	option ieee80211v '1'
