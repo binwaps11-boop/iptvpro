@@ -37,6 +37,9 @@ sani()     { printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._@!#%^*()+=:/-' | cut -c1-128
 sani_ip()  { printf '%s' "$1" | tr -cd '0-9.' | cut -c1-15; }
 sani_int() { printf '%s' "$1" | tr -cd '0-9' | cut -c1-9; }
 sani_hex() { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-32; }
+cookie_sid() { printf '%s' "${HTTP_COOKIE:-}" | tr ';' '
+' | sed -n 's/.*sysauth[A-Za-z_]*=\([A-Fa-f0-9]\{32,64\}\).*/sani_hex() { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-32; }
+/p' | head -1; }
 sani_word(){ printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-24; }
 fail()     { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
 
@@ -66,6 +69,7 @@ fi
 # behavior or the password-based login above.
 if [ "$OP" = "adopt" ]; then
 	SID="$(sani_hex "$(getp token)")"
+	[ -n "$SID" ] || SID="$(sani_hex "$(cookie_sid)")"
 	[ -n "$SID" ] || fail "no_token"
 	# must be a valid session that can write uci (real authenticated LuCI admin)
 	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
@@ -80,9 +84,10 @@ fi
 
 # ---------- everything else requires a valid session ----------
 TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || TOK="$(sani_hex "$(cookie_sid)")"
 [ -n "$TOK" ] || fail "no_token"
 MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
-[ "$MARK" = "1" ] || fail "unauthorized"
+[ "$MARK" = "1" ] || { ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"; [ "$ACC" = "true" ] || fail "unauthorized"; }
 ubus call session set "{\"ubus_rpc_session\":\"$TOK\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
 
 wifi_iface_for() {  # $1 = radio  -> echoes the wifi-iface section name

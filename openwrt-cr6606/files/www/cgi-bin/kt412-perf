@@ -42,6 +42,9 @@ getp() {
 }
 json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-64; }
+cookie_sid() { printf '%s' "${HTTP_COOKIE:-}" | tr ';' '
+' | sed -n 's/.*sysauth[A-Za-z_]*=\([A-Fa-f0-9]\{32,64\}\).*/sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-64; }
+/p' | head -1; }
 sani_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-24; }
 sani_int()  { printf '%s' "$1" | tr -cd '0-9' | cut -c1-5; }
 # URL for the speed test: only safe URL characters survive; no spaces / shell
@@ -54,6 +57,7 @@ OP="$(getp op | tr -cd 'a-z_')"
 # ---------- adopt (bootstrap from an existing authenticated LuCI session) ------
 if [ "$OP" = "adopt" ]; then
 	SID="$(sani_hex "$(getp token)")"
+	[ -n "$SID" ] || SID="$(sani_hex "$(cookie_sid)")"
 	[ -n "$SID" ] || fail "no_token"
 	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
 	if [ "$OKACC" = "true" ]; then
@@ -67,9 +71,10 @@ fi
 
 # ---------- everything else requires a valid, marked session ----------
 TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || TOK="$(sani_hex "$(cookie_sid)")"
 [ -n "$TOK" ] || fail "no_token"
 MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412perf' 2>/dev/null)"
-[ "$MARK" = "1" ] || fail "unauthorized"
+[ "$MARK" = "1" ] || { ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"; [ "$ACC" = "true" ] || fail "unauthorized"; }
 
 # ============================================================
 # helpers
