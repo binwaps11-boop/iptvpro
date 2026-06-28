@@ -17,9 +17,12 @@
 for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
 	uci -q set wireless.$dev.txpower='30'   # request the US legal max on every radio
 	case "$(uci -q get wireless.$dev.band)" in
-		# 2.4G: HE40 (40 MHz) so the link rate is FULL (~573 Mbps 2x2) instead of the
-		# ~286 Mbps cap of HE20. noscan forces 40 MHz even with neighbours around.
-		2g) uci -q set wireless.$dev.channel='1';   uci -q set wireless.$dev.htmode='HE40'; uci -q set wireless.$dev.noscan='1';;
+		# 2.4G: HE20 (20 MHz) — user choice for MAX RANGE / wall penetration. 2x2 HE20
+		# still peaks ~287 Mbps PHY (HE-MCS11, 2 streams); a narrower channel concentrates
+		# the same TX power into half the spectrum => higher spectral density + far more
+		# robust at distance than HE40. noscan is a 40 MHz coexistence knob, so it is
+		# intentionally NOT set here. Power untouched (30).
+		2g) uci -q set wireless.$dev.channel='1';   uci -q set wireless.$dev.htmode='HE20';;
 		5g) uci -q set wireless.$dev.channel='149'; uci -q set wireless.$dev.htmode='HE80';;
 	esac
 done
