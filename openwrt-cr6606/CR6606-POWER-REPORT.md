@@ -57,11 +57,37 @@ country  →  wireless-regdb  →  cfg80211  →  mac80211  →  mt76/mt7915  �
 | 5 GHz UNII-2 / DFS | 52–144 | 20–24 dBm | **yes** | no (regdb < 30 + radar) |
 | 5 GHz UNII-3 | 149–165 | **30 dBm** | no | **yes** (if caldata allows) |
 
-**Conclusion you can already predict, and the table will confirm:** a real, clean **30 dBm
-is reachable on 5 GHz ch149–165**. On 2.4 GHz and on 5 GHz ch36–144 the **regdb itself**
-caps below 30 — no firmware can legally exceed that, and forcing it (regdb/caldata hack)
-produces a clipped, *worse* signal. Other regdomains shift these numbers slightly; the
-`--countries` sweep shows by how much, measured.
+### 3b. ALL-country scan (official attempt on the X channels — no guessing)
+
+We parsed **every** country block in the official `wireless-regdb` `db.txt` to see if any
+legal regdomain opens UNII-1 / DFS to 30 dBm. Result:
+
+| Sub-band | Channels | Highest limit found **across the entire global regdb** | Who |
+|---|---|---|---|
+| 2.4 GHz | 1–11 | **30 dBm** | US, CA, NZ, BZ … |
+| UNII-1 | 36–48 | **23 dBm** (NO country reaches 30) | US (23); most are 17 |
+| DFS-lower | 52–64 | 30 dBm (only two) | **BO, NG** only — DFS + drops 2.4G to 20 |
+| DFS-upper | 100–144 | ~27 dBm (no country reaches 30) | GB (27) |
+| UNII-3 | 149–165 | **30 dBm** | US, CA, AU, NZ, PA, BO, NG … |
+
+Reference rows (2.4 / UNII-1 / DFS-lo / DFS-hi / UNII-3):
+```
+US: 30 / 23 / 23 / 23 / 30      NZ: 30 / 17 / 24 / 24 / 30
+CA: 30 / 17 / 24 /  - / 30      BO: 20 /  - / 30 /  - / 30   (DFS-lo=30 but 2.4=20)
+PA: 30 / 17 / 23 /  - / 30      NG: 20 /  - / 30 /  - / 30
+AU: 20 / 17 / 24 / 24 / 30      GB: 20 / 20 / 20 / 27 /  -
+```
+
+**Definitive conclusion (the X channels):**
+- **UNII-1 ch36–48 = 23 dBm is the GLOBAL maximum.** No official country anywhere grants
+  30 dBm on UNII-1. The FCC *permits* 30 for AP master mode, but `wireless-regdb` enforces 23
+  worldwide. Reaching 30 on ch36 requires **editing db.txt** → declined (regulatory edit).
+- **DFS ch52–144** never reaches 30 in US; only BO/NG hit 30 on the lower DFS block, at the
+  cost of declaring a country you're not in (non-compliant) + DFS radar + 2.4G dropped to 20.
+- **30 dBm is genuinely available on 2.4 GHz (ch1–11) and 5 GHz UNII-3 (ch149–165)** — no edit.
+
+The `--countries` mode (US CA GB DE FR JP AU NZ PA BO BZ NG CN 00) reproduces this table on
+your own device with `iw phy` — so the limits are measured, not quoted.
 
 ---
 

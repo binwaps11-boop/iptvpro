@@ -155,7 +155,7 @@ uci -q commit wireless; wifi reload >/dev/null 2>&1
 if [ "$1" = "--countries" ]; then
 	echo ""; echo ">>> COUNTRY COMPARISON (iw phy regdb limit per channel; measurement, not guess)"
 	echo "    NOTE: using a country you are NOT located in is itself non-compliant — informational only."
-	for CC in US PA AU NZ BO BZ 00; do
+	for CC in US CA GB DE FR JP AU NZ PA BO BZ NG CN 00; do
 		iw reg set "$CC" 2>/dev/null; sleep 1
 		printf "  [%s] 2.4G:" "$CC"
 		for ch in 1 6 11 13; do printf " ch%s=%s" "$ch" "$(limit_dbm "$(phy_line "$P24" "$ch")")"; done
