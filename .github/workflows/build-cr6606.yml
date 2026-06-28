@@ -7,12 +7,7 @@ name: Build CR6606 Smart AP (Xiaomi AX1800 WiFi6 + dashboard)
 # NO power/regulatory edits (mt76 respects regdb; WiFi6 AX1800 is native).
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
-    paths:
-      - ".github/workflows/build-cr6606.yml"
-      - "openwrt-cr6606/**"
+  workflow_dispatch:   # manual only — the SOURCE build (build-cr6606-src.yml) is primary
 
 permissions:
   contents: write
