@@ -34,10 +34,10 @@ jobs:
           sudo apt-get install -y build-essential libncurses5-dev zlib1g-dev gawk \
             git gettext libssl-dev xsltproc rsync wget unzip python3 file zstd
 
-      - name: Download OpenWrt ImageBuilder (ramips/mt7621, 24.10.0)
+      - name: Download OpenWrt ImageBuilder (ramips/mt7621, 24.10.6)
         run: |
           set -eux
-          VER=24.10.0
+          VER=24.10.6
           IB="openwrt-imagebuilder-${VER}-ramips-mt7621.Linux-x86_64"
           URL="https://downloads.openwrt.org/releases/${VER}/targets/ramips/mt7621/${IB}.tar.zst"
           wget -q "$URL" -O ib.tar.zst
@@ -95,7 +95,7 @@ jobs:
           name: "CR660x system-30dbm-measured-test — FAST (cr6606 + cr6608 + cr6609)"
           body: |
             Xiaomi CR660x (ramips/mt7621, MT7915 WiFi6 AX1800 2x2/2x2). DSA native.
-            OpenWrt 24.10.0 ImageBuilder — builds ALL THREE family members
+            OpenWrt 24.10.6 ImageBuilder — builds ALL THREE family members
             (cr6606 / cr6608 / cr6609; identical hardware, shared cr660x DTS).
             Flash the bin whose name matches YOUR device (e.g. *cr6608*sysupgrade.bin).
             Smart AP UI + LuCI + SSH + flow offload (SW) + proof scripts + all audit fixes
