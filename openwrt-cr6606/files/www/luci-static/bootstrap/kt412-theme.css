@@ -1125,3 +1125,22 @@ html,body{max-width:100%;overflow-x:hidden}
 @media (min-width:1600px){
   #view>div,.mk-wrap{max-width:1360px}
 }
+
+/* ============================================================================
+   NIGHT MODE — toggled by the dashboard button (sets html.kt-night, persisted).
+   Default theme stays LIGHT; this overrides the design tokens + the few hardcoded
+   light surfaces to a dark scheme (purple accent kept). COLOUR ONLY.
+   ============================================================================ */
+html.kt-night{
+  --kt-bg0:#0a0e17; --kt-bg1:#0f1626; --kt-bg2:#16203a;
+  --kt-card:#131c2e; --kt-card2:#1a2740; --kt-glass:#131c2e; --kt-glass-strong:#0f1828;
+  --kt-stroke:rgba(255,255,255,0.16); --kt-stroke-2:rgba(255,255,255,0.24);
+  --kt-txt:#f8fafc; --kt-txt2:#dbe4ee; --kt-muted:#a7b4c6;
+  --kt-accent:#8b5cf6; --kt-accent2:#8b5cf6; --kt-accent3:#7c3aed; --kt-accent-soft:rgba(139,92,246,0.16);
+  --kt-shadow:0 4px 18px rgba(0,0,0,.45); --kt-shadow-lg:0 14px 38px rgba(0,0,0,.55);
+  color-scheme:dark;
+}
+html.kt-night body{ background:linear-gradient(160deg,#0a0e17,#0f1626 62%,#0a0e17)!important; color:var(--kt-txt)!important; }
+html.kt-night .kt-card{ background:#131c2e!important; }
+html.kt-night .cbi-rowstyle-2,html.kt-night tr.cbi-rowstyle-2,html.kt-night .tr.cbi-rowstyle-2{ background:rgba(255,255,255,.03)!important; }
+html.kt-night pre,html.kt-night code{ background:#0f1626!important; }

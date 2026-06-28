@@ -41,7 +41,7 @@ fi
 # CSS no longer forces RTL on the page shell, so the native responsive layout works).
 uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=internal
 uci -q set luci.main.mediaurlbase='/luci-static/bootstrap'
-uci -q set luci.main.lang='ar'
+uci -q set luci.main.lang='auto'
 uci -q commit luci
 
 exit 0

@@ -834,3 +834,29 @@ body:has(input#luci_password) fieldset, body:has(input[name="luci_password"]) fi
 body:has(input#luci_password) .cbi-section-node, body:has(input[name="luci_password"]) .cbi-section-node{
   display:block!important; width:100%!important; max-width:100%!important; margin:0!important; padding:0!important; float:none!important;
 }
+
+/* ============================================================================
+   NIGHT MODE (html.kt-night) — dashboard + login dark override. Default = light.
+   ============================================================================ */
+html.kt-night{
+  --mk-bg0:#0a0f1c; --mk-bg1:#0f1626; --mk-bg2:#16203a;
+  --mk-card:#172238; --mk-card2:#1f2c46; --mk-glass:#172238; --mk-glass2:#1f2c46;
+  --mk-stroke:rgba(255,255,255,0.17); --mk-stroke2:rgba(139,92,246,0.55);
+  --mk-txt:#f8fafc; --mk-txt2:#e7eef7; --mk-muted:#aab8cc;
+  --mk-accent:#8b5cf6; --mk-accent2:#8b5cf6; --mk-violet:#a78bfa; --mk-blue:#60a5fa; --mk-cyan:#8b5cf6;
+  --mk-green:#34d399; --mk-amber:#fbbf24; --mk-red:#f87171; --mk-grey:#64748b;
+  --mk-shadow:0 4px 16px rgba(0,0,0,.45); --mk-shadow-lg:0 14px 36px rgba(0,0,0,.55);
+  color-scheme:dark;
+}
+html.kt-night body:has(.mk-wrap){
+  background:linear-gradient(160deg,#0a0f1c,#0f1626 60%,#0a0f1c)!important;
+}
+html.kt-night .mk-wrap::before{ background:linear-gradient(160deg,#0a0f1c,#0f1626 60%,#0a0f1c); }
+html.kt-night .mk-gauge .track{ stroke:#334155; }
+html.kt-night .mk-gauge .mk-gval{ fill:#ffffff; }
+/* night login backdrop */
+html.kt-night body.node-main-login,
+html.kt-night body:has(input#luci_password),
+html.kt-night body:has(input[name="luci_password"]){
+  background:linear-gradient(160deg,#0a0f1c,#16203a 55%,#0a0f1c)!important;
+}

@@ -61,7 +61,7 @@ function ktIc(n){var d=document.createElement('div');d.innerHTML=ktIcSvg(n);retu
 var API = '/cgi-bin/kt412';
 var TOKEN = '';
 var ADOPTING = null;
-var SKIN_KEY = 'kt412_mk_skin';
+var NIGHT_KEY = 'kt412_night';   // night (dark) mode toggle; default = light
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
 function clamp(n,a,b){ n=+n; if(isNaN(n)) n=a; return n<a?a:(n>b?b:n); }
@@ -233,7 +233,7 @@ function ifTile(name, label, icon, up, speed, kind){
 }
 
 function shell(){
-	var skinOff = (localStorage.getItem(SKIN_KEY)==='off');
+	var nightOn = (localStorage.getItem(NIGHT_KEY)==='on');
 	return ''
 	+ '<div class="mk-wrap">'
 	/* ===== premium top HEADER bar ===== */
@@ -246,8 +246,8 @@ function shell(){
 	+ '      </div>'
 	+ '    </div>'
 	+ '    <div class="mk-spacer"></div>'
-	+ '    <div class="mk-toggle'+(skinOff?'':' on')+'" id="mk-skin-toggle" title="تبديل الواجهة الزجاجية / Bootstrap">'
-	+ '      <span class="sw"><i></i></span><span>الواجهة الزجاجية</span>'
+	+ '    <div class="mk-toggle'+(nightOn?' on':'')+'" id="mk-night-toggle" title="الوضع الليلي / Night mode">'
+	+ '      <span class="sw"><i></i></span><span>الوضع الليلي</span>'
 	+ '    </div>'
 	+ '  </div>'
 	/* status chip row */
@@ -316,18 +316,18 @@ function shell(){
 	+ '</div>';
 }
 
-function applySkin(off){
+function applyNight(on){
 	var html = document.documentElement;
-	if (off){ html.setAttribute('data-mk-skin','off'); localStorage.setItem(SKIN_KEY,'off'); }
-	else { html.removeAttribute('data-mk-skin'); localStorage.setItem(SKIN_KEY,'on'); }
+	if (on){ html.classList.add('kt-night'); localStorage.setItem(NIGHT_KEY,'on'); }
+	else { html.classList.remove('kt-night'); localStorage.setItem(NIGHT_KEY,'off'); }
 }
 
 function wireToggle(root){
-	var t = root.querySelector('#mk-skin-toggle');
+	var t = root.querySelector('#mk-night-toggle');
 	if (!t) return;
 	t.addEventListener('click', function(){
-		var off = t.classList.toggle('on') === false;  // toggled OFF -> skin off
-		applySkin(off);
+		var on = t.classList.toggle('on');   // toggled ON -> night (dark) mode
+		applyNight(on);
 	});
 }
 
@@ -488,7 +488,7 @@ return view.extend({
 	load: function(){ return Promise.resolve(); },
 	render: function(){
 		// apply persisted skin preference immediately
-		applySkin(localStorage.getItem(SKIN_KEY)==='off');
+		applyNight(localStorage.getItem(NIGHT_KEY)==='on');
 		var root = E('div', {});
 		root.innerHTML = shell();
 		wireToggle(root);
