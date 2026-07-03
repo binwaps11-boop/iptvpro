@@ -1,0 +1,10 @@
+#!/bin/sh
+
+for service in watchcat mwan3 qos sqm; do
+	if [ -x "/etc/init.d/$service" ]; then
+		"/etc/init.d/$service" stop >/dev/null 2>&1 || true
+		"/etc/init.d/$service" disable >/dev/null 2>&1 || true
+	fi
+done
+
+exit 0

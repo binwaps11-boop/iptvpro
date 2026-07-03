@@ -1,0 +1,73 @@
+# Smart AP — بناء OpenWrt لراوتر Xiaomi Mi Router CR6608
+
+مصدر لوحة التحكم "Smart AP" السوداء وإعدادات البناء المخصص، مأخوذة من صورة
+`openwrt-24.10.6-ramips-mt7621-xiaomi_mi-router-cr6608-squashfs-sysupgrade.bin`
+(OpenWrt 24.10.6 r29141، نواة 6.6.127) بعد فحصها وإصلاحها.
+
+## بنية اللوحة
+
+- **`www/index.html` + `www/dashboard.js`** — لوحة Smart AP السوداء (عربي RTL، بدون CDN، تعمل offline):
+  - صفحة **تسجيل الدخول هي الأساسية**: عند فتح أي صفحة تُمسح الجلسة ويظهر الدخول أولاً، والدخول عبر `ubus session login`.
+  - أقسام اللوحة: نظرة عامة (Overview) · الترافيك · الأجهزة · WiFi · صحة النظام · إجراءات — كلها خلف تسجيل الدخول.
+  - LuCI الكامل متاح من زر "ضبط OpenWrt" على `/cgi-bin/luci` بثيم argon الداكن، وله تسجيل دخوله الخاص.
+- **`www/cgi-bin/`** — واجهات CGI الخلفية:
+  - `dashapi2` — قراءة البيانات الحية (محمي بجلسة ubus).
+  - `dashaction` — إجراءات محمية (إعادة تشغيل بتأكيد... إلخ).
+  - `dashctl` — التحكم بالإعدادات مع نسخ احتياطي تلقائي و rollback خلال 30 ثانية.
+  - `dashapi` — **(تم إصلاحه)** النسخة القديمة كانت بدون أي تحقق من الجلسة وتسرّب معلومات النظام قبل تسجيل الدخول؛ أضيفت لها نفس حماية `dashapi2` (رفض 403 بدون جلسة صحيحة).
+
+## الإصلاح المطبق (الفرق الوحيد عن البناء الأصلي)
+
+`www/cgi-bin/dashapi`: إضافة تحقق من جلسة ubus قبل إخراج أي بيانات — أي طلب بدون
+`sid` صالح (32 hex متحقق منه عبر `ubus call session access`) يُرفض بـ `403 Forbidden`.
+كل ما عدا ذلك (النواة، الإعدادات، اللوحة، صفحتا النظرة العامة والترافيك) **مطابق بايت-بايت للأصل**.
+
+## نتيجة فحص البناء
+
+| البند | الحالة |
+|---|---|
+| DSA (br-lan يضم lan1+lan2+lan3+wan كوضع Access Point) | ✅ صحيح ومطابق لتعريف اللوحة |
+| تعاريف WiFi 6 (kmod-mt7915e + firmware للشريحة MT7905D/MT7975D) | ✅ موجودة وسليمة |
+| أوضاع ax/ac (HE20 على 2.4GHz و HE80 على 5GHz + beamforming + 802.11k/v) | ✅ صحيحة لـ AX1800، وأجهزة ac/n تتصل بتوافق خلفي |
+| wpad-openssl كامل (WPA3 جاهز عند الحاجة) | ✅ |
+| حماية CGI (dashapi2 / dashaction / dashctl) | ✅ محمية بجلسة |
+| dashapi القديم | 🔴 كان مكشوفاً — **تم إصلاحه** |
+| dhcp-guard (تشغيل DHCP محلي تلقائياً عند غياب راوتر أعلى) | ✅ |
+| واجهة طوارئ ثابتة 192.168.66.1 (recovery) | ✅ |
+
+## ملاحظات مهمة (بقرار المالك — لم تُغيَّر)
+
+- **الواي فاي مفتوح بدون تشفير** (Smart-AP / Smart-AP-5G) و**كلمة مرور root فارغة** —
+  أي شخص على الشبكة يستطيع الدخول للوحة. يُنصح بضبط كلمة مرور root وتشفير WPA2
+  من اللوحة أو LuCI بعد أول تشغيل.
+- LAN ثابت على `192.168.1.1` — إذا كان الراوتر الرئيسي على نفس العنوان سيحدث تعارض؛
+  عندها استخدم واجهة الطوارئ `192.168.66.1`.
+
+## طريقة الفلاش
+
+1. من LuCI: **System → Backup / Flash Firmware → Flash image** وارفع ملف `-fixed.bin`.
+2. أو من SSH: `sysupgrade -v /tmp/openwrt-...-fixed.bin`
+3. الصورة تحمل fwtool metadata صحيحة للجهاز (`xiaomi,mi-router-cr6608`) وبدون توقيع —
+   الجهاز لا يتحقق من التواقيع (لا يوجد `ucert` في البناء) فتمر الترقية بشكل طبيعي.
+   إذا ظهر تحذير compat (1.0→1.1) فهذا موجود أصلاً في البناء الأصلي واستخدم الترقية بدون حفظ الإعدادات أو Force.
+
+## إعادة البناء بعد تعديل الملفات
+
+```sh
+mkdir -p overlay/www/cgi-bin
+cp www/index.html www/dashboard.js overlay/www/
+cp www/cgi-bin/* overlay/www/cgi-bin/
+./repack.sh original-sysupgrade.bin overlay output-fixed.bin
+```
+
+راجع `repack.sh` — يعيد بناء squashfs بنفس خيارات OpenWrt (xz، بلوك 256KiB)
+ويلحق metadata بأداة `fwtool` الرسمية (ناتجها مطابق بايت-بايت لأداة الجهاز نفسه).
+
+## محتويات المجلد
+
+- `www/` — اللوحة السوداء + CGI (بما فيها `dashapi` المُصلح)
+- `etc-config/` — network, wireless, dhcp, firewall, system, uhttpd
+- `etc-init.d/` + `scripts/` — خدمات cr6608-dhcp-guard و cr6608-quicksettings
+- `uci-defaults/` — سكربتات أول إقلاع
+- `fwtool-metadata.json` — metadata الصورة كما استُخرجت من الأصل
+- `repack.sh` — سكربت إعادة التغليف

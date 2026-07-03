@@ -1,0 +1,1234 @@
+#!/bin/sh
+POST_DATA=""
+if [ "$REQUEST_METHOD" = "POST" ] && [ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null; then
+  POST_DATA="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
+fi
+REQ="$QUERY_STRING"
+[ -n "$POST_DATA" ] && REQ="${REQ:+$REQ&}$POST_DATA"
+qparam() { printf '%s' "$REQ" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1; }
+param() {
+  qparam "$1" | sed 's/+/ /g; s/%3A/:/g; s/%3a/:/g; s/%2E/./g; s/%2e/./g; s/%2D/-/g; s/%2d/-/g; s/%5F/_/g; s/%5f/_/g; s/%2F/\//g; s/%2f/\//g; s/%20/ /g; s/%40/@/g; s/%23/#/g; s/%2B/+/g; s/%2b/+/g; s/%26/\&/g; s/%3D/=/g; s/%3d/=/g'
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+  printf '{"ok":false,"error":"forbidden","message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+sid="$(qparam sid | sed 's/[^A-Fa-f0-9]//g')"
+case "$sid" in 00000000000000000000000000000000|'') deny_auth ;; esac
+[ "${#sid}" = 32 ] 2>/dev/null || deny_auth
+access="$(ubus call session access "{\"ubus_rpc_session\":\"$sid\",\"scope\":\"ubus\",\"object\":\"system\",\"function\":\"board\"}" 2>/dev/null)"
+printf '%s' "$access" | grep -q '"access"[[:space:]]*:[[:space:]]*true' || deny_auth
+
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
+
+json_escape() { tr '\011' ' ' | tr -d '\000-\010\013\014\016-\037\177' | awk 'BEGIN{ORS=""}{gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); if (NR>1) printf "\\n"; printf "%s",$0}'; }
+jstr() { printf '"'; printf '%s' "$1" | json_escape; printf '"'; }
+jnum() { case "$1" in ''|*[!0-9.-]*) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
+redact() { sed 's/[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][^ ]*/[redacted]/g; s/[Tt][Oo][Kk][Ee][Nn][^ ]*/[redacted]/g; s/[Ss][Ee][Cc][Rr][Ee][Tt][^ ]*/[redacted]/g; s/\.key=.*/.key=[redacted]/g'; }
+safe_host() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._:-]//g' | cut -c1-80; }
+safe_mac() { printf '%s' "$1" | tr A-F a-f | sed 's/[^0-9a-f:]//g' | cut -c1-17; }
+safe_num() { printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-4; }
+safe_word() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_.:-]//g' | cut -c1-48; }
+safe_uci_ref() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_@.:\[\]-]//g' | cut -c1-64; }
+safe_uci_opt() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_:-]//g' | cut -c1-64; }
+safe_uci_value() { printf '%s' "$1" | tr -d '\000-\010\013\014\016-\037\177' | cut -c1-256; }
+safe_port_list() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_:. *-]//g' | cut -c1-160; }
+cards_json() {
+  printf '['; first=1
+  while IFS='|' read -r label value hint level; do
+    [ -n "$label$value$hint$level" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '{"label":%s,"value":%s,"hint":%s,"level":%s}' "$(jstr "$label")" "$(jstr "$value")" "$(jstr "$hint")" "$(jstr "${level:-neutral}")"
+    first=0
+  done
+  printf ']'
+}
+form_json() {
+  printf '['; first=1
+  while IFS='|' read -r name label value hint type readonly group modes options; do
+    [ -n "$name$label$value$hint" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '{"name":%s,"label":%s,"value":%s,"hint":%s,"type":%s,"readonly":%s,"group":%s,"modes":%s,"options":%s}' \
+      "$(jstr "$name")" "$(jstr "$label")" "$(jstr "$value")" "$(jstr "$hint")" "$(jstr "${type:-text}")" "$([ "$readonly" = "1" ] && echo true || echo false)" "$(jstr "$group")" "$(jstr "$modes")" "$(jstr "$options")"
+    first=0
+  done
+  printf ']'
+}
+emit() {
+  ok="${1:-true}"; title="$2"; summary="$3"; cards="${4:-[]}"; text="$5"; actions="${6:-[]}"; form="${7:-[]}"
+  printf '{"ok":%s,"section":%s,"title":%s,"summary":%s,"cards":%s,"actions":%s,"form":%s,"text":%s}\n' \
+    "$ok" "$(jstr "$section")" "$(jstr "$title")" "$(jstr "$summary")" "$cards" "$actions" "$form" "$(jstr "$text")"
+}
+backup_cfg() {
+  tag="$(safe_word "$1")"; [ -n "$tag" ] || tag="change"
+  mkdir -p /root/dashboard-backups
+  [ -f /etc/config/smartap ] || touch /etc/config/smartap 2>/dev/null
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  tar -czf "/root/dashboard-backups/smartap-${tag}-${ts}.tar.gz" /etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/smartap /etc/crontabs/root /etc/passwd /etc/shadow /etc/rc.button/reset 2>/dev/null
+  printf '/root/dashboard-backups/smartap-%s-%s.tar.gz' "$tag" "$ts"
+}
+arm_rollback() {
+  backup="$1"
+  [ -n "$backup" ] || return 0
+  printf '%s\n' "$backup" > /tmp/smartap-rollback-backup
+  touch /tmp/smartap-rollback-armed
+  (
+    sleep 30
+    if [ -f /tmp/smartap-rollback-armed ] && [ -r "$backup" ]; then
+      tar -xzf "$backup" -C / 2>/dev/null
+      /etc/init.d/dnsmasq restart >/dev/null 2>&1
+      /etc/init.d/firewall reload >/dev/null 2>&1
+      /etc/init.d/network reload >/dev/null 2>&1
+      wifi reload >/dev/null 2>&1
+      rm -f /tmp/smartap-rollback-armed
+    fi
+  ) >/dev/null 2>&1 &
+}
+confirm_required() {
+  [ "$confirm" = "1" ] && return 0
+  emit false "$1" "Confirmation required" "[]" "Press the action again to apply. A backup will be created first. TX Power is never modified." "[]" "[]"
+  exit 0
+}
+radio_ifaces() { uci -q show wireless | awk -F'[.=]' '/=wifi-iface/{print $2}'; }
+luci_action() {
+  printf '[]'
+}
+luci_url() {
+  echo ""
+}
+mode_has_vlan() {
+  case "$1" in ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan) return 0 ;; esac
+  return 1
+}
+valid_ipv4() {
+  printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+config_radio_iface() {
+  radio="$1"
+  uci show wireless 2>/dev/null | awk -F'[.=]' -v r="$radio" '
+    /=wifi-iface/ {sec=$2; dev=0; ap=0}
+    $0 ~ "\\."sec"\\.device=.?"r".?" {dev=1}
+    $0 ~ "\\."sec"\\.mode=.?ap.?" {ap=1}
+    dev && ap {print sec; exit}
+  '
+}
+store_royal_config() {
+  touch /etc/config/smartap 2>/dev/null
+  uci -q set smartap.quick='quicksettings'
+  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh; do
+    v="$(param "$k" | cut -c1-96)"
+    [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
+  done
+  uci -q set smartap.quick.txpower_locked='30'
+  uci -q commit smartap
+}
+set_wifi_security() {
+  ifc="$1"; sec="$2"; key="$3"
+  [ -n "$ifc" ] || return 0
+  case "$sec" in
+    open) uci set wireless."$ifc".encryption='none'; uci delete wireless."$ifc".key 2>/dev/null ;;
+    wpa3) uci set wireless."$ifc".encryption='sae-mixed'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
+    *) uci set wireless."$ifc".encryption='psk2'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
+  esac
+}
+valid_config() {
+  case "$1" in network|wireless|dhcp|firewall|system|sqm|uhttpd|dropbear|smartap) return 0 ;; esac
+  return 1
+}
+reload_by_config() {
+  case "$1" in
+    network) /etc/init.d/network reload >/dev/null 2>&1 ;;
+    wireless) wifi reload >/dev/null 2>&1 ;;
+    dhcp) /etc/init.d/dnsmasq restart >/dev/null 2>&1 ;;
+    firewall) /etc/init.d/firewall reload >/dev/null 2>&1 ;;
+    system) /etc/init.d/system reload >/dev/null 2>&1 || true ;;
+    sqm) /etc/init.d/sqm restart >/dev/null 2>&1 ;;
+    uhttpd) /etc/init.d/uhttpd reload >/dev/null 2>&1 ;;
+    dropbear) /etc/init.d/dropbear restart >/dev/null 2>&1 ;;
+  esac
+}
+
+section="$(param section)"; action="$(param action)"; confirm="$(param confirm)"
+[ -n "$section" ] || section="control"
+board="$(ubus call system board 2>/dev/null)"
+info="$(ubus call system info 2>/dev/null)"
+model="$(printf '%s\n' "$board" | jsonfilter -e '@.model' 2>/dev/null)"
+version="$(printf '%s\n' "$board" | jsonfilter -e '@.release.version' 2>/dev/null)"
+target="$(printf '%s\n' "$board" | jsonfilter -e '@.release.target' 2>/dev/null)"
+kernel="$(printf '%s\n' "$board" | jsonfilter -e '@.kernel' 2>/dev/null)"
+uptime_s="$(printf '%s\n' "$info" | jsonfilter -e '@.uptime' 2>/dev/null)"
+loadavg="$(cat /proc/loadavg 2>/dev/null)"
+lan_ip="$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2; exit}')"
+default_route="$(ip -4 route show default 2>/dev/null | head -n 1)"
+tx0="$(uci -q get wireless.radio0.txpower 2>/dev/null)"
+tx1="$(uci -q get wireless.radio1.txpower 2>/dev/null)"
+
+case "$action" in
+  keep_changes) rm -f /tmp/smartap-rollback-armed /tmp/smartap-rollback-backup; emit true "Keep changes" "Rollback timer cancelled" "[]" "The current settings are kept." "[]" "[]"; exit 0 ;;
+  rollback_last)
+    rb="$(cat /tmp/smartap-rollback-backup 2>/dev/null)"
+    if [ -r "$rb" ]; then
+      tar -xzf "$rb" -C / 2>/dev/null
+      /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+      rm -f /tmp/smartap-rollback-armed
+      emit true "Rollback" "Restored previous backup" "[]" "Restored: $rb" "[]" "[]"
+    else
+      emit false "Rollback" "No rollback backup available" "[]" "No readable rollback backup found." "[]" "[]"
+    fi
+    exit 0 ;;
+  clear_api_cache) rm -f /tmp/dashapi2.cache /tmp/dashapi2.cache.ts; emit true "Cache" "Cache cleared" "[]" "Live API cache was cleared." "[]" "[]"; exit 0 ;;
+  add_interface)
+    confirm_required "Add interface"
+    ifname="$(safe_word "$(param if_name)")"; proto="$(safe_word "$(param if_proto)")"; dev="$(safe_word "$(param if_device)")"
+    ipaddr="$(param if_ipaddr | cut -c1-32)"; netmask="$(param if_netmask | cut -c1-32)"; gateway="$(param if_gateway | cut -c1-32)"; dns="$(param if_dns | cut -c1-80)"
+    [ -n "$ifname" ] || { emit false "Interfaces" "Missing name" "[]" "Interface name is required." "[]" "[]"; exit 0; }
+    case "$ifname" in lan|wan|loopback) emit false "Interfaces" "Protected interface" "[]" "Use LAN/DHCP panel for lan and broadband mode for wan." "[]" "[]"; exit 0 ;; esac
+    case "$proto" in static|dhcp|none) : ;; *) proto="static" ;; esac
+    backup="$(backup_cfg interface)"
+    uci -q get network."$ifname" >/dev/null || uci set network."$ifname"='interface'
+    uci set network."$ifname".proto="$proto"
+    [ -n "$dev" ] && uci set network."$ifname".device="$dev"
+    if [ "$proto" = "static" ]; then
+      [ -n "$ipaddr" ] && uci set network."$ifname".ipaddr="$ipaddr"
+      [ -n "$netmask" ] && uci set network."$ifname".netmask="$netmask"
+      [ -n "$gateway" ] && uci set network."$ifname".gateway="$gateway"
+      [ -n "$dns" ] && uci set network."$ifname".dns="$dns"
+    fi
+    uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "Interfaces" "Interface saved with rollback" "[]" "Backup: $backup\nInterface $ifname was saved and network reloaded. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  add_route)
+    confirm_required "Add route"
+    r_iface="$(safe_word "$(param route_interface)")"; r_target="$(param route_target | cut -c1-32)"; r_netmask="$(param route_netmask | cut -c1-32)"; r_gateway="$(param route_gateway | cut -c1-32)"
+    [ -n "$r_iface" ] || r_iface="lan"
+    valid_ipv4 "$r_target" || { emit false "Routing" "Invalid target" "[]" "Route target must be IPv4." "[]" "[]"; exit 0; }
+    valid_ipv4 "$r_netmask" || r_netmask="255.255.255.0"
+    valid_ipv4 "$r_gateway" || { emit false "Routing" "Invalid gateway" "[]" "Gateway must be IPv4." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg route)"
+    s="$(uci add network route)"; uci set network."$s".interface="$r_iface"; uci set network."$s".target="$r_target"; uci set network."$s".netmask="$r_netmask"; uci set network."$s".gateway="$r_gateway"
+    uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "Routing" "Static route added" "[]" "Backup: $backup\nRoute $r_target/$r_netmask via $r_gateway was added. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  add_firewall_rule)
+    confirm_required "Firewall"
+    fname="$(param rule_name | cut -c1-48)"; fsrc="$(safe_word "$(param rule_src)")"; fdest="$(safe_word "$(param rule_dest)")"; fproto="$(safe_word "$(param rule_proto)")"; fdport="$(safe_num "$(param rule_dport)")"; ftarget="$(safe_word "$(param rule_target)")"
+    [ -n "$fname" ] || fname="CR6608-Rule"; [ -n "$fsrc" ] || fsrc="lan"; [ -n "$fdest" ] || fdest="wan"; [ -n "$fproto" ] || fproto="tcp"; case "$ftarget" in ACCEPT|REJECT|DROP) : ;; *) ftarget="ACCEPT" ;; esac
+    backup="$(backup_cfg firewall-rule)"
+    r="$(uci add firewall rule)"; uci set firewall."$r".name="$fname"; uci set firewall."$r".src="$fsrc"; uci set firewall."$r".dest="$fdest"; uci set firewall."$r".proto="$fproto"; [ -n "$fdport" ] && uci set firewall."$r".dest_port="$fdport"; uci set firewall."$r".target="$ftarget"; uci set firewall."$r".family='ipv4'
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    emit true "Firewall" "Rule added" "[]" "Backup: $backup\nFirewall rule $fname was added and firewall reloaded. TX Power unchanged." "[]" "[]"; exit 0 ;;
+  save_system)
+    confirm_required "System"
+    newhost="$(safe_word "$(param hostname)")"; newtz="$(param timezone | cut -c1-64)"
+    backup="$(backup_cfg system)"
+    [ -n "$newhost" ] && uci set system.@system[0].hostname="$newhost"
+    [ -n "$newtz" ] && uci set system.@system[0].timezone="$newtz"
+    uci commit system; /etc/init.d/system reload >/dev/null 2>&1 || true
+    emit true "System" "System values saved" "[]" "Backup: $backup\nHostname/timezone saved. TX Power unchanged." "[]" "[]"; exit 0 ;;
+  add_cron)
+    confirm_required "Scheduled Tasks"
+    line="$(param cron_line | tr -d '\r\n' | cut -c1-180)"
+    [ -n "$line" ] || { emit false "Scheduled Tasks" "Missing cron line" "[]" "Enter a full cron line." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg cron)"
+    ( crontab -l 2>/dev/null; printf '%s\n' "$line" ) | crontab -
+    /etc/init.d/cron reload >/dev/null 2>&1
+    emit true "Scheduled Tasks" "Cron line added" "[]" "Backup: $backup\nCron was reloaded." "[]" "[]"; exit 0 ;;
+  service_enable|service_disable|service_restart)
+    confirm_required "Startup"
+    svc="$(safe_word "$(param service_name)")"; [ -x "/etc/init.d/$svc" ] || { emit false "Startup" "Unknown service" "[]" "Service script not found." "[]" "[]"; exit 0; }
+    case "$action" in service_enable) /etc/init.d/"$svc" enable >/tmp/dashctl.action 2>&1; msg="enabled" ;; service_disable) /etc/init.d/"$svc" disable >/tmp/dashctl.action 2>&1; msg="disabled" ;; *) /etc/init.d/"$svc" restart >/tmp/dashctl.action 2>&1; msg="restarted" ;; esac
+    emit true "Startup" "Service $msg" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  save_interface)
+    confirm_required "Interfaces"
+    ifname="$(safe_word "$(param if_name)")"; proto="$(safe_word "$(param if_proto)")"; dev="$(param if_device | cut -c1-64)"
+    ipaddr="$(param if_ipaddr | cut -c1-32)"; netmask="$(param if_netmask | cut -c1-32)"; gateway="$(param if_gateway | cut -c1-32)"; dns="$(param if_dns | cut -c1-120)"
+    username="$(param if_username | cut -c1-64)"; password="$(param if_password | cut -c1-64)"; auto="$(safe_num "$(param if_auto)")"
+    [ -n "$ifname" ] || { emit false "Interfaces" "Missing interface" "[]" "Interface name is required." "[]" "[]"; exit 0; }
+    case "$proto" in static|dhcp|none|pppoe) : ;; *) emit false "Interfaces" "Invalid protocol" "[]" "Use static, dhcp, none, or pppoe." "[]" "[]"; exit 0 ;; esac
+    backup="$(backup_cfg interface-save)"
+    uci -q get network."$ifname" >/dev/null || uci set network."$ifname"='interface'
+    uci set network."$ifname".proto="$proto"
+    [ -n "$dev" ] && uci set network."$ifname".device="$dev"
+    [ "$auto" = "0" ] && uci set network."$ifname".auto='0' || uci set network."$ifname".auto='1'
+    if [ "$proto" = "static" ]; then
+      valid_ipv4 "$ipaddr" || { emit false "Interfaces" "Invalid IPv4" "[]" "Static protocol requires a valid IPv4 address." "[]" "[]"; exit 0; }
+      uci set network."$ifname".ipaddr="$ipaddr"; uci set network."$ifname".netmask="${netmask:-255.255.255.0}"
+      [ -n "$gateway" ] && uci set network."$ifname".gateway="$gateway" || uci delete network."$ifname".gateway 2>/dev/null
+      [ -n "$dns" ] && uci set network."$ifname".dns="$dns" || uci delete network."$ifname".dns 2>/dev/null
+    elif [ "$proto" = "pppoe" ]; then
+      uci set network."$ifname".username="$username"; [ -n "$password" ] && uci set network."$ifname".password="$password"
+    fi
+    uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "Interfaces" "Interface saved with rollback" "[]" "Backup: $backup\nInterface $ifname saved and network reloaded. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  delete_interface)
+    confirm_required "Interfaces"
+    ifname="$(safe_word "$(param if_name)")"
+    case "$ifname" in ''|lan|wan|loopback) emit false "Interfaces" "Protected interface" "[]" "lan, wan and loopback are protected from deletion here. Disable/edit instead." "[]" "[]"; exit 0 ;; esac
+    backup="$(backup_cfg interface-delete)"
+    uci -q delete network."$ifname"; uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "Interfaces" "Interface deleted with rollback" "[]" "Backup: $backup\nDeleted interface $ifname. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_wifi)
+    confirm_required "Wireless"
+    wifi_if="$(safe_word "$(param wifi_if)")"; radio="$(safe_word "$(param wifi_radio)")"; ssid="$(param wifi_ssid | cut -c1-32)"
+    network_name="$(safe_word "$(param wifi_network)")"; mode="$(safe_word "$(param wifi_mode)")"; channel="$(safe_num "$(param wifi_channel)")"; htmode="$(safe_word "$(param wifi_htmode)")"
+    disabled="$(safe_num "$(param wifi_disabled)")"; hidden="$(safe_num "$(param wifi_hidden)")"; isolate="$(safe_num "$(param wifi_isolate)")"; wmm="$(safe_num "$(param wifi_wmm)")"; dtim="$(safe_num "$(param wifi_dtim)")"
+    enc="$(safe_word "$(param wifi_encryption)")"; key="$(param wifi_key | cut -c1-64)"
+    [ -n "$wifi_if" ] || wifi_if="wifinet0"; [ -n "$radio" ] || radio="$(uci -q get wireless."$wifi_if".device)"; [ -n "$radio" ] || radio="radio0"
+    case "$mode" in ap|sta|mesh) : ;; *) mode="ap" ;; esac
+    case "$enc" in none|psk2|sae-mixed) : ;; *) enc="psk2" ;; esac
+    if [ "$enc" != "none" ] && [ -n "$key" ] && [ "${#key}" -lt 8 ]; then emit false "Wireless" "Weak key" "[]" "Wi-Fi key must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
+    backup="$(backup_cfg wifi-save)"
+    uci -q get wireless."$wifi_if" >/dev/null || uci set wireless."$wifi_if"='wifi-iface'
+    uci set wireless."$wifi_if".device="$radio"; uci set wireless."$wifi_if".mode="$mode"; uci set wireless."$wifi_if".network="${network_name:-lan}"
+    [ -n "$ssid" ] && uci set wireless."$wifi_if".ssid="$ssid"
+    [ "$disabled" = "1" ] && uci set wireless."$wifi_if".disabled='1' || uci set wireless."$wifi_if".disabled='0'
+    [ "$hidden" = "1" ] && uci set wireless."$wifi_if".hidden='1' || uci delete wireless."$wifi_if".hidden 2>/dev/null
+    [ "$isolate" = "1" ] && uci set wireless."$wifi_if".isolate='1' || uci set wireless."$wifi_if".isolate='0'
+    [ -n "$wmm" ] && uci set wireless."$wifi_if".wmm="$wmm"
+    [ -n "$dtim" ] && uci set wireless."$wifi_if".dtim_period="$dtim"
+    if [ "$enc" = "none" ]; then uci set wireless."$wifi_if".encryption='none'; uci delete wireless."$wifi_if".key 2>/dev/null; else uci set wireless."$wifi_if".encryption="$enc"; [ -n "$key" ] && uci set wireless."$wifi_if".key="$key"; fi
+    [ -n "$channel" ] && uci set wireless."$radio".channel="$channel"
+    [ -n "$htmode" ] && uci set wireless."$radio".htmode="$htmode"
+    uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    emit true "Wireless" "Wi-Fi saved with rollback" "[]" "Backup: $backup\nWi-Fi section $wifi_if saved and wireless reloaded. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  delete_wifi)
+    confirm_required "Wireless"
+    wifi_if="$(safe_word "$(param wifi_if)")"
+    case "$wifi_if" in ''|wifinet0|wifinet1) emit false "Wireless" "Protected Wi-Fi" "[]" "Main radios are protected from deletion; disable/edit them instead." "[]" "[]"; exit 0 ;; esac
+    backup="$(backup_cfg wifi-delete)"
+    uci -q delete wireless."$wifi_if"; uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    emit true "Wireless" "Wi-Fi section deleted" "[]" "Backup: $backup\nDeleted $wifi_if. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_dhcp_static|delete_dhcp_static)
+    confirm_required "DHCP static lease"
+    hname="$(safe_word "$(param host_name)")"; hmac="$(safe_mac "$(param host_mac)")"; hip="$(param host_ip | cut -c1-32)"
+    [ "${#hmac}" = 17 ] || { emit false "DHCP" "Invalid MAC" "[]" "Enter a valid MAC address." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg dhcp-host)"
+    for s in $(uci show dhcp | awk -F'[.=]' -v m="$hmac" '$0 ~ "\\.mac=.?"m".?" {print $2}'); do uci delete dhcp."$s" 2>/dev/null; done
+    if [ "$action" = "save_dhcp_static" ]; then
+      valid_ipv4 "$hip" || { emit false "DHCP" "Invalid IP" "[]" "Enter a valid static lease IPv4." "[]" "[]"; exit 0; }
+      hs="$(uci add dhcp host)"; uci set dhcp."$hs".name="${hname:-CR6608Host}"; uci set dhcp."$hs".mac="$hmac"; uci set dhcp."$hs".ip="$hip"
+    fi
+    uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    emit true "DHCP" "Static lease updated" "[]" "Backup: $backup\nStatic lease action completed." "[]" "[]"; exit 0 ;;
+  save_firewall_zone|add_forwarding|delete_firewall_rule_by_name)
+    confirm_required "Firewall"
+    backup="$(backup_cfg firewall-edit)"
+    if [ "$action" = "save_firewall_zone" ]; then
+      zname="$(safe_word "$(param zone_name)")"; znet="$(param zone_networks | cut -c1-120)"; zin="$(safe_word "$(param zone_input)")"; zout="$(safe_word "$(param zone_output)")"; zfwd="$(safe_word "$(param zone_forward)")"; zmasq="$(safe_num "$(param zone_masq)")"
+      [ -n "$zname" ] || { emit false "Firewall" "Missing zone" "[]" "Zone name is required." "[]" "[]"; exit 0; }
+      zsec="$(uci show firewall | awk -F'[.=]' -v n="$zname" '$0 ~ "\\.name=.?"n".?" {print $2; exit}')"; [ -n "$zsec" ] || zsec="$(uci add firewall zone)"
+      uci set firewall."$zsec".name="$zname"; uci set firewall."$zsec".network="$znet"; uci set firewall."$zsec".input="${zin:-REJECT}"; uci set firewall."$zsec".output="${zout:-ACCEPT}"; uci set firewall."$zsec".forward="${zfwd:-REJECT}"
+      [ "$zmasq" = "1" ] && uci set firewall."$zsec".masq='1' || uci delete firewall."$zsec".masq 2>/dev/null
+    elif [ "$action" = "add_forwarding" ]; then
+      fsrc="$(safe_word "$(param fwd_src)")"; fdst="$(safe_word "$(param fwd_dest)")"; [ -n "$fsrc$fdst" ] || { emit false "Firewall" "Missing zones" "[]" "Source and destination zones are required." "[]" "[]"; exit 0; }
+      fs="$(uci add firewall forwarding)"; uci set firewall."$fs".src="$fsrc"; uci set firewall."$fs".dest="$fdst"
+    else
+      rname="$(param rule_name | cut -c1-64)"; [ -n "$rname" ] || { emit false "Firewall" "Missing rule name" "[]" "Rule name is required." "[]" "[]"; exit 0; }
+      for s in $(uci show firewall | awk -F'[.=]' -v n="$rname" '$0 ~ "\\.name=.?"n".?" {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
+    fi
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    emit true "Firewall" "Firewall updated" "[]" "Backup: $backup\nFirewall was updated and reloaded." "[]" "[]"; exit 0 ;;
+  save_bridge_options|set_port_state)
+    confirm_required "Switch / Ports"
+    backup="$(backup_cfg switch)"
+    if [ "$action" = "save_bridge_options" ]; then
+      stp="$(safe_num "$(param bridge_stp)")"; igmp="$(safe_num "$(param bridge_igmp)")"; bports="$(safe_port_list "$(param bridge_ports)")"
+      uci set network.@device[0].stp="${stp:-0}"
+      [ "$igmp" = "1" ] && uci set network.@device[0].igmp_snooping='1' || uci delete network.@device[0].igmp_snooping 2>/dev/null
+      if [ -n "$bports" ]; then
+        uci -q delete network.@device[0].ports
+        for p in $bports; do
+          case "$p" in wan|lan1|lan2|lan3) uci add_list network.@device[0].ports="$p" ;; esac
+        done
+      fi
+      uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+      emit true "Switch / Ports" "Bridge options saved" "[]" "Backup: $backup\nBridge ports/STP/IGMP options saved." "[]" "[]"; exit 0
+    fi
+    port="$(safe_word "$(param port_name)")"; enabled="$(safe_num "$(param port_enabled)")"
+    case "$port" in lan1|lan2|lan3|wan) : ;; *) emit false "Switch / Ports" "Invalid port" "[]" "Use lan1, lan2, lan3 or wan." "[]" "[]"; exit 0 ;; esac
+    [ "$enabled" = "0" ] && ip link set "$port" down 2>/tmp/dashctl.action || ip link set "$port" up 2>/tmp/dashctl.action
+    emit true "Switch / Ports" "Port state changed" "[]" "Backup: $backup\nRuntime port action sent for $port. Network config was not rewritten." "[]" "[]"; exit 0 ;;
+  set_admin_password)
+    confirm_required "Administration"
+    p1="$(param admin_password | cut -c1-80)"
+    [ "${#p1}" -ge 8 ] || { emit false "Administration" "Weak password" "[]" "Password must be 8+ characters." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg admin-password)"
+    printf '%s\n%s\n' "$p1" "$p1" | passwd root >/tmp/dashctl.action 2>&1
+    emit true "Administration" "Password updated" "[]" "Backup: $backup\nRoot password command completed. Password is not printed." "[]" "[]"; exit 0 ;;
+  save_admin_access)
+    confirm_required "Administration"
+    ssh_port="$(safe_num "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_num "$(param http_port)")"
+    backup="$(backup_cfg admin-access)"
+    [ -n "$ssh_port" ] && uci set dropbear.@dropbear[0].Port="$ssh_port"
+    if [ "$ssh_enabled" = "0" ]; then /etc/init.d/dropbear disable >/dev/null 2>&1; else /etc/init.d/dropbear enable >/dev/null 2>&1; fi
+    [ -n "$http_port" ] && { uci -q delete uhttpd.main.listen_http; uci add_list uhttpd.main.listen_http="0.0.0.0:$http_port"; }
+    uci commit dropbear; uci commit uhttpd
+    /etc/init.d/dropbear restart >/dev/null 2>&1; /etc/init.d/uhttpd reload >/dev/null 2>&1
+    emit true "Administration" "Access services saved" "[]" "Backup: $backup\nuhttpd/dropbear access settings saved." "[]" "[]"; exit 0 ;;
+  opkg_update|opkg_install|opkg_remove)
+    confirm_required "Software"
+    pkg="$(safe_word "$(param package_name)")"
+    case "$action" in opkg_update) opkg update >/tmp/dashctl.action 2>&1 ;; opkg_install) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg install "$pkg" >/tmp/dashctl.action 2>&1 ;; opkg_remove) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg remove "$pkg" >/tmp/dashctl.action 2>&1 ;; esac
+    emit true "Software" "Package command finished" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  create_config_backup)
+    confirm_required "Backup"
+    mkdir -p /root/dashboard-backups
+    out="/root/dashboard-backups/openwrt-config-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$out" /etc/config /etc/crontabs/root 2>/tmp/dashctl.action
+    emit true "Backup" "Config backup created" "[]" "Backup: $out\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  raw_uci_set|raw_uci_delete|raw_uci_add_section|raw_uci_delete_section|raw_uci_commit_reload)
+    confirm_required "Raw OpenWrt UCI"
+    cfg="$(safe_word "$(param raw_config)")"; sec="$(safe_uci_ref "$(param raw_section)")"; opt="$(safe_uci_opt "$(param raw_option)")"; val="$(safe_uci_value "$(param raw_value)")"; typ="$(safe_uci_opt "$(param raw_type)")"
+    valid_config "$cfg" || { emit false "Raw UCI" "Blocked config" "[]" "Only network, wireless, dhcp, firewall, system, sqm, uhttpd, dropbear and smartap are allowed." "[]" "[]"; exit 0; }
+    if [ "$cfg" = "wireless" ] && [ "$opt" = "txpower" ]; then
+      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains 30 read-only." "[]" "[]"; exit 0
+    fi
+    backup="$(backup_cfg raw-uci)"
+    case "$action" in
+      raw_uci_set)
+        [ -n "$sec$opt" ] || { emit false "Raw UCI" "Missing section/option" "[]" "Section and option are required." "[]" "[]"; exit 0; }
+        uci set "$cfg.$sec.$opt=$val" ;;
+      raw_uci_delete)
+        [ -n "$sec$opt" ] || { emit false "Raw UCI" "Missing section/option" "[]" "Section and option are required." "[]" "[]"; exit 0; }
+        uci -q delete "$cfg.$sec.$opt" ;;
+      raw_uci_add_section)
+        [ -n "$typ" ] || { emit false "Raw UCI" "Missing type" "[]" "Section type is required." "[]" "[]"; exit 0; }
+        newsec="$(uci add "$cfg" "$typ")"; [ -n "$sec" ] && uci rename "$cfg.$newsec=$sec" 2>/dev/null || sec="$newsec" ;;
+      raw_uci_delete_section)
+        [ -n "$sec" ] || { emit false "Raw UCI" "Missing section" "[]" "Section is required." "[]" "[]"; exit 0; }
+        case "$cfg.$sec" in network.lan|network.loopback|wireless.radio0|wireless.radio1) emit false "Raw UCI" "Protected section" "[]" "Core sections are protected from deletion here." "[]" "[]"; exit 0 ;; esac
+        uci -q delete "$cfg.$sec" ;;
+      raw_uci_commit_reload) : ;;
+    esac
+    uci commit "$cfg"; arm_rollback "$backup"; reload_by_config "$cfg"
+    emit true "Raw OpenWrt UCI" "Applied with rollback" "[]" "Backup: $backup\nConfig: $cfg\nSection: $sec\nOption: $opt\nTX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_dsa_vlan|delete_dsa_vlan)
+    confirm_required "DSA VLAN"
+    vdev="$(safe_uci_ref "$(param vlan_device)")"; [ -n "$vdev" ] || vdev="br-lan"
+    vid="$(safe_num "$(param vlan_id)")"; vports="$(safe_port_list "$(param vlan_ports)")"
+    [ -n "$vid" ] && [ "$vid" -ge 1 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || { emit false "DSA VLAN" "Invalid VLAN" "[]" "VLAN ID must be 1-4094." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg dsa-vlan)"
+    for s in $(uci show network 2>/dev/null | awk -F'[.=]' '/=bridge-vlan/{print $2}'); do
+      [ "$(uci -q get network.$s.device)" = "$vdev" ] && [ "$(uci -q get network.$s.vlan)" = "$vid" ] && uci -q delete network."$s"
+    done
+    if [ "$action" = "save_dsa_vlan" ]; then
+      [ -n "$vports" ] || { emit false "DSA VLAN" "Missing ports" "[]" "Use official DSA syntax, e.g. lan1:u* lan2:t wan:t." "[]" "[]"; exit 0; }
+      s="$(uci add network bridge-vlan)"; uci set network."$s".device="$vdev"; uci set network."$s".vlan="$vid"
+      for p in $vports; do
+        base="${p%%:*}"
+        case "$base" in wan|lan1|lan2|lan3|br-lan|phy0-ap0|phy1-ap0) uci add_list network."$s".ports="$p" ;; esac
+      done
+    fi
+    uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "DSA VLAN" "Applied with rollback" "[]" "Backup: $backup\nDevice=$vdev VLAN=$vid Ports=$vports\nKeep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_wifi_radio)
+    confirm_required "Wi-Fi radio"
+    radio="$(safe_word "$(param wifi_radio)")"; [ -n "$radio" ] || radio="radio0"
+    case "$radio" in radio0|radio1) : ;; *) emit false "Wi-Fi radio" "Invalid radio" "[]" "Use radio0 or radio1." "[]" "[]"; exit 0 ;; esac
+    channel="$(safe_num "$(param radio_channel)")"; htmode="$(safe_word "$(param radio_htmode)")"; country="$(safe_word "$(param radio_country)")"
+    disabled="$(safe_num "$(param radio_disabled)")"; legacy="$(safe_num "$(param radio_legacy)")"; cell="$(safe_num "$(param radio_cell_density)")"; distance="$(safe_num "$(param radio_distance)")"
+    su_bfer="$(safe_num "$(param radio_he_su_beamformer)")"; su_bfee="$(safe_num "$(param radio_he_su_beamformee)")"; mu_bfer="$(safe_num "$(param radio_he_mu_beamformer)")"
+    backup="$(backup_cfg wifi-radio)"
+    [ -n "$channel" ] && uci set wireless."$radio".channel="$channel"
+    [ -n "$htmode" ] && uci set wireless."$radio".htmode="$htmode"
+    [ -n "$country" ] && uci set wireless."$radio".country="$country"
+    [ "$disabled" = "1" ] && uci set wireless."$radio".disabled='1' || uci set wireless."$radio".disabled='0'
+    [ -n "$legacy" ] && uci set wireless."$radio".legacy_rates="$legacy"
+    [ -n "$cell" ] && uci set wireless."$radio".cell_density="$cell"
+    [ -n "$distance" ] && uci set wireless."$radio".distance="$distance"
+    [ -n "$su_bfer" ] && uci set wireless."$radio".he_su_beamformer="$su_bfer"
+    [ -n "$su_bfee" ] && uci set wireless."$radio".he_su_beamformee="$su_bfee"
+    [ -n "$mu_bfer" ] && uci set wireless."$radio".he_mu_beamformer="$mu_bfer"
+    uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. TX Power unchanged and not part of this form." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_dnsmasq)
+    confirm_required "DHCP / DNS"
+    backup="$(backup_cfg dnsmasq)"
+    for pair in domainneeded boguspriv rebind_protection localservice filter_aaaa filter_a authoritative readethers; do
+      v="$(safe_num "$(param "dns_$pair")")"; [ -n "$v" ] && uci set dhcp.@dnsmasq[0]."$pair"="$v"
+    done
+    cache="$(safe_num "$(param dns_cachesize)")"; domain="$(safe_uci_value "$(param dns_domain)")"; localdom="$(safe_uci_value "$(param dns_local)")"
+    [ -n "$cache" ] && uci set dhcp.@dnsmasq[0].cachesize="$cache"
+    [ -n "$domain" ] && uci set dhcp.@dnsmasq[0].domain="$domain"
+    [ -n "$localdom" ] && uci set dhcp.@dnsmasq[0].local="$localdom"
+    uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    emit true "DHCP / DNS" "DNSMasq saved" "[]" "Backup: $backup\nDNSMasq options saved and restarted." "[]" "[]"; exit 0 ;;
+  save_firewall_defaults)
+    confirm_required "Firewall defaults"
+    backup="$(backup_cfg firewall-defaults)"
+    fin="$(safe_word "$(param fw_input)")"; fout="$(safe_word "$(param fw_output)")"; ffwd="$(safe_word "$(param fw_forward)")"; syn="$(safe_num "$(param fw_syn_flood)")"; flow="$(safe_num "$(param fw_flow_offloading)")"; flowhw="$(safe_num "$(param fw_flow_offloading_hw)")"
+    case "$fin" in ACCEPT|REJECT|DROP) uci set firewall.@defaults[0].input="$fin" ;; esac
+    case "$fout" in ACCEPT|REJECT|DROP) uci set firewall.@defaults[0].output="$fout" ;; esac
+    case "$ffwd" in ACCEPT|REJECT|DROP) uci set firewall.@defaults[0].forward="$ffwd" ;; esac
+    [ -n "$syn" ] && uci set firewall.@defaults[0].syn_flood="$syn"
+    [ -n "$flow" ] && uci set firewall.@defaults[0].flow_offloading="$flow"
+    [ -n "$flowhw" ] && uci set firewall.@defaults[0].flow_offloading_hw="$flowhw"
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    emit true "Firewall defaults" "Defaults saved" "[]" "Backup: $backup\nFirewall defaults/offloading saved." "[]" "[]"; exit 0 ;;
+  save_sqm)
+    confirm_required "SQM"
+    backup="$(backup_cfg sqm)"
+    sqm_enabled="$(safe_num "$(param sqm_enabled)")"; sqm_iface="$(safe_word "$(param sqm_interface)")"; down="$(safe_num "$(param sqm_download)")"; up="$(safe_num "$(param sqm_upload)")"; qdisc="$(safe_word "$(param sqm_qdisc)")"; script="$(safe_word "$(param sqm_script)")"
+    uci -q get sqm.smartap >/dev/null || uci set sqm.smartap='queue'
+    [ "$sqm_enabled" = "1" ] && uci set sqm.smartap.enabled='1' || uci set sqm.smartap.enabled='0'
+    [ -n "$sqm_iface" ] && uci set sqm.smartap.interface="$sqm_iface"
+    [ -n "$down" ] && uci set sqm.smartap.download="$down"
+    [ -n "$up" ] && uci set sqm.smartap.upload="$up"
+    [ -n "$qdisc" ] && uci set sqm.smartap.qdisc="$qdisc"
+    [ -n "$script" ] && uci set sqm.smartap.script="$script"
+    uci commit sqm; /etc/init.d/sqm restart >/dev/null 2>&1
+    emit true "SQM" "SQM saved" "[]" "Backup: $backup\nSQM CR6608 queue saved." "[]" "[]"; exit 0 ;;
+  save_reboot_schedule)
+    confirm_required "Reboot schedule"
+    enabled="$(safe_num "$(param reboot_sched_enabled)")"; hour="$(safe_num "$(param reboot_hour)")"; minute="$(safe_num "$(param reboot_minute)")"
+    [ -n "$hour" ] && [ "$hour" -le 23 ] 2>/dev/null || hour=4
+    [ -n "$minute" ] && [ "$minute" -le 59 ] 2>/dev/null || minute=0
+    backup="$(backup_cfg reboot-schedule)"
+    crontab -l 2>/dev/null | grep -v 'CR6608 scheduled reboot' > /tmp/smartap.cron 2>/dev/null || true
+    if [ "$enabled" = "1" ]; then
+      printf '%s %s * * * /sbin/reboot # CR6608 scheduled reboot\n' "$minute" "$hour" >> /tmp/smartap.cron
+    fi
+    crontab /tmp/smartap.cron; rm -f /tmp/smartap.cron
+    /etc/init.d/cron reload >/dev/null 2>&1
+    emit true "Reboot schedule" "Schedule saved" "[]" "Backup: $backup\nScheduled reboot enabled=$enabled at $hour:$minute." "[]" "[]"; exit 0 ;;
+  set_led)
+    confirm_required "LED"
+    led="$(param led_name | sed 's#[^A-Za-z0-9_:/.-]##g' | cut -c1-96)"; trig="$(safe_word "$(param led_trigger)")"; bright="$(safe_num "$(param led_brightness)")"
+    [ -d "/sys/class/leds/$led" ] || { emit false "LED" "Unknown LED" "[]" "LED not found under /sys/class/leds." "[]" "[]"; exit 0; }
+    [ -n "$trig" ] && printf '%s' "$trig" > "/sys/class/leds/$led/trigger" 2>/dev/null
+    [ -n "$bright" ] && printf '%s' "$bright" > "/sys/class/leds/$led/brightness" 2>/dev/null
+    emit true "LED" "Runtime LED updated" "[]" "LED runtime state sent. Persistent LED UCI can still be edited through Raw UCI inside the Xiaomi CR6608 panel." "[]" "[]"; exit 0 ;;
+  kill_process)
+    confirm_required "Processes"
+    pid="$(safe_num "$(param process_pid)")"; sig="$(safe_num "$(param process_signal)")"
+    [ -n "$pid" ] || { emit false "Processes" "Missing PID" "[]" "PID is required." "[]" "[]"; exit 0; }
+    [ -n "$sig" ] || sig=15
+    kill "-$sig" "$pid" >/tmp/dashctl.action 2>&1
+    emit true "Processes" "Signal sent" "[]" "Sent signal $sig to PID $pid.\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  system_reboot)
+    confirm_required "Reboot"
+    emit true "Reboot" "Reboot command accepted" "[]" "Router reboot will start now. TX Power was not changed." "[]" "[]"
+    ( sleep 2; reboot ) >/dev/null 2>&1 &
+    exit 0 ;;
+  ping)
+    host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="192.168.1.1"
+    out="$(ping -c 4 -W 2 "$host" 2>&1 | redact)"
+    cards="$(cards_json <<EOF
+Target|$host|ICMP check|ok
+Command|ping -c 4|Safe diagnostic|neutral
+EOF
+)"
+    emit true "Ping" "Live diagnostic from the router" "$cards" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
+  traceroute)
+    host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="192.168.1.1"
+    out="$(traceroute -m 8 -w 2 "$host" 2>&1 | redact)"
+    emit true "Traceroute" "Route diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
+  nslookup)
+    host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="openwrt.org"
+    out="$(nslookup "$host" 2>&1 | redact)"
+    emit true "DNS lookup" "DNS diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
+  save_dhcp)
+    confirm_required "LAN / DHCP"
+    ipaddr="$(param lan_ipaddr)"; netmask="$(param netmask)"; start="$(safe_num "$(param start)")"; limit="$(safe_num "$(param limit)")"; leasetime="$(param leasetime)"; enabled="$(safe_num "$(param dhcp_enabled)")"
+    case "$ipaddr" in ''|*[!0-9.]*) emit false "LAN / DHCP" "Invalid LAN IP" "[]" "Use an IPv4 address." "[]" "[]"; exit 0 ;; esac
+    case "$netmask" in ''|*[!0-9.]*) emit false "LAN / DHCP" "Invalid netmask" "[]" "Use an IPv4 netmask." "[]" "[]"; exit 0 ;; esac
+    [ -n "$start" ] && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
+    [ -n "$limit" ] && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg lan-dhcp)"
+    uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
+    uci set dhcp.lan.start="$start"; uci set dhcp.lan.limit="$limit"; uci set dhcp.lan.leasetime="${leasetime:-12h}"
+    [ "$enabled" = "1" ] && uci delete dhcp.lan.ignore 2>/dev/null || uci set dhcp.lan.ignore='1'
+    uci commit network; uci commit dhcp
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "LAN / DHCP" "Applied with backup" "[]" "Backup: $backup\nNetwork and dnsmasq reloaded. If access changes, restore the backup from SSH." "[]" "[]"; exit 0 ;;
+  save_royal)
+    confirm_required "Quick Setup"
+    backup="$(backup_cfg royal-save)"
+    store_royal_config
+    emit true "Quick Setup" "Saved" "[]" "Backup: $backup\nQuick Setup values were saved in Xiaomi CR6608 config. No service was reloaded. TX Power was not changed." '[{"id":"apply_royal","label":"Save & Apply","confirm":true},{"id":"reset_royal","label":"Reset Quick Setup","confirm":true}]' "[]"; exit 0 ;;
+  reset_royal)
+    confirm_required "Quick Setup reset"
+    backup="$(backup_cfg royal-reset)"
+    uci -q delete smartap.quick
+    for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
+    for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
+    uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp
+    arm_rollback "$backup"
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+    emit true "Quick Setup" "Reset applied with rollback" "[]" "Backup: $backup\nOnly Xiaomi CR6608-created quick setup sections were removed. TX Power was not changed. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  apply_royal)
+    confirm_required "Quick Setup"
+    program_mode="$(safe_word "$(param program_mode)")"; [ -n "$program_mode" ] || program_mode="ap"
+    case "$program_mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe_ap) : ;; *) emit false "Quick Setup" "Invalid mode" "[]" "Unknown programming mode." "[]" "[]"; exit 0 ;; esac
+    device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; ssid="$(param ssid | cut -c1-32)"
+    ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"; mesh_id="$(param mesh_id | cut -c1-48)"
+    wds_peer_ssid="$(param wds_peer_ssid | cut -c1-32)"; hide_ssid="$(safe_num "$(param hide_ssid)")"; security="$(safe_word "$(param security)")"
+    wifi_password="$(param wifi_password | cut -c1-64)"; device_password="$(param device_password | cut -c1-80)"
+    delete_previous="$(safe_num "$(param delete_previous)")"; pppoe_user="$(param pppoe_user | cut -c1-64)"; pppoe_pass="$(param pppoe_pass | cut -c1-64)"
+    broadband_port="$(safe_word "$(param broadband_port)")"; [ -n "$broadband_port" ] || broadband_port="wan"
+    reset_button_enabled="$(safe_num "$(param reset_button_enabled)")"; reset_mode="$(safe_word "$(param reset_mode)")"
+    nat_enabled="$(safe_num "$(param nat_enabled)")"; dhcp_server="$(safe_num "$(param dhcp_server)")"; firewall_enabled="$(safe_num "$(param firewall_enabled)")"
+    watchcat_enabled="$(safe_num "$(param watchcat_enabled)")"; broadband_enabled="$(safe_num "$(param broadband_enabled)")"; fake_mesh="$(safe_num "$(param fake_mesh)")"
+    [ -n "$device_ip" ] && valid_ipv4 "$device_ip" || { emit false "Quick Setup" "Invalid IP" "[]" "Device IP must be a valid IPv4 address." "[]" "[]"; exit 0; }
+    if mode_has_vlan "$program_mode"; then
+      [ -n "$vlan_id" ] && [ "$vlan_id" -ge 1 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "VLAN ID must be 1-4094." "[]" "[]"; exit 0; }
+    fi
+    case "$security" in open|wpa2|wpa3) : ;; *) security="wpa2" ;; esac
+    if [ "$security" != "open" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -lt 8 ]; then emit false "Quick Setup" "Weak Wi-Fi password" "[]" "Wi-Fi password must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
+    if [ -n "$device_password" ] && [ "${#device_password}" -lt 8 ]; then emit false "Quick Setup" "Weak admin password" "[]" "Device password must be 8+ characters, or leave blank to keep current password." "[]" "[]"; exit 0; fi
+    backup="$(backup_cfg royal-apply)"
+    [ "$delete_previous" = "1" ] && {
+      for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
+      for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
+    }
+    store_royal_config
+    uci set network.lan.ipaddr="$device_ip"
+    ifc24="$(config_radio_iface radio0)"; [ -n "$ifc24" ] || ifc24="wifinet0"
+    ifc5="$(config_radio_iface radio1)"; [ -n "$ifc5" ] || ifc5="wifinet1"
+    [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
+    [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
+    [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+    set_wifi_security "$ifc24" "$security" "$wifi_password"
+    set_wifi_security "$ifc5" "$security" "$wifi_password"
+    [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
+    if mode_has_vlan "$program_mode"; then
+      uci -q get network.smartap_vlan >/dev/null || uci set network.smartap_vlan='interface'
+      uci set network.smartap_vlan.device="br-lan.$vlan_id"; uci set network.smartap_vlan.proto='none'
+      uci set wireless."$ifc24".network='smartap_vlan'; uci set wireless."$ifc5".network='smartap_vlan'
+    fi
+    case "$program_mode" in
+      mesh|mesh_vlan)
+        uci -q get wireless.smartap_mesh >/dev/null || uci set wireless.smartap_mesh='wifi-iface'
+        uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network='lan'; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
+        ;;
+      wds_sender|wds_sender_vlan)
+        uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
+        ;;
+      wds_receiver|wds_receiver_vlan)
+        uci -q get wireless.smartap_wds >/dev/null || uci set wireless.smartap_wds='wifi-iface'
+        uci set wireless.smartap_wds.device='radio1'; uci set wireless.smartap_wds.mode='sta'; uci set wireless.smartap_wds.network='lan'; uci set wireless.smartap_wds.ssid="${wds_peer_ssid:-$ssid}"; uci set wireless.smartap_wds.wds='1'; uci set wireless.smartap_wds.disabled='0'
+        set_wifi_security smartap_wds "$security" "$wifi_password"
+        ;;
+    esac
+    [ "$fake_mesh" = "1" ] && { uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'; }
+    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; then
+      uci -q get network.wan >/dev/null || uci set network.wan='interface'
+      uci set network.wan.device="$broadband_port"; uci set network.wan.proto='pppoe'; uci set network.wan.username="$pppoe_user"; [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"; uci set network.wan.disabled='0'; uci set network.wan.auto='1'
+    fi
+    [ "$dhcp_server" = "1" ] && uci delete dhcp.lan.ignore 2>/dev/null || uci set dhcp.lan.ignore='1'
+    if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
+    [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
+    if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then
+      [ -f /etc/rc.button/reset.smartap.orig ] || cp /etc/rc.button/reset /etc/rc.button/reset.smartap.orig 2>/dev/null
+      printf '%s\n' '#!/bin/sh' 'logger -t cr6608 "reset button blocked by CR6608 policy"' 'exit 0' > /etc/rc.button/reset
+      chmod +x /etc/rc.button/reset
+    elif [ "$reset_mode" = "reboot" ] && [ -f /etc/rc.button/reset ]; then
+      [ -f /etc/rc.button/reset.smartap.orig ] || cp /etc/rc.button/reset /etc/rc.button/reset.smartap.orig 2>/dev/null
+      printf '%s\n' '#!/bin/sh' 'logger -t cr6608 "reset button changed to reboot-only by CR6608 policy"' 'reboot' 'exit 0' > /etc/rc.button/reset
+      chmod +x /etc/rc.button/reset
+    elif [ "$reset_button_enabled" = "1" ] && [ -f /etc/rc.button/reset.smartap.orig ]; then
+      cp /etc/rc.button/reset.smartap.orig /etc/rc.button/reset
+      chmod +x /etc/rc.button/reset
+    fi
+    if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
+    uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
+    arm_rollback "$backup"
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+    txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
+    health="$(ubus call system board >/dev/null 2>&1 && echo OK || echo CHECK)"
+    emit true "Quick Setup" "Applied with 30s rollback" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_quick)
+    confirm_required "Quick Setup"
+    ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
+    ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"; wan_proto="$(safe_word "$(param wan_proto)")"
+    auto_channel="$(safe_num "$(param auto_channel)")"; band_steering="$(safe_num "$(param band_steering)")"; roaming="$(safe_num "$(param roaming)")"; dtim="$(safe_num "$(param dtim)")"; wmm="$(safe_num "$(param wmm)")"
+    pppoe_user="$(param pppoe_user | cut -c1-64)"; pppoe_pass="$(param pppoe_pass | cut -c1-64)"
+    static_ip="$(param static_ip)"; static_netmask="$(param static_netmask)"; static_gateway="$(param static_gateway)"; static_dns="$(param static_dns)"
+    lte_apn="$(param lte_apn | cut -c1-64)"
+    guest_enabled="$(safe_num "$(param guest_enabled)")"; guest_ssid="$(param guest_ssid | cut -c1-32)"; guest_pass="$(param guest_pass | cut -c1-64)"
+    timezone="$(param timezone | cut -c1-64)"; ntp_server="$(param ntp_server | cut -c1-96)"
+    backup="$(backup_cfg quick-setup)"
+    if [ "$auto_channel" = "1" ]; then
+      ch24="1"
+      for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c \"Channel: $c\" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
+      ch24="${bestc:-1}"; ch5="36"
+    fi
+    [ -n "$ssid24" ] && uci set wireless.wifinet0.ssid="$ssid24"
+    [ -n "$ssid5" ] && uci set wireless.wifinet1.ssid="$ssid5"
+    [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
+    [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+    if [ -n "$pass24" ]; then uci set wireless.wifinet0.encryption='sae-mixed'; uci set wireless.wifinet0.key="$pass24"; fi
+    if [ -n "$pass5" ]; then uci set wireless.wifinet1.encryption='sae-mixed'; uci set wireless.wifinet1.key="$pass5"; fi
+    for ifc in wifinet0 wifinet1; do
+      [ "$roaming" = "1" ] && { uci set wireless."$ifc".ieee80211k='1'; uci set wireless."$ifc".ieee80211v='1'; }
+      [ -n "$dtim" ] && uci set wireless."$ifc".dtim_period="$dtim"
+      [ -n "$wmm" ] && uci set wireless."$ifc".wmm="$wmm"
+      [ "$band_steering" = "1" ] && uci set wireless."$ifc".bss_transition='1'
+    done
+    case "$wan_proto" in
+      dhcp) uci set network.wan.proto='dhcp'; uci set network.wan.disabled='0'; uci set network.wan.auto='1' ;;
+      pppoe) uci set network.wan.proto='pppoe'; uci set network.wan.username="$pppoe_user"; [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"; uci set network.wan.disabled='0'; uci set network.wan.auto='1' ;;
+      static) uci set network.wan.proto='static'; [ -n "$static_ip" ] && uci set network.wan.ipaddr="$static_ip"; [ -n "$static_netmask" ] && uci set network.wan.netmask="$static_netmask"; [ -n "$static_gateway" ] && uci set network.wan.gateway="$static_gateway"; [ -n "$static_dns" ] && uci set network.wan.dns="$static_dns"; uci set network.wan.disabled='0'; uci set network.wan.auto='1' ;;
+      lte) uci -q get network.lte >/dev/null || uci set network.lte='interface'; uci set network.lte.proto='dhcp'; [ -n "$lte_apn" ] && uci set network.lte.apn="$lte_apn" ;;
+      disabled|'') uci set network.wan.disabled='1'; uci set network.wan.auto='0' ;;
+    esac
+    if [ "$guest_enabled" = "1" ]; then
+      uci -q get wireless.smartap_guest >/dev/null || uci set wireless.smartap_guest='wifi-iface'
+      uci set wireless.smartap_guest.device='radio0'; uci set wireless.smartap_guest.mode='ap'; uci set wireless.smartap_guest.network='guest'; uci set wireless.smartap_guest.ssid="${guest_ssid:-CR6608-Guest}"; uci set wireless.smartap_guest.isolate='1'; uci set wireless.smartap_guest.disabled='0'
+      if [ -n "$guest_pass" ]; then uci set wireless.smartap_guest.encryption='sae-mixed'; uci set wireless.smartap_guest.key="$guest_pass"; else uci set wireless.smartap_guest.encryption='none'; uci delete wireless.smartap_guest.key 2>/dev/null; fi
+      uci -q get network.guest >/dev/null || uci set network.guest='interface'; uci set network.guest.proto='static'; uci set network.guest.ipaddr='192.168.77.1'; uci set network.guest.netmask='255.255.255.0'
+      uci -q get dhcp.guest >/dev/null || uci set dhcp.guest='dhcp'; uci set dhcp.guest.interface='guest'; uci set dhcp.guest.start='100'; uci set dhcp.guest.limit='80'; uci set dhcp.guest.leasetime='6h'
+    fi
+    [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
+    if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
+    uci commit wireless; uci commit network; uci commit dhcp; uci commit system
+    arm_rollback "$backup"
+    wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    emit true "Quick Setup" "Applied with 30s rollback" "[]" "Backup: $backup\nA 30-second rollback timer is armed. Press Keep changes if access is stable. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  auto_optimize)
+    confirm_required "Auto optimize"
+    backup="$(backup_cfg auto-optimize)"
+    bestc=""; bestn=""
+    for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c \"Channel: $c\" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
+    uci set wireless.radio0.channel="${bestc:-1}"; uci set wireless.radio1.channel='36'
+    for ifc in wifinet0 wifinet1; do uci set wireless."$ifc".wmm='1'; uci set wireless."$ifc".dtim_period='2'; uci set wireless."$ifc".ieee80211k='1'; uci set wireless."$ifc".ieee80211v='1'; done
+    uci set wireless.radio0.legacy_rates='0'; uci set wireless.radio1.legacy_rates='0'
+    uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    emit true "Auto optimize" "Safe Wi-Fi optimization applied" "[]" "Backup: $backup\n2.4G channel=${bestc:-1}, 5G channel=36, WMM/DTIM/802.11k/v enabled where supported. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  enable_stp)
+    confirm_required "Loop Guard"
+    backup="$(backup_cfg loopguard)"
+    brsec="$(uci show network 2>/dev/null | awk -F'[.=]' '$0 ~ /=device/ && prev ~ /name=.br-lan./{print prevsec} {prev=$0; prevsec=$2}' | head -1)"
+    [ -n "$brsec" ] || brsec='@device[0]'
+    uci set network."$brsec".stp='1'; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "Loop Guard" "STP enabled" "[]" "Backup: $backup\nBridge STP is enabled on br-lan. TX Power untouched." "[]" "[]"; exit 0 ;;
+  block_mac)
+    confirm_required "Block device"
+    mac="$(safe_mac "$(param mac)")"; [ "${#mac}" = 17 ] || { emit false "Block device" "Invalid MAC" "[]" "Enter MAC as aa:bb:cc:dd:ee:ff." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg block-mac)"
+    rule="$(uci add firewall rule)"
+    uci set firewall."$rule".name="CR6608-Block-$mac"; uci set firewall."$rule".src='lan'; uci set firewall."$rule".src_mac="$mac"; uci set firewall."$rule".target='REJECT'; uci set firewall."$rule".family='ipv4'
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    emit true "Connected Devices" "MAC blocked" "[]" "Backup: $backup\nFirewall reject rule added for $mac." "[]" "[]"; exit 0 ;;
+  unblock_mac)
+    confirm_required "Unblock device"
+    mac="$(safe_mac "$(param mac)")"; backup="$(backup_cfg unblock-mac)"
+    for s in $(uci show firewall | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    emit true "Connected Devices" "MAC unblock attempted" "[]" "Backup: $backup\nMatching CR6608 block rules removed for $mac." "[]" "[]"; exit 0 ;;
+  deauth_client)
+    confirm_required "Wi-Fi Clients"
+    mac="$(safe_mac "$(param mac)")"; iface="$(safe_word "$(param iface)")"; [ -n "$iface" ] || iface='phy0-ap0'
+    out="$(ubus call hostapd."$iface" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":60}" 2>&1 | redact)"
+    emit true "Wi-Fi Clients" "Deauth command sent" "[]" "${out:-Client disconnect requested for $mac on $iface.}" "[]" "[]"; exit 0 ;;
+  firewall_reload) confirm_required "Firewall"; /etc/init.d/firewall reload >/tmp/dashctl.action 2>&1; emit true "Firewall" "Firewall reloaded" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  wifi_reload) confirm_required "Wi-Fi reload"; wifi reload >/tmp/dashctl.action 2>&1; emit true "Wi-Fi reload" "Wi-Fi reload sent" "[]" "TX Power was not modified.\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  restart_dnsmasq) confirm_required "DHCP service"; /etc/init.d/dnsmasq restart >/tmp/dashctl.action 2>&1; emit true "DHCP service" "dnsmasq restarted" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+  save_guest)
+    confirm_required "Guest Wi-Fi"
+    enabled="$(safe_num "$(param guest_enabled)")"; gssid="$(param guest_ssid | cut -c1-32)"; gpass="$(param guest_pass | cut -c1-64)"
+    backup="$(backup_cfg guest)"
+    if [ "$enabled" = "1" ]; then
+      uci -q get network.guest >/dev/null || uci set network.guest='interface'
+      uci set network.guest.proto='static'; uci set network.guest.ipaddr='192.168.77.1'; uci set network.guest.netmask='255.255.255.0'
+      uci -q get dhcp.guest >/dev/null || uci set dhcp.guest='dhcp'
+      uci set dhcp.guest.interface='guest'; uci set dhcp.guest.start='100'; uci set dhcp.guest.limit='80'; uci set dhcp.guest.leasetime='6h'
+      uci -q get wireless.smartap_guest >/dev/null || uci set wireless.smartap_guest='wifi-iface'
+      uci set wireless.smartap_guest.device='radio0'; uci set wireless.smartap_guest.mode='ap'; uci set wireless.smartap_guest.network='guest'; uci set wireless.smartap_guest.ssid="${gssid:-CR6608-Guest}"; uci set wireless.smartap_guest.isolate='1'
+      if [ -n "$gpass" ]; then uci set wireless.smartap_guest.encryption='sae-mixed'; uci set wireless.smartap_guest.key="$gpass"; else uci set wireless.smartap_guest.encryption='none'; uci delete wireless.smartap_guest.key 2>/dev/null; fi
+      if ! uci show firewall | grep -q "name='guest'"; then z="$(uci add firewall zone)"; uci set firewall."$z".name='guest'; uci set firewall."$z".network='guest'; uci set firewall."$z".input='REJECT'; uci set firewall."$z".output='ACCEPT'; uci set firewall."$z".forward='REJECT'; fi
+    else
+      uci set wireless.smartap_guest.disabled='1' 2>/dev/null
+    fi
+    uci commit network; uci commit dhcp; uci commit wireless; uci commit firewall
+    /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+    emit true "Guest Wi-Fi" "Guest settings applied" "[]" "Backup: $backup\nGuest network updated. TX Power was not changed." "[]" "[]"; exit 0 ;;
+  save_iptv)
+    confirm_required "IPTV"
+    igmp="$(safe_num "$(param igmp_snooping)")"; backup="$(backup_cfg iptv)"
+    [ "$igmp" = "1" ] && uci set network.@device[0].igmp_snooping='1' || uci delete network.@device[0].igmp_snooping 2>/dev/null
+    uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+    emit true "IPTV" "IPTV bridge setting applied" "[]" "Backup: $backup\nIGMP snooping=$igmp. Advanced VLAN/igmpproxy values are visible inside Xiaomi CR6608 panels." "[]" "[]"; exit 0 ;;
+esac
+
+case "$section" in
+  control|dashboard)
+    cards="$(cards_json <<EOF
+Dashboard|Xiaomi CR6608|Active interface|ok
+Model|${model:-unknown}|ubus system board|neutral
+Firmware|${version:-unknown}|OpenWrt release|neutral
+SPA only|Enabled|No external redirects|ok
+Raw UCI|Enabled|Whitelisted official configs|warn
+EOF
+)"
+    form="$(form_json <<EOF
+raw_config|Config file|network|Official UCI config to edit|select|0|||network:network,wireless:wireless,dhcp:dhcp,firewall:firewall,system:system,sqm:sqm,uhttpd:uhttpd,dropbear:dropbear,smartap:smartap
+raw_section|Section|lan|Named section or @type[index], e.g. lan or @device[0]
+raw_option|Option|ipaddr|Option name. txpower is blocked by policy.
+raw_value|Value||New value for set action
+raw_type|New section type|interface|Used only by Add section
+EOF
+)"
+    text="$( { echo "Official UCI configs"; ls /etc/config 2>/dev/null; echo; echo "ubus objects"; ubus list 2>/dev/null | sort; } | redact)"
+    emit true "Xiaomi CR6608 Control Panel" "Single-page Xiaomi CR6608 interface with raw OpenWrt editor" "$cards" "$text" '[{"id":"raw_uci_set","label":"UCI set option","confirm":true},{"id":"raw_uci_delete","label":"UCI delete option","confirm":true},{"id":"raw_uci_add_section","label":"UCI add section","confirm":true},{"id":"raw_uci_delete_section","label":"UCI delete section","confirm":true},{"id":"raw_uci_commit_reload","label":"Commit + reload config","confirm":true}]' "$form" ;;
+  wizard)
+    saved() { uci -q get smartap.quick."$1" 2>/dev/null; }
+    royal_mode="$(saved program_mode)"; [ -n "$royal_mode" ] || royal_mode="ap"
+    royal_ip="$(saved device_ip)"; [ -n "$royal_ip" ] || royal_ip="$(uci -q get network.lan.ipaddr)"
+    royal_vlan="$(saved vlan_id)"
+    royal_ssid="$(saved ssid)"; [ -n "$royal_ssid" ] || royal_ssid="$(uci -q get wireless.wifinet0.ssid)"
+    ch24="$(saved ch24)"; [ -n "$ch24" ] || ch24="$(uci -q get wireless.radio0.channel)"
+    ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
+    mesh_id="$(saved mesh_id)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.smartap_mesh.mesh_id 2>/dev/null)"
+    wds_peer="$(saved wds_peer_ssid)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.smartap_wds.ssid 2>/dev/null)"
+    hide_ssid="$(saved hide_ssid)"; [ -n "$hide_ssid" ] || hide_ssid="$(uci -q get wireless.wifinet0.hidden 2>/dev/null)"
+    enc="$(uci -q get wireless.wifinet0.encryption 2>/dev/null)"
+    royal_security="$(saved security)"; [ -n "$royal_security" ] || case "$enc" in none|'') royal_security="open" ;; *sae*) royal_security="wpa3" ;; *) royal_security="wpa2" ;; esac
+    wan_proto="$(uci -q get network.wan.proto 2>/dev/null)"
+    pppoe_user="$(uci -q get network.wan.username 2>/dev/null)"
+    dhcp_ignore="$(uci -q get dhcp.lan.ignore 2>/dev/null)"
+    firewall_enabled="$( /etc/init.d/firewall enabled >/dev/null 2>&1 && echo 1 || echo 0 )"
+    nat_enabled="$(uci show firewall 2>/dev/null | grep -Eq "\\.name='wan'|\\.name=wan" && uci show firewall 2>/dev/null | grep -q "\\.masq='1'\\|\\.masq=1" && echo 1 || echo 0)"
+    reset_enabled="$(saved reset_button_enabled)"; [ -n "$reset_enabled" ] || reset_enabled="1"
+    reset_mode="$(saved reset_mode)"; [ -n "$reset_mode" ] || reset_mode="factory"
+    form="$(form_json <<EOF
+program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
+device_ip|عنوان IP|${royal_ip:-192.168.1.1}|عنوان إدارة الراوتر داخل LAN|text|0|device|all|
+vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
+ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
+ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
+ch5|قناة 5G|${ch5:-36}|يفضل قناة غير DFS مثل 36/40/44/48|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
+mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID / عنوان الشبكة المتشابكة|text|0|device|mesh,mesh_vlan|
+wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
+hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور|select|0|device|wds_sender,wds_sender_vlan|0:ظاهر,1:مخفي
+security|نوع الحماية|${royal_security:-wpa2}|Open / WPA2 / WPA3 mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3 mixed
+wifi_password|كلمة مرور Wi-Fi||اتركها فارغة للاحتفاظ بالمفتاح الحالي|password|0|device|all|
+device_password|تغيير كلمة مرور الجهاز||اختياري، لا تظهر في السجلات ولا الروابط|password|0|device|all|
+delete_previous|حذف الإعدادات السابقة|0|يحذف فقط أقسام Xiaomi CR6608 السابقة، لا يعمل firstboot|select|0|device|all|0:لا,1:نعم
+pppoe_user|اسم مستخدم PAP/CHAP|${pppoe_user}|خاص بوضع البرودباند PPPoE|text|0|device|pppoe_ap|
+pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها إن وجدت|password|0|device|pppoe_ap|
+broadband_port|منفذ البرودباند|wan|غالباً wan|text|0|device|pppoe_ap|
+reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
+reset_mode|طريقة الفورمات|${reset_mode}|سياسة موثقة داخل Xiaomi CR6608|select|0|security|all|factory:Factory reset,reboot:Reboot only,disabled:Blocked
+nat_enabled|NAT|${nat_enabled:-1}|تفعيل NAT على منطقة WAN|select|0|advanced|all|1:مفعل,0:معطل
+dhcp_server|DHCP Server|$([ "$dhcp_ignore" = "1" ] && echo 0 || echo 1)|تشغيل/إيقاف DHCP للـ LAN|select|0|advanced|all|1:مفعل,0:معطل
+firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل الخدمة فقط، لا يتم تعطيلها تلقائياً إلا بطلب مؤكد|select|0|advanced|all|1:مفعل,0:معطل
+watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
+broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
+fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
+txpower_readonly|طاقة البث|30|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
+EOF
+)"
+    cards="$(cards_json <<EOF
+Rollback|30 seconds|Keep changes after apply|warn
+WPA mode|WPA2/WPA3 mixed|When password is entered|ok
+TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
+Offline|No CDN|All local assets|ok
+EOF
+)"
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply creates a backup, reloads only required services, arms rollback, and checks access. TX Power is locked at 30 and never written." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+  specs)
+    cards="$(cards_json <<EOF
+Model|${model:-unknown}|ubus system board|ok
+Target|${target:-unknown}|OpenWrt target|neutral
+Kernel|${kernel:-unknown}|Kernel version|neutral
+Uptime|${uptime_s:-0} s|ubus system info|neutral
+Load|${loadavg:-unknown}|/proc/loadavg|neutral
+EOF
+)"
+    text="$( { echo "Board"; printf '%s\n' "$board"; echo; echo "Memory"; free 2>/dev/null; echo; echo "Overlay"; df -h /overlay 2>/dev/null; } | redact)"
+    emit true "Device Info" "Live OpenWrt system data" "$cards" "$text" '[{"id":"clear_api_cache","label":"Clear API cache"}]' '[]' ;;
+  power)
+    cards="$(cards_json <<EOF
+radio0 TX Power|${tx0:-unknown} dBm|Locked read-only|warn
+radio1 TX Power|${tx1:-unknown} dBm|Locked read-only|warn
+Policy|No write|Power remains unchanged|ok
+EOF
+)"
+    form="$(form_json <<EOF
+txpower|TX Power|30|Locked by policy. This field is disabled.|text|1
+EOF
+)"
+    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Expected value: 30 dBm." '[]' "$form" ;;
+  lan|dhcp)
+    dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
+    ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"
+    dns_domainneeded="$(uci -q get dhcp.@dnsmasq[0].domainneeded)"; dns_boguspriv="$(uci -q get dhcp.@dnsmasq[0].boguspriv)"; dns_rebind="$(uci -q get dhcp.@dnsmasq[0].rebind_protection)"
+    dns_localservice="$(uci -q get dhcp.@dnsmasq[0].localservice)"; dns_filter_aaaa="$(uci -q get dhcp.@dnsmasq[0].filter_aaaa)"; dns_filter_a="$(uci -q get dhcp.@dnsmasq[0].filter_a)"
+    dns_authoritative="$(uci -q get dhcp.@dnsmasq[0].authoritative)"; dns_readethers="$(uci -q get dhcp.@dnsmasq[0].readethers)"; dns_cache="$(uci -q get dhcp.@dnsmasq[0].cachesize)"
+    dns_domain="$(uci -q get dhcp.@dnsmasq[0].domain)"; dns_local="$(uci -q get dhcp.@dnsmasq[0].local)"
+    cards="$(cards_json <<EOF
+LAN IP|${lan_ip:-unknown}|br-lan IPv4|ok
+DHCP start|${dhcp_start:-unknown}|dhcp.lan.start|neutral
+DHCP limit|${dhcp_limit:-unknown}|dhcp.lan.limit|neutral
+Lease time|${dhcp_lease:-unknown}|dhcp.lan.leasetime|neutral
+DHCP enabled|$([ "$dhcp_ignore" = "1" ] && echo no || echo yes)|dnsmasq|ok
+EOF
+)"
+    form="$(form_json <<EOF
+lan_ipaddr|LAN IPv4|${ipaddr:-192.168.1.1}|Changing this can move the router IP
+netmask|Netmask|${netmask:-255.255.255.0}|LAN mask
+start|DHCP start|${dhcp_start:-100}|Pool start, 1-254|number
+limit|DHCP limit|${dhcp_limit:-150}|Pool size, 1-250|number
+leasetime|Lease time|${dhcp_lease:-12h}|Example: 12h or 720m
+dhcp_enabled|DHCP enabled|$([ "$dhcp_ignore" = "1" ] && echo 0 || echo 1)|1 enabled, 0 disabled|number
+host_name|Static lease name|CR6608Host|Optional client name
+host_mac|Static lease MAC||aa:bb:cc:dd:ee:ff
+host_ip|Static lease IP||Example: 192.168.1.50
+dns_domain|DNS domain|${dns_domain:-lan}|dnsmasq domain
+dns_local|Local domain|${dns_local:-/lan/}|dnsmasq local zone
+dns_cachesize|DNS cache size|${dns_cache:-1000}|dnsmasq cachesize|number
+dns_domainneeded|Domain needed|${dns_domainneeded:-1}|Reject plain names upstream|select|0|||1:on,0:off
+dns_boguspriv|Bogus private reverse|${dns_boguspriv:-1}|Protect private reverse lookups|select|0|||1:on,0:off
+dns_rebind_protection|Rebind protection|${dns_rebind:-1}|Block DNS rebinding|select|0|||1:on,0:off
+dns_localservice|Local service only|${dns_localservice:-1}|Restrict service to local networks|select|0|||1:on,0:off
+dns_filter_aaaa|Filter AAAA IPv6|${dns_filter_aaaa:-1}|IPv6 filtering requested by policy|select|0|||1:on,0:off
+dns_filter_a|Filter A IPv4|${dns_filter_a:-0}|Usually off|select|0|||0:off,1:on
+dns_authoritative|Authoritative DHCP|${dns_authoritative:-1}|dnsmasq authoritative mode|select|0|||1:on,0:off
+dns_readethers|Read ethers|${dns_readethers:-1}|Read /etc/ethers|select|0|||1:on,0:off
+EOF
+)"
+    text="$( { uci -q show network.lan; uci -q show dhcp.lan; echo; echo "Static hosts"; uci -q show dhcp | grep '=host\\|.mac=\\|.ip='; } | redact)"
+    emit true "LAN / DHCP" "LAN, DHCP, DNSMasq and static host controls" "$cards" "$text" '[{"id":"save_dhcp","label":"Apply LAN/DHCP","confirm":true},{"id":"save_dnsmasq","label":"Save DNSMasq","confirm":true},{"id":"save_dhcp_static","label":"Add / update static lease","confirm":true},{"id":"delete_dhcp_static","label":"Delete static lease by MAC","confirm":true},{"id":"restart_dnsmasq","label":"Restart DHCP/DNS","confirm":true}]' "$form" ;;
+  devices)
+    text="$( { echo "DHCP leases"; cat /tmp/dhcp.leases 2>/dev/null; echo; echo "IPv4 neighbors"; ip -4 neigh show 2>/dev/null; echo; echo "ARP"; cat /proc/net/arp 2>/dev/null; } | redact)"
+    cards="$(cards_json <<EOF
+DHCP leases|$(awk 'END{print NR+0}' /tmp/dhcp.leases 2>/dev/null)|dnsmasq lease source|ok
+ARP entries|$(awk 'NR>1{c++} END{print c+0}' /proc/net/arp 2>/dev/null)|/proc/net/arp|neutral
+Firewall block|Available|MAC drop rule with backup|warn
+EOF
+)"
+    form="$(form_json <<EOF
+mac|Client MAC||aa:bb:cc:dd:ee:ff
+EOF
+)"
+    emit true "Connected Devices" "DHCP, neighbors, ARP and block/unblock" "$cards" "$text" '[{"id":"block_mac","label":"Block MAC","confirm":true},{"id":"unblock_mac","label":"Unblock MAC","confirm":true}]' "$form" ;;
+  clients)
+    ifaces="$(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}' | tr '\n' ' ')"
+    text="$( { for i in $ifaces; do echo "[$i]"; iwinfo "$i" assoclist 2>/dev/null; echo; ubus -S call hostapd."$i" get_clients 2>/dev/null; done; } | redact)"
+    form="$(form_json <<EOF
+iface|Wi-Fi iface|phy0-ap0|Example: phy0-ap0
+mac|Client MAC||aa:bb:cc:dd:ee:ff
+EOF
+)"
+    emit true "Wi-Fi Clients" "Assoclist plus hostapd deauth" "[]" "$text" '[{"id":"deauth_client","label":"Deauth client 60s","confirm":true}]' "$form" ;;
+  loopguard)
+    stp="$(uci -q get network.@device[0].stp 2>/dev/null)"
+    cards="$(cards_json <<EOF
+Bridge|br-lan|DSA bridge|ok
+STP|${stp:-0}|Loop guard setting|$([ "$stp" = "1" ] && echo ok || echo warn)
+EOF
+)"
+    text="$( { bridge link show; echo; bridge vlan show; echo; logread -l 120 | grep -Ei 'loop|bridge|storm|stp' || true; } 2>/dev/null | redact)"
+    emit true "Loop Guard" "Bridge loop visibility and STP" "$cards" "$text" '[{"id":"enable_stp","label":"Enable STP on br-lan","confirm":true}]' '[]' ;;
+  switchmgr)
+    text="$( { echo "Ports"; for p in br-lan eth0 wan lan1 lan2 lan3; do [ -d /sys/class/net/$p ] || continue; printf '%-8s oper=%s speed=%s carrier=%s rx=%s tx=%s\n' "$p" "$(cat /sys/class/net/$p/operstate 2>/dev/null)" "$(cat /sys/class/net/$p/speed 2>/dev/null)" "$(cat /sys/class/net/$p/carrier 2>/dev/null)" "$(cat /sys/class/net/$p/statistics/rx_bytes 2>/dev/null)" "$(cat /sys/class/net/$p/statistics/tx_bytes 2>/dev/null)"; done; echo; bridge vlan show; } | redact)"
+    stp="$(uci -q get network.@device[0].stp 2>/dev/null)"; igmp="$(uci -q get network.@device[0].igmp_snooping 2>/dev/null)"
+    bridge_ports="$(uci -q get network.@device[0].ports 2>/dev/null)"
+    port_opts="$(for p in wan lan1 lan2 lan3; do [ -d /sys/class/net/$p ] && printf '%s:%s,' "$p" "$p"; done | sed 's/,$//')"; [ -n "$port_opts" ] || port_opts="wan:wan,lan1:lan1,lan2:lan2,lan3:lan3"
+    form="$(form_json <<EOF
+port_name|Port|lan1|Physical DSA port|select|0|||$port_opts
+port_enabled|Runtime state|1|Bring the port up or down at runtime|select|0|||1:up,0:down
+bridge_ports|Bridge ports|${bridge_ports:-lan1 lan2 lan3 wan}|Official DSA bridge ports list
+bridge_stp|Bridge STP|${stp:-0}|Loop guard on br-lan bridge|select|0|||0:off,1:on
+bridge_igmp|IGMP snooping|${igmp:-0}|Useful for IPTV multicast|select|0|||0:off,1:on
+vlan_device|Bridge VLAN device|br-lan|Usually br-lan
+vlan_id|VLAN ID|10|1-4094|number
+vlan_ports|VLAN ports|lan1:u* lan2:t|Official DSA syntax: lan1:u* lan2:t wan:t
+EOF
+)"
+    emit true "Switch / Ports" "DSA port map, bridge ports and VLAN controls" "[]" "$text" '[{"id":"set_port_state","label":"Set port state","confirm":true},{"id":"save_bridge_options","label":"Save bridge options","confirm":true},{"id":"save_dsa_vlan","label":"Save DSA VLAN","confirm":true},{"id":"delete_dsa_vlan","label":"Delete DSA VLAN","confirm":true}]' "$form" ;;
+  optimizer)
+    text="$( { echo "iwinfo"; iwinfo; echo; echo "iw dev"; iw dev; echo; echo "Recommendations"; echo "- Keep 2.4G on 1/6/11; current $(uci -q get wireless.radio0.channel)"; echo "- Keep 5G on non-DFS if stability is preferred; current $(uci -q get wireless.radio1.channel)"; echo "- WMM/DTIM/legacy rates"; uci -q show wireless | sed '/\\.key=/d' | grep -E 'wmm|dtim|legacy|htmode|channel|txpower'; } 2>/dev/null | redact)"
+    cards="$(cards_json <<EOF
+TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|iwinfo|ok
+5G|$(uci -q get wireless.radio1.htmode) ch $(uci -q get wireless.radio1.channel)|iwinfo|ok
+EOF
+)"
+    emit true "Wi-Fi Performance Diagnostics" "Read-only recommendations plus safe reload" "$cards" "$text" '[{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' '[]' ;;
+  wireless)
+    wifi_opts="$(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface/{printf "%s:%s,", $2,$2}' | sed 's/,$//')"; [ -n "$wifi_opts" ] || wifi_opts="wifinet0:wifinet0,wifinet1:wifinet1"
+    wifi_if="$(printf '%s' "$wifi_opts" | cut -d: -f1 | cut -d, -f1)"; [ -n "$wifi_if" ] || wifi_if="wifinet0"
+    radio="$(uci -q get wireless."$wifi_if".device 2>/dev/null)"; [ -n "$radio" ] || radio="radio0"
+    ssid="$(uci -q get wireless."$wifi_if".ssid 2>/dev/null)"
+    network_name="$(uci -q get wireless."$wifi_if".network 2>/dev/null)"
+    mode="$(uci -q get wireless."$wifi_if".mode 2>/dev/null)"
+    enc="$(uci -q get wireless."$wifi_if".encryption 2>/dev/null)"
+    disabled="$(uci -q get wireless."$wifi_if".disabled 2>/dev/null)"
+    hidden="$(uci -q get wireless."$wifi_if".hidden 2>/dev/null)"
+    isolate="$(uci -q get wireless."$wifi_if".isolate 2>/dev/null)"
+    wmm="$(uci -q get wireless."$wifi_if".wmm 2>/dev/null)"
+    dtim="$(uci -q get wireless."$wifi_if".dtim_period 2>/dev/null)"
+    channel="$(uci -q get wireless."$radio".channel 2>/dev/null)"
+    htmode="$(uci -q get wireless."$radio".htmode 2>/dev/null)"
+    country="$(uci -q get wireless."$radio".country 2>/dev/null)"
+    legacy="$(uci -q get wireless."$radio".legacy_rates 2>/dev/null)"
+    cell="$(uci -q get wireless."$radio".cell_density 2>/dev/null)"
+    distance="$(uci -q get wireless."$radio".distance 2>/dev/null)"
+    su_bfer="$(uci -q get wireless."$radio".he_su_beamformer 2>/dev/null)"
+    su_bfee="$(uci -q get wireless."$radio".he_su_beamformee 2>/dev/null)"
+    mu_bfer="$(uci -q get wireless."$radio".he_mu_beamformer 2>/dev/null)"
+    radio_disabled="$(uci -q get wireless."$radio".disabled 2>/dev/null)"
+    form="$(form_json <<EOF
+wifi_if|Wi-Fi section|${wifi_if:-wifinet0}|Existing section name or new wifi-iface id|select|0|||$wifi_opts
+wifi_radio|Radio|${radio:-radio0}|radio0 2.4G / radio1 5G|select|0|||radio0:2.4G radio0,radio1:5G radio1
+wifi_mode|Mode|${mode:-ap}|AP / STA / Mesh|select|0|||ap:Access Point,sta:Client STA,mesh:Mesh
+wifi_network|Network|${network_name:-lan}|Attached OpenWrt network
+wifi_ssid|SSID|${ssid:-Smart-AP}|Wireless name
+wifi_encryption|Security|${enc:-none}|none / WPA2 / WPA3 mixed|select|0|||none:Open,psk2:WPA2,sae-mixed:WPA3 mixed
+wifi_key|Wi-Fi key||Leave blank to keep the current key|password
+wifi_channel|Channel|${channel:-1}|Channel for selected radio|number
+wifi_htmode|HT mode|${htmode:-HE20}|HT20/HT40/VHT80/HE80
+wifi_disabled|Disabled|${disabled:-0}|1 disabled, 0 enabled|select|0|||0:Enabled,1:Disabled
+wifi_hidden|Hidden SSID|${hidden:-0}|1 hidden, 0 visible|select|0|||0:Visible,1:Hidden
+wifi_isolate|Client isolation|${isolate:-0}|1 isolates wireless clients|select|0|||0:Off,1:On
+wifi_wmm|WMM|${wmm:-1}|Recommended on|select|0|||1:On,0:Off
+wifi_dtim|DTIM|${dtim:-2}|Recommended 2|number
+radio_channel|Radio channel|${channel:-1}|Official radio channel|number
+radio_htmode|Radio HT mode|${htmode:-HE20}|HT20/HT40/VHT80/HE80
+radio_country|Country|${country:-US}|Regulatory country code
+radio_disabled|Radio disabled|${radio_disabled:-0}|1 disabled, 0 enabled|select|0|||0:Enabled,1:Disabled
+radio_legacy|Legacy rates|${legacy:-0}|0 recommended for modern clients|select|0|||0:Off,1:On
+radio_cell_density|Cell density|${cell:-0}|OpenWrt radio cell density|number
+radio_distance|Distance|${distance:-0}|Distance/ACK timing if supported|number
+radio_he_su_beamformer|HE SU beamformer|${su_bfer:-1}|If supported by driver|select|0|||1:On,0:Off
+radio_he_su_beamformee|HE SU beamformee|${su_bfee:-1}|If supported by driver|select|0|||1:On,0:Off
+radio_he_mu_beamformer|HE MU beamformer|${mu_bfer:-1}|If supported by driver|select|0|||1:On,0:Off
+EOF
+)"
+    text="$(uci -q show wireless 2>/dev/null | sed '/\\.key=/d' | redact)"
+    cards="$(cards_json <<EOF
+TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+Selected|$wifi_if|wifi-iface section|ok
+2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|radio0|neutral
+5G|$(uci -q get wireless.radio1.htmode) ch $(uci -q get wireless.radio1.channel)|radio1|neutral
+EOF
+)"
+    emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
+  analyzer|channel_analysis)
+    text="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
+      echo "SCAN $i"
+      if command -v timeout >/dev/null 2>&1; then scan_out="$(timeout 6 iwinfo "$i" scan 2>/dev/null)"; else scan_out="$(iwinfo "$i" info 2>/dev/null; iwinfo "$i" freqlist 2>/dev/null | head -n 40)"; fi
+      printf '%s\n' "$scan_out" | awk '
+        /Address:|ESSID:|Channel:|Signal:|Encryption:/ {
+          gsub(/^[ \t]+/,""); print
+        }
+      ' | head -n 80
+      echo
+    done; } | redact)"
+    emit true "Wi-Fi Analyzer" "Bounded scan; no long blocking requests" "[]" "$text" '[{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' '[]' ;;
+  nettools|diagnostics)
+    dns="$(cat /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto /etc/resolv.conf 2>/dev/null | awk '/nameserver/{print $2}' | head -n 3 | tr '\n' ' ')"
+    cards="$(cards_json <<EOF
+LAN IP|${lan_ip:-unknown}|br-lan|ok
+Default route|${default_route:-none}|IPv4|neutral
+DNS|${dns:-unknown}|Resolver list|neutral
+EOF
+)"
+    emit true "Network Tools" "Ping, traceroute and DNS from router" "$cards" "Enter a host and run a diagnostic." '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]' ;;
+  netcfg)
+    gssid="$(uci -q get wireless.smartap_guest.ssid 2>/dev/null)"; gdis="$(uci -q get wireless.smartap_guest.disabled 2>/dev/null)"
+    sched="$(crontab -l 2>/dev/null | grep 'CR6608 scheduled reboot' | tail -n1)"
+    sched_min="$(printf '%s' "$sched" | awk '{print $1}')"; sched_hour="$(printf '%s' "$sched" | awk '{print $2}')"
+    form="$(form_json <<EOF
+guest_enabled|Guest enabled|$([ "$gdis" = "1" ] && echo 0 || echo 1)|1 enabled, 0 disabled|number
+guest_ssid|Guest SSID|${gssid:-Smart-AP-Guest}|Guest Wi-Fi name
+guest_pass|Guest password||Blank keeps/open; 8+ recommended
+reboot_sched_enabled|Scheduled reboot|$([ -n "$sched" ] && echo 1 || echo 0)|Enable daily scheduled reboot|select|0|||0:off,1:on
+reboot_hour|Reboot hour|${sched_hour:-4}|0-23|number
+reboot_minute|Reboot minute|${sched_min:-0}|0-59|number
+EOF
+)"
+    text="$( { echo "Crontab"; crontab -l 2>/dev/null; echo; echo "Guest config"; uci -q show wireless.smartap_guest 2>/dev/null | sed '/\\.key=/d'; uci -q show network.guest 2>/dev/null; uci -q show dhcp.guest 2>/dev/null; } | redact)"
+    emit true "Reboot Schedule & Guest" "Cron view, scheduled reboot and guest Wi-Fi builder" "[]" "$text" '[{"id":"save_guest","label":"Apply Guest Wi-Fi","confirm":true},{"id":"save_reboot_schedule","label":"Save reboot schedule","confirm":true}]' "$form" ;;
+  speed)
+    cards="$(cards_json <<EOF
+Local speed|Browser/API test|Use dashboard action|neutral
+External speed|Disabled|Offline, no CDN|ok
+EOF
+)"
+    emit true "Speed Test" "Offline-safe local test" "$cards" "Use the main Speed Test action; it reads the local API repeatedly and calculates latency/jitter/throughput." '[{"id":"clear_api_cache","label":"Clear API cache"}]' '[]' ;;
+  iptv|sqm)
+    igmp="$(uci -q get network.@device[0].igmp_snooping 2>/dev/null)"
+    sqm_enabled="$(uci -q get sqm.smartap.enabled 2>/dev/null)"; sqm_iface="$(uci -q get sqm.smartap.interface 2>/dev/null)"; sqm_down="$(uci -q get sqm.smartap.download 2>/dev/null)"; sqm_up="$(uci -q get sqm.smartap.upload 2>/dev/null)"
+    sqm_qdisc="$(uci -q get sqm.smartap.qdisc 2>/dev/null)"; sqm_script="$(uci -q get sqm.smartap.script 2>/dev/null)"
+    form="$(form_json <<EOF
+igmp_snooping|IGMP snooping|${igmp:-0}|1 enabled, 0 disabled|number
+sqm_enabled|SQM enabled|${sqm_enabled:-0}|Enable Xiaomi CR6608 SQM queue|select|0|||0:off,1:on
+sqm_interface|SQM interface|${sqm_iface:-wan}|Interface name, e.g. wan or br-lan
+sqm_download|Download kbit/s|${sqm_down:-0}|0 means unset|number
+sqm_upload|Upload kbit/s|${sqm_up:-0}|0 means unset|number
+sqm_qdisc|Queue discipline|${sqm_qdisc:-cake}|cake/fq_codel
+sqm_script|SQM script|${sqm_script:-piece_of_cake.qos}|piece_of_cake.qos / simple.qos
+EOF
+)"
+    text="$( { echo "Network bridge"; uci -q show network.@device[0]; echo; echo "igmpproxy"; uci -q show igmpproxy 2>/dev/null; echo; echo "sqm"; uci -q show sqm 2>/dev/null; } | redact)"
+    emit true "IPTV / SQM" "IGMP/SQM visibility with safe controls" "[]" "$text" '[{"id":"save_iptv","label":"Apply IGMP snooping","confirm":true},{"id":"save_sqm","label":"Save SQM queue","confirm":true}]' "$form" ;;
+  neighbors)
+    text="$( { echo "Bridge FDB"; bridge fdb show; echo; echo "Bridge links"; bridge link show; echo; echo "IPv4 neighbors"; ip -4 neigh show; } 2>/dev/null | redact)"
+    emit true "Bridge Neighbors" "bridge fdb/link and IPv4 neighbors" "[]" "$text" '[]' '[]' ;;
+  overview|realtime|logs|processes|routes|nftables|firewall|system|admin|package-manager|startup|crontab|leds|flash|reboot|interfaces)
+    form='[]'; actions='[]'; cards='[]'
+    case "$section" in
+      overview)
+        cards="$(cards_json <<EOF
+Model|${model:-unknown}|ubus system board|ok
+Firmware|${version:-unknown}|OpenWrt release|neutral
+LAN IP|${lan_ip:-unknown}|br-lan|ok
+Default route|${default_route:-none}|IPv4|neutral
+TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+EOF
+)"
+        text="$( { echo "System board"; printf '%s\n' "$board"; echo; echo "Network interfaces"; ubus call network.interface dump 2>/dev/null; echo; echo "Wireless status"; iwinfo 2>/dev/null; } | redact)"
+        ;;
+      realtime)
+        cards="$(cards_json <<EOF
+Load|${loadavg:-unknown}|/proc/loadavg|neutral
+Memory|$(free 2>/dev/null | awk '/Mem:/{print $3"/"$2}')|free|neutral
+Overlay|$(df -h /overlay 2>/dev/null | awk 'NR==2{print $5" used"}')|df -h /overlay|neutral
+EOF
+)"
+        text="$( { echo "/proc/net/dev"; cat /proc/net/dev; echo; echo "Processes"; ps w | head -n 35; } 2>/dev/null | redact)"
+        ;;
+      logs) text="$(logread -l 140 2>/dev/null | redact)" ;;
+      processes)
+        text="$(ps w 2>/dev/null | redact)"
+        form="$(form_json <<EOF
+process_pid|PID||Process id to signal|number
+process_signal|Signal|15|15 terminate, 9 kill|select|0|||15:TERM,9:KILL,1:HUP
+EOF
+)"
+        actions='[{"id":"kill_process","label":"Send signal to process","confirm":true}]'
+        ;;
+      routes)
+        text="$( { ip -4 route show table all 2>/dev/null; echo; uci -q show network | grep '=route\\|.target=\\|.gateway=\\|.interface='; } | redact)"
+        form="$(form_json <<EOF
+route_interface|Interface|lan|Example: lan or wan
+route_target|Target|192.168.2.0|IPv4 network
+route_netmask|Netmask|255.255.255.0|Route netmask
+route_gateway|Gateway||IPv4 gateway
+EOF
+)"
+        actions='[{"id":"add_route","label":"Add static route","confirm":true}]'
+        ;;
+      nftables|firewall)
+        text="$( { uci -q show firewall; echo; nft list ruleset 2>/dev/null | head -n 220; } | redact)"
+        fw_in="$(uci -q get firewall.@defaults[0].input)"; fw_out="$(uci -q get firewall.@defaults[0].output)"; fw_fwd="$(uci -q get firewall.@defaults[0].forward)"
+        fw_syn="$(uci -q get firewall.@defaults[0].syn_flood)"; fw_flow="$(uci -q get firewall.@defaults[0].flow_offloading)"; fw_flowhw="$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+        form="$(form_json <<EOF
+fw_input|Default input|${fw_in:-REJECT}|Firewall default input|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+fw_output|Default output|${fw_out:-ACCEPT}|Firewall default output|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+fw_forward|Default forward|${fw_fwd:-REJECT}|Firewall default forward|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+fw_syn_flood|SYN flood protection|${fw_syn:-1}|Enable SYN flood guard|select|0|||1:on,0:off
+fw_flow_offloading|Software flow offload|${fw_flow:-1}|IPv4 flow offload|select|0|||1:on,0:off
+fw_flow_offloading_hw|Hardware flow offload|${fw_flowhw:-0}|Enable only if stable on target|select|0|||0:off,1:on
+rule_name|Rule name|CR6608-Rule|Name shown in firewall
+rule_src|Source zone|lan|Example: lan
+rule_dest|Destination zone|wan|Example: wan
+rule_proto|Protocol|tcp|tcp / udp / icmp / all
+rule_dport|Destination port||Optional port
+rule_target|Target|ACCEPT|ACCEPT / REJECT / DROP
+zone_name|Zone name|guest|Firewall zone to create or update
+zone_networks|Zone networks|guest|Space-separated network names
+zone_input|Zone input|REJECT|Input policy|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+zone_output|Zone output|ACCEPT|Output policy|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+zone_forward|Zone forward|REJECT|Forward policy|select|0|||ACCEPT:ACCEPT,REJECT:REJECT,DROP:DROP
+zone_masq|Zone NAT masq|0|Enable masquerading on this zone|select|0|||0:off,1:on
+fwd_src|Forward from|lan|Source zone
+fwd_dest|Forward to|wan|Destination zone
+EOF
+)"
+        actions='[{"id":"save_firewall_defaults","label":"Save firewall defaults","confirm":true},{"id":"add_firewall_rule","label":"Add firewall rule","confirm":true},{"id":"delete_firewall_rule_by_name","label":"Delete rule by name","confirm":true},{"id":"save_firewall_zone","label":"Save firewall zone","confirm":true},{"id":"add_forwarding","label":"Add zone forwarding","confirm":true},{"id":"firewall_reload","label":"Reload firewall","confirm":true}]'
+        ;;
+      system)
+        h="$(uci -q get system.@system[0].hostname 2>/dev/null)"; z="$(uci -q get system.@system[0].timezone 2>/dev/null)"
+        text="$( { printf '%s\n' "$board"; echo; printf '%s\n' "$info"; } | redact)"
+        form="$(form_json <<EOF
+hostname|Hostname|${h:-OpenWrt}|Router hostname
+timezone|Timezone|${z:-UTC}|Timezone string
+EOF
+)"
+        actions='[{"id":"save_system","label":"Save system values","confirm":true}]'
+        ;;
+      admin)
+        text="$( { /etc/init.d/uhttpd status 2>/dev/null; /etc/init.d/dropbear status 2>/dev/null; echo; passwd -S root 2>/dev/null; } | redact)"
+        ssh_port="$(uci -q get dropbear.@dropbear[0].Port 2>/dev/null)"; http_port="$(uci -q get uhttpd.main.listen_http 2>/dev/null | head -n1 | sed 's/.*://')"; /etc/init.d/dropbear enabled >/dev/null 2>&1 && ssh_en=1 || ssh_en=0
+        form="$(form_json <<EOF
+admin_password|New root password||8+ characters; never printed in logs|password
+ssh_enabled|SSH enabled|${ssh_en:-1}|dropbear service enable state|select|0|||1:on,0:off
+ssh_port|SSH port|${ssh_port:-22}|dropbear port|number
+http_port|HTTP port|${http_port:-80}|uhttpd listen_http port|number
+EOF
+)"
+        actions='[{"id":"set_admin_password","label":"Set root password","confirm":true},{"id":"save_admin_access","label":"Save access services","confirm":true}]'
+        ;;
+      package-manager)
+        text="$(opkg list-installed 2>/dev/null | head -n 180 | redact)"
+        form="$(form_json <<EOF
+package_name|Package name||Example: luci-app-sqm
+EOF
+)"
+        actions='[{"id":"opkg_update","label":"opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
+        ;;
+      startup)
+        text="$(for s in /etc/init.d/*; do [ -x "$s" ] || continue; b="$(basename "$s")"; "$s" enabled >/dev/null 2>&1 && e=enabled || e=disabled; printf '%-28s %s\n' "$b" "$e"; done | redact)"
+        form="$(form_json <<EOF
+service_name|Service name|dnsmasq|Example: dnsmasq, firewall, network
+EOF
+)"
+        actions='[{"id":"service_enable","label":"Enable service","confirm":true},{"id":"service_disable","label":"Disable service","confirm":true},{"id":"service_restart","label":"Restart service","confirm":true}]'
+        ;;
+      crontab)
+        text="$(crontab -l 2>/dev/null | redact)"
+        form="$(form_json <<EOF
+cron_line|Cron line||Example: 0 4 * * * /sbin/reboot
+EOF
+)"
+        actions='[{"id":"add_cron","label":"Add cron line","confirm":true}]'
+        ;;
+      leds)
+        text="$(for l in /sys/class/leds/*; do [ -d "$l" ] || continue; printf '%s trigger=' "$(basename "$l")"; cat "$l/trigger" 2>/dev/null; done | redact)"
+        led_opts="$(for l in /sys/class/leds/*; do [ -d "$l" ] || continue; b="$(basename "$l")"; printf '%s:%s,' "$b" "$b"; done | sed 's/,$//')"; [ -n "$led_opts" ] || led_opts="status:status"
+        form="$(form_json <<EOF
+led_name|LED|status|Runtime LED under /sys/class/leds|select|0|||$led_opts
+led_trigger|Trigger|none|Example: none, timer, default-on
+led_brightness|Brightness|1|0 or 1 usually|number
+EOF
+)"
+        actions='[{"id":"set_led","label":"Set LED runtime","confirm":true}]'
+        ;;
+      flash)
+        text="$( { ls -lh /root/dashboard-backups 2>/dev/null; echo; df -h /overlay 2>/dev/null; } | redact)"
+        actions='[{"id":"create_config_backup","label":"Create config backup","confirm":true}]'
+        ;;
+      reboot)
+        text="Reboot is available inside Xiaomi CR6608 with double confirmation. TX Power is not modified."
+        actions='[{"id":"system_reboot","label":"Reboot router now","confirm":true}]'
+        ;;
+      interfaces)
+        text="$( { ubus call network.interface dump 2>/dev/null; echo; uci -q show network | grep '=interface\\|.proto=\\|.device=\\|.ipaddr=\\|.netmask='; } | redact)"
+        if_proto_cur="$(uci -q get network.lan.proto 2>/dev/null)"; if_dev_cur="$(uci -q get network.lan.device 2>/dev/null)"; if_ip_cur="$(uci -q get network.lan.ipaddr 2>/dev/null)"; if_mask_cur="$(uci -q get network.lan.netmask 2>/dev/null)"
+        dev_opts="$(for d in br-lan wan lan1 lan2 lan3 eth0 lo; do [ -d /sys/class/net/$d ] && printf '%s:%s,' "$d" "$d"; done | sed 's/,$//')"; [ -n "$dev_opts" ] || dev_opts="br-lan:br-lan,wan:wan"
+        form="$(form_json <<EOF
+if_name|Interface name|lan|Existing name or new interface id
+if_proto|Protocol|${if_proto_cur:-static}|OpenWrt protocol|select|0|||static:Static address,dhcp:DHCP client,pppoe:PPPoE,none:Unmanaged
+if_device|Device|${if_dev_cur:-br-lan}|Linux device / bridge / VLAN|select|0|||$dev_opts
+if_ipaddr|IPv4 address|${if_ip_cur:-192.168.1.1}|Static only
+if_netmask|Netmask|${if_mask_cur:-255.255.255.0}|Static only
+if_gateway|Gateway||Optional
+if_dns|DNS||Optional
+if_auto|Auto start|1|Start interface automatically|select|0|||1:on,0:off
+if_username|PPPoE username||Only used when protocol is pppoe
+if_password|PPPoE password||Leave blank to keep current password|password
+EOF
+)"
+        actions='[{"id":"save_interface","label":"Save interface","confirm":true},{"id":"delete_interface","label":"Delete interface","confirm":true}]'
+        ;;
+    esac
+    emit true "$section" "" "${cards:-[]}" "$text" "$actions" "$form" ;;
+  logout)
+    emit true "Log out" "End local dashboard session" "[]" "Use the button below to clear the browser session." '[{"id":"logout","label":"Log out"}]' '[]' ;;
+  *)
+    url="$(luci_url "$section")"
+    emit true "$section" "" "[]" "This section is handled inside the Xiaomi CR6608 page." '[]' '[]' ;;
+esac

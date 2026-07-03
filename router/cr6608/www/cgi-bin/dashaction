@@ -1,0 +1,61 @@
+#!/bin/sh
+param() {
+  printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+json_msg() {
+  msg="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' ')"
+  printf '{"ok":%s,"message":"%s"}\n' "$1" "$msg"
+}
+
+sid="$(param sid | sed 's/[^A-Fa-f0-9]//g')"
+case "$sid" in
+  00000000000000000000000000000000|'') deny_auth ;;
+esac
+[ "${#sid}" = 32 ] 2>/dev/null || deny_auth
+access="$(ubus call session access "{\"ubus_rpc_session\":\"$sid\",\"scope\":\"ubus\",\"object\":\"system\",\"function\":\"board\"}" 2>/dev/null)"
+printf '%s' "$access" | grep -q '"access"[[:space:]]*:[[:space:]]*true' || deny_auth
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf '\r\n'
+
+action="$(param action)"
+confirm="$(param confirm)"
+
+case "$action" in
+  refresh)
+    json_msg true "تم تحديث البيانات من الواجهة."
+    ;;
+  speedtest)
+    json_msg true "اختبار السرعة الخارجي غير مفعل لأن اللوحة تعمل offline؛ استخدم الاختبار المحلي داخل الواجهة."
+    ;;
+  reconnect)
+    if ubus list 2>/dev/null | grep -Eiq 'modem|lte|qmi|gsm|wwan'; then
+      json_msg false "تم العثور على كائن LTE، لكن إعادة الاتصال محمية ولم تنفذ تلقائياً لتجنب فقدان الوصول."
+    else
+      json_msg false "لا توجد واجهة LTE/WAN واضحة في ubus، لذلك لم يتم تنفيذ إعادة اتصال عشوائية."
+    fi
+    ;;
+  wifi_toggle)
+    json_msg false "تبديل WiFi محمي حالياً حتى لا ينقطع الوصول. لم يتم تعديل wireless أو TX Power."
+    ;;
+  reboot)
+    if [ "$confirm" = "1" ]; then
+      (sleep 2; reboot) >/dev/null 2>&1 &
+      json_msg true "تم إرسال أمر إعادة التشغيل. سيعود الراوتر بعد قليل."
+    else
+      json_msg false "إعادة التشغيل تحتاج تأكيداً."
+    fi
+    ;;
+  *)
+    json_msg false "إجراء غير معروف."
+    ;;
+esac

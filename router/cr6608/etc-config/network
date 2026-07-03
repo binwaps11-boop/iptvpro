@@ -1,0 +1,48 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option packet_steering '1'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+	list ports 'lan2'
+	list ports 'lan3'
+	list ports 'wan'
+	option stp '1'
+	option igmp_snooping '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.1'
+	option netmask '255.255.255.0'
+	option delegate '0'
+
+config interface 'wan'
+	option device 'wan'
+	option proto 'dhcp'
+	option ipv6 '0'
+	option disabled '1'
+	option auto '0'
+
+config interface 'mgmt'
+	option device '@lan'
+	option proto 'dhcp'
+	option hostname 'CR6608-Smart-AP'
+	option metric '10'
+	option auto '0'
+	option disabled '1'
+
+config interface 'recovery'
+	option device '@lan'
+	option proto 'static'
+	option ipaddr '192.168.66.1'
+	option netmask '255.255.255.0'
+
