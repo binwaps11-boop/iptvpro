@@ -1,0 +1,17 @@
+#!/bin/sh
+# Spread the 2.4G channel across identical units (1 / 6 / 11, derived from the MAC),
+# so several CR6608 units installed in the SAME venue don't all boot on channel 6 and
+# fight each other. Runs once at first boot; any channel the operator later sets in
+# Quick Settings overrides this and persists.
+mac="$(cat /sys/class/net/eth0/address 2>/dev/null || cat /sys/class/net/br-lan/address 2>/dev/null)"
+[ -n "$mac" ] || exit 0
+last="$(printf '%s' "$mac" | tr -d ':' | tail -c 2)"
+case "$(( 0x$last % 3 ))" in
+	0) ch=1 ;;
+	1) ch=6 ;;
+	2) ch=11 ;;
+	*) exit 0 ;;
+esac
+uci -q set wireless.radio0.channel="$ch"
+uci -q commit wireless
+exit 0
