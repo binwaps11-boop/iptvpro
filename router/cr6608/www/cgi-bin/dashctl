@@ -1120,7 +1120,7 @@ EOF
 )"
     emit true "Switch / Ports" "DSA port map, bridge ports and VLAN controls" "[]" "$text" '[{"id":"set_port_state","label":"Set port state","confirm":true},{"id":"save_bridge_options","label":"Save bridge options","confirm":true},{"id":"save_dsa_vlan","label":"Save DSA VLAN","confirm":true},{"id":"delete_dsa_vlan","label":"Delete DSA VLAN","confirm":true}]' "$form" ;;
   optimizer)
-    text="توصيات الأداء: 2.4G على 1/6/11، و5G على قناة غير DFS مثل 149 لأعلى ثبات وسرعة."
+    text="توصيات الأداء: 2.4G على 1/6/11، و5G على قناة غير DFS مثل 36 (الافتراضي) أو 149 لأعلى ثبات وسرعة."
     cards="$(cards_json <<EOF
 TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
 2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|iwinfo|ok
