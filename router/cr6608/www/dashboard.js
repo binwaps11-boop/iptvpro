@@ -44,10 +44,10 @@
       vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
-      quickNote: "اختر الوضع وعبّئ الحقول ثم اضغط حفظ وتطبيق. كل تطبيق ينشئ نسخة احتياطية ويفعّل إرجاعاً تلقائياً خلال 60 ثانية. تُطبَّق كل الحقول من التبويبات الثلاثة معاً.",
+      quickNote: "اختر الوضع وعبّئ الحقول ثم اضغط حفظ وتطبيق. التطبيق يحفظ فوراً وبشكل نهائي (Apply & Keep) مع نسخة احتياطية وزر إرجاع يدوي. تُطبَّق كل الحقول من التبويبات الثلاثة معاً.",
       isolationHint: "حمايات وتحكم بالمنافذ — كل خيار مشروح تحته.",
       isolationTitle: "الحماية والمنافذ — دليل مبسّط",
-      isolationNote: "٣ أقسام: (١) الحمايات العامة — دروع تشتغل تلقائياً، خلّها مفعّلة. (٢) عزل الواي فاي — تخلي أجهزة الشبكة ما تشوف بعض (أأمن). (٣) منافذ الكيبل — تشغّل/تطفّي كل منفذ وتعزله أو تحط له VLAN. تحت كل خيار جملة تشرح وش يصير لو غيّرته. أي تعديل يُحفظ تلقائياً مع إرجاع خلال ٦٠ ثانية لو انقطع وصولك.",
+      isolationNote: "٣ أقسام: (١) الحمايات العامة — دروع تشتغل تلقائياً، خلّها مفعّلة. (٢) عزل الواي فاي — تخلي أجهزة الشبكة ما تشوف بعض (أأمن). (٣) منافذ الكيبل — تشغّل/تطفّي كل منفذ وتعزله أو تحط له VLAN. تحت كل خيار جملة تشرح وش يصير لو غيّرته. أي تعديل يُطبَّق ويُحفظ فوراً (Apply & Keep)، مع نسخة احتياطية وزر إرجاع يدوي.",
       subtitle: "لوحة OpenWrt محلية: بيانات حية، أصول داخلية، بدون CDN.",
       uptime: "مدة التشغيل", model: "الموديل", firmware: "النظام", internet: "الإنترنت",
       deviceCount: "الأجهزة", updated: "آخر تحديث", traffic: "الترافيك", cpu: "المعالج",
@@ -81,10 +81,10 @@
       vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
-      quickNote: "Pick a mode, fill the fields, then Save & Apply. Each apply makes a backup and arms a 60s auto-rollback. All fields from the three tabs are applied together.",
+      quickNote: "Pick a mode, fill the fields, then Save & Apply. Each apply saves immediately and permanently (Apply & Keep) with a backup and a manual rollback button. All fields from the three tabs are applied together.",
       isolationHint: "Protections & port control — each option explained below it.",
       isolationTitle: "Protection & Ports — simple guide",
-      isolationNote: "3 parts: (1) General protections — shields that run automatically, keep them on. (2) Wi-Fi isolation — makes devices unable to see each other (safer). (3) LAN ports — turn each port on/off, isolate it, or assign a VLAN. Each option has a line explaining what happens if you change it. Every change auto-saves with a 60s rollback if you lose access.",
+      isolationNote: "3 parts: (1) General protections — shields that run automatically, keep them on. (2) Wi-Fi isolation — makes devices unable to see each other (safer). (3) LAN ports — turn each port on/off, isolate it, or assign a VLAN. Each option has a line explaining what happens if you change it. Every change applies and saves immediately (Apply & Keep), with a backup and manual rollback.",
       subtitle: "Local OpenWrt dashboard: live data, offline assets, no CDN.",
       uptime: "Uptime", model: "Model", firmware: "Firmware", internet: "Internet",
       deviceCount: "Devices", updated: "Updated", traffic: "Traffic", cpu: "CPU",
@@ -678,7 +678,7 @@
       '<button class="wizard-tab" data-wizard-tab="security">2. إعدادات الحماية</button>' +
       '<button class="wizard-tab" data-wizard-tab="advanced">3. إعدادات متقدمة</button>' +
       '</div>' +
-      '<p class="mode-hint">كل تطبيق ينشئ نسخة احتياطية، يطلب تأكيداً، يفعّل rollback تلقائياً، ولا يكتب قيمة TX Power أبداً.</p>' +
+      '<p class="mode-hint">كل تطبيق يُحفظ فوراً (Apply & Keep) مع نسخة احتياطية وتأكيد قبل التنفيذ، ولا يخفض قيمة TX Power أبداً.</p>' +
       '<section class="royal-pane" data-wizard-pane="device"><div class="royal-grid wizard-fields">' + group("device") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="security" hidden><div class="royal-grid wizard-fields">' + group("security") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="advanced" hidden><div class="royal-grid wizard-fields">' + group("advanced") + '</div></section>' +

@@ -68,23 +68,14 @@ backup_cfg() {
   tar -czf "/root/dashboard-backups/smartap-${tag}-${ts}.tar.gz" /etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/smartap /etc/crontabs/root /etc/passwd /etc/shadow /etc/rc.button/reset 2>/dev/null
   printf '/root/dashboard-backups/smartap-%s-%s.tar.gz' "$tag" "$ts"
 }
+# APPLY & KEEP: settings are applied and saved immediately — there is NO auto-revert
+# timer. The backup path is only recorded so the manual "Rollback now" button
+# (rollback_last) can restore the previous state on demand.
 arm_rollback() {
   backup="$1"
   [ -n "$backup" ] || return 0
   printf '%s\n' "$backup" > /tmp/smartap-rollback-backup
-  touch /tmp/smartap-rollback-armed
-  (
-    sleep 60
-    if [ -f /tmp/smartap-rollback-armed ] && [ -r "$backup" ]; then
-      tar -xzf "$backup" -C / 2>/dev/null
-      /etc/init.d/dnsmasq restart >/dev/null 2>&1
-      /etc/init.d/firewall reload >/dev/null 2>&1
-      /etc/init.d/network reload >/dev/null 2>&1
-      wifi reload >/dev/null 2>&1
-      [ -x /usr/sbin/cr6608-security-apply ] && /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1
-      rm -f /tmp/smartap-rollback-armed
-    fi
-  ) >/dev/null 2>&1 &
+  rm -f /tmp/smartap-rollback-armed
 }
 confirm_required() {
   [ "$confirm" = "1" ] && return 0
@@ -195,7 +186,7 @@ case "$action" in
     /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1
     /etc/init.d/cr6608-security enable >/dev/null 2>&1
     arm_rollback "$backup"
-    emit true "الحماية والمنافذ" "تم التطبيق مع إرجاع تلقائي" "[]" "نسخة احتياطية: $backup\nالحماية العامة=$se فيضان=$fg تسريب=$rg لوب=$lg. واي فاي 2.4G=$w24 5G=$w5. المنافذ محفوظة وتُعاد عند الإقلاع. الوصول للإدارة مضمون على كل المنافذ والواي فاي. إذا انقطع وصولك سيُسترجع تلقائياً خلال 60 ثانية — أو اضغط \"الاحتفاظ بالتغييرات\". طاقة البث لم تُلمس." '[{"id":"keep_changes","label":"الاحتفاظ بالتغييرات"},{"id":"rollback_last","label":"إرجاع الآن","confirm":true}]' "[]"; exit 0 ;;
+    emit true "الحماية والمنافذ" "تم التطبيق والحفظ فوراً" "[]" "نسخة احتياطية: $backup\nالحماية العامة=$se فيضان=$fg تسريب=$rg لوب=$lg. واي فاي 2.4G=$w24 5G=$w5. المنافذ محفوظة وتُعاد عند الإقلاع. الوصول للإدارة مضمون على كل المنافذ والواي فاي. الإعدادات محفوظة نهائياً. زر \"إرجاع الآن\" متاح لو أردت الرجوع للحالة السابقة. طاقة البث لم تُلمس." '[{"id":"keep_changes","label":"الاحتفاظ بالتغييرات"},{"id":"rollback_last","label":"إرجاع الآن","confirm":true}]' "[]"; exit 0 ;;
   rollback_last)
     rb="$(cat /tmp/smartap-rollback-backup 2>/dev/null)"
     if [ -r "$rb" ]; then
@@ -685,8 +676,26 @@ EOF
     esac
     [ "$fake_mesh" = "1" ] && { uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'; }
     if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; then
+      # PPPoE client: the broadband port must LEAVE the bridge, otherwise pppd cannot
+      # bind it (this was why PPPoE never connected). Validate credentials first.
+      case "$broadband_port" in lan1|lan2|lan3|wan) : ;; *) broadband_port="wan" ;; esac
+      if [ "$program_mode" = "pppoe_ap" ] && [ -z "$pppoe_user" ]; then
+        emit false "Quick Setup" "PPPoE username required" "[]" "أدخل اسم مستخدم PPPoE. / Enter the PPPoE username." "[]" "[]"; exit 0
+      fi
+      uci -q del_list network.@device[0].ports="$broadband_port"
       uci -q get network.wan >/dev/null || uci set network.wan='interface'
-      uci set network.wan.device="$broadband_port"; uci set network.wan.proto='pppoe'; uci set network.wan.username="$pppoe_user"; [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"; uci set network.wan.disabled='0'; uci set network.wan.auto='1'
+      uci set network.wan.device="$broadband_port"; uci set network.wan.proto='pppoe'
+      [ -n "$pppoe_user" ] && uci set network.wan.username="$pppoe_user"
+      [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"
+      uci set network.wan.ipv6='0'; uci set network.wan.disabled='0'; uci set network.wan.auto='1'
+    else
+      # Not PPPoE: make sure every port is back in the bridge and the wan interface is
+      # parked, so AP modes always have all 4 ports working as LAN.
+      for p in lan1 lan2 lan3 wan; do
+        [ -d "/sys/class/net/$p" ] || continue
+        uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
+      done
+      uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
     [ "$dhcp_server" = "1" ] && uci delete dhcp.lan.ignore 2>/dev/null || uci set dhcp.lan.ignore='1'
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
@@ -709,7 +718,7 @@ EOF
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
     health="$(ubus call system board >/dev/null 2>&1 && echo OK || echo CHECK)"
-    emit true "Quick Setup" "Applied with 60s rollback" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_quick)
     confirm_required "Quick Setup"
     ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
@@ -757,7 +766,7 @@ EOF
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    emit true "Quick Setup" "Applied with 60s rollback" "[]" "Backup: $backup\nA 60-second rollback timer is armed. Press Keep changes if access is stable. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately. Use "Rollback now" only if you want to restore the previous state. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   auto_optimize)
     confirm_required "Auto optimize"
     backup="$(backup_cfg auto-optimize)"
@@ -871,7 +880,7 @@ lan3_vlan|VLAN لمنفذ LAN3|$vl3|اتركه 1 عادةً. غيّره فقط �
 EOF
 )"
     text="$( { echo "الوصول للوحة مضمون دائماً: VLAN $mgmt_vlan (الإدارة) غير موسوم على كل المنافذ + الواي فاي، ولوحة الطوارئ 192.168.66.1."; echo; echo "bridge link show:"; bridge link show 2>/dev/null; echo; echo "smartap policy:"; /usr/sbin/cr6608-security-apply get 2>/dev/null; } 2>/dev/null | redact)"
-    emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ تلقائي مع إرجاع خلال 60 ثانية" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات","confirm":true}]' "$form" ;;
+    emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ وتطبيق فوري (Apply & Keep) + زر إرجاع يدوي" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات","confirm":true}]' "$form" ;;
   control|dashboard)
     cards="$(cards_json <<EOF
 Dashboard|Xiaomi CR6608|Active interface|ok
@@ -946,7 +955,7 @@ TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply creates a backup, reloads only required services, arms rollback, and checks access. TX Power is set to maximum (${tx0:-35}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to maximum (${tx0:-35}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
