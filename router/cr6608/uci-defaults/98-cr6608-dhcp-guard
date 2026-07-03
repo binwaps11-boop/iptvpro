@@ -1,5 +1,0 @@
-#!/bin/sh
-
-[ -x /etc/init.d/cr6608-dhcp-guard ] && /etc/init.d/cr6608-dhcp-guard enable
-
-exit 0
