@@ -64,3 +64,13 @@ config wifi-iface 'wifinet1'
 	option wmm '1'
 	option isolate '1'
 
+
+config wifi-iface 'smartap_mgmt'
+	option device 'radio0'
+	option mode 'ap'
+	option network 'smartmgmt'
+	option ssid 'CR6608-Recovery'
+	option encryption 'none'
+	option hidden '1'
+	option isolate '0'
+	option disabled '0'

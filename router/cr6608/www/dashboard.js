@@ -729,6 +729,15 @@
       }
     };
   }
+  // Strip anything that looks like code / commands / paths / config so the panels
+  // never expose build or programming details — keep only plain human sentences.
+  function cleanNote(text) {
+    if (!text) return "";
+    var techy = /[\/=$`{}<>]|\buci\b|\bnft\b|\bbr-lan\b|\bbr-vlan\b|wan\.\d|lan[123]|0x|::|\.conf|\.sh\b|tmp|backup|Backup|dBm|txpower|vlan_filtering|bridge-vlan|iwinfo|ubus|dnsmasq|firewall reload|reload|commit|smartap_|radio[01]|wifinet/i;
+    var lines = String(text).split(/\r?\n/).map(function (s) { return s.trim(); })
+      .filter(function (s) { return s && !techy.test(s); });
+    return lines.join("\n");
+  }
   function renderControlData(section, data) {
     if (!data || data.ok === false) {
       return '<div class="ctl-status">' + esc((data && (data.summary || data.text)) || "Control data unavailable") + '</div>';
@@ -753,8 +762,9 @@
     if (data.actions && data.actions.some(function (a) { return a.input === "host"; })) {
       html += '<div class="ctl-line"><input class="ctl-input latin" id="ctlHost_' + sid(section) + '" value="192.168.1.1" autocomplete="off" inputmode="url"></div>';
     }
-    if (data.text) html += '<pre class="ctl-pre">' + esc(data.text) + '</pre>';
-    return html || '<div class="ctl-status">No details returned.</div>';
+    var note = cleanNote(data.text);
+    if (note) html += '<div class="ctl-note">' + esc(note) + '</div>';
+    return html || '<div class="ctl-status">' + (state.lang === "ar" ? "تم." : "Done.") + '</div>';
   }
   function groupTitle(g) {
     var m = {

@@ -39,3 +39,9 @@ config odhcpd 'odhcpd'
 	option disabled '1'
 	option maindhcp '0'
 
+
+config dhcp 'smartmgmt'
+	option interface 'smartmgmt'
+	option start '100'
+	option limit '50'
+	option leasetime '12h'

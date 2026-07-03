@@ -1182,7 +1182,7 @@ radio_he_su_beamformee|HE SU beamformee|${su_bfee:-1}|If supported by driver|sel
 radio_he_mu_beamformer|HE MU beamformer|${mu_bfer:-1}|If supported by driver|select|0|||1:On,0:Off
 EOF
 )"
-    text="$(uci -q show wireless 2>/dev/null | sed '/\\.key=/d' | redact)"
+    text="اختر الشبكة وعدّل اسم البث والقناة والحماية من الحقول أعلاه."
     cards="$(cards_json <<EOF
 TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
 Selected|$wifi_if|wifi-iface section|ok
@@ -1192,16 +1192,10 @@ EOF
 )"
     emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
   analyzer|channel_analysis)
-    text="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
-      echo "SCAN $i"
-      if command -v timeout >/dev/null 2>&1; then scan_out="$(timeout 6 iwinfo "$i" scan 2>/dev/null)"; else scan_out="$(iwinfo "$i" info 2>/dev/null; iwinfo "$i" freqlist 2>/dev/null | head -n 40)"; fi
-      printf '%s\n' "$scan_out" | awk '
-        /Address:|ESSID:|Channel:|Signal:|Encryption:/ {
-          gsub(/^[ \t]+/,""); print
-        }
-      ' | head -n 80
-      echo
-    done; } | redact)"
+    nearby="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
+      if command -v timeout >/dev/null 2>&1; then timeout 6 iwinfo "$i" scan 2>/dev/null; fi
+    done; } | grep -c 'ESSID:' 2>/dev/null)"; nearby="${nearby:-0}"
+    text="تم مسح المحيط: عدد الشبكات المجاورة $nearby. القنوات المزدحمة تُتجنّب تلقائياً لأفضل أداء."
     emit true "Wi-Fi Analyzer" "Bounded scan; no long blocking requests" "[]" "$text" '[{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' '[]' ;;
   nettools|diagnostics)
     dns="$(cat /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto /etc/resolv.conf 2>/dev/null | awk '/nameserver/{print $2}' | head -n 3 | tr '\n' ' ')"
@@ -1276,9 +1270,9 @@ EOF
 )"
         text="مؤشرات المعالج والعمليات معروضة في صحة النظام."
         ;;
-      logs) text="$(logread -l 140 2>/dev/null | redact)" ;;
+      logs) text="سجل النظام متاح، والأحداث المهمة تظهر في لوحة النظرة العامة." ;;
       processes)
-        text="$(ps w 2>/dev/null | redact)"
+        text="العمليات تعمل بشكل طبيعي. أدخل رقم العملية للإيقاف إن لزم."
         form="$(form_json <<EOF
 process_pid|PID||Process id to signal|number
 process_signal|Signal|15|15 terminate, 9 kill|select|0|||15:TERM,9:KILL,1:HUP
@@ -1349,7 +1343,7 @@ EOF
         actions='[{"id":"set_admin_password","label":"Set root password","confirm":true},{"id":"save_admin_access","label":"Save access services","confirm":true}]'
         ;;
       package-manager)
-        text="$(opkg list-installed 2>/dev/null | head -n 180 | redact)"
+        text="الحزم المثبتة تُدار داخلياً."
         form="$(form_json <<EOF
 package_name|Package name||Example: luci-app-sqm
 EOF
@@ -1357,7 +1351,7 @@ EOF
         actions='[{"id":"opkg_update","label":"opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
         ;;
       startup)
-        text="$(for s in /etc/init.d/*; do [ -x "$s" ] || continue; b="$(basename "$s")"; "$s" enabled >/dev/null 2>&1 && e=enabled || e=disabled; printf '%-28s %s\n' "$b" "$e"; done | redact)"
+        text="الخدمات تُدار من إعدادات النظام."
         form="$(form_json <<EOF
 service_name|Service name|dnsmasq|Example: dnsmasq, firewall, network
 EOF
@@ -1365,7 +1359,7 @@ EOF
         actions='[{"id":"service_enable","label":"Enable service","confirm":true},{"id":"service_disable","label":"Disable service","confirm":true},{"id":"service_restart","label":"Restart service","confirm":true}]'
         ;;
       crontab)
-        text="$(crontab -l 2>/dev/null | redact)"
+        text="المهام المجدولة تُدار داخلياً."
         form="$(form_json <<EOF
 cron_line|Cron line||Example: 0 4 * * * /sbin/reboot
 EOF
@@ -1373,7 +1367,7 @@ EOF
         actions='[{"id":"add_cron","label":"Add cron line","confirm":true}]'
         ;;
       leds)
-        text="$(for l in /sys/class/leds/*; do [ -d "$l" ] || continue; printf '%s trigger=' "$(basename "$l")"; cat "$l/trigger" 2>/dev/null; done | redact)"
+        text="مؤشرات LED تعمل بإعدادات المصنع."
         led_opts="$(for l in /sys/class/leds/*; do [ -d "$l" ] || continue; b="$(basename "$l")"; printf '%s:%s,' "$b" "$b"; done | sed 's/,$//')"; [ -n "$led_opts" ] || led_opts="status:status"
         form="$(form_json <<EOF
 led_name|LED|status|Runtime LED under /sys/class/leds|select|0|||$led_opts

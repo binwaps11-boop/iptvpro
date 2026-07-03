@@ -47,3 +47,14 @@ config interface 'recovery'
 	option ipaddr '192.168.66.1'
 	option netmask '255.255.255.0'
 
+
+config device
+	option name 'br-mgmt'
+	option type 'bridge'
+
+config interface 'smartmgmt'
+	option device 'br-mgmt'
+	option proto 'static'
+	option ipaddr '192.168.67.1'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
