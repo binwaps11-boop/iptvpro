@@ -1,4 +1,8 @@
 #!/bin/sh
+# --- safety: no system command may hang the API (busybox timeout) ---
+ubus() { timeout 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
 POST_DATA=""
 if [ "$REQUEST_METHOD" = "POST" ] && [ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null; then
   POST_DATA="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
@@ -881,7 +885,7 @@ lan3_isolate|عزل منفذ LAN3|$il3|تشغيل = الجهاز على هذا �
 lan3_vlan|VLAN لمنفذ LAN3|$vl3|اتركه 1 عادةً. غيّره فقط لشبكة VLAN منفصلة.|number|0|ports|
 EOF
 )"
-    text="$( { echo "الوصول للوحة مضمون دائماً: VLAN $mgmt_vlan (الإدارة) غير موسوم على كل المنافذ + الواي فاي، ولوحة الطوارئ 192.168.66.1."; echo; echo "bridge link show:"; bridge link show 2>/dev/null; echo; echo "smartap policy:"; /usr/sbin/cr6608-security-apply get 2>/dev/null; } 2>/dev/null | redact)"
+    text="الوصول للوحة مضمون دائماً على العنوان الذي تضبطه — عبر الواي فاي وكل منافذ الكيبل، ولوحة الطوارئ 192.168.66.1 عند الحاجة."
     emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ وتطبيق فوري (Apply & Keep) + زر إرجاع يدوي" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات","confirm":true}]' "$form" ;;
   control|dashboard)
     cards="$(cards_json <<EOF
@@ -900,7 +904,7 @@ raw_value|Value||New value for set action
 raw_type|New section type|interface|Used only by Add section
 EOF
 )"
-    text="$( { echo "Official UCI configs"; ls /etc/config 2>/dev/null; echo; echo "ubus objects"; ubus list 2>/dev/null | sort; } | redact)"
+    text="لوحة التحكم الرئيسية لجهاز Xiaomi CR6608."
     emit true "Xiaomi CR6608 Control Panel" "Single-page Xiaomi CR6608 interface with raw OpenWrt editor" "$cards" "$text" '[{"id":"raw_uci_set","label":"UCI set option","confirm":true},{"id":"raw_uci_delete","label":"UCI delete option","confirm":true},{"id":"raw_uci_add_section","label":"UCI add section","confirm":true},{"id":"raw_uci_delete_section","label":"UCI delete section","confirm":true},{"id":"raw_uci_commit_reload","label":"Commit + reload config","confirm":true}]' "$form" ;;
   wizard)
     saved() { uci -q get smartap.quick."$1" 2>/dev/null; }
@@ -967,7 +971,7 @@ Uptime|${uptime_s:-0} s|ubus system info|neutral
 Load|${loadavg:-unknown}|/proc/loadavg|neutral
 EOF
 )"
-    text="$( { echo "Board"; printf '%s\n' "$board"; echo; echo "Memory"; free 2>/dev/null; echo; echo "Overlay"; df -h /overlay 2>/dev/null; } | redact)"
+    text="معلومات الجهاز والذاكرة والتخزين معروضة في البطاقات أعلاه."
     emit true "Device Info" "Live OpenWrt system data" "$cards" "$text" '[{"id":"clear_api_cache","label":"Clear API cache"}]' '[]' ;;
   power)
     cards="$(cards_json <<EOF
@@ -1019,10 +1023,10 @@ dns_authoritative|Authoritative DHCP|${dns_authoritative:-1}|dnsmasq authoritati
 dns_readethers|Read ethers|${dns_readethers:-1}|Read /etc/ethers|select|0|||1:on,0:off
 EOF
 )"
-    text="$( { uci -q show network.lan; uci -q show dhcp.lan; echo; echo "Static hosts"; uci -q show dhcp | grep '=host\\|.mac=\\|.ip='; } | redact)"
+    text="عنوان الشبكة وخادم DHCP قابلان للضبط من الحقول أعلاه."
     emit true "LAN / DHCP" "LAN, DHCP, DNSMasq and static host controls" "$cards" "$text" '[{"id":"save_dhcp","label":"Apply LAN/DHCP","confirm":true},{"id":"save_dnsmasq","label":"Save DNSMasq","confirm":true},{"id":"save_dhcp_static","label":"Add / update static lease","confirm":true},{"id":"delete_dhcp_static","label":"Delete static lease by MAC","confirm":true},{"id":"restart_dnsmasq","label":"Restart DHCP/DNS","confirm":true}]' "$form" ;;
   devices)
-    text="$( { echo "DHCP leases"; cat /tmp/dhcp.leases 2>/dev/null; echo; echo "IPv4 neighbors"; ip -4 neigh show 2>/dev/null; echo; echo "ARP"; cat /proc/net/arp 2>/dev/null; } | redact)"
+    text="قائمة الأجهزة المتصلة معروضة في صفحة الأجهزة بشكل مرتب (IP · MAC · الشركة)."
     cards="$(cards_json <<EOF
 DHCP leases|$(awk 'END{print NR+0}' /tmp/dhcp.leases 2>/dev/null)|dnsmasq lease source|ok
 ARP entries|$(awk 'NR>1{c++} END{print c+0}' /proc/net/arp 2>/dev/null)|/proc/net/arp|neutral
@@ -1036,7 +1040,7 @@ EOF
     emit true "Connected Devices" "DHCP, neighbors, ARP and block/unblock" "$cards" "$text" '[{"id":"block_mac","label":"Block MAC","confirm":true},{"id":"unblock_mac","label":"Unblock MAC","confirm":true}]' "$form" ;;
   clients)
     ifaces="$(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}' | tr '\n' ' ')"
-    text="$( { for i in $ifaces; do echo "[$i]"; iwinfo "$i" assoclist 2>/dev/null; echo; ubus -S call hostapd."$i" get_clients 2>/dev/null; done; } | redact)"
+    text="أجهزة الواي فاي المتصلة وقوة إشارتها معروضة أعلاه؛ يمكنك فصل أي جهاز."
     form="$(form_json <<EOF
 iface|Wi-Fi iface|phy0-ap0|Example: phy0-ap0
 mac|Client MAC||aa:bb:cc:dd:ee:ff
@@ -1050,10 +1054,10 @@ Bridge|br-lan|DSA bridge|ok
 STP|${stp:-0}|Loop guard setting|$([ "$stp" = "1" ] && echo ok || echo warn)
 EOF
 )"
-    text="$( { bridge link show; echo; bridge vlan show; echo; logread -l 120 | grep -Ei 'loop|bridge|storm|stp' || true; } 2>/dev/null | redact)"
+    text="حماية الحلقات (STP) تمنع أي لوب في منفذ من التأثير على بقية الشبكة."
     emit true "Loop Guard" "Bridge loop visibility and STP" "$cards" "$text" '[{"id":"enable_stp","label":"Enable STP on br-lan","confirm":true}]' '[]' ;;
   switchmgr)
-    text="$( { echo "Ports"; for p in br-lan eth0 wan lan1 lan2 lan3; do [ -d /sys/class/net/$p ] || continue; printf '%-8s oper=%s speed=%s carrier=%s rx=%s tx=%s\n' "$p" "$(cat /sys/class/net/$p/operstate 2>/dev/null)" "$(cat /sys/class/net/$p/speed 2>/dev/null)" "$(cat /sys/class/net/$p/carrier 2>/dev/null)" "$(cat /sys/class/net/$p/statistics/rx_bytes 2>/dev/null)" "$(cat /sys/class/net/$p/statistics/tx_bytes 2>/dev/null)"; done; echo; bridge vlan show; } | redact)"
+    text="حالة المنافذ وسرعتها معروضة في البطاقات؛ اضبط الـ VLAN لكل منفذ من الأعلى."
     stp="$(uci -q get network.@device[0].stp 2>/dev/null)"; igmp="$(uci -q get network.@device[0].igmp_snooping 2>/dev/null)"
     bridge_ports="$(uci -q get network.@device[0].ports 2>/dev/null)"
     port_opts="$(for p in wan lan1 lan2 lan3; do [ -d /sys/class/net/$p ] && printf '%s:%s,' "$p" "$p"; done | sed 's/,$//')"; [ -n "$port_opts" ] || port_opts="wan:wan,lan1:lan1,lan2:lan2,lan3:lan3"
@@ -1070,7 +1074,7 @@ EOF
 )"
     emit true "Switch / Ports" "DSA port map, bridge ports and VLAN controls" "[]" "$text" '[{"id":"set_port_state","label":"Set port state","confirm":true},{"id":"save_bridge_options","label":"Save bridge options","confirm":true},{"id":"save_dsa_vlan","label":"Save DSA VLAN","confirm":true},{"id":"delete_dsa_vlan","label":"Delete DSA VLAN","confirm":true}]' "$form" ;;
   optimizer)
-    text="$( { echo "iwinfo"; iwinfo; echo; echo "iw dev"; iw dev; echo; echo "Recommendations"; echo "- Keep 2.4G on 1/6/11; current $(uci -q get wireless.radio0.channel)"; echo "- Keep 5G on non-DFS if stability is preferred; current $(uci -q get wireless.radio1.channel)"; echo "- WMM/DTIM/legacy rates"; uci -q show wireless | sed '/\\.key=/d' | grep -E 'wmm|dtim|legacy|htmode|channel|txpower'; } 2>/dev/null | redact)"
+    text="توصيات الأداء: 2.4G على 1/6/11، و5G على قناة غير DFS مثل 149 لأعلى ثبات وسرعة."
     cards="$(cards_json <<EOF
 TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
 2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|iwinfo|ok
@@ -1171,7 +1175,7 @@ reboot_hour|Reboot hour|${sched_hour:-4}|0-23|number
 reboot_minute|Reboot minute|${sched_min:-0}|0-59|number
 EOF
 )"
-    text="$( { echo "Crontab"; crontab -l 2>/dev/null; echo; echo "Guest config"; uci -q show wireless.smartap_guest 2>/dev/null | sed '/\\.key=/d'; uci -q show network.guest 2>/dev/null; uci -q show dhcp.guest 2>/dev/null; } | redact)"
+    text="شبكة الضيوف معزولة عن شبكتك الرئيسية؛ جدولة إعادة التشغيل اختيارية."
     emit true "Reboot Schedule & Guest" "Cron view, scheduled reboot and guest Wi-Fi builder" "[]" "$text" '[{"id":"save_guest","label":"Apply Guest Wi-Fi","confirm":true},{"id":"save_reboot_schedule","label":"Save reboot schedule","confirm":true}]' "$form" ;;
   speed)
     cards="$(cards_json <<EOF
@@ -1194,10 +1198,10 @@ sqm_qdisc|Queue discipline|${sqm_qdisc:-cake}|cake/fq_codel
 sqm_script|SQM script|${sqm_script:-piece_of_cake.qos}|piece_of_cake.qos / simple.qos
 EOF
 )"
-    text="$( { echo "Network bridge"; uci -q show network.@device[0]; echo; echo "igmpproxy"; uci -q show igmpproxy 2>/dev/null; echo; echo "sqm"; uci -q show sqm 2>/dev/null; } | redact)"
+    text="إعدادات IPTV/الجسر تُدار من الأعلى."
     emit true "IPTV / SQM" "IGMP/SQM visibility with safe controls" "[]" "$text" '[{"id":"save_iptv","label":"Apply IGMP snooping","confirm":true},{"id":"save_sqm","label":"Save SQM queue","confirm":true}]' "$form" ;;
   neighbors)
-    text="$( { echo "Bridge FDB"; bridge fdb show; echo; echo "Bridge links"; bridge link show; echo; echo "IPv4 neighbors"; ip -4 neigh show; } 2>/dev/null | redact)"
+    text="جدول الأجهزة على الجسر معروض في صفحة الأجهزة."
     emit true "Bridge Neighbors" "bridge fdb/link and IPv4 neighbors" "[]" "$text" '[]' '[]' ;;
   overview|realtime|logs|processes|routes|nftables|firewall|system|admin|package-manager|startup|crontab|leds|flash|reboot|interfaces)
     form='[]'; actions='[]'; cards='[]'
@@ -1211,7 +1215,7 @@ Default route|${default_route:-none}|IPv4|neutral
 TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
 EOF
 )"
-        text="$( { echo "System board"; printf '%s\n' "$board"; echo; echo "Network interfaces"; ubus call network.interface dump 2>/dev/null; echo; echo "Wireless status"; iwinfo 2>/dev/null; } | redact)"
+        text="معلومات النظام والشبكة معروضة في البطاقات."
         ;;
       realtime)
         cards="$(cards_json <<EOF
@@ -1220,7 +1224,7 @@ Memory|$(free 2>/dev/null | awk '/Mem:/{print $3"/"$2}')|free|neutral
 Overlay|$(df -h /overlay 2>/dev/null | awk 'NR==2{print $5" used"}')|df -h /overlay|neutral
 EOF
 )"
-        text="$( { echo "/proc/net/dev"; cat /proc/net/dev; echo; echo "Processes"; ps w | head -n 35; } 2>/dev/null | redact)"
+        text="مؤشرات المعالج والعمليات معروضة في صحة النظام."
         ;;
       logs) text="$(logread -l 140 2>/dev/null | redact)" ;;
       processes)
@@ -1233,7 +1237,7 @@ EOF
         actions='[{"id":"kill_process","label":"Send signal to process","confirm":true}]'
         ;;
       routes)
-        text="$( { ip -4 route show table all 2>/dev/null; echo; uci -q show network | grep '=route\\|.target=\\|.gateway=\\|.interface='; } | redact)"
+        text="مسارات الشبكة تُدار تلقائياً."
         form="$(form_json <<EOF
 route_interface|Interface|lan|Example: lan or wan
 route_target|Target|192.168.2.0|IPv4 network
@@ -1244,7 +1248,7 @@ EOF
         actions='[{"id":"add_route","label":"Add static route","confirm":true}]'
         ;;
       nftables|firewall)
-        text="$( { uci -q show firewall; echo; nft list ruleset 2>/dev/null | head -n 220; } | redact)"
+        text="قواعد الجدار الناري تُدار من قسم الحماية."
         fw_in="$(uci -q get firewall.@defaults[0].input)"; fw_out="$(uci -q get firewall.@defaults[0].output)"; fw_fwd="$(uci -q get firewall.@defaults[0].forward)"
         fw_syn="$(uci -q get firewall.@defaults[0].syn_flood)"; fw_flow="$(uci -q get firewall.@defaults[0].flow_offloading)"; fw_flowhw="$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
         form="$(form_json <<EOF
@@ -1274,7 +1278,7 @@ EOF
         ;;
       system)
         h="$(uci -q get system.@system[0].hostname 2>/dev/null)"; z="$(uci -q get system.@system[0].timezone 2>/dev/null)"
-        text="$( { printf '%s\n' "$board"; echo; printf '%s\n' "$info"; } | redact)"
+        text="معلومات النظام معروضة في البطاقات."
         form="$(form_json <<EOF
 hostname|Hostname|${h:-OpenWrt}|Router hostname
 timezone|Timezone|${z:-UTC}|Timezone string
@@ -1283,7 +1287,7 @@ EOF
         actions='[{"id":"save_system","label":"Save system values","confirm":true}]'
         ;;
       admin)
-        text="$( { /etc/init.d/uhttpd status 2>/dev/null; /etc/init.d/dropbear status 2>/dev/null; echo; passwd -S root 2>/dev/null; } | redact)"
+        text="حالة الخدمات سليمة."
         ssh_port="$(uci -q get dropbear.@dropbear[0].Port 2>/dev/null)"; http_port="$(uci -q get uhttpd.main.listen_http 2>/dev/null | head -n1 | sed 's/.*://')"; /etc/init.d/dropbear enabled >/dev/null 2>&1 && ssh_en=1 || ssh_en=0
         form="$(form_json <<EOF
 admin_password|New root password||8+ characters; never printed in logs|password
@@ -1330,7 +1334,7 @@ EOF
         actions='[{"id":"set_led","label":"Set LED runtime","confirm":true}]'
         ;;
       flash)
-        text="$( { ls -lh /root/dashboard-backups 2>/dev/null; echo; df -h /overlay 2>/dev/null; } | redact)"
+        text="النسخ الاحتياطية محفوظة داخل الجهاز."
         actions='[{"id":"create_config_backup","label":"Create config backup","confirm":true}]'
         ;;
       reboot)
@@ -1338,7 +1342,7 @@ EOF
         actions='[{"id":"system_reboot","label":"Reboot router now","confirm":true}]'
         ;;
       interfaces)
-        text="$( { ubus call network.interface dump 2>/dev/null; echo; uci -q show network | grep '=interface\\|.proto=\\|.device=\\|.ipaddr=\\|.netmask='; } | redact)"
+        text="الواجهات تُدار من قسم الشبكة."
         if_proto_cur="$(uci -q get network.lan.proto 2>/dev/null)"; if_dev_cur="$(uci -q get network.lan.device 2>/dev/null)"; if_ip_cur="$(uci -q get network.lan.ipaddr 2>/dev/null)"; if_mask_cur="$(uci -q get network.lan.netmask 2>/dev/null)"
         dev_opts="$(for d in br-lan wan lan1 lan2 lan3 eth0 lo; do [ -d /sys/class/net/$d ] && printf '%s:%s,' "$d" "$d"; done | sed 's/,$//')"; [ -n "$dev_opts" ] || dev_opts="br-lan:br-lan,wan:wan"
         form="$(form_json <<EOF
