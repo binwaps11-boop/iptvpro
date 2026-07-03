@@ -811,8 +811,9 @@
     var modeEl = document.querySelector('[data-control-section="wizard"] [data-ctl-field="program_mode"]');
     var modeLabel = modeEl && modeEl.options ? modeEl.options[modeEl.selectedIndex].text : fv("program_mode");
     box.innerHTML = '<div class="kv"><span>Mode</span><b class="latin">' + esc(modeLabel || "-") + '</b></div>' +
-      '<div class="kv"><span>IP</span><b class="latin">' + esc(fv("device_ip") || "-") + '</b></div>' +
+      '<div class="kv"><span>IP (Cable/LAN)</span><b class="latin">' + esc(fv("device_ip") || "-") + '</b></div>' +
       '<div class="kv"><span>VLAN</span><b class="latin">' + esc(fv("vlan_id") || "-") + '</b></div>' +
+      (fv("vlan_access_ip") ? '<div class="kv"><span>VLAN IP (Wi-Fi)</span><b class="latin">' + esc(fv("vlan_access_ip")) + '</b></div>' : "") +
       '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
       '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
       '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +

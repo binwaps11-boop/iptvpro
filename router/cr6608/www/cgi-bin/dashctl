@@ -109,10 +109,23 @@ config_radio_iface() {
     dev && ap {print sec; exit}
   '
 }
+lan_zone_add() {
+  # keep network $1 in the 'lan' firewall zone so uhttpd/the dashboard answers on it (input ACCEPT)
+  net="$1"; [ -n "$net" ] || return 0
+  zsec="$(uci show firewall 2>/dev/null | awk -F'[.=]' '$0 ~ "\\.name=.?lan.?$" {print $2; exit}')"
+  [ -n "$zsec" ] || return 0
+  uci -q get firewall."$zsec".network 2>/dev/null | tr ' ' '\n' | grep -qx "$net" || uci add_list firewall."$zsec".network="$net"
+}
+lan_zone_del() {
+  net="$1"; [ -n "$net" ] || return 0
+  zsec="$(uci show firewall 2>/dev/null | awk -F'[.=]' '$0 ~ "\\.name=.?lan.?$" {print $2; exit}')"
+  [ -n "$zsec" ] || return 0
+  uci -q del_list firewall."$zsec".network="$net" 2>/dev/null
+}
 store_royal_config() {
   touch /etc/config/smartap 2>/dev/null
   uci -q set smartap.quick='quicksettings'
-  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh; do
+  for k in program_mode device_ip vlan_id vlan_access_ip ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh; do
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
@@ -576,16 +589,21 @@ EOF
     uci -q delete smartap.quick
     for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
     for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
-    # unwind any AP-VLAN: plain bridge, radios back on management LAN
-    while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
-      vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+    uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
+    lan_zone_del smartap_vlan
+    # unwind any AP-VLAN (old bridge-vlans + new separate bridge): plain bridge, all ports back,
+    # radios back on management LAN, management DHCP back to closed (its shipped default).
+    while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
+      vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
       [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
     done
     uci -q delete network.@device[0].vlan_filtering
     uci set network.lan.device='br-lan'
+    for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
     uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+    uci set dhcp.lan.ignore='1'
     for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
-    uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp
+    uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp; uci -q commit firewall
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     emit true "Quick Setup" "Reset applied with rollback" "[]" "Backup: $backup\nOnly Xiaomi CR6608-created quick setup sections were removed. TX Power was not changed. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
@@ -593,7 +611,7 @@ EOF
     confirm_required "Quick Setup"
     program_mode="$(safe_word "$(param program_mode)")"; [ -n "$program_mode" ] || program_mode="ap"
     case "$program_mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe_ap) : ;; *) emit false "Quick Setup" "Invalid mode" "[]" "Unknown programming mode." "[]" "[]"; exit 0 ;; esac
-    device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; ssid="$(param ssid | cut -c1-32)"
+    device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; vlan_access_ip="$(param vlan_access_ip | cut -c1-32)"; ssid="$(param ssid | cut -c1-32)"
     ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"; mesh_id="$(param mesh_id | cut -c1-48)"
     wds_peer_ssid="$(param wds_peer_ssid | cut -c1-32)"; hide_ssid="$(safe_num "$(param hide_ssid)")"; security="$(safe_word "$(param security)")"
     wifi_password="$(param wifi_password | cut -c1-64)"; device_password="$(param device_password | cut -c1-80)"
@@ -610,6 +628,9 @@ EOF
     fi
     if mode_has_vlan "$program_mode"; then
       [ -n "$vlan_id" ] && [ "$vlan_id" -ge 2 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "رقم VLAN يجب أن يكون بين 2 و 4094 (1 محجوز لشبكة الإدارة). / VLAN ID must be 2-4094 (1 is reserved for management)." "[]" "[]"; exit 0; }
+      if [ -n "$vlan_access_ip" ]; then
+        valid_ipv4 "$vlan_access_ip" || { emit false "Quick Setup" "Invalid VLAN access IP" "[]" "عنوان دخول الفيلان يجب أن يكون IPv4 صحيحاً، أو اتركه فارغاً. / VLAN access IP must be valid IPv4 or empty." "[]" "[]"; exit 0; }
+      fi
     fi
     case "$security" in open|wpa2|wpa3) : ;; *) security="wpa2" ;; esac
     if [ "$security" != "open" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -lt 8 ]; then emit false "Quick Setup" "Weak Wi-Fi password" "[]" "Wi-Fi password must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
@@ -630,51 +651,76 @@ EOF
     set_wifi_security "$ifc5" "$security" "$wifi_password"
     [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
     if mode_has_vlan "$program_mode"; then
-      # WHOLE AP on ONE VLAN (unified reachability): the management interface (the IP the
-      # user set) + BOTH Wi-Fi radios + all LAN ports all live on br-lan.<vlan_id>.
-      #   * LAN ports (lan1/2/3) = untagged  -> local devices AND the dashboard are reachable
-      #     over any cable at the SET IP.
-      #   * WAN port = tagged                -> uplink trunk toward the Mikrotik carries the VLAN.
-      #   * Wi-Fi radios stay on the 'lan' network (= br-lan.<vlan_id>) -> the dashboard is
-      #     reachable over Wi-Fi at the SAME set IP, and clients live inside the VLAN.
-      # This is the fix for "in VLAN mode I could only reach it by cable at 192.168.66.1".
-      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
-        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
-        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
-      done
-      uci -q delete network.smartap_vlan
-      uci set network.@device[0].vlan_filtering='1'
-      vq="$(uci add network bridge-vlan)"; uci set "network.$vq.name=SmartAP-qvlan"; uci set "network.$vq.device=br-lan"; uci set "network.$vq.vlan=$vlan_id"
-      for p in lan1 lan2 lan3; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vq.ports=$p:u*"; done
-      [ -d "/sys/class/net/wan" ] && uci add_list "network.$vq.ports=wan:t"
-      # management + recovery interfaces move onto the VLAN device (keep their IPs)
-      uci set network.lan.device="br-lan.$vlan_id"
-      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device="br-lan.$vlan_id"
-      # both radios stay on 'lan' -> reachable over Wi-Fi at the set IP, clients on the VLAN
-      uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
-    else
-      # Non-VLAN: plain bridge, everything on 'lan' (reachable via Wi-Fi AND every cable port).
-      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
-        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+      # ===================================================================================
+      # LOCKOUT-PROOF 412 model. Management can NEVER be cut off by a VLAN mistake:
+      #   * br-lan stays a PLAIN bridge (NO VLAN filtering) carrying only the cable ports
+      #     lan1/2/3. The device IP + recovery 192.168.66.1 live here and behave exactly like
+      #     a stock OpenWrt LAN. An ISOLATED management DHCP pool is forced on, so plugging a
+      #     cable ALWAYS hands your phone/PC an IP and the dashboard opens at the device IP --
+      #     no static IP, and zero dependency on the VLAN being correct.
+      #   * The client VLAN lives on a SEPARATE bridge (br-vlan) built from an 802.1q tagged
+      #     sub-interface on the WAN port (wan.<vid>) toward the Mikrotik + the Wi-Fi clients.
+      #     Any mistake there can only affect Wi-Fi clients; it can never touch management.
+      #   * vlan_access_ip (optional) is the AP's own IP INSIDE the client VLAN, so the
+      #     dashboard is also reachable over Wi-Fi at that separate address.
+      # ===================================================================================
+      mgmt_isolated=1; client_net='smartap_vlan'
+      # tear down any previous VLAN artifacts (old bridge-vlan attempt AND this model)
+      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
+        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
         [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
       done
       uci -q delete network.@device[0].vlan_filtering
+      uci -q delete network.smartap_vlan; uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
+      uci -q delete dhcp.smartap_vlan
+      # management bridge: plain, CABLE PORTS ONLY (wan removed -> management is isolated)
+      uci -q del_list network.@device[0].ports='wan'
+      for p in lan1 lan2 lan3; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
+      uci set network.lan.device='br-lan'
+      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan'
+      # tagged uplink to the Mikrotik: wan.<vid>
+      uci set network.smartap_wandev='device'; uci set network.smartap_wandev.type='8021q'; uci set network.smartap_wandev.ifname='wan'; uci set network.smartap_wandev.vid="$vlan_id"; uci set network.smartap_wandev.name="wan.$vlan_id"
+      # separate, UNFILTERED client bridge: tagged uplink + Wi-Fi clients
+      uci set network.smartap_vdev='device'; uci set network.smartap_vdev.type='bridge'; uci set network.smartap_vdev.name='br-vlan'; uci add_list network.smartap_vdev.ports="wan.$vlan_id"
+      # client L3 interface on br-vlan (holds the separate Wi-Fi access IP if given)
+      uci set network.smartap_vlan='interface'; uci set network.smartap_vlan.device='br-vlan'; uci set network.smartap_vlan.ipv6='0'
+      if [ -n "$vlan_access_ip" ]; then
+        uci set network.smartap_vlan.proto='static'; uci set network.smartap_vlan.ipaddr="$vlan_access_ip"; uci set network.smartap_vlan.netmask='255.255.255.0'
+      else
+        uci set network.smartap_vlan.proto='none'
+      fi
+      # never serve DHCP on the client VLAN (the Mikrotik owns it)
+      uci set dhcp.smartap_vlan='dhcp'; uci set dhcp.smartap_vlan.interface='smartap_vlan'; uci set dhcp.smartap_vlan.ignore='1'
+      # Wi-Fi clients ride the client VLAN
+      uci set wireless."$ifc24".network='smartap_vlan'; uci set wireless."$ifc5".network='smartap_vlan'
+      # let the dashboard answer on the client VLAN too (input ACCEPT via the lan zone)
+      lan_zone_add smartap_vlan
+    else
+      # Plain AP: tear down every VLAN artifact, put everything back on the plain br-lan.
+      mgmt_isolated=0; client_net='lan'
+      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
+        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
+        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
+      done
+      uci -q delete network.@device[0].vlan_filtering
+      uci -q delete network.smartap_vlan; uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
+      uci -q delete dhcp.smartap_vlan
+      lan_zone_del smartap_vlan
       uci set network.lan.device='br-lan'
       uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
-      uci -q delete network.smartap_vlan
       uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     fi
     case "$program_mode" in
       mesh|mesh_vlan)
         uci -q get wireless.smartap_mesh >/dev/null || uci set wireless.smartap_mesh='wifi-iface'
-        uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network='lan'; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
+        uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network="${client_net:-lan}"; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
         ;;
       wds_sender|wds_sender_vlan)
         uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
         ;;
       wds_receiver|wds_receiver_vlan)
         uci -q get wireless.smartap_wds >/dev/null || uci set wireless.smartap_wds='wifi-iface'
-        uci set wireless.smartap_wds.device='radio1'; uci set wireless.smartap_wds.mode='sta'; uci set wireless.smartap_wds.network='lan'; uci set wireless.smartap_wds.ssid="${wds_peer_ssid:-$ssid}"; uci set wireless.smartap_wds.wds='1'; uci set wireless.smartap_wds.disabled='0'
+        uci set wireless.smartap_wds.device='radio1'; uci set wireless.smartap_wds.mode='sta'; uci set wireless.smartap_wds.network="${client_net:-lan}"; uci set wireless.smartap_wds.ssid="${wds_peer_ssid:-$ssid}"; uci set wireless.smartap_wds.wds='1'; uci set wireless.smartap_wds.disabled='0'
         set_wifi_security smartap_wds "$security" "$wifi_password"
         ;;
     esac
@@ -692,16 +738,35 @@ EOF
       [ -n "$pppoe_user" ] && uci set network.wan.username="$pppoe_user"
       [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"
       uci set network.wan.ipv6='0'; uci set network.wan.disabled='0'; uci set network.wan.auto='1'
+    elif [ "${mgmt_isolated:-0}" = "1" ]; then
+      # VLAN mode: keep the cable ports in the plain management bridge; the WAN port is the
+      # tagged trunk (wan.<vid>) and must STAY OUT of br-lan so management stays isolated.
+      for p in lan1 lan2 lan3; do
+        [ -d "/sys/class/net/$p" ] || continue
+        uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
+      done
+      uci -q del_list network.@device[0].ports='wan'
+      uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     else
-      # Not PPPoE: make sure every port is back in the bridge and the wan interface is
-      # parked, so AP modes always have all 4 ports working as LAN.
+      # Plain AP (not PPPoE): make sure every port is back in the bridge and the wan interface
+      # is parked, so AP modes always have all 4 ports working as LAN.
       for p in lan1 lan2 lan3 wan; do
         [ -d "/sys/class/net/$p" ] || continue
         uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
       done
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
-    if [ "$dhcp_server" = "1" ]; then uci -q delete dhcp.lan.ignore; else uci set dhcp.lan.ignore='1'; fi
+    if [ "${mgmt_isolated:-0}" = "1" ]; then
+      # Isolated management DHCP: guarantees a cable client always gets an IP in the DEVICE
+      # subnet and can open the dashboard at the IP you set. It is walled off from the Mikrotik
+      # (the WAN trunk is not in this bridge), so it can never conflict with the upstream DHCP.
+      uci -q delete dhcp.lan.ignore
+      uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='100'; uci set dhcp.lan.leasetime='12h'
+    elif [ "$dhcp_server" = "1" ]; then
+      uci -q delete dhcp.lan.ignore
+    else
+      uci set dhcp.lan.ignore='1'
+    fi
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
     [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then
@@ -911,6 +976,7 @@ EOF
     royal_mode="$(saved program_mode)"; [ -n "$royal_mode" ] || royal_mode="ap"
     royal_ip="$(saved device_ip)"; [ -n "$royal_ip" ] || royal_ip="$(uci -q get network.lan.ipaddr)"
     royal_vlan="$(saved vlan_id)"
+    royal_vlan_ip="$(saved vlan_access_ip)"; [ -n "$royal_vlan_ip" ] || royal_vlan_ip="$(uci -q get network.smartap_vlan.ipaddr 2>/dev/null)"
     royal_ssid="$(saved ssid)"; [ -n "$royal_ssid" ] || royal_ssid="$(uci -q get wireless.wifinet0.ssid)"
     ch24="$(saved ch24)"; [ -n "$ch24" ] || ch24="$(uci -q get wireless.radio0.channel)"
     ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
@@ -928,8 +994,9 @@ EOF
     reset_mode="$(saved reset_mode)"; [ -n "$reset_mode" ] || reset_mode="factory"
     form="$(form_json <<EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
-device_ip|عنوان IP|${royal_ip:-192.168.1.1}|عنوان إدارة الراوتر داخل LAN|text|0|device|all|
+device_ip|عنوان IP للجهاز (الكيبل / LAN)|${royal_ip:-192.168.1.1}|عنوان إدارة الجهاز — تدخل به عبر الكيبل دائماً وعبر الواي فاي في وضع LAN|text|0|device|all|
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
+vlan_access_ip|عنوان دخول خاص بالفيلان (واي فاي)|${royal_vlan_ip}|عنوان منفصل داخل شبكة الفيلان — تدخل به على صفحة الضبط عبر الواي فاي وأنت داخل الفيلان (اتركه فارغاً لتعطيله)|text|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 ch5|قناة 5G|${ch5:-36}|يفضل قناة غير DFS مثل 36/40/44/48|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
