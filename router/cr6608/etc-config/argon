@@ -1,6 +1,7 @@
 config global
+	option mode 'light'
 	option primary '#7C3AED'
-	option dark_primary '#7C3AED'
+	option dark_primary '#5B21B6'
 	option blur '10'
 	option blur_dark '10'
 	option transparency '0.72'
