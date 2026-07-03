@@ -1,5 +1,4 @@
 config global
-	option mode 'dark'
 	option primary '#7C3AED'
 	option dark_primary '#7C3AED'
 	option blur '10'
