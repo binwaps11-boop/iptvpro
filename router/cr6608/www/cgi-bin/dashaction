@@ -24,8 +24,7 @@ case "$sid" in
   00000000000000000000000000000000|'') deny_auth ;;
 esac
 [ "${#sid}" = 32 ] 2>/dev/null || deny_auth
-access="$(ubus call session access "{\"ubus_rpc_session\":\"$sid\",\"scope\":\"ubus\",\"object\":\"system\",\"function\":\"board\"}" 2>/dev/null)"
-printf '%s' "$access" | grep -q '"access"[[:space:]]*:[[:space:]]*true' || deny_auth
+[ -f "/tmp/dashsess/$sid" ] || deny_auth
 
 printf 'Content-Type: application/json\r\n'
 printf 'Cache-Control: no-store\r\n'

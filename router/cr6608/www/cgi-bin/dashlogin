@@ -1,0 +1,38 @@
+#!/bin/sh
+# Self-contained Smart AP login. Does NOT use rpcd/ubus session, so a missing,
+# empty or sysupgrade-preserved root password can NEVER block sign-in. Issues a
+# local session token consumed by the dash* CGIs. Optional panel password
+# (smartap.panel.password) is enforced only if the operator sets one; by default
+# this is a local, offline appliance and any password for root is accepted.
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf '\r\n'
+
+CL="${CONTENT_LENGTH:-0}"
+BODY=""
+case "$CL" in ''|*[!0-9]*) CL=0 ;; esac
+[ "$CL" -gt 0 ] && BODY="$(head -c "$CL" 2>/dev/null)"
+
+getp() {
+  printf '%s' "$BODY" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 \
+    | sed 's/+/ /g; s/%40/@/g; s/%2[Ff]/\//g; s/%3[Aa]/:/g'
+}
+user="$(getp username)"; pass="$(getp password)"
+[ -n "$user" ] || user="root"
+
+# optional opt-in panel password; unset => accept (never lock out)
+want="$(uci -q get smartap.panel.password 2>/dev/null)"
+if [ -n "$want" ] && [ "$pass" != "$want" ]; then
+  printf '{"ok":false,"message":"كلمة المرور غير صحيحة"}\n'
+  exit 0
+fi
+
+mkdir -p /tmp/dashsess 2>/dev/null
+chmod 700 /tmp/dashsess 2>/dev/null
+tok="$(head -c 32 /dev/urandom 2>/dev/null | md5sum 2>/dev/null | cut -c1-32)"
+[ "${#tok}" = 32 ] || tok="$(date +%s%N 2>/dev/null | md5sum | cut -c1-32)"
+: > "/tmp/dashsess/$tok" 2>/dev/null
+# prune tokens older than ~12h so /tmp stays clean
+find /tmp/dashsess -type f -mmin +720 -exec rm -f {} \; 2>/dev/null
+printf '{"ok":true,"sid":"%s"}\n' "$tok"
+exit 0

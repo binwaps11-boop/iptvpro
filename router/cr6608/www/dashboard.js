@@ -430,11 +430,20 @@
     try {
       var user = username || "root";
       var pass = password || "";
-      var data = await ubusCall(ANON, "session", "login", { username:user, password:pass, timeout:3600 });
-      if (!data.ubus_rpc_session) throw new Error("missing session");
-      state.session = data.ubus_rpc_session;
+      // Self-contained local login — never depends on rpcd/ubus, so an empty or
+      // sysupgrade-preserved root password can't block sign-in.
+      var res = await fetch("/cgi-bin/dashlogin", {
+        method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "username=" + encodeURIComponent(user) + "&password=" + encodeURIComponent(pass)
+      });
+      var data = await res.json();
+      if (!data.ok || !data.sid) throw new Error(data.message || "login failed");
+      state.session = data.sid;
       sessionStorage.setItem(LS + "session", state.session);
-      await primeLuciSession(user, pass);
+      // best-effort: also prime the LuCI (OpenWrt settings) session so the
+      // settings button doesn't prompt again. Failure here is non-fatal.
+      primeLuciSession(user, pass);
       toast(tr("loginOk"));
       showDashboard();
     } catch (e) {
@@ -446,7 +455,8 @@
   async function validateSession() {
     if (!state.session) return false;
     try {
-      await ubusCall(state.session, "system", "board", {});
+      var res = await fetch(authUrl("/cgi-bin/dashapi"), { cache: "no-store" });
+      if (res.status !== 200) throw new Error("invalid");
       return true;
     } catch (e) {
       state.session = "";
