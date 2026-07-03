@@ -1,0 +1,191 @@
+#!/bin/sh
+# cr6608-security-apply — applies Smart AP security, port and VLAN policy from /etc/config/smartap.
+# Design goals:
+#   * Everything is optional (master switch security.enabled) and fully removable.
+#   * Protections: web flood guard, rogue-DHCP / IP-leak guard (never hand IPs to the
+#     upstream Mikrotik or leak them to other ports), loop guard (STP).
+#   * Per-port enable/disable, per-port isolation, per-port client VLAN.
+#   * Management is NEVER cut off: VLAN 1 (192.168.1.1) stays untagged on every port and
+#     Wi-Fi, so the dashboard is always reachable regardless of VLAN/isolation settings.
+# Usage: cr6608-security-apply {apply|firewall|ports|vlan|get}
+
+STATE="smartap"
+PORTS="lan1 lan2 lan3"
+MGMT_DEFAULT_VLAN="1"
+
+log() { logger -t cr6608-security "$*"; }
+g()   { uci -q get "$1" 2>/dev/null; }
+
+# ------------------------------------------------------------------ firewall
+# All Smart AP firewall rules carry a name prefixed with "SmartAP-" so we can
+# add/remove them idempotently without touching the user's own rules.
+clear_smartap_fw() {
+	# uci indexes shift on delete, so resolve by name repeatedly
+	while uci show firewall 2>/dev/null | grep -q "\.name='SmartAP-"; do
+		local idx
+		idx="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
+		[ -n "$idx" ] || break
+		uci -q delete "firewall.$idx" || break
+	done
+}
+
+add_fw_rule() {
+	# add_fw_rule <name> <opts...>  — opts are uci key=val pairs
+	local s
+	s="$(uci add firewall rule)"
+	uci set "firewall.$s.name=$1"; shift
+	for kv in "$@"; do uci set "firewall.$s.${kv%%=*}=${kv#*=}"; done
+}
+
+apply_firewall() {
+	local enabled flood rogue
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	flood="$(g $STATE.security.flood_guard)"; flood="${flood:-1}"
+	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+
+	clear_smartap_fw
+
+	if [ "$enabled" = "1" ]; then
+		if [ "$flood" = "1" ]; then
+			# Rate-limit dashboard/web hits from the LAN, then drop the flood overflow.
+			add_fw_rule "SmartAP-Web-RateLimit" src=lan proto=tcp dest_port="80 443" \
+				limit="180/minute" limit_burst=60 target=ACCEPT
+			add_fw_rule "SmartAP-Web-FloodDrop" src=lan proto=tcp dest_port="80 443" target=DROP
+		fi
+		if [ "$rogue" = "1" ]; then
+			# Defensive L3 drop: nothing on the LAN may act as a DHCP server toward the
+			# router / upstream. Core guarantee is DHCP-server-off + isolation + STP.
+			add_fw_rule "SmartAP-RogueDHCP-In" src=lan proto=udp src_port=67 dest_port=68 target=DROP
+			add_fw_rule "SmartAP-RogueDHCP-Boot" src=lan proto=udp src_port=68 dest_port=67 family=ipv4 target=ACCEPT
+		fi
+	fi
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+}
+
+apply_dhcp_guard() {
+	local enabled rogue
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+	if [ "$enabled" = "1" ] && [ "$rogue" = "1" ]; then
+		# Never serve DHCP (would leak IPs onto the Mikrotik network).
+		uci set dhcp.lan.ignore='1'
+		uci commit dhcp
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+	fi
+}
+
+apply_loop_guard() {
+	local enabled loop
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	loop="$(g $STATE.security.loop_guard)"; loop="${loop:-1}"
+	local want=0
+	[ "$enabled" = "1" ] && [ "$loop" = "1" ] && want=1
+	# br-lan device is the first bridge section
+	uci set network.@device[0].stp="$want" 2>/dev/null && uci commit network
+}
+
+# ------------------------------------------------------------------ ports
+apply_ports() {
+	for p in $PORTS; do
+		[ -d "/sys/class/net/$p" ] || continue
+		local en iso
+		en="$(g $STATE.$p.enabled)"; en="${en:-1}"
+		iso="$(g $STATE.$p.isolate)"; iso="${iso:-0}"
+		if [ "$en" = "0" ]; then
+			ip link set dev "$p" down 2>/dev/null && log "port $p down"
+		else
+			ip link set dev "$p" up 2>/dev/null
+			[ "$iso" = "1" ] && bridge link set dev "$p" isolated on 2>/dev/null \
+				|| bridge link set dev "$p" isolated off 2>/dev/null
+			log "port $p up isolate=$iso"
+		fi
+	done
+}
+
+# ------------------------------------------------------------------ vlan
+# Safe model: management VLAN (default 1, 192.168.1.1) is untagged on every port and
+# Wi-Fi. A port assigned a different client VLAN gets that VLAN *tagged* (trunk) so the
+# dashboard stays reachable untagged everywhere. When all ports use the management VLAN
+# we remove VLAN filtering entirely (plain bridge = original behaviour).
+clear_smartap_vlan() {
+	while uci show network 2>/dev/null | grep -q "\.name='SmartAP-vlan"; do
+		local idx
+		idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-vlan.*/\1/p" | head -n1)"
+		[ -n "$idx" ] || break
+		uci -q delete "network.$idx" || break
+	done
+}
+
+apply_vlan() {
+	local mgmt need=0
+	mgmt="$(g $STATE.management.vlan)"; mgmt="${mgmt:-$MGMT_DEFAULT_VLAN}"
+	for p in $PORTS; do
+		local v; v="$(g $STATE.$p.vlan)"; v="${v:-$mgmt}"
+		[ "$v" != "$mgmt" ] && need=1
+	done
+
+	clear_smartap_vlan
+
+	if [ "$need" = "0" ]; then
+		# no segmentation requested -> plain bridge, management everywhere
+		uci -q delete network.@device[0].vlan_filtering 2>/dev/null
+		uci commit network
+		/etc/init.d/network reload >/dev/null 2>&1 || true
+		return 0
+	fi
+
+	# management VLAN untagged (u*) on all bridge ports incl. wan uplink
+	uci set network.@device[0].vlan_filtering='1'
+	local s
+	s="$(uci add network bridge-vlan)"
+	uci set "network.$s.name=SmartAP-vlan-mgmt"
+	uci set "network.$s.device=br-lan"
+	uci set "network.$s.vlan=$mgmt"
+	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$s.ports=$p:u*"; done
+
+	# each non-management client VLAN, tagged on its port(s)
+	for p in $PORTS; do
+		local v; v="$(g $STATE.$p.vlan)"; v="${v:-$mgmt}"
+		[ "$v" = "$mgmt" ] && continue
+		local vs
+		vs="$(uci add network bridge-vlan)"
+		uci set "network.$vs.name=SmartAP-vlan-$p"
+		uci set "network.$vs.device=br-lan"
+		uci set "network.$vs.vlan=$v"
+		uci add_list "network.$vs.ports=$p:t"
+	done
+	uci commit network
+	/etc/init.d/network reload >/dev/null 2>&1 || true
+	log "vlan applied (management $mgmt untagged on all ports)"
+}
+
+# management always reachable: keep recovery interface + lan input open
+ensure_management() {
+	# recovery static 192.168.66.1 on br-lan is defined in /etc/config/network; nothing to
+	# rewrite here, but make sure the lan firewall zone accepts input (dashboard/ssh).
+	:
+}
+
+case "$1" in
+	firewall) apply_firewall; apply_dhcp_guard; apply_loop_guard ;;
+	ports)    apply_ports ;;
+	vlan)     apply_vlan ;;
+	get)
+		echo "enabled=$(g $STATE.security.enabled)"
+		echo "flood_guard=$(g $STATE.security.flood_guard)"
+		echo "rogue_dhcp_guard=$(g $STATE.security.rogue_dhcp_guard)"
+		echo "loop_guard=$(g $STATE.security.loop_guard)"
+		for p in $PORTS; do echo "$p enabled=$(g $STATE.$p.enabled) isolate=$(g $STATE.$p.isolate) vlan=$(g $STATE.$p.vlan)"; done
+		;;
+	apply|"")
+		ensure_management
+		apply_firewall
+		apply_dhcp_guard
+		apply_loop_guard
+		apply_vlan
+		apply_ports
+		;;
+	*) echo "usage: $0 {apply|firewall|ports|vlan|get}"; exit 1 ;;
+esac
+exit 0

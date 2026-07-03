@@ -1,0 +1,26 @@
+config security 'security'
+	option enabled '1'
+	option flood_guard '1'
+	option rogue_dhcp_guard '1'
+	option loop_guard '1'
+	option wifi_isolate '1'
+
+config management 'management'
+	option vlan '1'
+	option ipaddr '192.168.1.1'
+	option recovery_always '1'
+
+config port 'lan1'
+	option enabled '1'
+	option isolate '0'
+	option vlan '1'
+
+config port 'lan2'
+	option enabled '1'
+	option isolate '0'
+	option vlan '1'
+
+config port 'lan3'
+	option enabled '1'
+	option isolate '0'
+	option vlan '1'

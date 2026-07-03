@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=10
+
+start() {
+	# reapply saved security + port + isolation policy once the network is up
+	(
+		sleep 7
+		/usr/sbin/cr6608-security-apply apply
+	) &
+}
+
+reload_service() {
+	/usr/sbin/cr6608-security-apply apply
+}
+
+restart() {
+	reload_service
+}

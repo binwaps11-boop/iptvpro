@@ -74,13 +74,14 @@ arm_rollback() {
   printf '%s\n' "$backup" > /tmp/smartap-rollback-backup
   touch /tmp/smartap-rollback-armed
   (
-    sleep 30
+    sleep 60
     if [ -f /tmp/smartap-rollback-armed ] && [ -r "$backup" ]; then
       tar -xzf "$backup" -C / 2>/dev/null
       /etc/init.d/dnsmasq restart >/dev/null 2>&1
       /etc/init.d/firewall reload >/dev/null 2>&1
       /etc/init.d/network reload >/dev/null 2>&1
       wifi reload >/dev/null 2>&1
+      [ -x /usr/sbin/cr6608-security-apply ] && /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1
       rm -f /tmp/smartap-rollback-armed
     fi
   ) >/dev/null 2>&1 &
@@ -120,7 +121,7 @@ store_royal_config() {
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
-  uci -q set smartap.quick.txpower_locked='30'
+  uci -q set smartap.quick.txpower_locked="${tx0:-35}"
   uci -q commit smartap
 }
 set_wifi_security() {
@@ -166,6 +167,35 @@ tx1="$(uci -q get wireless.radio1.txpower 2>/dev/null)"
 
 case "$action" in
   keep_changes) rm -f /tmp/smartap-rollback-armed /tmp/smartap-rollback-backup; emit true "Keep changes" "Rollback timer cancelled" "[]" "The current settings are kept." "[]" "[]"; exit 0 ;;
+  apply_isolation)
+    confirm_required "Security"
+    backup="$(backup_cfg security)"
+    [ -f /etc/config/smartap ] || : > /etc/config/smartap
+    uci -q get smartap.security >/dev/null 2>&1 || { uci set smartap.security='security'; }
+    uci -q get smartap.management >/dev/null 2>&1 || { uci set smartap.management='management'; uci set smartap.management.vlan='1'; uci set smartap.management.ipaddr='192.168.1.1'; uci set smartap.management.recovery_always='1'; }
+    se="$(safe_num "$(param sec_enabled)")"; fg="$(safe_num "$(param flood_guard)")"; rg="$(safe_num "$(param rogue_dhcp_guard)")"; lg="$(safe_num "$(param loop_guard)")"
+    uci set smartap.security.enabled="${se:-1}"
+    uci set smartap.security.flood_guard="${fg:-1}"
+    uci set smartap.security.rogue_dhcp_guard="${rg:-1}"
+    uci set smartap.security.loop_guard="${lg:-1}"
+    w24="$(safe_num "$(param iso_wifi24)")"; w5="$(safe_num "$(param iso_wifi5)")"
+    [ "$w24" = "1" ] && uci set wireless.wifinet0.isolate='1' || uci set wireless.wifinet0.isolate='0'
+    [ "$w5" = "1" ] && uci set wireless.wifinet1.isolate='1' || uci set wireless.wifinet1.isolate='0'
+    uci set smartap.security.wifi_isolate="$w24"
+    for n in 1 2 3; do
+      pen="$(safe_num "$(param lan${n}_enabled)")"; pil="$(safe_num "$(param lan${n}_isolate)")"; pvl="$(safe_num "$(param lan${n}_vlan)")"
+      [ -n "$pvl" ] || pvl="1"; [ "$pvl" -ge 1 ] 2>/dev/null && [ "$pvl" -le 4094 ] 2>/dev/null || pvl="1"
+      uci -q get smartap.lan$n >/dev/null 2>&1 || uci set smartap.lan$n='port'
+      uci set smartap.lan$n.enabled="${pen:-1}"
+      uci set smartap.lan$n.isolate="${pil:-0}"
+      uci set smartap.lan$n.vlan="$pvl"
+    done
+    uci commit wireless; uci commit smartap
+    wifi reload >/dev/null 2>&1
+    /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1
+    /etc/init.d/cr6608-security enable >/dev/null 2>&1
+    arm_rollback "$backup"
+    emit true "الحماية والمنافذ" "تم التطبيق مع إرجاع تلقائي" "[]" "نسخة احتياطية: $backup\nالحماية العامة=$se فيضان=$fg تسريب=$rg لوب=$lg. واي فاي 2.4G=$w24 5G=$w5. المنافذ محفوظة وتُعاد عند الإقلاع. الوصول للإدارة مضمون على كل المنافذ والواي فاي. إذا انقطع وصولك سيُسترجع تلقائياً خلال 60 ثانية — أو اضغط \"الاحتفاظ بالتغييرات\". طاقة البث لم تُلمس." '[{"id":"keep_changes","label":"الاحتفاظ بالتغييرات"},{"id":"rollback_last","label":"إرجاع الآن","confirm":true}]' "[]"; exit 0 ;;
   rollback_last)
     rb="$(cat /tmp/smartap-rollback-backup 2>/dev/null)"
     if [ -r "$rb" ]; then
@@ -380,7 +410,7 @@ case "$action" in
     cfg="$(safe_word "$(param raw_config)")"; sec="$(safe_uci_ref "$(param raw_section)")"; opt="$(safe_uci_opt "$(param raw_option)")"; val="$(safe_uci_value "$(param raw_value)")"; typ="$(safe_uci_opt "$(param raw_type)")"
     valid_config "$cfg" || { emit false "Raw UCI" "Blocked config" "[]" "Only network, wireless, dhcp, firewall, system, sqm, uhttpd, dropbear and smartap are allowed." "[]" "[]"; exit 0; }
     if [ "$cfg" = "wireless" ] && [ "$opt" = "txpower" ]; then
-      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains 30 read-only." "[]" "[]"; exit 0
+      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-35} read-only." "[]" "[]"; exit 0
     fi
     backup="$(backup_cfg raw-uci)"
     case "$action" in
@@ -751,6 +781,53 @@ EOF
 esac
 
 case "$section" in
+  isolation)
+    sec_en="$(uci -q get smartap.security.enabled 2>/dev/null)"; sec_en="${sec_en:-1}"
+    flood="$(uci -q get smartap.security.flood_guard 2>/dev/null)"; flood="${flood:-1}"
+    rogue="$(uci -q get smartap.security.rogue_dhcp_guard 2>/dev/null)"; rogue="${rogue:-1}"
+    loop="$(uci -q get smartap.security.loop_guard 2>/dev/null)"; loop="${loop:-1}"
+    iso24="$(uci -q get wireless.wifinet0.isolate 2>/dev/null)"; iso24="${iso24:-0}"
+    iso5="$(uci -q get wireless.wifinet1.isolate 2>/dev/null)"; iso5="${iso5:-0}"
+    mgmt_vlan="$(uci -q get smartap.management.vlan 2>/dev/null)"; mgmt_vlan="${mgmt_vlan:-1}"
+    for n in 1 2 3; do
+      eval "en$n=\"\$(uci -q get smartap.lan$n.enabled 2>/dev/null)\"; en$n=\${en$n:-1}"
+      eval "il$n=\"\$(uci -q get smartap.lan$n.isolate 2>/dev/null)\"; il$n=\${il$n:-0}"
+      eval "vl$n=\"\$(uci -q get smartap.lan$n.vlan 2>/dev/null)\"; vl$n=\${vl$n:-$mgmt_vlan}"
+    done
+    yn() { [ "$1" = "1" ] && echo "مفعّل" || echo "متوقف"; }
+    lvl() { [ "$1" = "1" ] && echo ok || echo warn; }
+    cards="$(cards_json <<EOF
+الحماية العامة|$(yn "$sec_en")|المفتاح الرئيسي لكل الحمايات|$(lvl "$sec_en")
+حماية الفيضان|$(yn "$flood")|حد أقصى لطلبات الويب ضد البوتات|$(lvl "$flood")
+منع تسريب IP|$(yn "$rogue")|يمنع توزيع/تسريب العناوين للميكروتك والمنافذ|$(lvl "$rogue")
+منع اللوب|$(yn "$loop")|STP على الجسر ضد الحلقات|$(lvl "$loop")
+واي فاي 2.4G|$([ "$iso24" = "1" ] && echo معزول || echo مفتوح)|Smart-AP|$([ "$iso24" = "1" ] && echo ok || echo neutral)
+واي فاي 5G|$([ "$iso5" = "1" ] && echo معزول || echo مفتوح)|Smart-AP-5G|$([ "$iso5" = "1" ] && echo ok || echo neutral)
+LAN1|$([ "$en1" = "1" ] && echo يعمل || echo موقوف) · VLAN $vl1|$([ "$il1" = "1" ] && echo معزول || echo عادي)|$([ "$en1" = "1" ] && echo ok || echo bad)
+LAN2|$([ "$en2" = "1" ] && echo يعمل || echo موقوف) · VLAN $vl2|$([ "$il2" = "1" ] && echo معزول || echo عادي)|$([ "$en2" = "1" ] && echo ok || echo bad)
+LAN3|$([ "$en3" = "1" ] && echo يعمل || echo موقوف) · VLAN $vl3|$([ "$il3" = "1" ] && echo معزول || echo عادي)|$([ "$en3" = "1" ] && echo ok || echo bad)
+EOF
+)"
+    form="$(form_json <<EOF
+sec_enabled|الحماية العامة (المفتاح الرئيسي)|$sec_en|تشغيل يفعّل الحمايات، إيقاف يلغيها كلها|select|0|guard||1:مفعّل,0:متوقف
+flood_guard|حماية الفيضان (البوتات)|$flood|حد أقصى 180 طلب/دقيقة على الويب|select|0|guard||1:مفعّل,0:متوقف
+rogue_dhcp_guard|منع تسريب العناوين|$rogue|يمنع الجهاز من توزيع IP للميكروتك أو تسريب المشكلة لبقية المنافذ|select|0|guard||1:مفعّل,0:متوقف
+loop_guard|منع اللوب (STP)|$loop|حماية من الحلقات بين المنافذ|select|0|guard||1:مفعّل,0:متوقف
+iso_wifi24|عزل واي فاي 2.4G|$iso24|أجهزة Smart-AP لا ترى بعضها|select|0|wifi||1:تشغيل,0:إيقاف
+iso_wifi5|عزل واي فاي 5G|$iso5|أجهزة Smart-AP-5G لا ترى بعضها|select|0|wifi||1:تشغيل,0:إيقاف
+lan1_enabled|تشغيل منفذ LAN1|$en1|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
+lan1_isolate|عزل منفذ LAN1|$il1|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
+lan1_vlan|VLAN منفذ LAN1|$vl1|1 = شبكة الإدارة. غيّره لعزل المنفذ في VLAN مستقل|number|0|ports|
+lan2_enabled|تشغيل منفذ LAN2|$en2|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
+lan2_isolate|عزل منفذ LAN2|$il2|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
+lan2_vlan|VLAN منفذ LAN2|$vl2|1 = شبكة الإدارة|number|0|ports|
+lan3_enabled|تشغيل منفذ LAN3|$en3|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
+lan3_isolate|عزل منفذ LAN3|$il3|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
+lan3_vlan|VLAN منفذ LAN3|$vl3|1 = شبكة الإدارة|number|0|ports|
+EOF
+)"
+    text="$( { echo "الوصول للوحة مضمون دائماً: VLAN $mgmt_vlan (الإدارة) غير موسوم على كل المنافذ + الواي فاي، ولوحة الطوارئ 192.168.66.1."; echo; echo "bridge link show:"; bridge link show 2>/dev/null; echo; echo "smartap policy:"; /usr/sbin/cr6608-security-apply get 2>/dev/null; } 2>/dev/null | redact)"
+    emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ تلقائي مع إرجاع خلال 60 ثانية" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات","confirm":true}]' "$form" ;;
   control|dashboard)
     cards="$(cards_json <<EOF
 Dashboard|Xiaomi CR6608|Active interface|ok
@@ -815,7 +892,7 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower_readonly|طاقة البث|30|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
+txpower_readonly|طاقة البث|${tx0:-35}|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
 EOF
 )"
     cards="$(cards_json <<EOF
@@ -845,7 +922,7 @@ Policy|No write|Power remains unchanged|ok
 EOF
 )"
     form="$(form_json <<EOF
-txpower|TX Power|30|Locked by policy. This field is disabled.|text|1
+txpower|TX Power|${tx0:-35}|Locked by policy. This field is disabled.|text|1
 EOF
 )"
     emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Expected value: 30 dBm." '[]' "$form" ;;

@@ -40,7 +40,10 @@
       lanOnly: "LAN فقط", refresh: "تحديث", theme: "الثيم", dark: "داكن", light: "فاتح",
       overview: "نظرة",
       signal: "الإشارة", network: "الترافيك", devices: "الأجهزة", wifi: "WiFi",
-      system: "صحة النظام", actions: "إجراءات",
+      system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
+      isolationHint: "تحكم بعزل المنافذ والواي فاي: تشغيل/إيقاف لكل منفذ.",
+      isolationTitle: "عزل المنافذ والأجهزة",
+      isolationNote: "عند تفعيل العزل لمنفذ أو شبكة واي فاي، أجهزته ترى الإنترنت فقط ولا ترى بعضها — حماية قوية للشبكة المفتوحة. الحفظ تلقائي مع نسخة احتياطية.",
       subtitle: "لوحة OpenWrt محلية: بيانات حية، أصول داخلية، بدون CDN.",
       uptime: "مدة التشغيل", model: "الموديل", firmware: "النظام", internet: "الإنترنت",
       deviceCount: "الأجهزة", updated: "آخر تحديث", traffic: "الترافيك", cpu: "المعالج",
@@ -70,7 +73,10 @@
       lanOnly: "LAN only", refresh: "Refresh", theme: "Theme", dark: "Dark", light: "Light",
       overview: "Overview",
       signal: "Signal", network: "Traffic", devices: "Devices", wifi: "WiFi",
-      system: "System Health", actions: "Actions",
+      system: "System Health", actions: "Actions", isolation: "Isolation",
+      isolationHint: "Control port and Wi-Fi isolation: on/off per port.",
+      isolationTitle: "Port & Client Isolation",
+      isolationNote: "When isolation is on for a port or Wi-Fi network, its devices reach the internet only and cannot see each other — strong protection for an open network. Saved automatically with a backup.",
       subtitle: "Local OpenWrt dashboard: live data, offline assets, no CDN.",
       uptime: "Uptime", model: "Model", firmware: "Firmware", internet: "Internet",
       deviceCount: "Devices", updated: "Updated", traffic: "Traffic", cpu: "CPU",
@@ -164,7 +170,8 @@
       bolt:"M13 2 4 14h7l-1 8 9-12h-7l1-8Z",
       refresh:"M20 12a8 8 0 0 1-13.7 5.7M4 12A8 8 0 0 1 17.7 6.3M17 3v4h-4M7 21v-4h4",
       sms:"M4 5h16v11H8l-4 4V5Z",
-      gear:"M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"
+      gear:"M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z",
+      shield:"M12 3 5 6v6c0 4 3 6.5 7 9 4-2.5 7-5 7-9V6l-7-3ZM9.5 12l1.8 1.8L15 10"
     }[name] || "M5 12h14M12 5v14";
     return '<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="' + p + '" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   }
@@ -398,6 +405,7 @@
       ["devices","devices","device"],
       ["wifi","wifi","wifi"],
       ["system","system","cpu"],
+      ["isolation","isolation","shield"],
       ["actions","actions","gear"]
     ];
     $("nav").innerHTML = nav.map(function (n, i) { return '<button data-section="' + n[0] + '" class="' + (i ? "" : "active") + '">' + icon(n[2]) + '<span>' + tr(n[1]) + '</span></button>'; }).join("");
@@ -408,12 +416,18 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","system","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","system","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
       $(id).dataset.uiVersion = UI_VERSION;
       bindDynamic();
+    }
+    if (id === "isolation" && $("isolation") && $("isolation").dataset.uiVersion !== UI_VERSION) {
+      $("isolation").innerHTML = renderIsolation();
+      $("isolation").dataset.uiVersion = UI_VERSION;
+      bindDynamic();
+      loadControl("isolation");
     }
     window.scrollTo({ top:0, behavior:"smooth" });
     setTimeout(loadActiveControl, 0);
@@ -629,6 +643,16 @@
     var actions = [["refresh",tr("refresh"),tr("readApiNow")],["speedtest",tr("speedTest"),tr("localTest")],["reconnect",tr("reconnect"),tr("protected")],["wifi_toggle",tr("toggleWifi"),tr("protected")],["reboot",tr("reboot"),tr("confirmRequired")]];
     return sectionHead(tr("actions"), tr("actionsHint"), tr("safeAction")) +
       '<div class="actions">' + actions.map(function (a) { return '<button class="action" data-action="' + a[0] + '"><strong>' + esc(a[1]) + '</strong><span>' + esc(a[2]) + '</span></button>'; }).join("") + '</div>' + renderEvents(state.latest || {});
+  }
+  function renderIsolation() {
+    return sectionHead(tr("isolation"), tr("isolationHint"), "Xiaomi CR6608") +
+      '<div class="branch-detail" data-control-section="isolation">' +
+      '<div class="chip warn"><span>' + esc(tr("protected")) + '</span></div>' +
+      '<h3>' + esc(tr("isolationTitle")) + '</h3>' +
+      '<p>' + esc(tr("isolationNote")) + '</p>' +
+      '<div class="branch-actions"><button class="btn primary" data-ctl-refresh="isolation">' + esc(tr("refresh")) + '</button></div>' +
+      '<div id="ctl_isolation" class="ctl-status">' + esc(tr("loading")) + '</div>' +
+      '</div>';
   }
   function render(data) {
     state.latest = data;
