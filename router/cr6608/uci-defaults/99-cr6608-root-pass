@@ -1,0 +1,14 @@
+#!/bin/sh
+# Guarantee a working login on every flash. OpenWrt sysupgrade preserves the old
+# /etc/shadow, so a unit that previously had an EMPTY root password keeps it —
+# and rpcd/LuCI refuse passwordless logins, breaking the Smart AP sign-in.
+# If root has no usable password, set the documented default (admin). A password
+# the operator has already set (non-empty) is left untouched.
+cur="$(awk -F: '/^root:/{print $2}' /etc/shadow 2>/dev/null)"
+case "$cur" in
+	""|"!"|"x"|"*"|"!*")
+		printf 'admin\nadmin\n' | passwd root >/dev/null 2>&1
+		logger -t cr6608 "root login password set to default (was empty)"
+		;;
+esac
+exit 0
