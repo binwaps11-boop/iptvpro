@@ -118,6 +118,11 @@ clear_smartap_vlan() {
 }
 
 apply_vlan() {
+	# Defer entirely to Quick Settings when an AP-VLAN is active there — one VLAN owner only.
+	if uci -q get network.smartap_vlan >/dev/null 2>&1 || uci -q get network.cr6608_vlan >/dev/null 2>&1; then
+		log "quick-settings AP-VLAN active; security-page VLAN skipped (single owner)"
+		return 0
+	fi
 	local mgmt need=0
 	mgmt="$(g $STATE.management.vlan)"; mgmt="${mgmt:-$MGMT_DEFAULT_VLAN}"
 	for p in $PORTS; do

@@ -75,8 +75,26 @@ has_lan_port() {
 cleanup_previous() {
 	uci -q delete wireless.cr6608_mesh
 	uci -q delete wireless.cr6608_wds
+	clear_vlan
+}
+
+# clear_vlan — revert to a plain (non-filtering) bridge with management on br-lan.
+# Removes every SmartAP quick-VLAN artifact so a non-VLAN mode connects normally.
+clear_vlan() {
 	uci -q delete network.cr6608_vlan
 	uci -q delete network.cr6608_vlan_dev
+	uci -q delete network.@device[0].vlan_filtering
+	# management interface back on the plain bridge
+	uci set network.lan.device='br-lan'
+	# recovery interface back on the plain bridge if it was moved
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+	# drop any SmartAP quick bridge-vlan sections
+	while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+		local idx
+		idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+		[ -n "$idx" ] || break
+		uci -q delete "network.$idx" || break
+	done
 }
 
 set_ap_ports() {
@@ -102,19 +120,48 @@ set_pppoe_wan() {
 	uci set network.wan.auto='1'
 }
 
+# set_vlan_target — correct DSA (MT7621) VLAN for "AP on a VLAN".
+#   * Management VLAN 1 stays UNTAGGED (native/pvid) on every wired port, so the
+#     dashboard IP the user set is reachable over any LAN cable.
+#   * The client VLAN <vid> is TAGGED on every wired port (trunk toward the Mikrotik).
+#   * Both Wi-Fi radios join the client VLAN (their network is set to cr6608_vlan by
+#     the caller), so 2.4G and 5G clients live inside <vid> and get their IPs from the
+#     upstream Mikrotik DHCP on that VLAN.
+# Uses bridge-VLAN filtering (the DSA way) — NOT an 8021q device stacked on the bridge.
 set_vlan_target() {
-	local vid="$1"
+	local vid="$1" p m c
 	[ -n "$vid" ] || return 1
 	echo "$vid" | grep -Eq '^[0-9]+$' || return 1
-	[ "$vid" -ge 1 ] && [ "$vid" -le 4094 ] || return 1
-	uci set network.cr6608_vlan_dev='device'
-	uci set network.cr6608_vlan_dev.type='8021q'
-	uci set network.cr6608_vlan_dev.ifname='br-lan'
-	uci set network.cr6608_vlan_dev.vid="$vid"
-	uci set network.cr6608_vlan_dev.name="br-lan.$vid"
+	[ "$vid" -ge 2 ] && [ "$vid" -le 4094 ] || return 1   # 1 is reserved for management
+
+	# start from a clean slate (removes any stale 8021q or prior quick-VLAN artifacts)
+	clear_vlan
+
+	# enable VLAN filtering on the br-lan bridge
+	uci set network.@device[0].vlan_filtering='1'
+
+	# VLAN 1 = management, untagged/native (pvid) on all wired ports
+	m="$(uci add network bridge-vlan)"
+	uci set "network.$m.name=SmartAP-qvlan-mgmt"
+	uci set "network.$m.device=br-lan"
+	uci set "network.$m.vlan=1"
+	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$m.ports=$p:u*"; done
+
+	# client VLAN = tagged on all wired ports (whichever port faces the Mikrotik carries it)
+	c="$(uci add network bridge-vlan)"
+	uci set "network.$c.name=SmartAP-qvlan-client"
+	uci set "network.$c.device=br-lan"
+	uci set "network.$c.vlan=$vid"
+	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$c.ports=$p:t"; done
+
+	# management L3 interface moves onto the native VLAN device (keeps its IP)
+	uci set network.lan.device='br-lan.1'
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
+
+	# client L3 interface Wi-Fi bridges into; no IP (clients use the upstream DHCP)
 	uci set network.cr6608_vlan='interface'
-	uci set network.cr6608_vlan.proto='none'
 	uci set network.cr6608_vlan.device="br-lan.$vid"
+	uci set network.cr6608_vlan.proto='none'
 	return 0
 }
 
@@ -173,7 +220,13 @@ apply_config() {
 		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
 			if set_vlan_target "$vlan"; then
 				target_network='cr6608_vlan'
+			else
+				clear_vlan
+				log "VLAN mode requested but VLAN ID '$vlan' is invalid (must be 2-4094); staying on management LAN"
 			fi
+			;;
+		*)
+			clear_vlan
 			;;
 	esac
 

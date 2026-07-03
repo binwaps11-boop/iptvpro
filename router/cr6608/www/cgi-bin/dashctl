@@ -581,6 +581,15 @@ EOF
     uci -q delete smartap.quick
     for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
     for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
+    # unwind any AP-VLAN: plain bridge, radios back on management LAN
+    while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+      vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+      [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
+    done
+    uci -q delete network.@device[0].vlan_filtering
+    uci set network.lan.device='br-lan'
+    uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+    for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
     uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
@@ -600,7 +609,7 @@ EOF
     watchcat_enabled="$(safe_num "$(param watchcat_enabled)")"; broadband_enabled="$(safe_num "$(param broadband_enabled)")"; fake_mesh="$(safe_num "$(param fake_mesh)")"
     [ -n "$device_ip" ] && valid_ipv4 "$device_ip" || { emit false "Quick Setup" "Invalid IP" "[]" "Device IP must be a valid IPv4 address." "[]" "[]"; exit 0; }
     if mode_has_vlan "$program_mode"; then
-      [ -n "$vlan_id" ] && [ "$vlan_id" -ge 1 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "VLAN ID must be 1-4094." "[]" "[]"; exit 0; }
+      [ -n "$vlan_id" ] && [ "$vlan_id" -ge 2 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "رقم VLAN يجب أن يكون بين 2 و 4094 (1 محجوز لشبكة الإدارة). / VLAN ID must be 2-4094 (1 is reserved for management)." "[]" "[]"; exit 0; }
     fi
     case "$security" in open|wpa2|wpa3) : ;; *) security="wpa2" ;; esac
     if [ "$security" != "open" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -lt 8 ]; then emit false "Quick Setup" "Weak Wi-Fi password" "[]" "Wi-Fi password must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
@@ -621,9 +630,35 @@ EOF
     set_wifi_security "$ifc5" "$security" "$wifi_password"
     [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
     if mode_has_vlan "$program_mode"; then
+      # Correct DSA (MT7621) VLAN: management VLAN 1 stays untagged on every wired port so
+      # the device IP is reachable by cable; client VLAN <vlan_id> is tagged on the wired
+      # uplink toward the Mikrotik; both radios (2.4G + 5G) join the client VLAN.
+      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
+      done
+      uci set network.@device[0].vlan_filtering='1'
+      vm="$(uci add network bridge-vlan)"; uci set "network.$vm.name=SmartAP-qvlan-mgmt"; uci set "network.$vm.device=br-lan"; uci set "network.$vm.vlan=1"
+      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vm.ports=$p:u*"; done
+      vc="$(uci add network bridge-vlan)"; uci set "network.$vc.name=SmartAP-qvlan-client"; uci set "network.$vc.device=br-lan"; uci set "network.$vc.vlan=$vlan_id"
+      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vc.ports=$p:t"; done
+      uci set network.lan.device='br-lan.1'
+      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
       uci -q get network.smartap_vlan >/dev/null || uci set network.smartap_vlan='interface'
       uci set network.smartap_vlan.device="br-lan.$vlan_id"; uci set network.smartap_vlan.proto='none'
       uci set wireless."$ifc24".network='smartap_vlan'; uci set wireless."$ifc5".network='smartap_vlan'
+    else
+      # Non-VLAN: plain bridge, both radios back on the management LAN (reachable via
+      # Wi-Fi AND every cable port).
+      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
+      done
+      uci -q delete network.@device[0].vlan_filtering
+      uci set network.lan.device='br-lan'
+      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+      uci -q delete network.smartap_vlan
+      uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     fi
     case "$program_mode" in
       mesh|mesh_vlan)
@@ -665,7 +700,7 @@ EOF
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
     health="$(ubus call system board >/dev/null 2>&1 && echo OK || echo CHECK)"
-    emit true "Quick Setup" "Applied with 30s rollback" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied with 60s rollback" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_quick)
     confirm_required "Quick Setup"
     ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
@@ -713,7 +748,7 @@ EOF
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    emit true "Quick Setup" "Applied with 30s rollback" "[]" "Backup: $backup\nA 30-second rollback timer is armed. Press Keep changes if access is stable. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied with 60s rollback" "[]" "Backup: $backup\nA 60-second rollback timer is armed. Press Keep changes if access is stable. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   auto_optimize)
     confirm_required "Auto optimize"
     backup="$(backup_cfg auto-optimize)"
