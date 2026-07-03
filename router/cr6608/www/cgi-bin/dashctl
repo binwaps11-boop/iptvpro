@@ -129,7 +129,7 @@ store_royal_config() {
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
-  uci -q set smartap.quick.txpower_locked="${tx0:-35}"
+  uci -q set smartap.quick.txpower_locked="${tx0:-30}"
   uci -q commit smartap
 }
 set_wifi_security() {
@@ -418,7 +418,7 @@ case "$action" in
     cfg="$(safe_word "$(param raw_config)")"; sec="$(safe_uci_ref "$(param raw_section)")"; opt="$(safe_uci_opt "$(param raw_option)")"; val="$(safe_uci_value "$(param raw_value)")"; typ="$(safe_uci_opt "$(param raw_type)")"
     valid_config "$cfg" || { emit false "Raw UCI" "Blocked config" "[]" "Only network, wireless, dhcp, firewall, system, sqm, uhttpd, dropbear and smartap are allowed." "[]" "[]"; exit 0; }
     if [ "$cfg" = "wireless" ] && [ "$opt" = "txpower" ]; then
-      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-35} read-only." "[]" "[]"; exit 0
+      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-30} read-only." "[]" "[]"; exit 0
     fi
     backup="$(backup_cfg raw-uci)"
     case "$action" in
@@ -763,6 +763,9 @@ EOF
       chmod +x /etc/rc.button/reset
     fi
     if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
+    # TX Power policy: every Quick Setup apply EXPLICITLY pins 30 dBm on both radios --
+    # never left on driver default, and nothing in the wizard can lower or unset it.
+    uci set wireless.radio0.txpower='30'; uci set wireless.radio1.txpower='30'
     uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
@@ -813,6 +816,7 @@ EOF
     fi
     [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
     if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
+    uci set wireless.radio0.txpower='30'; uci set wireless.radio1.txpower='30'
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
@@ -997,7 +1001,7 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower_readonly|طاقة البث|${tx0:-35}|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
+txpower_readonly|طاقة البث|${tx0:-30}|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
 EOF
 )"
     cards="$(cards_json <<EOF
@@ -1007,7 +1011,7 @@ TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to maximum (${tx0:-35}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is pinned to 30 dBm on both radios (${tx0:-30}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
@@ -1027,10 +1031,10 @@ Policy|No write|Power remains unchanged|ok
 EOF
 )"
     form="$(form_json <<EOF
-txpower|TX Power|${tx0:-35}|Locked by policy. This field is disabled.|text|1
+txpower|TX Power|${tx0:-30}|Locked by policy. This field is disabled.|text|1
 EOF
 )"
-    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-35} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
+    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-30} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"

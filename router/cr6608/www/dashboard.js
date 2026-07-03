@@ -589,7 +589,12 @@
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>Channel</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div></div><h4>Clients</h4>' + sta, x.hw_modes || "", "wifi");
     }).join("") + '</div>' : '<div class="empty">' + tr("unavailable") + '</div>';
-    if (w.length) setTimeout(function () { drawChannels($("channelCanvas"), w); }, 0);
+    if (w.length) {
+      // draw now, then once more after the section finishes expanding (canvas measured
+      // too early renders scaled-up, overlapping labels)
+      setTimeout(function () { drawChannels($("channelCanvas"), w); }, 0);
+      setTimeout(function () { drawChannels($("channelCanvas"), w); }, 450);
+    }
     var chanCard = w.length ? card(state.lang === "ar" ? "إشغال القنوات" : "Channel occupancy",
       '<canvas id="channelCanvas" style="width:100%;height:150px"></canvas>', "2.4G / 5G", "signal") : "";
     return sectionHead("WiFi AX / AC / N", "Clients, RSSI, link rate", "offline") + chanCard + body;
@@ -597,8 +602,17 @@
   // theme-aware Wi-Fi channel occupancy (net-new, offline canvas)
   function drawChannels(canvas, wifiList) {
     if (!canvas) return;
+    // measure the PARENT box, not the canvas: the canvas rect can be read before its
+    // 100%-width style settles, baking a small bitmap that CSS then stretches into
+    // giant blurry overlapping labels
+    var host = canvas.parentElement || canvas;
     var rect = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-    var w = Math.max(260, Math.floor(rect.width)), h = Math.max(130, Math.floor(rect.height));
+    var hostW = host.getBoundingClientRect().width;
+    if (window.getComputedStyle) {
+      var cs = getComputedStyle(host);
+      hostW -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    }
+    var w = Math.max(260, Math.floor(hostW || rect.width)), h = Math.max(130, Math.floor(rect.height) || 150);
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
     var ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
     var axis = cssVar("--muted", "#94A3B8"), grid = cssVar("--border", "rgba(148,163,184,.16)");
@@ -607,7 +621,12 @@
     function xOf(i) { return pad + slot * i; }
     ctx.strokeStyle = grid; ctx.beginPath(); ctx.moveTo(pad, base); ctx.lineTo(w - pad, base); ctx.stroke();
     ctx.fillStyle = axis; ctx.font = "9px system-ui"; ctx.textAlign = "center";
-    chans.forEach(function (c, i) { if (c < 14 ? (c % 2 === 1) : true) ctx.fillText(c, xOf(i), h - 5); });
+    chans.forEach(function (c, i) {
+      // 2.4G: odd channels; 5G: every other one starting at 40 so the 11|36 band
+      // boundary never renders as one glued number
+      var show = c < 14 ? (c % 2 === 1) : ((i - 12) % 2 === 0);
+      if (show) ctx.fillText(c, xOf(i), h - 5);
+    });
     var maxCl = 1; (wifiList || []).forEach(function (x) { maxCl = Math.max(maxCl, Number(x.clients) || 0); });
     (wifiList || []).forEach(function (x) {
       var ch = Number(x.channel) || 0, idx = chans.indexOf(ch); if (idx < 0) return;
@@ -616,6 +635,7 @@
       var mhz = /80/.test(x.htmode) ? 80 : /40/.test(x.htmode) ? 40 : 20;
       var span = slot * (mhz / 20) * 0.9 + slot * 0.4;
       var cl = Math.max(0, Number(x.clients) || 0), bh = (base - pad) * (0.3 + 0.7 * (cl / maxCl));
+      bh = Math.min(bh, base - 34); // keep the bubble label inside the canvas
       var cx = xOf(idx);
       ctx.beginPath(); ctx.moveTo(cx - span, base); ctx.quadraticCurveTo(cx, base - bh - 14, cx + span, base); ctx.closePath();
       ctx.fillStyle = hexA(color, 0.28); ctx.fill();
@@ -816,7 +836,7 @@
       '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
       '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
       '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
-      '<div class="kv"><span>TX Power</span><b class="latin">35 locked</b></div>';
+      '<div class="kv"><span>TX Power</span><b class="latin">30 locked</b></div>';
   }
   function syncWizardMode() {
     var panel = document.querySelector('[data-control-section="wizard"]');
