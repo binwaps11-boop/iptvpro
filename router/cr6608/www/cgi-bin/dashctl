@@ -354,7 +354,7 @@ case "$action" in
     if [ "$action" = "save_bridge_options" ]; then
       stp="$(safe_num "$(param bridge_stp)")"; igmp="$(safe_num "$(param bridge_igmp)")"; bports="$(safe_port_list "$(param bridge_ports)")"
       uci set network.@device[0].stp="${stp:-0}"
-      [ "$igmp" = "1" ] && uci set network.@device[0].igmp_snooping='1' || uci delete network.@device[0].igmp_snooping 2>/dev/null
+      if [ "$igmp" = "1" ]; then uci set network.@device[0].igmp_snooping='1'; else uci -q delete network.@device[0].igmp_snooping; fi
       if [ -n "$bports" ]; then
         uci -q delete network.@device[0].ports
         for p in $bports; do
@@ -366,7 +366,7 @@ case "$action" in
     fi
     port="$(safe_word "$(param port_name)")"; enabled="$(safe_num "$(param port_enabled)")"
     case "$port" in lan1|lan2|lan3|wan) : ;; *) emit false "Switch / Ports" "Invalid port" "[]" "Use lan1, lan2, lan3 or wan." "[]" "[]"; exit 0 ;; esac
-    [ "$enabled" = "0" ] && ip link set "$port" down 2>/tmp/dashctl.action || ip link set "$port" up 2>/tmp/dashctl.action
+    if [ "$enabled" = "0" ]; then ip link set "$port" down 2>/tmp/dashctl.action; else ip link set "$port" up 2>/tmp/dashctl.action; fi
     emit true "Switch / Ports" "Port state changed" "[]" "Backup: $backup\nRuntime port action sent for $port. Network config was not rewritten." "[]" "[]"; exit 0 ;;
   set_admin_password)
     confirm_required "Administration"
@@ -557,7 +557,7 @@ EOF
     backup="$(backup_cfg lan-dhcp)"
     uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
     uci set dhcp.lan.start="$start"; uci set dhcp.lan.limit="$limit"; uci set dhcp.lan.leasetime="${leasetime:-12h}"
-    [ "$enabled" = "1" ] && uci delete dhcp.lan.ignore 2>/dev/null || uci set dhcp.lan.ignore='1'
+    if [ "$enabled" = "1" ]; then uci -q delete dhcp.lan.ignore; else uci set dhcp.lan.ignore='1'; fi
     uci commit network; uci commit dhcp
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
     emit true "LAN / DHCP" "Applied with backup" "[]" "Backup: $backup\nNetwork and dnsmasq reloaded. If access changes, restore the backup from SSH." "[]" "[]"; exit 0 ;;
@@ -697,7 +697,7 @@ EOF
       done
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
-    [ "$dhcp_server" = "1" ] && uci delete dhcp.lan.ignore 2>/dev/null || uci set dhcp.lan.ignore='1'
+    if [ "$dhcp_server" = "1" ]; then uci -q delete dhcp.lan.ignore; else uci set dhcp.lan.ignore='1'; fi
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
     [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then
@@ -780,7 +780,7 @@ EOF
   enable_stp)
     confirm_required "Loop Guard"
     backup="$(backup_cfg loopguard)"
-    brsec="$(uci show network 2>/dev/null | awk -F'[.=]' '$0 ~ /=device/ && prev ~ /name=.br-lan./{print prevsec} {prev=$0; prevsec=$2}' | head -1)"
+    brsec="$(uci show network 2>/dev/null | sed -n "s/^network\.\([^.]*\)\.name='br-lan'.*/\1/p" | head -1)"
     [ -n "$brsec" ] || brsec='@device[0]'
     uci set network."$brsec".stp='1'; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
     emit true "Loop Guard" "STP enabled" "[]" "Backup: $backup\nBridge STP is enabled on br-lan. TX Power untouched." "[]" "[]"; exit 0 ;;
@@ -794,8 +794,10 @@ EOF
     emit true "Connected Devices" "MAC blocked" "[]" "Backup: $backup\nFirewall reject rule added for $mac." "[]" "[]"; exit 0 ;;
   unblock_mac)
     confirm_required "Unblock device"
-    mac="$(safe_mac "$(param mac)")"; backup="$(backup_cfg unblock-mac)"
-    for s in $(uci show firewall | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
+    mac="$(safe_mac "$(param mac)")"
+    [ "${#mac}" = 17 ] || { emit false "Connected Devices" "Invalid MAC" "[]" "Enter a full MAC (aa:bb:cc:dd:ee:ff). An empty/partial MAC is rejected so it cannot mass-unblock." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg unblock-mac)"
+    for s in $(uci show firewall | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m"\047" {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
     uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
     emit true "Connected Devices" "MAC unblock attempted" "[]" "Backup: $backup\nMatching CR6608 block rules removed for $mac." "[]" "[]"; exit 0 ;;
   deauth_client)
@@ -816,7 +818,7 @@ EOF
       uci -q get dhcp.guest >/dev/null || uci set dhcp.guest='dhcp'
       uci set dhcp.guest.interface='guest'; uci set dhcp.guest.start='100'; uci set dhcp.guest.limit='80'; uci set dhcp.guest.leasetime='6h'
       uci -q get wireless.smartap_guest >/dev/null || uci set wireless.smartap_guest='wifi-iface'
-      uci set wireless.smartap_guest.device='radio0'; uci set wireless.smartap_guest.mode='ap'; uci set wireless.smartap_guest.network='guest'; uci set wireless.smartap_guest.ssid="${gssid:-CR6608-Guest}"; uci set wireless.smartap_guest.isolate='1'
+      uci set wireless.smartap_guest.device='radio0'; uci set wireless.smartap_guest.mode='ap'; uci set wireless.smartap_guest.network='guest'; uci set wireless.smartap_guest.ssid="${gssid:-CR6608-Guest}"; uci set wireless.smartap_guest.isolate='1'; uci set wireless.smartap_guest.disabled='0'
       if [ -n "$gpass" ]; then uci set wireless.smartap_guest.encryption='sae-mixed'; uci set wireless.smartap_guest.key="$gpass"; else uci set wireless.smartap_guest.encryption='none'; uci delete wireless.smartap_guest.key 2>/dev/null; fi
       if ! uci show firewall | grep -q "name='guest'"; then z="$(uci add firewall zone)"; uci set firewall."$z".name='guest'; uci set firewall."$z".network='guest'; uci set firewall."$z".input='REJECT'; uci set firewall."$z".output='ACCEPT'; uci set firewall."$z".forward='REJECT'; fi
     else
@@ -828,7 +830,7 @@ EOF
   save_iptv)
     confirm_required "IPTV"
     igmp="$(safe_num "$(param igmp_snooping)")"; backup="$(backup_cfg iptv)"
-    [ "$igmp" = "1" ] && uci set network.@device[0].igmp_snooping='1' || uci delete network.@device[0].igmp_snooping 2>/dev/null
+    if [ "$igmp" = "1" ]; then uci set network.@device[0].igmp_snooping='1'; else uci -q delete network.@device[0].igmp_snooping; fi
     uci commit network; /etc/init.d/network reload >/dev/null 2>&1
     emit true "IPTV" "IPTV bridge setting applied" "[]" "Backup: $backup\nIGMP snooping=$igmp. Advanced VLAN/igmpproxy values are visible inside Xiaomi CR6608 panels." "[]" "[]"; exit 0 ;;
 esac

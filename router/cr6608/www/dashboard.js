@@ -42,6 +42,7 @@
       signal: "الإشارة", network: "الترافيك", devices: "الأجهزة", wifi: "WiFi",
       system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
       vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف",
+      netmgr: "الشبكة", wifimgr: "لاسلكي", sysmgr: "النظام",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
       quickNote: "اختر الوضع وعبّئ الحقول ثم اضغط حفظ وتطبيق. التطبيق يحفظ فوراً وبشكل نهائي (Apply & Keep) مع نسخة احتياطية وزر إرجاع يدوي. تُطبَّق كل الحقول من التبويبات الثلاثة معاً.",
@@ -79,6 +80,7 @@
       signal: "Signal", network: "Traffic", devices: "Devices", wifi: "WiFi",
       system: "System Health", actions: "Actions", isolation: "Isolation",
       vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown",
+      netmgr: "Network", wifimgr: "Wireless", sysmgr: "System",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
       quickNote: "Pick a mode, fill the fields, then Save & Apply. Each apply saves immediately and permanently (Apply & Keep) with a backup and a manual rollback button. All fields from the three tabs are applied together.",
@@ -220,19 +222,32 @@
   function sectionHead(title, desc, chip) {
     return '<div class="section-head"><div><h3>' + title + '</h3><p>' + desc + '</p></div>' + (chip ? '<span class="chip">' + chip + '</span>' : "") + '</div>';
   }
+  // Read a CSS custom property (theme-aware) with a fallback, so canvas drawings
+  // follow the light/dark theme automatically.
+  function cssVar(name, fallback) {
+    try {
+      var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      v = (v || "").trim();
+      return v || fallback;
+    } catch (e) { return fallback; }
+  }
   function drawChart(canvas, samples, opts) {
     if (!canvas) return;
     opts = opts || {};
     var rect = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-    var w = Math.max(260, Math.floor(rect.width)), h = Math.max(180, Math.floor(rect.height));
+    var w = Math.max(260, Math.floor(rect.width)), h = Math.max(160, Math.floor(rect.height));
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
     var ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+    var muted = cssVar("--muted", "#94A3B8"), grid = cssVar("--border", "rgba(148,163,184,.16)");
+    var palette = opts.colors || [cssVar("--accent", "#06B6D4"), cssVar("--primary", "#3B82F6"), cssVar("--good", "#84CC16")];
     var pad = 26, iw = w - pad * 2, ih = h - pad * 2;
-    ctx.strokeStyle = "rgba(148,163,184,.16)"; ctx.lineWidth = 1;
+    ctx.strokeStyle = grid; ctx.lineWidth = 1;
     for (var g = 0; g < 4; g++) { var y = pad + ih * g / 3; ctx.beginPath(); ctx.moveTo(pad,y); ctx.lineTo(w-pad,y); ctx.stroke(); }
-    if (!samples || samples.length < 2) { ctx.fillStyle="#94A3B8"; ctx.textAlign="center"; ctx.fillText(tr("loading"), w/2, h/2); return; }
-    var keys = opts.keys || ["rx","tx"], max = 1;
-    samples.forEach(function (s) { keys.forEach(function (k) { max = Math.max(max, Number(s[k]) || 0); }); });
+    if (!samples || samples.length < 2) { ctx.fillStyle=muted; ctx.textAlign="center"; ctx.fillText(tr("loading"), w/2, h/2); return; }
+    var keys = opts.keys || ["rx","tx"], labels = opts.labels || keys, isPct = opts.fmt === "pct";
+    var max = isPct ? 100 : 1;
+    if (!isPct) samples.forEach(function (s) { keys.forEach(function (k) { max = Math.max(max, Number(s[k]) || 0); }); });
+    function fmtVal(v) { return isPct ? Math.round(v) + "%" : bps(v); }
     function line(key, color) {
       var peak = {v:0,x:0,y:0};
       ctx.beginPath();
@@ -243,9 +258,17 @@
       });
       ctx.strokeStyle = color; ctx.lineWidth = 2.6; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke();
       ctx.fillStyle = color; ctx.beginPath(); ctx.arc(peak.x, peak.y, 4, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "#94A3B8"; ctx.font = "11px system-ui"; ctx.fillText("peak " + bps(peak.v), Math.min(w - 90, peak.x + 8), Math.max(14, peak.y - 8));
     }
-    line(keys[0], "#06B6D4"); if (keys[1]) line(keys[1], "#8B5CF6");
+    keys.forEach(function (k, i) { line(k, palette[i % palette.length]); });
+    // theme-aware legend
+    ctx.font = "11px system-ui"; ctx.textAlign = "left";
+    var lx = pad;
+    keys.forEach(function (k, i) {
+      var c = palette[i % palette.length], lab = labels[i] || k;
+      ctx.fillStyle = c; ctx.fillRect(lx, 8, 10, 10);
+      ctx.fillStyle = muted; ctx.fillText(lab, lx + 14, 17);
+      lx += 14 + ctx.measureText(lab).width + 18;
+    });
   }
   function totalTraffic(data) {
     if (data.traffic) return (Number(data.traffic.rx_bytes) || 0) + (Number(data.traffic.tx_bytes) || 0);
@@ -465,6 +488,9 @@
       ["system","system","cpu"],
       ["quick","quick","gear"],
       ["isolation","isolation","shield"],
+      ["netmgr","netmgr","net"],
+      ["wifimgr","wifimgr","wifi"],
+      ["sysmgr","sysmgr","cpu"],
       ["actions","actions","gear"]
     ];
     $("nav").innerHTML = nav.map(function (n, i) { return '<button data-section="' + n[0] + '" class="' + (i ? "" : "active") + '">' + icon(n[2]) + '<span>' + tr(n[1]) + '</span></button>'; }).join("");
@@ -475,7 +501,7 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","system","quick","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","system","quick","isolation","netmgr","wifimgr","sysmgr","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
@@ -563,7 +589,51 @@
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>Channel</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div></div><h4>Clients</h4>' + sta, x.hw_modes || "", "wifi");
     }).join("") + '</div>' : '<div class="empty">' + tr("unavailable") + '</div>';
-    return sectionHead("WiFi AX / AC / N", "Clients, RSSI, link rate", "offline") + body;
+    if (w.length) setTimeout(function () { drawChannels($("channelCanvas"), w); }, 0);
+    var chanCard = w.length ? card(state.lang === "ar" ? "إشغال القنوات" : "Channel occupancy",
+      '<canvas id="channelCanvas" style="width:100%;height:150px"></canvas>', "2.4G / 5G", "signal") : "";
+    return sectionHead("WiFi AX / AC / N", "Clients, RSSI, link rate", "offline") + chanCard + body;
+  }
+  // theme-aware Wi-Fi channel occupancy (net-new, offline canvas)
+  function drawChannels(canvas, wifiList) {
+    if (!canvas) return;
+    var rect = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    var w = Math.max(260, Math.floor(rect.width)), h = Math.max(130, Math.floor(rect.height));
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+    var ctx = canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+    var axis = cssVar("--muted", "#94A3B8"), grid = cssVar("--border", "rgba(148,163,184,.16)");
+    var chans = [1,2,3,4,5,6,7,8,9,10,11,36,40,44,48,149,153,157,161,165];
+    var pad = 20, base = h - 20, slot = (w - pad * 2) / (chans.length - 1);
+    function xOf(i) { return pad + slot * i; }
+    ctx.strokeStyle = grid; ctx.beginPath(); ctx.moveTo(pad, base); ctx.lineTo(w - pad, base); ctx.stroke();
+    ctx.fillStyle = axis; ctx.font = "9px system-ui"; ctx.textAlign = "center";
+    chans.forEach(function (c, i) { if (c < 14 ? (c % 2 === 1) : true) ctx.fillText(c, xOf(i), h - 5); });
+    var maxCl = 1; (wifiList || []).forEach(function (x) { maxCl = Math.max(maxCl, Number(x.clients) || 0); });
+    (wifiList || []).forEach(function (x) {
+      var ch = Number(x.channel) || 0, idx = chans.indexOf(ch); if (idx < 0) return;
+      var band5 = x.band === "5G";
+      var color = band5 ? cssVar("--primary", "#3B82F6") : cssVar("--accent", "#06B6D4");
+      var mhz = /80/.test(x.htmode) ? 80 : /40/.test(x.htmode) ? 40 : 20;
+      var span = slot * (mhz / 20) * 0.9 + slot * 0.4;
+      var cl = Math.max(0, Number(x.clients) || 0), bh = (base - pad) * (0.3 + 0.7 * (cl / maxCl));
+      var cx = xOf(idx);
+      ctx.beginPath(); ctx.moveTo(cx - span, base); ctx.quadraticCurveTo(cx, base - bh - 14, cx + span, base); ctx.closePath();
+      ctx.fillStyle = hexA(color, 0.28); ctx.fill();
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(cx - span, base); ctx.quadraticCurveTo(cx, base - bh - 14, cx + span, base); ctx.stroke();
+      ctx.fillStyle = color; ctx.font = "bold 11px system-ui"; ctx.textAlign = "center";
+      ctx.fillText((band5 ? "5G·" : "2.4G·") + ch + " (" + cl + ")", cx, base - bh - 18);
+    });
+  }
+  // rgba() from a hex/color var with alpha
+  function hexA(c, a) {
+    c = (c || "").trim();
+    if (c.charAt(0) === "#") {
+      var n = c.length === 4 ? c.replace(/#(.)(.)(.)/, "#$1$1$2$2$3$3") : c;
+      var r = parseInt(n.substr(1,2),16), g = parseInt(n.substr(3,2),16), b = parseInt(n.substr(5,2),16);
+      if (isFinite(r) && isFinite(g) && isFinite(b)) return "rgba(" + r + "," + g + "," + b + "," + a + ")";
+    }
+    return c || "rgba(6,182,212," + a + ")";
   }
   function renderSystem(data) {
     var mem = data.mem || {}, st = data.storage || {}, cpu = data.cpu || {};
@@ -576,7 +646,20 @@
       gauge("Storage", stPct + "%", bytes(st.used), bytes(st.available) + " free", stPct, quality("system", stPct).color, "storage") +
       gauge("Temp", finite(temp) ? fmt(temp,1) : tr("unavailable"), finite(temp) ? "C" : "", finite(temp) ? tr("ok") : tr("unavailable"), finite(temp) ? clamp(temp,0,100) : 0, finite(temp) ? quality("system", temp).color : "#64748B", "temp") +
       '</div>';
-    return sectionHead(tr("systemTitle"), "loadavg / free / overlay / thermal", "thresholds") + card("Health", body, "live", "cpu") + card("Availability 24h", availabilityHtml(), "local", "bolt");
+    if (finite(temp)) pushHistory("temp", clamp(temp,0,100), 60);
+    // theme-aware CPU/RAM/temp trend (net-new chart)
+    var trend = (state.histories.cpu || []).map(function (c, i) {
+      return { cpu:c, ram:(state.histories.ram||[])[i]||0, temp:(state.histories.temp||[])[i]||0 };
+    });
+    setTimeout(function () {
+      drawChart($("sysTrendCanvas"), trend, {
+        keys:["cpu","ram","temp"], labels:[tr("cpu"),tr("ram"),tr("temp")], fmt:"pct",
+        colors:[cssVar("--accent","#06B6D4"), cssVar("--good","#84CC16"), cssVar("--mid","#F59E0B")]
+      });
+    }, 0);
+    var trendCard = card(state.lang === "ar" ? "مسار الموارد" : "Resource trend",
+      '<canvas id="sysTrendCanvas" style="width:100%;height:180px"></canvas>', "CPU / RAM / " + tr("temp"), "cpu");
+    return sectionHead(tr("systemTitle"), "loadavg / free / overlay / thermal", "thresholds") + card("Health", body, "live", "cpu") + trendCard + card("Availability 24h", availabilityHtml(), "local", "bolt");
   }
   function renderNetwork(data, rates) {
     var interfaces = data.interfaces || [];
@@ -588,7 +671,43 @@
     return sectionHead(tr("networkTitle"), "RX/TX, drops, latency, speed test", data.backhaul && data.backhaul.online ? tr("online") : tr("lanOnly")) + '<div class="grid two">' + renderTraffic(data, rates, "network") + ping + '</div>' + table;
   }
   function adminGroups() {
-    return {};
+    var ar = state.lang === "ar";
+    // Only sections whose backend is fully supported on this build are listed.
+    // (SQM and igmpproxy-IPTV are intentionally omitted: SQM caps throughput and
+    //  igmpproxy/udpxy are not installed.)
+    return {
+      netmgr: {
+        title: ar ? "الشبكة المحلية" : "Network",
+        desc: ar ? "DHCP، السويتش والمنافذ، حماية الحلقات، الضيوف والجدولة، الجيران" : "DHCP, switch/ports, loop guard, guest & schedule, neighbors",
+        items: [
+          ["dhcp", ar ? "الشبكة / DHCP" : "LAN / DHCP", ""],
+          ["switchmgr", ar ? "السويتش والمنافذ" : "Switch / Ports", ""],
+          ["loopguard", ar ? "حماية الحلقات (STP)" : "Loop Guard", ""],
+          ["netcfg", ar ? "شبكة الضيوف والجدولة" : "Guest & Reboot", ""],
+          ["neighbors", ar ? "جيران الجسر" : "Bridge Neighbors", ""]
+        ]
+      },
+      wifimgr: {
+        title: ar ? "لاسلكي AX1800" : "Wireless AX1800",
+        desc: ar ? "الشبكات، محلل القنوات، تحسين الأداء، الأجهزة المتصلة، طاقة البث" : "Networks, analyzer, optimizer, clients, TX power",
+        items: [
+          ["wireless", ar ? "شبكات الواي فاي" : "Wi-Fi Networks", ""],
+          ["analyzer", ar ? "محلل القنوات" : "Analyzer", ""],
+          ["optimizer", ar ? "تحسين الأداء" : "Optimizer", ""],
+          ["clients", ar ? "أجهزة الواي فاي" : "Wi-Fi Clients", ""],
+          ["power", ar ? "طاقة البث" : "TX Power", "protected"]
+        ]
+      },
+      sysmgr: {
+        title: ar ? "النظام والأدوات" : "System & Tools",
+        desc: ar ? "معلومات الجهاز، أدوات الشبكة، اختبار السرعة" : "Device info, network tools, speed test",
+        items: [
+          ["specs", ar ? "معلومات الجهاز" : "Device Info", ""],
+          ["nettools", ar ? "أدوات الشبكة" : "Network Tools", ""],
+          ["speed", ar ? "اختبار السرعة" : "Speed Test", ""]
+        ]
+      }
+    };
   }
   function renderControlData(section, data) {
     if (!data || data.ok === false) {
@@ -994,6 +1113,11 @@
       state.theme = state.theme === "dark" ? "light" : "dark";
       localStorage.setItem(LS + "theme", state.theme);
       renderChrome();
+      // Repaint everything so canvas charts/gauges pick up the new theme colors,
+      // and re-open the active control section so its chart (if any) redraws too.
+      if (state.latest) render(state.latest);
+      var act = document.body.dataset.activeSection;
+      if (act) { var el = $(act); if (el && el.dataset) { el.dataset.uiVersion = ""; } showSection(act); }
     };
     $("intervalSelect").onchange = function () { state.interval = Number(this.value) || 5; localStorage.setItem(LS + "interval", state.interval); startPolling(); };
     $("logoutBtn").onclick = logout;
