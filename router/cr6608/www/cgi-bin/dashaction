@@ -38,14 +38,27 @@ case "$action" in
     json_msg true "اختبار السرعة الخارجي غير مفعل لأن اللوحة تعمل offline؛ استخدم الاختبار المحلي داخل الواجهة."
     ;;
   reconnect)
-    if ubus list 2>/dev/null | grep -Eiq 'modem|lte|qmi|gsm|wwan'; then
-      json_msg false "تم العثور على كائن LTE، لكن إعادة الاتصال محمية ولم تنفذ تلقائياً لتجنب فقدان الوصول."
+    if [ "$confirm" = "1" ]; then
+      # real reconnect: renew wan (if any) and reload network + wifi
+      ( ifup wan >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1 ) &
+      json_msg true "تم تنفيذ إعادة الاتصال: أعيد تحميل الشبكة والواي فاي وتجديد WAN إن وجد."
     else
-      json_msg false "لا توجد واجهة LTE/WAN واضحة في ubus، لذلك لم يتم تنفيذ إعادة اتصال عشوائية."
+      json_msg false "إعادة الاتصال تحتاج تأكيداً (اضغط الزر مرة أخرى)."
     fi
     ;;
   wifi_toggle)
-    json_msg false "تبديل WiFi محمي حالياً حتى لا ينقطع الوصول. لم يتم تعديل wireless أو TX Power."
+    if [ "$confirm" = "1" ]; then
+      d0="$(uci -q get wireless.radio0.disabled)"; d0="${d0:-0}"
+      if [ "$d0" = "0" ]; then
+        uci set wireless.radio0.disabled='1'; uci set wireless.radio1.disabled='1'; state="أُطفئ"
+      else
+        uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'; state="شُغّل"
+      fi
+      uci commit wireless; (wifi reload >/dev/null 2>&1) &
+      json_msg true "تم: $state الواي فاي على الحزمتين. إذا كنت متصلاً عبر الواي فاي وأطفأته، ادخل عبر الكيبل لإعادته."
+    else
+      json_msg false "تبديل WiFi يحتاج تأكيداً (اضغط الزر مرة أخرى خلال 6 ثوانٍ)."
+    fi
     ;;
   reboot)
     if [ "$confirm" = "1" ]; then

@@ -936,7 +936,7 @@ device_password|تغيير كلمة مرور الجهاز||اختياري، لا
 delete_previous|حذف الإعدادات السابقة|0|يحذف فقط أقسام Xiaomi CR6608 السابقة، لا يعمل firstboot|select|0|device|all|0:لا,1:نعم
 pppoe_user|اسم مستخدم PAP/CHAP|${pppoe_user}|خاص بوضع البرودباند PPPoE|text|0|device|pppoe_ap|
 pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها إن وجدت|password|0|device|pppoe_ap|
-broadband_port|منفذ البرودباند|wan|غالباً wan|text|0|device|pppoe_ap|
+broadband_port|منفذ دخول البرودباند|wan|المنفذ الموصول بمودم المزوّد — الافتراضي WAN|select|0|device|pppoe_ap|wan:WAN (الافتراضي),lan1:LAN1,lan2:LAN2,lan3:LAN3
 reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
 reset_mode|طريقة الفورمات|${reset_mode}|سياسة موثقة داخل Xiaomi CR6608|select|0|security|all|factory:Factory reset,reboot:Reboot only,disabled:Blocked
 nat_enabled|NAT|${nat_enabled:-1}|تفعيل NAT على منطقة WAN|select|0|advanced|all|1:مفعل,0:معطل

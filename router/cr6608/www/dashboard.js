@@ -547,7 +547,9 @@
       '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
         var vn = d.vendor || tr("unknownVendor");
-        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + " dBm" : tr("unavailable")) + '</td><td><button class="btn dev-action">' + tr("block") + '</button> <button class="btn dev-action">' + tr("allow") + '</button></td></tr>';
+        var m = esc(d.mac || "");
+        var acts = m ? '<button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="block_mac">' + tr("block") + '</button> <button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="unblock_mac">' + tr("allow") + '</button>' : "";
+        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + " dBm" : tr("unavailable")) + '</td><td>' + acts + '</td></tr>';
       }).join("") +
       '</tbody></table></div>';
   }
@@ -949,7 +951,22 @@
     });
     Array.prototype.forEach.call(document.querySelectorAll("[data-smart-section]"), function (b) { b.onclick = function (ev) { ev.preventDefault(); showSection(b.dataset.smartSection); }; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-smart-logout]"), function (b) { b.onclick = function (ev) { ev.preventDefault(); logout(); }; });
-    Array.prototype.forEach.call(document.querySelectorAll(".dev-action"), function (b) { b.onclick = function () { toast(tr("simulated")); }; });
+    Array.prototype.forEach.call(document.querySelectorAll(".dev-action"), function (b) {
+      b.onclick = async function () {
+        var mac = b.dataset.devMac, act = b.dataset.devAct;
+        if (!mac || !act) return toast(tr("simulated"));
+        try {
+          var r = await fetch(CTL, { method:"POST", cache:"no-store",
+            headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+            body:"section=devices&action=" + encodeURIComponent(act) + "&mac=" + encodeURIComponent(mac) + "&confirm=1&" + sidQuery() + "&_=" + Date.now() });
+          if (r.status === 403) return requireLogin(tr("loginBad"));
+          var j = await r.json();
+          toast(j.summary || j.text || tr("ok"));
+          event((act === "block_mac" ? "Block " : "Allow ") + mac);
+          setTimeout(loadData, 400);
+        } catch (e) { toast(e.message); }
+      };
+    });
     var d = $("dailyBudget"), m = $("monthBudget");
     if (d) d.onchange = function () { localStorage.setItem(LS + "dailyBudgetGb", Math.max(1, Number(d.value)||5)); loadData(); };
     if (m) m.onchange = function () { localStorage.setItem(LS + "monthBudgetGb", Math.max(1, Number(m.value)||100)); loadData(); };
