@@ -733,7 +733,7 @@
   // never expose build or programming details — keep only plain human sentences.
   function cleanNote(text) {
     if (!text) return "";
-    var techy = /[\/=$`{}<>]|\buci\b|\bnft\b|\bbr-lan\b|\bbr-vlan\b|wan\.\d|lan[123]|0x|::|\.conf|\.sh\b|tmp|backup|Backup|dBm|txpower|vlan_filtering|bridge-vlan|iwinfo|ubus|dnsmasq|firewall reload|reload|commit|smartap_|radio[01]|wifinet/i;
+    var techy = /[\/=$`{}<>]|\buci\b|\bnft\b|\bbr-lan\b|\bbr-vlan\b|\bbridge\b|\bpolicy\b|\bshow\b|\blink\b|guard|isolated|enabled=|flood|rogue|wan\.\d|lan[123]|0x|::|\.conf|\.sh\b|tmp|backup|Backup|dBm|txpower|vlan_filtering|bridge-vlan|iwinfo|ubus|dnsmasq|firewall reload|reload|commit|smartap|radio[01]|wifinet/i;
     var lines = String(text).split(/\r?\n/).map(function (s) { return s.trim(); })
       .filter(function (s) { return s && !techy.test(s); });
     return lines.join("\n");
