@@ -607,7 +607,12 @@ EOF
     reset_button_enabled="$(safe_num "$(param reset_button_enabled)")"; reset_mode="$(safe_word "$(param reset_mode)")"
     nat_enabled="$(safe_num "$(param nat_enabled)")"; dhcp_server="$(safe_num "$(param dhcp_server)")"; firewall_enabled="$(safe_num "$(param firewall_enabled)")"
     watchcat_enabled="$(safe_num "$(param watchcat_enabled)")"; broadband_enabled="$(safe_num "$(param broadband_enabled)")"; fake_mesh="$(safe_num "$(param fake_mesh)")"
-    [ -n "$device_ip" ] && valid_ipv4 "$device_ip" || { emit false "Quick Setup" "Invalid IP" "[]" "Device IP must be a valid IPv4 address." "[]" "[]"; exit 0; }
+    # A blank IP keeps the current management IP (do not abort); a non-blank IP must be valid.
+    if [ -n "$device_ip" ]; then
+      valid_ipv4 "$device_ip" || { emit false "Quick Setup" "Invalid IP" "[]" "Device IP must be a valid IPv4 address." "[]" "[]"; exit 0; }
+    else
+      device_ip="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+    fi
     if mode_has_vlan "$program_mode"; then
       [ -n "$vlan_id" ] && [ "$vlan_id" -ge 2 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "رقم VLAN يجب أن يكون بين 2 و 4094 (1 محجوز لشبكة الإدارة). / VLAN ID must be 2-4094 (1 is reserved for management)." "[]" "[]"; exit 0; }
     fi
@@ -620,7 +625,7 @@ EOF
       for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
     }
     store_royal_config
-    uci set network.lan.ipaddr="$device_ip"
+    [ -n "$device_ip" ] && uci set network.lan.ipaddr="$device_ip"
     ifc24="$(config_radio_iface radio0)"; [ -n "$ifc24" ] || ifc24="wifinet0"
     ifc5="$(config_radio_iface radio1)"; [ -n "$ifc5" ] || ifc5="wifinet1"
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
@@ -630,26 +635,30 @@ EOF
     set_wifi_security "$ifc5" "$security" "$wifi_password"
     [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
     if mode_has_vlan "$program_mode"; then
-      # Correct DSA (MT7621) VLAN: management VLAN 1 stays untagged on every wired port so
-      # the device IP is reachable by cable; client VLAN <vlan_id> is tagged on the wired
-      # uplink toward the Mikrotik; both radios (2.4G + 5G) join the client VLAN.
+      # WHOLE AP on ONE VLAN (unified reachability): the management interface (the IP the
+      # user set) + BOTH Wi-Fi radios + all LAN ports all live on br-lan.<vlan_id>.
+      #   * LAN ports (lan1/2/3) = untagged  -> local devices AND the dashboard are reachable
+      #     over any cable at the SET IP.
+      #   * WAN port = tagged                -> uplink trunk toward the Mikrotik carries the VLAN.
+      #   * Wi-Fi radios stay on the 'lan' network (= br-lan.<vlan_id>) -> the dashboard is
+      #     reachable over Wi-Fi at the SAME set IP, and clients live inside the VLAN.
+      # This is the fix for "in VLAN mode I could only reach it by cable at 192.168.66.1".
       while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
         vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
         [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
       done
+      uci -q delete network.smartap_vlan
       uci set network.@device[0].vlan_filtering='1'
-      vm="$(uci add network bridge-vlan)"; uci set "network.$vm.name=SmartAP-qvlan-mgmt"; uci set "network.$vm.device=br-lan"; uci set "network.$vm.vlan=1"
-      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vm.ports=$p:u*"; done
-      vc="$(uci add network bridge-vlan)"; uci set "network.$vc.name=SmartAP-qvlan-client"; uci set "network.$vc.device=br-lan"; uci set "network.$vc.vlan=$vlan_id"
-      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vc.ports=$p:t"; done
-      uci set network.lan.device='br-lan.1'
-      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
-      uci -q get network.smartap_vlan >/dev/null || uci set network.smartap_vlan='interface'
-      uci set network.smartap_vlan.device="br-lan.$vlan_id"; uci set network.smartap_vlan.proto='none'
-      uci set wireless."$ifc24".network='smartap_vlan'; uci set wireless."$ifc5".network='smartap_vlan'
+      vq="$(uci add network bridge-vlan)"; uci set "network.$vq.name=SmartAP-qvlan"; uci set "network.$vq.device=br-lan"; uci set "network.$vq.vlan=$vlan_id"
+      for p in lan1 lan2 lan3; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$vq.ports=$p:u*"; done
+      [ -d "/sys/class/net/wan" ] && uci add_list "network.$vq.ports=wan:t"
+      # management + recovery interfaces move onto the VLAN device (keep their IPs)
+      uci set network.lan.device="br-lan.$vlan_id"
+      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device="br-lan.$vlan_id"
+      # both radios stay on 'lan' -> reachable over Wi-Fi at the set IP, clients on the VLAN
+      uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     else
-      # Non-VLAN: plain bridge, both radios back on the management LAN (reachable via
-      # Wi-Fi AND every cable port).
+      # Non-VLAN: plain bridge, everything on 'lan' (reachable via Wi-Fi AND every cable port).
       while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
         vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
         [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
@@ -844,21 +853,21 @@ LAN3|$([ "$en3" = "1" ] && echo يعمل || echo موقوف) · VLAN $vl3|$([ "$
 EOF
 )"
     form="$(form_json <<EOF
-sec_enabled|الحماية العامة (المفتاح الرئيسي)|$sec_en|تشغيل يفعّل الحمايات، إيقاف يلغيها كلها|select|0|guard||1:مفعّل,0:متوقف
-flood_guard|حماية الفيضان (البوتات)|$flood|حد أقصى 180 طلب/دقيقة على الويب|select|0|guard||1:مفعّل,0:متوقف
-rogue_dhcp_guard|منع تسريب العناوين|$rogue|يمنع الجهاز من توزيع IP للميكروتك أو تسريب المشكلة لبقية المنافذ|select|0|guard||1:مفعّل,0:متوقف
-loop_guard|منع اللوب (STP)|$loop|حماية من الحلقات بين المنافذ|select|0|guard||1:مفعّل,0:متوقف
-iso_wifi24|عزل واي فاي 2.4G|$iso24|أجهزة Smart-AP لا ترى بعضها|select|0|wifi||1:تشغيل,0:إيقاف
-iso_wifi5|عزل واي فاي 5G|$iso5|أجهزة Smart-AP-5G لا ترى بعضها|select|0|wifi||1:تشغيل,0:إيقاف
-lan1_enabled|تشغيل منفذ LAN1|$en1|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
-lan1_isolate|عزل منفذ LAN1|$il1|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
-lan1_vlan|VLAN منفذ LAN1|$vl1|1 = شبكة الإدارة. غيّره لعزل المنفذ في VLAN مستقل|number|0|ports|
-lan2_enabled|تشغيل منفذ LAN2|$en2|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
-lan2_isolate|عزل منفذ LAN2|$il2|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
-lan2_vlan|VLAN منفذ LAN2|$vl2|1 = شبكة الإدارة|number|0|ports|
-lan3_enabled|تشغيل منفذ LAN3|$en3|إيقاف يعطّل المنفذ فيزيائياً|select|0|ports||1:يعمل,0:موقوف
-lan3_isolate|عزل منفذ LAN3|$il3|جهاز المنفذ يرى الإنترنت فقط|select|0|ports||1:تشغيل,0:إيقاف
-lan3_vlan|VLAN منفذ LAN3|$vl3|1 = شبكة الإدارة|number|0|ports|
+sec_enabled|الحماية العامة (المفتاح الرئيسي)|$sec_en|المفتاح الكبير: تشغيل = كل الحمايات تحتها تعمل. إيقاف = تُلغى كلها دفعة واحدة.|select|0|guard||1:مفعّل,0:متوقف
+flood_guard|حماية من الضغط والبوتات|$flood|تمنع أي جهاز من إغراق اللوحة بآلاف الطلبات (هجوم/بوت). لو أوقفتها: اللوحة تصير أبطأ وأضعف أمام الضغط. يُنصح: مفعّل.|select|0|guard||1:مفعّل,0:متوقف
+rogue_dhcp_guard|منع توزيع عناوين خاطئة|$rogue|تمنع أي جهاز متصل من توزيع عناوين IP وهمية تعطّل الشبكة (مشكلة شائعة). لو أوقفتها: يمكن لجهاز غريب أن يخرّب توزيع العناوين. يُنصح: مفعّل.|select|0|guard||1:مفعّل,0:متوقف
+loop_guard|منع الالتفاف (اللوب)|$loop|يمنع انهيار الشبكة لو وصّلت كيبل بالغلط بين منفذين. لو أوقفته: خطر توقف الشبكة عند خطأ توصيل. يُنصح: مفعّل.|select|0|guard||1:مفعّل,0:متوقف
+iso_wifi24|عزل أجهزة واي فاي 2.4G|$iso24|تشغيل = أجهزة شبكة Smart-AP لا يرى بعضها بعضاً (تشوف الإنترنت فقط) — أأمن للشبكة المفتوحة. إيقاف = الأجهزة تشوف بعضها (مشاركة ملفات/طباعة).|select|0|wifi||1:تشغيل,0:إيقاف
+iso_wifi5|عزل أجهزة واي فاي 5G|$iso5|نفس الفكرة لشبكة Smart-AP-5G. تشغيل = عزل الأجهزة عن بعض. إيقاف = تشوف بعضها.|select|0|wifi||1:تشغيل,0:إيقاف
+lan1_enabled|منفذ LAN1: تشغيل/إيقاف|$en1|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به. شغّله لاستخدام المنفذ.|select|0|ports||1:يعمل,0:موقوف
+lan1_isolate|عزل منفذ LAN1|$il1|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
+lan1_vlan|VLAN لمنفذ LAN1|$vl1|اتركه 1 (شبكة الإدارة العادية). غيّره فقط لو تبي هذا المنفذ على شبكة VLAN منفصلة عند سويتش يدعم VLAN.|number|0|ports|
+lan2_enabled|منفذ LAN2: تشغيل/إيقاف|$en2|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به.|select|0|ports||1:يعمل,0:موقوف
+lan2_isolate|عزل منفذ LAN2|$il2|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
+lan2_vlan|VLAN لمنفذ LAN2|$vl2|اتركه 1 عادةً. غيّره فقط لشبكة VLAN منفصلة.|number|0|ports|
+lan3_enabled|منفذ LAN3: تشغيل/إيقاف|$en3|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به.|select|0|ports||1:يعمل,0:موقوف
+lan3_isolate|عزل منفذ LAN3|$il3|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
+lan3_vlan|VLAN لمنفذ LAN3|$vl3|اتركه 1 عادةً. غيّره فقط لشبكة VLAN منفصلة.|number|0|ports|
 EOF
 )"
     text="$( { echo "الوصول للوحة مضمون دائماً: VLAN $mgmt_vlan (الإدارة) غير موسوم على كل المنافذ + الواي فاي، ولوحة الطوارئ 192.168.66.1."; echo; echo "bridge link show:"; bridge link show 2>/dev/null; echo; echo "smartap policy:"; /usr/sbin/cr6608-security-apply get 2>/dev/null; } 2>/dev/null | redact)"
@@ -937,7 +946,7 @@ TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply creates a backup, reloads only required services, arms rollback, and checks access. TX Power is locked at 30 and never written." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply creates a backup, reloads only required services, arms rollback, and checks access. TX Power is set to maximum (${tx0:-35}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
@@ -960,7 +969,7 @@ EOF
 txpower|TX Power|${tx0:-35}|Locked by policy. This field is disabled.|text|1
 EOF
 )"
-    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Expected value: 30 dBm." '[]' "$form" ;;
+    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-35} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"

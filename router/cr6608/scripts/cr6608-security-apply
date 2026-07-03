@@ -119,7 +119,8 @@ clear_smartap_vlan() {
 
 apply_vlan() {
 	# Defer entirely to Quick Settings when an AP-VLAN is active there — one VLAN owner only.
-	if uci -q get network.smartap_vlan >/dev/null 2>&1 || uci -q get network.cr6608_vlan >/dev/null 2>&1; then
+	if uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan" \
+		|| uci -q get network.smartap_vlan >/dev/null 2>&1 || uci -q get network.cr6608_vlan >/dev/null 2>&1; then
 		log "quick-settings AP-VLAN active; security-page VLAN skipped (single owner)"
 		return 0
 	fi

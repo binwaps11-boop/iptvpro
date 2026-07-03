@@ -332,6 +332,10 @@
     .ctl-card.bad { border-color:rgba(239,68,68,.32); box-shadow:0 0 22px rgba(239,68,68,.09), var(--sheen); }
     .ctl-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr)); gap:12px; }
     .ctl-form label { display:grid; gap:8px; color:var(--muted); font-size:12px; }
+    .ctl-subhead { margin:18px 0 4px; padding:9px 13px; font-size:14px; font-weight:800; color:var(--text);
+      border-inline-start:3px solid var(--edge); border-radius:10px;
+      background:linear-gradient(90deg,rgba(56,189,248,.12),transparent); }
+    .ctl-subhead:first-child { margin-top:2px; }
     .ctl-input, .ctl-form input, .ctl-form select, .wizard-fields select {
       width:100%; min-height:42px; border:1px solid rgba(132,168,255,.16); border-radius:13px;
       background:rgba(4,8,18,.6); color:var(--text); padding:0 12px; outline:none;
@@ -578,6 +582,7 @@
       <section class="section" id="devices" hidden></section>
       <section class="section" id="wifi" hidden></section>
       <section class="section" id="system" hidden></section>
+      <section class="section" id="quick" hidden></section>
       <section class="section" id="isolation" hidden></section>
       <section class="section" id="actions" hidden></section>
     </main>

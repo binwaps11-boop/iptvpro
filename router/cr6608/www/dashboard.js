@@ -41,9 +41,13 @@
       overview: "نظرة",
       signal: "الإشارة", network: "الترافيك", devices: "الأجهزة", wifi: "WiFi",
       system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
-      isolationHint: "تحكم بعزل المنافذ والواي فاي: تشغيل/إيقاف لكل منفذ.",
-      isolationTitle: "عزل المنافذ والأجهزة",
-      isolationNote: "عند تفعيل العزل لمنفذ أو شبكة واي فاي، أجهزته ترى الإنترنت فقط ولا ترى بعضها — حماية قوية للشبكة المفتوحة. الحفظ تلقائي مع نسخة احتياطية.",
+      vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف",
+      quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
+      quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
+      quickNote: "اختر الوضع وعبّئ الحقول ثم اضغط حفظ وتطبيق. كل تطبيق ينشئ نسخة احتياطية ويفعّل إرجاعاً تلقائياً خلال 60 ثانية. تُطبَّق كل الحقول من التبويبات الثلاثة معاً.",
+      isolationHint: "حمايات وتحكم بالمنافذ — كل خيار مشروح تحته.",
+      isolationTitle: "الحماية والمنافذ — دليل مبسّط",
+      isolationNote: "٣ أقسام: (١) الحمايات العامة — دروع تشتغل تلقائياً، خلّها مفعّلة. (٢) عزل الواي فاي — تخلي أجهزة الشبكة ما تشوف بعض (أأمن). (٣) منافذ الكيبل — تشغّل/تطفّي كل منفذ وتعزله أو تحط له VLAN. تحت كل خيار جملة تشرح وش يصير لو غيّرته. أي تعديل يُحفظ تلقائياً مع إرجاع خلال ٦٠ ثانية لو انقطع وصولك.",
       subtitle: "لوحة OpenWrt محلية: بيانات حية، أصول داخلية، بدون CDN.",
       uptime: "مدة التشغيل", model: "الموديل", firmware: "النظام", internet: "الإنترنت",
       deviceCount: "الأجهزة", updated: "آخر تحديث", traffic: "الترافيك", cpu: "المعالج",
@@ -74,9 +78,13 @@
       overview: "Overview",
       signal: "Signal", network: "Traffic", devices: "Devices", wifi: "WiFi",
       system: "System Health", actions: "Actions", isolation: "Isolation",
-      isolationHint: "Control port and Wi-Fi isolation: on/off per port.",
-      isolationTitle: "Port & Client Isolation",
-      isolationNote: "When isolation is on for a port or Wi-Fi network, its devices reach the internet only and cannot see each other — strong protection for an open network. Saved automatically with a backup.",
+      vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown",
+      quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
+      quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
+      quickNote: "Pick a mode, fill the fields, then Save & Apply. Each apply makes a backup and arms a 60s auto-rollback. All fields from the three tabs are applied together.",
+      isolationHint: "Protections & port control — each option explained below it.",
+      isolationTitle: "Protection & Ports — simple guide",
+      isolationNote: "3 parts: (1) General protections — shields that run automatically, keep them on. (2) Wi-Fi isolation — makes devices unable to see each other (safer). (3) LAN ports — turn each port on/off, isolate it, or assign a VLAN. Each option has a line explaining what happens if you change it. Every change auto-saves with a 60s rollback if you lose access.",
       subtitle: "Local OpenWrt dashboard: live data, offline assets, no CDN.",
       uptime: "Uptime", model: "Model", firmware: "Firmware", internet: "Internet",
       deviceCount: "Devices", updated: "Updated", traffic: "Traffic", cpu: "CPU",
@@ -264,11 +272,61 @@
     state.previousTraffic = { rx:rx, tx:tx }; state.previousAt = now;
     return { rx:rxBps, tx:txBps, totalRx:rx, totalTx:tx };
   }
+  // Offline MAC vendor (OUI) table — first 3 octets -> manufacturer. Covers the most
+  // common consumer/IoT vendors; fully local, no lookups. "LAA" = locally-administered
+  // (randomized private) MAC used by modern phones for privacy.
+  var OUI = {
+    "3C5AB4":"Google","1A11A0":"Google","F0EF86":"Google","D8EB46":"Google",
+    "F4F5D8":"Google","001A11":"Google","AC63BE":"Amazon","44650D":"Amazon","F0272D":"Amazon",
+    "68370E":"Apple","F0DBF8":"Apple","A85C2C":"Apple","3C0754":"Apple","F80377":"Apple",
+    "9C207B":"Apple","D0817A":"Apple","A4B197":"Apple","BCD074":"Apple","78CA39":"Apple",
+    "F0989D":"Apple","881FA1":"Apple","AC1F74":"Apple","64B0A6":"Apple","24F094":"Apple",
+    "C82A14":"Apple","DC2B2A":"Apple","E0B52D":"Apple","F0B479":"Apple","98460A":"Apple",
+    "E4CE8F":"Apple","6C4008":"Apple","B8C111":"Apple","8866A5":"Apple","D49A20":"Apple",
+    "003EE1":"Apple","040CCE":"Apple","28E02C":"Apple","70CD60":"Apple","A0999B":"Apple",
+    "F4F15A":"Apple","B827EB":"Raspberry Pi","DCA632":"Raspberry Pi","E45F01":"Raspberry Pi","2CCF67":"Raspberry Pi",
+    "D83ADD":"Raspberry Pi","28CDC1":"Raspberry Pi","5CF370":"Xiaomi","64B473":"Xiaomi","286C07":"Xiaomi",
+    "7C1DD9":"Xiaomi","F8A45F":"Xiaomi","98FAE3":"Xiaomi","742344":"Xiaomi","A091A2":"Xiaomi",
+    "50EC50":"Xiaomi","C46AB7":"Xiaomi","78:11:DC":"Xiaomi","009EC8":"Xiaomi","2CFDA1":"Xiaomi",
+    "AC64DD":"Xiaomi","04CF8C":"Xiaomi","FC64BA":"Xiaomi","8CBEBE":"Xiaomi","3C47AE":"Xiaomi",
+    "F48B32":"Xiaomi","2CF0A2":"Xiaomi","D024F7":"Xiaomi","001874":"Huawei","00259E":"Huawei",
+    "080088":"Huawei","2008ED":"Huawei","283152":"Huawei","48435A":"Huawei","5C7D5E":"Huawei",
+    "781DBA":"Huawei","AC4E91":"Huawei","D0D04B":"Huawei","E8088B":"Huawei","F83DFF":"Huawei",
+    "00E0FC":"Huawei","047503":"Huawei","10C61F":"Huawei","4C8BEF":"Huawei","702E22":"Huawei",
+    "0C1420":"Samsung","1899E8":"Samsung","28395E":"Samsung","345B22":"Samsung","4844F7":"Samsung",
+    "5001BB":"Samsung","6C2F2C":"Samsung","78BDBC":"Samsung","8425DB":"Samsung","9401C2":"Samsung",
+    "A00798":"Samsung","B0DF3A":"Samsung","C0BDD1":"Samsung","D0176A":"Samsung","E8508B":"Samsung",
+    "F409D8":"Samsung","001632":"Samsung","0021D1":"Samsung","5CE8EB":"Samsung","EC1F72":"Samsung",
+    "001A2B":"Intel","001B21":"Intel","0024D7":"Intel","3C970E":"Intel","7CB27D":"Intel",
+    "A0A8CD":"Intel","B4B676":"Intel","E4A471":"Intel","F8633F":"Intel","8CC841":"Intel",
+    "00155D":"Microsoft","0017FA":"Microsoft","281878":"Microsoft","7CED8D":"Microsoft","C0335E":"Microsoft",
+    "00E04C":"Realtek","525400":"QEMU/KVM","000C29":"VMware","005056":"VMware","080027":"VirtualBox",
+    "001DD8":"Microsoft","D8FE8F":"Sony","FCF152":"Sony","AC9B0A":"Sony","000D93":"Sony",
+    "001966":"LG","0021FB":"LG","10683F":"LG","3CBDD8":"LG","6CD68A":"LG","A816B2":"LG",
+    "C4438F":"LG","001E75":"LG","001AEF":"OPPO","10A5D0":"OPPO","3CA582":"OPPO","5C0947":"OPPO",
+    "84D6D0":"OnePlus","C0EEFB":"OnePlus","64A2F9":"OnePlus","94652D":"OnePlus","2CF01A":"OnePlus",
+    "0016A4":"Vivo","2C598A":"Vivo","30766F":"Vivo","BCAEE3":"Vivo","D856BD":"Vivo",
+    "F0761C":"TP-Link","5091E3":"TP-Link","A42BB0":"TP-Link","EC086B":"TP-Link","6466B3":"TP-Link",
+    "5C628B":"MikroTik","4C5E0C":"MikroTik","6C3B6B":"MikroTik","D4CA6D":"MikroTik","E48D8C":"MikroTik",
+    "742401":"MikroTik","2CC81B":"MikroTik","B869F4":"MikroTik","08551A":"MikroTik","CC2DE0":"MikroTik",
+    "F81A67":"TP-Link","D8150D":"TP-Link","1CBFCE":"Shenzhen","001788":"Philips Hue","ECB5FA":"Philips Hue",
+    "18B430":"Nest","642944":"Nest","00D02D":"Ubiquiti","44D9E7":"Ubiquiti","788A20":"Ubiquiti",
+    "687251":"Ubiquiti","FCECDA":"Ubiquiti","74ACB9":"Ubiquiti","E063DA":"Ubiquiti","B4FBE4":"Ubiquiti"
+  };
+  function ouiVendor(mac) {
+    if (!mac) return "";
+    var hex = String(mac).replace(/[^0-9a-fA-F]/g, "").toUpperCase();
+    if (hex.length < 6) return "";
+    // second-least-significant bit of first octet set => locally-administered (random) MAC
+    var b1 = parseInt(hex.slice(0, 2), 16);
+    if (b1 & 0x02) return state.lang === "ar" ? "خاص (عشوائي)" : "Private (random)";
+    return OUI[hex.slice(0, 6)] || "";
+  }
   function mergeDevices(data) {
     var map = {};
     (data.devices || []).forEach(function (d) { var k = (d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet" }; });
     (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = (s.mac || Math.random()).toLowerCase(); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.rate }); }); });
-    return Object.keys(map).map(function (k) { return map[k]; });
+    return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; });
   }
   function wifiBand(data, band) { return (data.wifi || []).filter(function (w) { return w.band === band; })[0] || null; }
   function updateAvailability(ok) {
@@ -405,6 +463,7 @@
       ["devices","devices","device"],
       ["wifi","wifi","wifi"],
       ["system","system","cpu"],
+      ["quick","quick","gear"],
       ["isolation","isolation","shield"],
       ["actions","actions","gear"]
     ];
@@ -416,7 +475,7 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","system","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","system","quick","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
@@ -428,6 +487,12 @@
       $("isolation").dataset.uiVersion = UI_VERSION;
       bindDynamic();
       loadControl("isolation");
+    }
+    if (id === "quick" && $("quick") && $("quick").dataset.uiVersion !== UI_VERSION) {
+      $("quick").innerHTML = renderQuick();
+      $("quick").dataset.uiVersion = UI_VERSION;
+      bindDynamic();
+      loadControl("wizard");
     }
     window.scrollTo({ top:0, behavior:"smooth" });
     setTimeout(loadActiveControl, 0);
@@ -478,9 +543,12 @@
   function renderDevices(data) {
     var rows = mergeDevices(data);
     if (!rows.length) return sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
-    return sectionHead(tr("devices"), "IP / MAC / link / allow-list controls", rows.length + "") +
-      '<div class="table-wrap"><table><thead><tr><th>Type</th><th>IP</th><th>MAC</th><th>Link</th><th>RSSI</th><th>Action</th></tr></thead><tbody>' +
-      rows.map(function (d) { return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc(d.mac || tr("unavailable")) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + " dBm" : tr("unavailable")) + '</td><td><button class="btn dev-action">' + tr("block") + '</button> <button class="btn dev-action">' + tr("allow") + '</button></td></tr>'; }).join("") +
+    return sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
+      '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
+      rows.map(function (d) {
+        var vn = d.vendor || tr("unknownVendor");
+        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + " dBm" : tr("unavailable")) + '</td><td><button class="btn dev-action">' + tr("block") + '</button> <button class="btn dev-action">' + tr("allow") + '</button></td></tr>';
+      }).join("") +
       '</tbody></table></div>';
   }
   function renderWifi(data) {
@@ -532,7 +600,7 @@
       }).join("") + '</div>';
     }
     if (data.form && data.form.length) {
-      html += '<div class="ctl-form">' + data.form.map(fieldHtml).join("") + '</div>';
+      html += formWithGroups(data.form);
     }
     if (data.actions && data.actions.length) {
       html += '<div class="branch-actions">' + data.actions.filter(function (a) { return !a.url; }).map(function (a) {
@@ -546,6 +614,39 @@
     }
     if (data.text) html += '<pre class="ctl-pre">' + esc(data.text) + '</pre>';
     return html || '<div class="ctl-status">No details returned.</div>';
+  }
+  function groupTitle(g) {
+    var m = {
+      guard: state.lang === "ar" ? "🛡️ الحمايات العامة (تشغيل/إيقاف)" : "🛡️ General protections",
+      wifi: state.lang === "ar" ? "📶 عزل شبكات الواي فاي" : "📶 Wi-Fi isolation",
+      ports: state.lang === "ar" ? "🔌 منافذ الكيبل (LAN)" : "🔌 LAN cable ports",
+      device: state.lang === "ar" ? "الجهاز" : "Device",
+      security: state.lang === "ar" ? "الحماية" : "Security",
+      advanced: state.lang === "ar" ? "متقدم" : "Advanced"
+    };
+    return m[g] || "";
+  }
+  // Render a form, inserting a subheading whenever the field group changes (only if the
+  // form actually uses more than one group). Keeps single-group sections unchanged.
+  function formWithGroups(form) {
+    var groups = {};
+    form.forEach(function (f) { groups[f.group || ""] = 1; });
+    var multi = Object.keys(groups).filter(function (g) { return g; }).length > 1;
+    if (!multi) return '<div class="ctl-form">' + form.map(fieldHtml).join("") + '</div>';
+    var out = "", last = null, open = false;
+    form.forEach(function (f) {
+      var g = f.group || "";
+      if (g !== last) {
+        if (open) out += '</div>';
+        var t = groupTitle(g);
+        if (t) out += '<div class="ctl-subhead">' + esc(t) + '</div>';
+        out += '<div class="ctl-form">';
+        open = true; last = g;
+      }
+      out += fieldHtml(f);
+    });
+    if (open) out += '</div>';
+    return out;
   }
   function optionHtml(options, current) {
     return String(options || "").split(",").filter(Boolean).map(function (part) {
@@ -594,7 +695,7 @@
       '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
       '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
       '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
-      '<div class="kv"><span>TX Power</span><b class="latin">30 locked</b></div>';
+      '<div class="kv"><span>TX Power</span><b class="latin">35 locked</b></div>';
   }
   function syncWizardMode() {
     var panel = document.querySelector('[data-control-section="wizard"]');
@@ -652,6 +753,16 @@
       '<p>' + esc(tr("isolationNote")) + '</p>' +
       '<div class="branch-actions"><button class="btn primary" data-ctl-refresh="isolation">' + esc(tr("refresh")) + '</button></div>' +
       '<div id="ctl_isolation" class="ctl-status">' + esc(tr("loading")) + '</div>' +
+      '</div>';
+  }
+  function renderQuick() {
+    return sectionHead(tr("quick"), tr("quickHint"), "Xiaomi CR6608") +
+      '<div class="branch-detail" data-control-section="wizard">' +
+      '<div class="chip warn"><span>' + esc(tr("protected")) + '</span></div>' +
+      '<h3>' + esc(tr("quickTitle")) + '</h3>' +
+      '<p>' + esc(tr("quickNote")) + '</p>' +
+      '<div class="branch-actions"><button class="btn primary" data-ctl-refresh="wizard">' + esc(tr("refresh")) + '</button></div>' +
+      '<div id="ctl_wizard" class="ctl-status">' + esc(tr("loading")) + '</div>' +
       '</div>';
   }
   function render(data) {
@@ -741,7 +852,13 @@
     }
     var panel = document.querySelector('[data-control-section="' + section + '"]');
     Array.prototype.forEach.call(panel ? panel.querySelectorAll("[data-ctl-field]") : [], function (i) {
-      if (!i.disabled && !i.closest("[hidden]")) params += "&" + encodeURIComponent(i.dataset.ctlField) + "=" + encodeURIComponent(i.value);
+      // Submit every field the user actually filled — including fields in inactive
+      // wizard tabs (.royal-pane[hidden]). Only skip disabled fields and fields hidden
+      // by mode filtering (their own .royal-field wrapper is [hidden]).
+      if (i.disabled) return;
+      var wrap = i.closest(".royal-field");
+      if (wrap && wrap.hidden) return;
+      params += "&" + encodeURIComponent(i.dataset.ctlField) + "=" + encodeURIComponent(i.value);
     });
     return params;
   }
