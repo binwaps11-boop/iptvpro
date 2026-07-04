@@ -1,6 +1,6 @@
 {
 	"metadata_version": "1.1",
-	"compat_version": "1.0",
+	"compat_version": "1.1",
 	"supported_devices": ["xiaomi,mi-router-cr6608"],
 	"version": {
 		"dist": "OpenWrt",
