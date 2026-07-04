@@ -865,8 +865,70 @@ EOF
       emit false "Steer to 5G" "الجهاز أو الواجهة لا تدعم الطلب" "[]" "تعذر إرسال طلب الانتقال للجهاز $mac — قد لا يدعم الجهاز 802.11v." "[]" "[]"
     fi
     exit 0 ;;
+  lan_neighbors)
+    # Active LAN neighbor discovery (like Mikrotik / NanoStation "Neighbors"): find every
+    # device on the wired LAN — including devices behind an external switch on any port —
+    # and show its name, IP, MAC and the bridge port it is reached through. Read-only.
+    #  * ping-sweep each /24 the bridge holds so alive devices answer ARP,
+    #  * merge ARP + `ip neigh` (IP+MAC), the bridge FDB (MAC -> physical port; this is what
+    #    reveals devices sitting behind a switch), and DHCP leases (MAC -> hostname),
+    #  * reverse-DNS the rest (an upstream Mikrotik usually registers lease names in DNS).
+    st="/tmp/lanscan.$$"; mkdir -p "$st"
+    # every /24 the router has an address on (br-lan static + the upstream-DHCP subnet)
+    prefixes="$(ip -4 addr show 2>/dev/null | awk '/inet /{split($2,a,"/"); n=split(a[1],o,"."); if(o[1]!="127") print o[1]"."o[2]"."o[3]}' | sort -u | head -3)"
+    for pfx in $prefixes; do
+      i=1
+      while [ "$i" -le 254 ]; do
+        j=0
+        while [ "$j" -lt 48 ] && [ "$i" -le 254 ]; do
+          /bin/busybox timeout 1 ping -c 1 -W 1 "$pfx.$i" >/dev/null 2>&1 &
+          i=$((i+1)); j=$((j+1))
+        done
+        wait
+      done
+    done
+    # source tables (pipe-delimited so empty fields are preserved)
+    awk 'NR>1 && $4 ~ /:/ && $4!="00:00:00:00:00:00" {print $1"|"tolower($4)"|"$6}' /proc/net/arp 2>/dev/null > "$st/arp"
+    ip neigh show 2>/dev/null | awk '$1 ~ /^[0-9]+\./ {mac="";dev="";for(k=1;k<=NF;k++){if($k=="dev")dev=$(k+1);if($k=="lladdr")mac=tolower($(k+1))} if(mac!="")print $1"|"mac"|"dev}' > "$st/neigh"
+    bridge fdb show 2>/dev/null | awk '$1 ~ /:/ && !/permanent/ && !/self/ {mac=tolower($1);dev="";for(k=1;k<=NF;k++)if($k=="dev")dev=$(k+1); if(dev!=""&&dev!="br-lan"&&mac!="00:00:00:00:00:00")print mac"|"dev}' > "$st/fdb"
+    awk 'NF>=4{print tolower($2)"|"$3"|"$4}' /tmp/dhcp.leases 2>/dev/null > "$st/leases"
+    # merge every source, keyed by MAC
+    awk -F'|' '
+      FILENAME ~ /leases$/ { lhost[$1]=$3; lip[$1]=$2; seen[$1]=1; next }
+      FILENAME ~ /fdb$/    { if(!($1 in port)) port[$1]=$2; seen[$1]=1; next }
+      FILENAME ~ /arp$/    { ip[$2]=$1; ifc[$2]=$3; seen[$2]=1; next }
+      FILENAME ~ /neigh$/  { if(!($2 in ip)) ip[$2]=$1; if(!($2 in ifc)) ifc[$2]=$3; seen[$2]=1; next }
+      END{ for(m in seen){ theip=ip[m]; if(theip=="") theip=lip[m];
+             printf "%s|%s|%s|%s|%s\n", theip, m, lhost[m], port[m], ifc[m] } }
+    ' "$st/leases" "$st/fdb" "$st/arp" "$st/neigh" | sort -u > "$st/merged"
+    # reverse-DNS the entries that have an IP but no DHCP-lease name (bounded, parallel)
+    : > "$st/rdns"; kc=0
+    while IFS='|' read -r rip rmac rhost rport rifc; do
+      [ -n "$rhost" ] && continue
+      [ -n "$rip" ] || continue
+      [ "$kc" -ge 60 ] && break
+      kc=$((kc+1))
+      { nm="$(/bin/busybox timeout 1 nslookup "$rip" 2>/dev/null | sed -n 's/.*name = \([^ ]*\)\.$/\1/p;s/.*name = \([^ ]*\)$/\1/p' | grep -vi in-addr | head -1)"; [ -n "$nm" ] && printf '%s|%s\n' "$rip" "$nm" >> "$st/rdns"; } 2>/dev/null &
+      [ $((kc % 20)) -eq 0 ] && wait
+    done < "$st/merged"
+    wait
+    # emit devices JSON (host falls back to reverse-DNS; port falls back to L3 iface)
+    devjson="$(awk -F'|' '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); gsub(/\t/," ",s); return s }
+      FILENAME ~ /rdns$/ { rn[$1]=$2; next }
+      FILENAME ~ /merged$/ {
+        ip=$1; mac=$2; host=$3; prt=$4; ifc=$5;
+        if(host=="" && (ip in rn)) host=rn[ip];
+        pl=prt; if(pl=="") pl=ifc;
+        n++; if(n>1) printf ",";
+        printf "{\"ip\":\"%s\",\"mac\":\"%s\",\"host\":\"%s\",\"port\":\"%s\",\"iface\":\"%s\"}", esc(ip), esc(mac), esc(host), esc(pl), esc(ifc);
+      }' "$st/rdns" "$st/merged")"
+    total="$(grep -c . "$st/merged" 2>/dev/null)"; [ -n "$total" ] || total=0
+    rm -rf "$st"
+    printf '{"ok":true,"section":"lan_neighbors","total":%s,"devices":[%s]}\n' "$total" "${devjson:-}"
+    exit 0 ;;
   secscan_run)
-    # On-demand neighbor scan: neighboring SSIDs, their channels/signal, rogue/evil-twin
+    # On-demand Wi-Fi neighbor scan: neighboring SSIDs, their channels/signal, rogue/evil-twin
     # detection (foreign BSSID broadcasting our SSID), and least-congested channel advice.
     # Read-only; no confirm needed. Scanning briefly dips throughput, hence button-driven.
     our_ssids="$(uci -q show wireless 2>/dev/null | awk -F"'" '/\.ssid=/{print $2}' | sort -u)"

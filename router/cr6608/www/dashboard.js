@@ -31,7 +31,9 @@
     session: "",
     pendingAction: null,
     adminSelection: {},
-    controlCache: {}
+    controlCache: {},
+    lastScan: null,
+    lanScan: null
   };
 
   var L = {
@@ -44,6 +46,10 @@
       vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف", near: "قريب", mid: "متوسط", far: "بعيد",
       scanNeighbors: "فحص القنوات والشبكات المجاورة", scanning: "جاري الفحص…", bestChannel: "أفضل قناة",
       neighbors: "الشبكات المجاورة", noNeighbors: "لم يُعثر على شبكات مجاورة", applyBest: "طبّق أفضل قناة",
+      scanLan: "اكتشاف الأجهزة على الشبكة", lanNeighbors: "أجهزة الشبكة (الجيران)",
+      lanScanHint: "يفحص كل المنافذ ويكشف الأجهزة خلف أي سويتش — يعرض الاسم والـ IP والـ MAC والمنفذ.",
+      noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
+      port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -94,6 +100,10 @@
       vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown", near: "Near", mid: "Medium", far: "Far",
       scanNeighbors: "Scan channels & neighbors", scanning: "Scanning…", bestChannel: "Best channel",
       neighbors: "Neighboring networks", noNeighbors: "No neighboring networks found", applyBest: "Apply best channel",
+      scanLan: "Discover devices on the network", lanNeighbors: "Network devices (Neighbors)",
+      lanScanHint: "Scans every port and reveals devices behind any switch — shows name, IP, MAC and port.",
+      noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
+      port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -371,8 +381,8 @@
   }
   function mergeDevices(data) {
     var map = {};
-    (data.devices || []).forEach(function (d) { var k = (d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet", host:d.host }; });
-    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = (s.mac || Math.random()).toLowerCase(); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate }); }); });
+    (data.devices || []).forEach(function (d) { var k = String(d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet", host:d.host }; });
+    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate }); }); });
     return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; });
   }
   function wifiBand(data, band) { return (data.wifi || []).filter(function (w) { return w.band === band; })[0] || null; }
@@ -651,8 +661,13 @@
   }
   function renderDevices(data) {
     var rows = mergeDevices(data);
-    if (!rows.length) return sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
-    return sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
+    // Active neighbor discovery: reveals devices behind an external switch on any port
+    // (name / IP / MAC / port), like Mikrotik or NanoStation "Neighbors".
+    var scanCard = card(tr("lanNeighbors"),
+      '<p class="muted" style="margin:0 0 8px">' + esc(tr("lanScanHint")) + '</p>' +
+      '<div class="branch-actions"><button class="btn primary" id="lanScanBtn">' + esc(tr("scanLan")) + '</button></div>' +
+      '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "ARP · FDB · DNS", "net");
+    var live = rows.length ? sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
       '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
         var vn = d.vendor || tr("unknownVendor");
@@ -661,7 +676,47 @@
         var ipHost = esc(d.ip || tr("unavailable")) + (d.host ? '<br><small class="muted latin">' + esc(d.host) + '</small>' : "");
         return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + acts + '</td></tr>';
       }).join("") +
-      '</tbody></table></div>';
+      '</tbody></table></div>' :
+      sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
+    return live + scanCard;
+  }
+  // Render the on-demand LAN neighbor-scan result: one row per discovered device with
+  // its resolved name, IP, MAC and the bridge port (so devices behind a switch are visible).
+  function renderLanScan(d) {
+    if (!d || !d.ok) return '<div class="ctl-status">' + esc(tr("noLanDevices")) + '</div>';
+    var devs = (d.devices || []).slice().sort(function (a, b) {
+      function ipn(x) { var p = String(x && x.ip || "").split("."); return p.length === 4 ? (((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3]) : 4294967295; }
+      return ipn(a) - ipn(b);
+    });
+    if (!devs.length) return '<div class="empty">' + tr("noLanDevices") + '</div>';
+    var body = '<div class="table-wrap"><table><thead><tr><th>' + tr("host") + '</th><th>IP</th><th>MAC</th><th>' + tr("port") + '</th><th>' + tr("vendor") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
+      devs.map(function (x) {
+        var mac = String(x.mac || "");
+        var vn = (typeof ouiVendor === "function" ? ouiVendor(mac) : "") || tr("unknownVendor");
+        var nm = x.host ? esc(x.host) : '<span class="muted">—</span>';
+        var acts = mac ? '<button class="btn dev-action" data-dev-mac="' + esc(mac) + '" data-dev-act="block_mac">' + tr("block") + '</button>' : "";
+        var port = esc(x.port || x.iface || "");
+        return '<tr><td>' + nm + '</td><td class="latin">' + esc(x.ip || "—") + '</td><td class="latin">' + esc(mac.toUpperCase()) + '</td><td class="latin">' + port + '</td><td>' + esc(vn) + '</td><td>' + acts + '</td></tr>';
+      }).join("") + '</tbody></table></div>';
+    return '<h4 style="margin:10px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4>' + body;
+  }
+  async function scanLan() {
+    var btn = $("lanScanBtn"), box = $("lanScanResult");
+    if (!btn || !box) return;
+    btn.disabled = true; var old = btn.textContent; btn.textContent = tr("scanning");
+    box.innerHTML = '<div class="ctl-status">' + esc(tr("scanning")) + '</div>';
+    try {
+      var r = await fetch(CTL, { method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "section=devices&action=lan_neighbors&" + sidQuery() + "&_=" + Date.now() });
+      if (r.status === 403) { requireLogin(tr("loginBad")); return; }
+      var d = await r.json();
+      state.lanScan = d; // persist so the 5s poll re-render keeps the result
+      box.innerHTML = renderLanScan(d);
+      bindDynamic();
+    } catch (e) {
+      box.innerHTML = '<div class="ctl-status">' + esc("scan: " + e.message) + '</div>';
+    } finally { btn.disabled = false; btn.textContent = old; }
   }
   function healthCard(data) {
     var h = data.health; if (!h) return "";
@@ -1243,7 +1298,17 @@
 {key:"kpi_strip",ar:"شريط المؤشرات",en:"KPI Strip",cat:"Automation & UX",fn:function(d,H){var w=d.wifi||[],dv=(H.mergeDevices(d)||[]),air=H.num((d.health||{}).busy_pct),lat=H.num(d.latency_ms),tmp=H.num(d.temperature_c);var items=[[H.lang==="ar"?"أجهزة":"Devices",dv.length,"var(--primary)"],[H.lang==="ar"?"شبكات":"SSIDs",w.length,"var(--accent)"],[H.lang==="ar"?"هواء":"Air",H.finite(air)?air+"%":"—","var(--mid)"],[H.lang==="ar"?"استجابة":"Lat",H.finite(lat)?H.fmt(lat,0)+"ms":"—","var(--good)"],[H.lang==="ar"?"حرارة":"Temp",H.finite(tmp)?H.fmt(tmp,0)+"°":"—","var(--weak)"]];var r="<div style='display:flex;flex-wrap:wrap;gap:8px'>"+items.map(function(it){return "<div style='flex:1;min-width:80px;text-align:center;padding:8px;border-radius:8px;background:rgba(148,185,255,.06)'><div style='font-size:22px;font-weight:800;color:"+it[2]+"'>"+it[1]+"</div><div style='font-size:11px;color:var(--muted)'>"+it[0]+"</div></div>";}).join("")+"</div>";return H.card(H.lang==="ar"?"شريط المؤشرات":"KPI Strip",r,null,"bolt");}},
 {key:"capacity_headroom",ar:"سعة الاحتياطي",en:"Capacity Headroom",cat:"Automation & UX",fn:function(d,H){var air=H.num((d.health||{}).busy_pct),cpu=H.num((d.cpu||{}).percent),m=d.mem||{},mp=(H.num(m.total)&&H.num(m.available))?(1-H.num(m.available)/H.num(m.total))*100:null,mn=100;[air,cpu,mp].forEach(function(v){if(H.finite(v))mn=Math.min(mn,100-v);});var col=mn>=50?"var(--excellent)":mn>=25?"var(--good)":mn>=10?"var(--mid)":"var(--weak)";return H.card(H.lang==="ar"?"سعة الاحتياطي":"Capacity Headroom","<div style='text-align:center;font-size:36px;font-weight:800;color:"+col+"'>"+H.fmt(mn,0)+"%</div><div style='text-align:center;color:var(--muted);font-size:12px;margin-bottom:8px'>"+(H.lang==="ar"?"سعة متبقية (أقل مورد)":"headroom (tightest resource)")+"</div>"+H.bar(mn,100,col),null,"cpu");}},
 {key:"air_quality_index",ar:"مؤشر جودة الهواء اللاسلكي",en:"Air Quality Index",cat:"Automation & UX",fn:function(d,H){var w=d.wifi||[],s=0,n=0;w.forEach(function(x){var b=H.num((x.survey||{}).busy_pct);if(H.finite(b)){s+=b;n++;}});if(!n)return H.card(H.lang==="ar"?"جودة الهواء":"Air Quality","<div class='empty'>—</div>",null,"signal");var aqi=H.clamp(100-s/n,0,100),col=aqi>=70?"var(--excellent)":aqi>=45?"var(--good)":aqi>=25?"var(--mid)":"var(--weak)",t=aqi>=70?(H.lang==="ar"?"ممتاز":"Excellent"):aqi>=45?(H.lang==="ar"?"جيد":"Good"):aqi>=25?(H.lang==="ar"?"متوسط":"Fair"):(H.lang==="ar"?"مزدحم":"Congested");return H.card(H.lang==="ar"?"مؤشر جودة الهواء اللاسلكي":"Air Quality Index","<div style='text-align:center;font-size:40px;font-weight:800;color:"+col+"'>"+H.fmt(aqi,0)+"</div><div style='text-align:center;color:"+col+";margin-bottom:8px'>"+t+"</div>"+H.bar(aqi,100,col),t,"signal");}},
-{key:"quick_summary",ar:"الملخص السريع",en:"Quick Summary",cat:"Automation & UX",fn:function(d,H){var dv=(H.mergeDevices(d)||[]),w=d.wifi||[],parts=[];parts.push((H.lang==="ar"?"أجهزة: ":"Devices: ")+dv.length);parts.push((H.lang==="ar"?"شبكات: ":"Networks: ")+w.length);if(H.finite(H.num((d.health||{}).score)))parts.push((H.lang==="ar"?"الصحة: ":"Health: ")+H.num(d.health.score));if(H.finite(H.num(d.temperature_c)))parts.push((H.lang==="ar"?"الحرارة: ":"Temp: ")+H.fmt(H.num(d.temperature_c),0)+"°");var body="<div style='font-size:14px;line-height:2'>"+parts.map(function(p){return "<span style='display:inline-block;padding:4px 10px;margin:3px;border-radius:8px;background:rgba(148,185,255,.08)'>"+H.esc(p)+"</span>";}).join("")+"</div>";return H.card(H.lang==="ar"?"الملخص السريع":"Quick Summary",body,H.esc(d.hostname||""),"bolt");}}
+{key:"quick_summary",ar:"الملخص السريع",en:"Quick Summary",cat:"Automation & UX",fn:function(d,H){var dv=(H.mergeDevices(d)||[]),w=d.wifi||[],parts=[];parts.push((H.lang==="ar"?"أجهزة: ":"Devices: ")+dv.length);parts.push((H.lang==="ar"?"شبكات: ":"Networks: ")+w.length);if(H.finite(H.num((d.health||{}).score)))parts.push((H.lang==="ar"?"الصحة: ":"Health: ")+H.num(d.health.score));if(H.finite(H.num(d.temperature_c)))parts.push((H.lang==="ar"?"الحرارة: ":"Temp: ")+H.fmt(H.num(d.temperature_c),0)+"°");var body="<div style='font-size:14px;line-height:2'>"+parts.map(function(p){return "<span style='display:inline-block;padding:4px 10px;margin:3px;border-radius:8px;background:rgba(148,185,255,.08)'>"+H.esc(p)+"</span>";}).join("")+"</div>";return H.card(H.lang==="ar"?"الملخص السريع":"Quick Summary",body,H.esc(d.hostname||""),"bolt");}},
+   {key:"rf_dfs_channel_board",ar:"لوحة القنوات و DFS",en:"DFS & Channel Board",cat:"RF & Airtime",fn:function(d,H){var A=H.lang==='ar',w=(d&&d.wifi)||[];if(!w.length)return H.card(A?'لوحة القنوات و DFS':'DFS & Channel Board','<div style="color:var(--muted);text-align:center;padding:14px">'+(A?'لا توجد بيانات واي فاي':'No WiFi data')+'</div>','--','shield');var h='',dn=0;for(var i=0;i<w.length;i++){var r=w[i]||{},cn=+(r.channel)||0,b=H.esc(String(r.band||'?')),m=String(r.htmode||'').match(/(\d+)/),wd=m?m[1]:'20',is5=String(r.band||'').indexOf('5')===0,dfs=is5&&cn>=52&&cn<=144;if(dfs)dn++;var c=dfs?'var(--mid)':'var(--excellent)';h+='<div style="display:flex;align-items:center;gap:6px;padding:7px 0 2px;flex-wrap:wrap"><b style="color:var(--primary);min-width:42px">'+b+'</b><span style="background:var(--border);border-radius:6px;padding:2px 8px;font-weight:600">CH '+(cn||'?')+'</span><span style="background:var(--border);border-radius:6px;padding:2px 8px">'+H.esc(wd)+'MHz</span><span style="margin-'+(A?'right':'left')+':auto;color:'+c+';font-weight:700">&#9679; '+(dfs?'DFS':(A?'آمن':'clear'))+'</span></div><div style="font-size:11px;color:var(--muted);padding:0 0 6px;border-bottom:1px solid var(--border)">'+H.esc(String(r.ssid||''))+' &middot; '+H.esc(String(r.htmode||''))+' &middot; '+(A?'إشارة ':'sig ')+H.num(r.signal_dbm)+' dBm</div>';}var chip=dn?(dn+' DFS'):(A?'بدون DFS':'non-DFS');return H.card(A?'لوحة القنوات و DFS':'DFS & Channel Board',h,chip,'shield');}},
+   {key:"rf_airtime_efficiency",ar:"كفاءة زمن البث",en:"Airtime Efficiency",cat:"RF & Airtime",fn:function(d,H){var A=H.lang==='ar',w=(d&&d.wifi)||[];if(!w.length)return H.card(A?'كفاءة زمن البث':'Airtime Efficiency','<div style="color:var(--muted);text-align:center;padding:14px">'+(A?'لا توجد بيانات':'No data')+'</div>','--','signal');var h='',worst=0;for(var i=0;i<w.length;i++){var r=w[i]||{},s=r.survey||{},busy=H.clamp(+(s.busy_pct)||0,0,100),cl=+(r.clients)||0,ratio=busy/Math.max(cl,1),c=ratio<=8?'var(--excellent)':ratio<=18?'var(--good)':ratio<=35?'var(--mid)':'var(--weak)',lb=ratio<=8?(A?'ممتاز':'excellent'):ratio<=18?(A?'جيد':'good'):ratio<=35?(A?'متوسط':'fair'):(cl===0&&busy>20?(A?'تشويش':'interference'):(A?'مزدحم':'congested'));if(ratio>worst)worst=ratio;h+='<div style="padding:6px 0"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px"><b>'+H.esc(String(r.band||'?'))+' &middot; '+cl+(A?' عميل':' clients')+'</b><span style="color:'+c+';font-weight:700">'+lb+'</span></div>'+H.bar(busy,100,c)+'<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:3px"><span>'+(A?'انشغال ':'busy ')+H.fmt(busy,0)+'%</span><span>'+(A?'لكل عميل ':'per client ')+H.fmt(ratio,1)+'%</span></div></div>';}var chip=worst<=18?(A?'صحي':'healthy'):(A?'مراقبة':'watch');return H.card(A?'كفاءة زمن البث':'Airtime Efficiency',h,chip,'signal');}},
+   {key:"roaming_candidates",ar:"مرشحو التجوال",en:"Roaming Candidates",cat:"Clients & Devices",fn:function(d,H){var A=H.lang==='ar',w=(d&&d.wifi)||[],has5=w.some(function(r){return r&&r.band==='5G'});var dev={};((d&&d.devices)||[]).forEach(function(x){if(x&&x.mac)dev[String(x.mac).toUpperCase()]=x.host||x.ip||''});var L=[];w.forEach(function(r){if(!r||!r.stations)return;r.stations.forEach(function(s){if(!s)return;var sg=H.num(s.signal_dbm);if(!H.finite(sg))return;if(sg<=-67)L.push({m:String(s.mac||''),b:r.band||'',sg:sg})})});L.sort(function(a,b){return a.sg-b.sg});var n=L.length;L=L.slice(0,5);var h;if(!n){h='<div style="text-align:center;padding:12px;color:var(--good)">'+(A?'لا عملاء بإشارة ضعيفة — التغطية جيدة':'No weak clients — coverage healthy')+'</div>'}else{h=L.map(function(c){var nm=dev[c.m.toUpperCase()]||c.m.slice(-8);var col=c.sg<=-75?'var(--weak)':'var(--mid)';var tip=(c.b==='2.4G'&&has5)?(A?'مرشح للتوجيه إلى 5G':'Candidate: steer to 5G'):(A?'اقترب من نقطة الوصول':'Move closer to AP');return '<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:11px"><b>'+H.esc(nm)+'</b><span style="color:'+col+'">'+H.fmt(c.sg,0)+' dBm · '+H.esc(c.b)+'</span></div>'+H.bar(H.clamp(c.sg+95,0,55),55,col)+'<div style="font-size:10px;color:var(--accent)">'+tip+'</div></div>'}).join('')}
+return H.card(A?'مرشحو التجوال':'Roaming Candidates',h,String(n)+(A?' ضعيف':' weak'),'signal')}},
+   {key:"distance_leaderboard",ar:"أبعد العملاء",en:"Distance Leaderboard",cat:"Clients & Devices",fn:function(d,H){var A=H.lang==='ar',w=(d&&d.wifi)||[];var dev={};((d&&d.devices)||[]).forEach(function(x){if(x&&x.mac)dev[String(x.mac).toUpperCase()]=x.host||x.ip||''});var L=[];w.forEach(function(r){if(!r||!r.stations)return;r.stations.forEach(function(s){if(!s)return;var sg=H.num(s.signal_dbm);if(!H.finite(sg))return;var dm=H.num(H.distanceM(sg));if(!H.finite(dm)||dm<0)return;L.push({m:String(s.mac||''),b:r.band||'',dm:dm})})});L.sort(function(a,b){return b.dm-a.dm});var mx=L.length?L[0].dm:1,h;if(!L.length){h='<div style="text-align:center;padding:12px;color:var(--muted)">'+(A?'لا عملاء متصلين':'No connected clients')+'</div>'}else{h=L.slice(0,6).map(function(c,i){var nm=dev[c.m.toUpperCase()]||c.m.slice(-8);var col=c.dm>12?'var(--weak)':c.dm>7?'var(--mid)':c.dm>3?'var(--good)':'var(--excellent)';return '<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:11px"><span>#'+(i+1)+' <b>'+H.esc(nm)+'</b> <span style="color:var(--muted)">'+H.esc(c.b)+'</span></span><b style="color:'+col+'">~'+H.fmt(c.dm,1)+(A?' م':' m')+'</b></div>'+H.bar(c.dm,mx||1,col)+'</div>'}).join('')+'<div style="font-size:10px;color:var(--muted);margin-top:4px">'+(A?'تقدير من قوة الإشارة':'Estimated from RSSI')+'</div>'}
+return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.length)+(A?' جهاز':' clients'),'device')}},
+   {key:"client_bw_share",ar:"حصة العملاء من النطاق",en:"Client Bandwidth Share",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',t=a?'حصة العملاء':'Client Bandwidth Share',st=[],tot=0;(d.wifi||[]).forEach(function(w){(w.stations||[]).forEach(function(s){var e=H.num(s.expected_mbps);if(H.finite(e)&&e>0){st.push({k:s.ip||s.mac||'?',e:e});tot+=e}})});if(!st.length)return H.card(t,'<div class="empty">'+(a?'لا عملاء':'No data')+'</div>',null,'device');st.sort(function(x,y){return y.e-x.e});var top=st.slice(0,5),r=tot;top.forEach(function(x){r-=x.e});if(r>0)top.push({k:a?'أخرى':'Other',e:r});var cs='primary,accent,excellent,good,mid,muted'.split(','),acc=0,seg='',leg='';top.forEach(function(x,i){var f=x.e/tot,c='var(--'+cs[i%6]+')';seg+='<circle cx="60" cy="60" r="46" fill="none" stroke="'+c+'" stroke-width="14" stroke-dasharray="'+(f*289).toFixed(1)+' 289" stroke-dashoffset="'+(-acc*289).toFixed(1)+'" transform="rotate(-90 60 60)"/>';acc+=f;leg+='<div style="display:flex;justify-content:space-between;font-size:11px;margin:3px 0"><span class="latin" style="color:'+c+'">'+H.esc(x.k)+'</span><span class="latin">'+H.fmt(f*100,0)+'%·'+H.fmt(x.e,0)+'M</span></div>'});var svg='<svg width="120" height="120" viewBox="0 0 120 120" style="display:block;margin:0 auto">'+seg+'<text x="60" y="66" text-anchor="middle" font-size="17" fill="var(--text)">'+st.length+' '+(a?'عميل':'cl')+'</text></svg>';return H.card(t,svg+'<div style="margin-top:8px">'+leg+'</div>',H.fmt(tot,0)+'M','device');}},
+   {key:"bridge_pps_tile",ar:"معدل الجسر الكلي",en:"Bridge Throughput",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',t=a?'معدل الجسر الكلي':'Bridge Throughput',tr=d.traffic||{},rx=H.num(tr.rx_bps)||0,tx=H.num(tr.tx_bps)||0,tot=rx+tx;if(!tot&&!(H.num(tr.rx_bytes)||0))return H.card(t,'<div class="empty">'+(a?'لا بيانات':'No data')+'</div>',null,'net');var pps=tot/6000,pl=pps>=1000?H.fmt(pps/1000,1)+'k':H.fmt(pps,0),cap=0;(d.interfaces||[]).forEach(function(i){i=i||{};var s=H.num(i.speed_mbps);if(i.connected&&H.finite(s)&&s>cap)cap=s});var use=cap?H.clamp(tot/(cap*1e6)*100,0,100):0,col=!cap?'var(--primary)':use<40?'var(--excellent)':use<70?'var(--good)':use<90?'var(--mid)':'var(--weak)';var body='<div style="text-align:center"><div class="latin" style="font-size:30px;font-weight:800;color:'+col+'">'+H.bps(tot)+'</div><div style="font-size:11px;color:var(--muted)">≈ '+pl+' pps @750B</div></div><div class="grid two"><div class="traffic-box"><span>↓ RX</span><b class="latin" style="color:var(--accent)">'+H.bps(rx)+'</b></div><div class="traffic-box"><span>↑ TX</span><b class="latin" style="color:var(--primary)">'+H.bps(tx)+'</b></div></div>'+(cap?'<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)"><span>'+(a?'استخدام الوصلة':'Link use')+'</span><span class="latin">'+H.fmt(use,1)+'%/'+cap+'M</span></div>'+H.bar(use,100,col)+'</div>':'');return H.card(t,body,null,'bolt');}},
+   {key:"setup_checklist",ar:"قائمة فحص الإعداد",en:"Setup Checklist",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'قائمة فحص الإعداد':'Setup Checklist';d=d||{};var hs=H.num((d.health||{}).score),tc=H.num(d.temperature_c),lt=H.num(d.latency_ms),cl=H.num(d.clients),bo=(d.backhaul||{}).online;var L=[[A?'الوصلة الرئيسية متصلة':'Upstream online',bo===true,bo==null],[A?'يوجد أجهزة متصلة':'Clients connected',cl>0,!H.finite(cl)],[(A?'الصحة':'Health')+' &gt; 70',hs>70,!H.finite(hs)],[(A?'الحرارة':'Temp')+' &lt; 70°C',tc<70,!H.finite(tc)],[(A?'الاستجابة':'Latency')+' &lt; 20ms',lt<20,!H.finite(lt)]];var ok=0,tot=0,r='';for(var i=0;i<5;i++){var u=L[i][2],p=L[i][1];if(!u){tot++;if(p)ok++}var c=u?'var(--muted)':p?'var(--excellent)':'var(--weak)';r+='<div style="display:flex;align-items:center;gap:9px;margin:7px 0;font-size:12px"><span style="flex:0 0 20px;height:20px;border-radius:50%;border:1.5px solid '+c+';color:'+c+';font-weight:700;display:flex;align-items:center;justify-content:center">'+(u?'—':p?'✓':'✕')+'</span><span style="flex:1">'+L[i][0]+'</span></div>'}var pc=tot?ok/tot*100:0,col=pc>=100?'var(--excellent)':pc>=60?'var(--good)':pc>=40?'var(--mid)':'var(--weak)';return H.card(t,'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+(A?'اكتمال الإعداد':'Setup complete')+'</span><b style="color:'+col+'">'+ok+'/'+tot+'</b></div>'+H.bar(pc,100,col)+'<div style="height:6px"></div>'+r,ok+'/'+tot,'gear')}},
+   {key:"uptime_milestones",ar:"إنجازات التشغيل",en:"Uptime Milestones",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'إنجازات التشغيل':'Uptime Milestones';var up=H.num((d||{}).uptime);if(!H.finite(up)||up<0)return H.card(t,"<div class='empty'>—</div>",null,'bolt');var M=[[3600,'1h'],[86400,'1d'],[604800,'1w'],[2592e3,'30d'],[864e4,'100d'],[31536e3,'1y']],g=0,nx=null,pl='';for(var i=0;i<6;i++){var a=up>=M[i][0];if(a)g++;else if(!nx)nx=M[i];var c=a?'var(--excellent)':'var(--muted)';pl+='<div style="flex:1;margin:3px;padding:6px 0;text-align:center;border-radius:8px;font-size:14px;border:1px solid '+(a?c:'var(--border)')+';color:'+c+'">'+(a?'★':'☆')+'<div style="font-size:10px">'+M[i][1]+'</div></div>'}var hd='<div style="text-align:center;margin-bottom:8px;font-size:22px;font-weight:700;color:var(--primary)">'+H.esc(H.uptime(up))+'<div style="font-size:11px;font-weight:400;color:var(--muted)">'+(A?'تشغيل متواصل':'uptime streak')+'</div></div>',ft;if(nx){var p=H.clamp(up/nx[0]*100,0,100);ft='<div style="font-size:11px;margin:8px 0 3px;color:var(--muted)">'+(A?'التالي: ':'Next: ')+nx[1]+' · <b style="color:var(--accent)">'+H.fmt(p,0)+'%</b> · '+H.esc(H.uptime(nx[0]-up))+(A?' متبقية':' left')+'</div>'+H.bar(p,100,'var(--accent)')}else ft='<div style="margin-top:8px;text-align:center;color:var(--excellent);font-size:12px">'+(A?'اكتمل الكل!':'All achieved!')+'</div>';return H.card(t,hd+'<div style="display:flex;flex-wrap:wrap">'+pl+'</div>'+ft,g+'/6','bolt')}},
 ];
   function renderProInsights(data) {
     if (!PRO_FEATURES.length) return sectionHead(tr("insights"), "Pro", "") + '<div class="empty">' + tr("loading") + '</div>';
@@ -1465,6 +1530,8 @@
     });
     var scanBtn = $("wifiScanBtn");
     if (scanBtn) scanBtn.onclick = scanWifi;
+    var lanBtn = $("lanScanBtn");
+    if (lanBtn) lanBtn.onclick = scanLan;
     var applyChan = $("wifiApplyChanBtn");
     if (applyChan) applyChan.onclick = function () { applyBestChannels(applyChan.dataset.ch24, applyChan.dataset.ch5); };
     var stBtn = $("selftestBtn");
