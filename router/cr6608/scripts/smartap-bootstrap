@@ -114,7 +114,12 @@ fi
 # reachable over Wi-Fi with a static client IP regardless of VLAN/mesh programming.
 ensure_section network.wlanrescue interface network
 setv network.wlanrescue.proto static network
-setv network.wlanrescue.device br-lan network
+# 221 rides WHEREVER the Wi-Fi clients are: the plain bridge normally, but INSIDE the
+# quick-settings client VLAN (br-lan.<vid>) when AP+VLAN is programmed — otherwise every
+# boot would yank it out of the VLAN and Wi-Fi phones would lose the programming page.
+rescue_dev="br-lan"
+case "$(uci -q get network.cr6608_vlan.device 2>/dev/null)" in br-lan.*) rescue_dev="$(uci -q get network.cr6608_vlan.device)" ;; esac
+setv network.wlanrescue.device "$rescue_dev" network
 setv network.wlanrescue.ipaddr 221.221.221.221 network
 setv network.wlanrescue.netmask 255.255.255.0 network
 setv network.wlanrescue.ipv6 0 network

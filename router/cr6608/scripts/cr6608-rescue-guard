@@ -24,11 +24,15 @@ table bridge rescue221 {
 		type filter hook prerouting priority -300; policy accept;
 		iifname { $WIRED } ether type arp arp daddr ip $RIP drop
 		iifname { $WIRED } ether type ip ip daddr $RIP drop
+		iifname { $WIRED } vlan type arp arp daddr ip $RIP drop
+		iifname { $WIRED } vlan type ip ip daddr $RIP drop
 	}
 	chain egress {
 		type filter hook postrouting priority 300; policy accept;
 		oifname { $WIRED } ether type arp arp saddr ip $RIP drop
 		oifname { $WIRED } ether type ip ip saddr $RIP drop
+		oifname { $WIRED } vlan type arp arp saddr ip $RIP drop
+		oifname { $WIRED } vlan type ip ip saddr $RIP drop
 	}
 }
 EOF

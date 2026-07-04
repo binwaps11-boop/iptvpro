@@ -88,6 +88,8 @@ clear_vlan() {
 	uci set network.lan.device='br-lan'
 	# recovery interface back on the plain bridge if it was moved
 	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+	# Wi-Fi rescue 221.221.221.221 back on the plain bridge (it follows the Wi-Fi clients)
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
 	# drop any SmartAP quick bridge-vlan sections
 	while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
 		local idx
@@ -164,6 +166,10 @@ set_vlan_target() {
 	uci set network.cr6608_vlan='interface'
 	uci set network.cr6608_vlan.device="br-lan.$vid"
 	uci set network.cr6608_vlan.proto='none'
+	# The Wi-Fi rescue IP 221.221.221.221 must FOLLOW the Wi-Fi clients into the client
+	# VLAN — phones live inside <vid>, so if 221 stayed on the management side they could
+	# never open the programming page while the unit is programmed AP+VLAN.
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vid"
 	return 0
 }
 
