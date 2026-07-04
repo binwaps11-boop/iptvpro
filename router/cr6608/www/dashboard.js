@@ -51,6 +51,8 @@
       lanScanHint: "يفحص كل المنافذ ويكشف الأجهزة خلف أي سويتش — يعرض الاسم والـ IP والـ MAC والمنفذ.",
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
+      lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -105,6 +107,8 @@
       lanScanHint: "Scans every port and reveals devices behind any switch — shows name, IP, MAC and port.",
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
+      lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -677,6 +681,22 @@
     var t = d < 10 ? d.toFixed(1) : Math.round(d);
     return '<span class="prox" style="color:var(--accent)">≈ ' + t + ' ' + tr("meters") + '</span>';
   }
+  // Per-port throughput: live rx/tx rate on every physical wired port (lan1..lan3, wan)
+  // straight from /proc/net/dev deltas in dashapi2 — "how much each port is pulling".
+  function renderPortThroughput(data) {
+    var ifs = (data.interfaces || []).filter(function (i) { return /^(lan[0-9]+|wan[0-9.]*)$/.test(i.name); });
+    if (!ifs.length) return "";
+    var rows = ifs.map(function (i) {
+      var rx = num(i.rx_bps), tx = num(i.tx_bps), up = i.connected;
+      var tot = (finite(rx) ? rx : 0) + (finite(tx) ? tx : 0);
+      var col = !up ? "var(--muted)" : tot > 50e6 ? "var(--excellent)" : tot > 1e6 ? "var(--good)" : "var(--mid)";
+      return '<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><b class="latin">' + esc(i.name) +
+        '</b><span class="latin"><span class="chip ' + (up ? "ok" : "bad") + '" style="font-size:10px">' + (up ? (i.speed_mbps ? i.speed_mbps + "M" : "up") : "down") + '</span></span></div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)"><span>↓ ' + (finite(rx) ? bps(rx) : "—") + '</span><span>↑ ' + (finite(tx) ? bps(tx) : "—") + '</span></div>' +
+        bar(Math.min(tot / 1e6, 100), 100, col) + '</div>';
+    }).join("");
+    return card(tr("portThroughput"), '<p class="muted" style="margin:0 0 6px">' + esc(tr("perPortRate")) + '</p>' + rows, "per-port", "net");
+  }
   // Link efficiency = actual PHY rate vs the band's 2×2 HE ceiling (2.4G HE20≈287, 5G HE80≈1201).
   function linkEfficiency(band, txRate) {
     var r = num(txRate); if (!finite(r) || r <= 0) return null;
@@ -724,7 +744,7 @@
       }).join("") +
       '</tbody></table></div>' :
       sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
-    return live + scanCard;
+    return live + renderPortThroughput(data) + scanCard;
   }
   // Render the on-demand LAN neighbor-scan result: one row per discovered device with
   // its resolved name, IP, MAC and the bridge port (so devices behind a switch are visible).
@@ -744,7 +764,17 @@
         var port = esc(x.port || x.iface || "");
         return '<tr><td>' + nm + '</td><td class="latin">' + esc(x.ip || "—") + '</td><td class="latin">' + esc(mac.toUpperCase()) + '</td><td class="latin">' + port + '</td><td>' + esc(vn) + '</td><td>' + acts + '</td></tr>';
       }).join("") + '</tbody></table></div>';
-    return '<h4 style="margin:10px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4>' + body;
+    // LLDP/CDP neighbors — managed switches/routers/APs (name, platform, mgmt-IP, ports)
+    var lldp = (d.lldp || []);
+    var lldpHtml = "";
+    if (lldp.length) {
+      lldpHtml = '<h4 style="margin:14px 0 6px">' + tr("lldpNeighbors") + ' (' + lldp.length + ')</h4>' +
+        '<div class="table-wrap"><table><thead><tr><th>' + tr("deviceName") + '</th><th>' + tr("platform") + '</th><th>IP</th><th>' + tr("localPort") + '</th><th>' + tr("remotePort") + '</th></tr></thead><tbody>' +
+        lldp.map(function (n) {
+          return '<tr><td>' + esc(n.name || "—") + '</td><td>' + esc(n.platform || "—") + '</td><td class="latin">' + esc(n.ip || "—") + '</td><td class="latin">' + esc(n.local_port || "—") + '</td><td class="latin">' + esc(n.remote_port || "—") + '</td></tr>';
+        }).join("") + '</tbody></table></div>';
+    }
+    return '<h4 style="margin:10px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4>' + body + lldpHtml;
   }
   async function scanLan() {
     var btn = $("lanScanBtn"), box = $("lanScanResult");

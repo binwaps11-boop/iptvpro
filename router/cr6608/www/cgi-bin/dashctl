@@ -957,7 +957,21 @@ EOF
       }' "$st/rdns" "$st/merged")"
     total="$(grep -c . "$st/merged" 2>/dev/null)"; [ -n "$total" ] || total=0
     rm -rf "$st"
-    printf '{"ok":true,"section":"lan_neighbors","total":%s,"devices":[%s]}\n' "$total" "${devjson:-}"
+    # LLDP/CDP neighbors (managed switches, routers, APs that speak LLDP) — like the
+    # Mikrotik "Neighbors" list: name, platform, software, mgmt-IP, and the local/remote
+    # port. Read-only via lldpcli -f json (lldpd runs as a service). Empty if none seen.
+    lldp_arr="$(lldpcli -f keyvalue show neighbors 2>/dev/null | awk -F= '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+      function emit(){ if(name=="" && ip=="") return; printf "%s{\"name\":\"%s\",\"ip\":\"%s\",\"platform\":\"%s\",\"local_port\":\"%s\",\"remote_port\":\"%s\"}", (c++?",":""), esc(name), esc(ip), esc(plat), esc(lport), esc(rport) }
+      $1 ~ /\.rid$/ { if(have) emit(); have=1; name=""; ip=""; plat=""; rport="";
+                      lp=$1; sub(/^lldp\./,"",lp); sub(/\..*/,"",lp); lport=lp; next }
+      $1 ~ /\.chassis\.name$/    { name=$2; next }
+      $1 ~ /\.chassis\.mgmt-ip$/ { if(ip=="") ip=$2; next }
+      $1 ~ /\.chassis\.descr$/   { plat=$2; next }
+      $1 ~ /\.port\.descr$/      { rport=$2; next }
+      END{ if(have) emit() }
+    ' 2>/dev/null)"
+    printf '{"ok":true,"section":"lan_neighbors","total":%s,"devices":[%s],"lldp":[%s]}\n' "$total" "${devjson:-}" "${lldp_arr:-}"
     exit 0 ;;
   secscan_run)
     # On-demand Wi-Fi neighbor scan: neighboring SSIDs, their channels/signal, rogue/evil-twin
