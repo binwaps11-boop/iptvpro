@@ -12,7 +12,7 @@ config zone
 	option name 'lan'
 	list network 'lan'
 	list network 'mgmt'
-	list network 'smartmgmt'
+	list network 'recovery'
 	option input 'ACCEPT'
 	option output 'ACCEPT'
 	option forward 'ACCEPT'

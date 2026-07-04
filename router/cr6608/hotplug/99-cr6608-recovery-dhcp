@@ -1,0 +1,24 @@
+#!/bin/sh
+# Recovery-DHCP guard: the AP serves DHCP on the 192.168.66.0/24 recovery network ONLY
+# while there is NO upstream router handing out addresses. As soon as the 'mgmt' DHCP
+# client obtains a lease (an upstream Mikrotik/modem is present), the recovery DHCP server
+# is disabled so two DHCP servers never coexist on the same LAN. When the uplink is removed
+# (pure setup), it re-enables automatically — so 192.168.66.1 works on any port, harmlessly.
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifdown" ] || exit 0
+case "$INTERFACE" in mgmt|lan|recovery|wan) : ;; *) exit 0 ;; esac
+
+upstream=""
+# a lease on 'mgmt' means an upstream DHCP server answered on the bridge
+upstream="$(ubus call network.interface.mgmt status 2>/dev/null | jsonfilter -e '@.ipv4_address[0].address' 2>/dev/null)"
+# also treat a real default route as "upstream present"
+[ -n "$upstream" ] || upstream="$(ip -4 route show default 2>/dev/null | grep -v '192.168.66' | head -1)"
+
+cur="$(uci -q get dhcp.recovery.ignore)"
+if [ -n "$upstream" ]; then
+	# production: upstream serves DHCP -> do not serve ours
+	[ "$cur" = "1" ] || { uci -q set dhcp.recovery.ignore='1'; uci -q commit dhcp; /etc/init.d/dnsmasq reload >/dev/null 2>&1; }
+else
+	# setup: no upstream -> serve recovery DHCP so a laptop on any port gets 192.168.66.x
+	[ -z "$cur" ] || { uci -q del dhcp.recovery.ignore; uci -q commit dhcp; /etc/init.d/dnsmasq reload >/dev/null 2>&1; }
+fi
+exit 0

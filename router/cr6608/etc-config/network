@@ -13,6 +13,7 @@ config device
 	option type 'bridge'
 	list ports 'lan1'
 	list ports 'lan2'
+	list ports 'lan3'
 	list ports 'wan'
 	option stp '1'
 	option igmp_snooping '1'
@@ -25,30 +26,28 @@ config interface 'lan'
 	option delegate '0'
 	option ipv6 '0'
 
+# Recovery / management IP reachable from EVERY wired port (lan1/lan2/lan3/wan) and the
+# recovery Wi-Fi — a second static address on the same bridge, so it works no matter which
+# port the uplink or a laptop is plugged into.
+config interface 'recovery'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.66.1'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
+
+# Upstream detector: a DHCP client on the bridge. If it gets a lease, an upstream router
+# (the Mikrotik) is present -> the recovery DHCP server is auto-disabled by the guard
+# hotplug, so there is never a two-DHCP conflict in production.
+config interface 'mgmt'
+	option device 'br-lan'
+	option proto 'dhcp'
+	option hostname 'CR6608-Smart-AP'
+	option metric '10'
+
 config interface 'wan'
 	option device 'wan'
 	option proto 'dhcp'
 	option ipv6 '0'
 	option disabled '1'
 	option auto '0'
-
-config interface 'mgmt'
-	option device '@lan'
-	option proto 'dhcp'
-	option hostname 'CR6608-Smart-AP'
-	option metric '10'
-	option auto '0'
-	option disabled '1'
-
-
-config device
-	option name 'br-mgmt'
-	option type 'bridge'
-	list ports 'lan3'
-
-config interface 'smartmgmt'
-	option device 'br-mgmt'
-	option proto 'static'
-	option ipaddr '192.168.66.1'
-	option netmask '255.255.255.0'
-	option ipv6 '0'

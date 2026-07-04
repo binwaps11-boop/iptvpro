@@ -609,11 +609,10 @@ EOF
     uci -q delete network.@device[0].vlan_filtering
     uci set network.lan.device='br-lan'
     for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-    for p in lan1 lan2 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
-    uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+    for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
+    uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan'
     uci set dhcp.lan.ignore='1'
     for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
-    uci -q del_list network.@device[0].ports='lan3'
     uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp; uci -q commit firewall
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
@@ -740,7 +739,7 @@ EOF
     elif [ "${mgmt_isolated:-0}" = "1" ]; then
       # VLAN mode: cable ports stay in the bridge; the RAW wan port stays OUT (only its
       # tagged sub-interface wan.<vid> is in the bridge, so the uplink carries the VLAN only).
-      for p in lan1 lan2; do
+      for p in lan1 lan2 lan3; do
         [ -d "/sys/class/net/$p" ] || continue
         uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
       done
@@ -749,7 +748,7 @@ EOF
     else
       # Plain AP (not PPPoE): make sure every port is back in the bridge and the wan interface
       # is parked, so AP modes always have all 4 ports working as LAN.
-      for p in lan1 lan2 wan; do
+      for p in lan1 lan2 lan3 wan; do
         [ -d "/sys/class/net/$p" ] || continue
         uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
       done
@@ -779,7 +778,6 @@ EOF
     txp="$(safe_num "$(param txpower)")"; [ -n "$txp" ] || txp=35
     [ "$txp" -ge 1 ] 2>/dev/null && [ "$txp" -le 35 ] 2>/dev/null || txp=35
     uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
-    uci -q del_list network.@device[0].ports='lan3'
     uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
@@ -1199,7 +1197,7 @@ EOF
     text="حالة المنافذ وسرعتها معروضة في البطاقات؛ اضبط الـ VLAN لكل منفذ من الأعلى."
     stp="$(uci -q get network.@device[0].stp 2>/dev/null)"; igmp="$(uci -q get network.@device[0].igmp_snooping 2>/dev/null)"
     bridge_ports="$(uci -q get network.@device[0].ports 2>/dev/null)"
-    port_opts="$(for p in wan lan1 lan2; do [ -d /sys/class/net/$p ] && printf '%s:%s,' "$p" "$p"; done | sed 's/,$//')"; [ -n "$port_opts" ] || port_opts="wan:wan,lan1:lan1,lan2:lan2"
+    port_opts="$(for p in wan lan1 lan2 lan3; do [ -d /sys/class/net/$p ] && printf '%s:%s,' "$p" "$p"; done | sed 's/,$//')"; [ -n "$port_opts" ] || port_opts="wan:wan,lan1:lan1,lan2:lan2,lan3:lan3"
     form="$(form_json <<EOF
 port_name|Port|lan1|Physical DSA port|select|0|||$port_opts
 port_enabled|Runtime state|1|Bring the port up or down at runtime|select|0|||1:up,0:down
