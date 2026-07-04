@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", total: "الإجمالي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", total: "Total", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -673,13 +673,20 @@
     setTimeout(function () { drawChart($(canvasId), samples, { keys:["rx","tx"] }); }, 0);
     return card(tr("networkTitle"), body, "60s peaks", "net");
   }
-  // download (RX) / upload (TX) split box for a period
+  // download (RX) / upload (TX) split box for a period — three clean rows (label ... value)
+  // so the numbers never wrap/overlap on a narrow phone screen.
+  function usageRow(icon, label, val, color) {
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:3px 0;font-size:12px">' +
+      '<span class="muted">' + icon + ' ' + esc(label) + '</span>' +
+      '<b class="latin" style="color:' + color + ';white-space:nowrap">' + bytes(val) + '</b></div>';
+  }
   function usageSplit(label, rx, tx) {
-    return '<div class="traffic-box" style="text-align:start"><span>' + esc(label) + '</span>' +
-      '<div style="display:flex;justify-content:space-between;gap:10px;margin-top:4px">' +
-      '<div><small class="muted">↓ ' + esc(tr("download")) + '</small><br><b class="latin" style="color:var(--accent)">' + bytes(rx) + '</b></div>' +
-      '<div><small class="muted">↑ ' + esc(tr("upload")) + '</small><br><b class="latin" style="color:var(--primary)">' + bytes(tx) + '</b></div>' +
-      '<div><small class="muted">Σ</small><br><b class="latin">' + bytes(rx + tx) + '</b></div></div></div>';
+    return '<div class="traffic-box" style="text-align:start">' +
+      '<span style="font-weight:700">' + esc(label) + '</span>' +
+      usageRow("↓", tr("download"), rx, "var(--accent)") +
+      usageRow("↑", tr("upload"), tx, "var(--primary)") +
+      usageRow("Σ", tr("total") || "Σ", rx + tx, "var(--text)") +
+      '</div>';
   }
   function renderData(data) {
     var u = dataUsage(data), dailyBudget = Number(localStorage.getItem(LS + "dailyBudgetGb") || 5), monthBudget = Number(localStorage.getItem(LS + "monthBudgetGb") || 100);
@@ -786,8 +793,12 @@
   }
   function renderDevices(data) {
     var rows = mergeDevices(data);
-    // (Neighbor discovery list removed by user request — it surfaced too many
-    // switch/multicast MACs with no names to be useful.)
+    // Neighbor discovery (restored): LLDP managed devices (switches/routers, from the
+    // source) shown first, then the ARP/FDB device list. On-demand; result persists.
+    var scanCard = card(tr("lanNeighbors"),
+      '<p class="muted" style="margin:0 0 8px">' + esc(tr("lanScanHint")) + '</p>' +
+      '<div class="branch-actions"><button class="btn primary" id="lanScanBtn">' + esc(tr("scanLan")) + '</button></div>' +
+      '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "LLDP · ARP · FDB", "net");
     var live = rows.length ? sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
       '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
@@ -803,37 +814,50 @@
       }).join("") +
       '</tbody></table></div>' :
       sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
-    return live + renderPortThroughput(data);
+    return live + renderPortThroughput(data) + scanCard;
   }
   // Render the on-demand LAN neighbor-scan result: one row per discovered device with
   // its resolved name, IP, MAC and the bridge port (so devices behind a switch are visible).
+  // drop multicast / broadcast / reserved L2 addresses — they are not real devices and
+  // were the noise that made the old list look like "73 unknowns".
+  function isRealMac(mac) {
+    var m = String(mac || "").toLowerCase();
+    if (m.length !== 17) return false;
+    if (m === "ff:ff:ff:ff:ff:ff") return false;
+    if (/^(01:00:5e|33:33|01:80:c2|ff:ff)/.test(m)) return false; // IPv4/IPv6 multicast, STP
+    var b1 = parseInt(m.slice(0, 2), 16);
+    if (b1 & 0x01) return false; // any group/multicast bit set
+    return true;
+  }
   function renderLanScan(d) {
     if (!d || !d.ok) return '<div class="ctl-status">' + esc(tr("noLanDevices")) + '</div>';
-    var devs = (d.devices || []).slice().sort(function (a, b) {
-      function ipn(x) { var p = String(x && x.ip || "").split("."); return p.length === 4 ? (((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3]) : 4294967295; }
-      return ipn(a) - ipn(b);
-    });
-    if (!devs.length) return '<div class="empty">' + tr("noLanDevices") + '</div>';
-    var body = '<div class="table-wrap"><table><thead><tr><th>' + tr("host") + '</th><th>IP</th><th>MAC</th><th>' + tr("port") + '</th><th>' + tr("vendor") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
-      devs.map(function (x) {
-        var mac = String(x.mac || "");
-        var vn = (typeof ouiVendor === "function" ? ouiVendor(mac) : "") || tr("unknownVendor");
-        var nm = x.host ? esc(x.host) : '<span class="muted">—</span>';
-        var acts = mac ? '<button class="btn dev-action" data-dev-mac="' + esc(mac) + '" data-dev-act="block_mac">' + tr("block") + '</button>' : "";
-        var port = esc(x.port || x.iface || "");
-        return '<tr><td>' + nm + '</td><td class="latin">' + esc(x.ip || "—") + '</td><td class="latin">' + esc(mac.toUpperCase()) + '</td><td class="latin">' + port + '</td><td>' + esc(vn) + '</td><td>' + acts + '</td></tr>';
-      }).join("") + '</tbody></table></div>';
-    // LLDP/CDP neighbors — managed switches/routers/APs (name, platform, mgmt-IP, ports)
+    // LLDP/CDP neighbours first — the managed switches/routers (the "source" neighbors).
     var lldp = (d.lldp || []);
     var lldpHtml = "";
     if (lldp.length) {
-      lldpHtml = '<h4 style="margin:14px 0 6px">' + tr("lldpNeighbors") + ' (' + lldp.length + ')</h4>' +
+      lldpHtml = '<h4 style="margin:10px 0 6px">' + tr("lldpNeighbors") + ' (' + lldp.length + ')</h4>' +
         '<div class="table-wrap"><table><thead><tr><th>' + tr("deviceName") + '</th><th>' + tr("platform") + '</th><th>IP</th><th>' + tr("localPort") + '</th><th>' + tr("remotePort") + '</th></tr></thead><tbody>' +
         lldp.map(function (n) {
           return '<tr><td>' + esc(n.name || "—") + '</td><td>' + esc(n.platform || "—") + '</td><td class="latin">' + esc(n.ip || "—") + '</td><td class="latin">' + esc(n.local_port || "—") + '</td><td class="latin">' + esc(n.remote_port || "—") + '</td></tr>';
         }).join("") + '</tbody></table></div>';
     }
-    return '<h4 style="margin:10px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4>' + body + lldpHtml;
+    // ARP/FDB device list — filtered to real unicast MACs, real devices first (with IP/name).
+    var devs = (d.devices || []).filter(function (x) { return isRealMac(x && x.mac); }).sort(function (a, b) {
+      var ra = (a.ip || a.host) ? 0 : 1, rb = (b.ip || b.host) ? 0 : 1; if (ra !== rb) return ra - rb;
+      function ipn(x) { var p = String(x && x.ip || "").split("."); return p.length === 4 ? (((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3]) : 4294967295; }
+      return ipn(a) - ipn(b);
+    });
+    var body = devs.length ? '<h4 style="margin:14px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4><div class="table-wrap"><table><thead><tr><th>' + tr("host") + '</th><th>IP</th><th>MAC</th><th>' + tr("port") + '</th><th>' + tr("vendor") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
+      devs.map(function (x) {
+        var mac = String(x.mac || "");
+        var vn = deviceName(mac) || (typeof ouiVendor === "function" ? ouiVendor(mac) : "") || tr("unknownVendor");
+        var nm = x.host ? esc(x.host) : '<span class="muted">—</span>';
+        var acts = mac ? '<button class="btn dev-action" data-dev-mac="' + esc(mac) + '" data-dev-act="block_mac">' + tr("block") + '</button>' : "";
+        var port = esc(x.port || x.iface || "");
+        return '<tr><td>' + nm + '</td><td class="latin">' + esc(x.ip || "—") + '</td><td class="latin">' + esc(mac.toUpperCase()) + '</td><td class="latin">' + port + '</td><td>' + esc(vn) + '</td><td>' + acts + '</td></tr>';
+      }).join("") + '</tbody></table></div>' : "";
+    if (!lldpHtml && !body) return '<div class="empty">' + tr("noLanDevices") + '</div>';
+    return lldpHtml + body;
   }
   async function scanLan() {
     var btn = $("lanScanBtn"), box = $("lanScanResult");
