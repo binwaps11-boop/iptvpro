@@ -125,6 +125,19 @@ if [ -n "$zone" ]; then
   add_list_once "firewall.$zone" network wlanrescue firewall
 fi
 
+
+# Cable rescue IP (reference-source 219.219.219.219): always reachable over any LAN cable,
+# even after the unit is programmed on a VLAN/mesh — open http://219.219.219.219/.
+ensure_section network.cablerescue interface network
+setv network.cablerescue.proto static network
+setv network.cablerescue.device br-lan network
+setv network.cablerescue.ipaddr 219.219.219.219 network
+setv network.cablerescue.netmask 255.255.255.0 network
+setv network.cablerescue.ipv6 0 network
+if [ -n "$zone" ]; then
+  add_list_once "firewall.$zone" network cablerescue firewall
+fi
+
 # Configure requested Tx power in UCI, while the driver/regulatory layer still
 # enforces the real maximum power supported by the country/radio.
 uci -q get wireless.radio0 >/dev/null 2>&1 && setv wireless.radio0.txpower 35 wireless

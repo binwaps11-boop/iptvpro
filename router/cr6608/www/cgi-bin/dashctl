@@ -1214,7 +1214,7 @@ EOF
     reset_mode="$(saved reset_mode)"; [ -n "$reset_mode" ] || reset_mode="factory"
     form="$(form_json <<EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
-device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|هو نفسه عنوان الدخول في كل الأوضاع — تدخل به عبر الواي فاي وعبر الكيبل حتى في وضع الفيلان (ثبّت على جهازك IP من نفس الشبكة)|text|0|device|all|
+device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان الدخول الأساسي في كل الأوضاع. حتى في الفيلان/الميش يبقى الوصول مضموناً بثلاث طرق دائماً: (1) هذا العنوان عبر الكيبل والواي فاي، (2) بالكيبل على 219.219.219.219، (3) بالواي فاي على 221.221.221.221 — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|

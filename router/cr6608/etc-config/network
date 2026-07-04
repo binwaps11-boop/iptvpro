@@ -52,13 +52,25 @@ config interface 'wan'
 	option disabled '1'
 	option auto '0'
 
-# Rescue programming IP (mirrors the reference source): 221.221.221.221 always answers
-# on the bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like
-# 221.221.221.100/24 on your phone/laptop, and open http://221.221.221.221/ to reach
-# the programming page — no matter how the unit is programmed (VLAN/mesh/AP).
+# Wi-Fi rescue IP (mirrors the reference source): 221.221.221.221 always answers on the
+# bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like
+# 221.221.221.100/24 on your phone/laptop, and open http://221.221.221.221/ to reach the
+# programming page — no matter how the unit is programmed (VLAN/mesh/AP).
 config interface 'wlanrescue'
 	option device 'br-lan'
 	option proto 'static'
 	option ipaddr '221.221.221.221'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
+
+# Cable rescue IP (mirrors the reference source's ethernet bridge 219.219.219.219): always
+# answers on the bridge over ANY LAN cable. After you program the unit on a VLAN and give it
+# its own IP, you can still open the dashboard over cable at http://219.219.219.219/ (set a
+# static 219.219.219.100/24 on your laptop) — or over Wi-Fi at 221.221.221.221 — or at the
+# device's own programmed IP. All stay reachable regardless of VLAN/mesh.
+config interface 'cablerescue'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '219.219.219.219'
 	option netmask '255.255.255.0'
 	option ipv6 '0'
