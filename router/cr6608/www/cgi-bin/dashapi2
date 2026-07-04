@@ -205,35 +205,71 @@ survey_json() {
     }'
 }
 
-# Associated clients via ubus iwinfo — this is exactly the source LuCI uses and it
-# works reliably on the device where the CLI iwinfo/iw parsing returned nothing.
-# Arg: the assoclist JSON (already fetched once per radio to avoid duplicate calls).
-station_json() {
-  al="$1"
+# Resolve a client's IP from every table we have (ARP, ip neigh, DHCP leases).
+client_ip() {
+  m="$(printf '%s' "$1" | tr A-F a-f)"
+  ip="$(awk -v m="$m" 'tolower($4)==m{print $1; exit}' /proc/net/arp 2>/dev/null)"
+  [ -n "$ip" ] || ip="$(ip neigh show 2>/dev/null | awk -v m="$m" 'tolower($5)==m && $1 ~ /\./ {print $1; exit}')"
+  [ -n "$ip" ] || ip="$(awk -v m="$m" 'tolower($2)==m{print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+  printf '%s' "$ip"
+}
+# Associated-client table for an interface, tried across THREE sources so it works on
+# any build: (1) ubus iwinfo assoclist (what LuCI uses), (2) CLI iwinfo assoclist,
+# (3) `iw dev station dump`. Emits pipe rows: mac|sig|noise|inact|conn|txr|rxr|exp
+assoc_lines() {
+  IF="$1"
+  al="$(ubus call iwinfo assoclist "{\"device\":\"$IF\"}" 2>/dev/null)"
   n="$(printf '%s' "$al" | jsonfilter -e '@.results[*].mac' 2>/dev/null | grep -c .)"
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      mac="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].mac" 2>/dev/null)"
+      sig="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].signal" 2>/dev/null)"
+      noise="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].noise" 2>/dev/null)"
+      inact="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].inactive" 2>/dev/null)"
+      conn="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].connected_time" 2>/dev/null)"
+      txk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].tx.rate" 2>/dev/null)"
+      rxk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].rx.rate" 2>/dev/null)"
+      expk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].expected_throughput" 2>/dev/null)"
+      txr="$(awk -v r="$txk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
+      rxr="$(awk -v r="$rxk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
+      exp="$(awk -v r="$expk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
+      printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$mac" "$sig" "$noise" "$inact" "$conn" "$txr" "$rxr" "$exp"
+      i=$((i + 1))
+    done
+    return
+  fi
+  cli="$(iwinfo "$IF" assoclist 2>/dev/null)"
+  if printf '%s' "$cli" | grep -qE '^[0-9A-Fa-f][0-9A-Fa-f]:'; then
+    printf '%s\n' "$cli" | awk '
+      /^[0-9A-Fa-f][0-9A-Fa-f]:/ { mac=$1; sig=$2; noise=""; for(i=1;i<=NF;i++) if($i=="/") noise=$(i+1);
+        printf "%s|%s|%s||||\n", mac, sig, noise }'
+    return
+  fi
+  iw dev "$IF" station dump 2>/dev/null | awk '
+    function flush(){ if(mac!="") printf "%s|%s|%s|%s|%s|%s|%s|%s\n",mac,sig,noise,inact,conn,txr,rxr,exp }
+    /^Station/ { flush(); mac=$2; sig="";noise="";inact="";conn="";txr="";rxr="";exp="" }
+    /signal:/ && !/avg/ { sig=$2 }
+    /inactive time:/ { inact=$3 }
+    /connected time:/ { conn=$3 }
+    /tx bitrate:/ { txr=$3 }
+    /rx bitrate:/ { rxr=$3 }
+    /expected throughput:/ { v=$3; gsub(/[^0-9.]/,"",v); exp=v }
+    END{ flush() }'
+}
+# Build the stations JSON array for an interface from assoc_lines (multi-source).
+station_json() {
   printf '['
-  i=0; sf=1
-  while [ "$i" -lt "${n:-0}" ] 2>/dev/null; do
-    mac="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].mac" 2>/dev/null)"
-    sig="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].signal" 2>/dev/null)"
-    noise="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].noise" 2>/dev/null)"
-    inact="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].inactive" 2>/dev/null)"
-    conn="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].connected_time" 2>/dev/null)"
-    txk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].tx.rate" 2>/dev/null)"
-    rxk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].rx.rate" 2>/dev/null)"
-    expk="$(printf '%s' "$al" | jsonfilter -e "@.results[$i].expected_throughput" 2>/dev/null)"
-    txr="$(awk -v r="$txk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
-    rxr="$(awk -v r="$rxk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
-    exp="$(awk -v r="$expk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
+  sf=1
+  assoc_lines "$1" | while IFS='|' read -r mac sig noise inact conn txr rxr exp; do
+    [ -n "$mac" ] || continue
     snr="$(awk -v s="$sig" -v nz="$noise" 'BEGIN{if(s!=""&&nz!="")printf "%d", s-nz}')"
-    lmac="$(printf '%s' "$mac" | tr A-F a-f)"
-    ip="$(awk -v m="$lmac" 'tolower($4)==m{print $1; exit}' /proc/net/arp 2>/dev/null)"
-    [ -n "$ip" ] || ip="$(awk -v m="$lmac" 'tolower($2)==m{print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+    ip="$(client_ip "$mac")"
     [ "$sf" = 1 ] || printf ','
     printf '{"mac":%s,"ip":%s,"signal_dbm":%s,"noise_dbm":%s,"snr":%s,"tx_rate":%s,"rx_rate":%s,"inactive_ms":%s,"conn_s":%s,"expected_mbps":%s}' \
       "$(jstr "$mac")" "$(jstr "$ip")" "$(jnum "$sig")" "$(jnum "$noise")" "$(jnum "$snr")" \
       "$(jnum "$txr")" "$(jnum "$rxr")" "$(jnum "$inact")" "$(jnum "$conn")" "$(jnum "$exp")"
-    sf=0; i=$((i + 1))
+    sf=0
   done
   printf ']'
 }
@@ -241,34 +277,47 @@ station_json() {
 wifi="["
 first=1
 busy_max=0
-# Enumerate radios via ubus iwinfo (the LuCI source of truth), with iw/iwinfo fallbacks.
-wifi_ifaces="$(ubus call iwinfo devices 2>/dev/null | jsonfilter -e '@.devices[*]' 2>/dev/null)"
-[ -n "$wifi_ifaces" ] || wifi_ifaces="$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')"
-[ -n "$wifi_ifaces" ] || wifi_ifaces="$(iwinfo 2>/dev/null | awk '/ESSID/{print $1}')"
+# Enumerate AP interfaces from every source and de-dup. Never skip a real AP because
+# one source was empty — each field falls back independently (ubus -> CLI -> uci).
+wifi_ifaces="$(printf '%s\n%s\n%s\n' \
+  "$(ubus call iwinfo devices 2>/dev/null | jsonfilter -e '@.devices[*]' 2>/dev/null)" \
+  "$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')" \
+  "$(iwinfo 2>/dev/null | awk '/ESSID/{print $1}')" \
+  | grep -E '.' | sort -u)"
 for IF in $wifi_ifaces; do
+  [ -d "/sys/class/net/$IF" ] || continue
   info="$(ubus call iwinfo info "{\"device\":\"$IF\"}" 2>/dev/null)"
+  cliinfo="$(iwinfo "$IF" info 2>/dev/null)"
+  # SSID: ubus -> CLI iwinfo -> uci (matched by iface). If none, this isn't an AP -> skip.
   ssid="$(printf '%s' "$info" | jsonfilter -e '@.ssid' 2>/dev/null)"
-  # only AP interfaces carry an SSID; skip monitor/mesh/off radios
-  [ -n "$ssid" ] || continue
+  [ -n "$ssid" ] || ssid="$(printf '%s\n' "$cliinfo" | sed -n 's/.*ESSID: "\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$ssid" ] || ssid="$(uci -q show wireless 2>/dev/null | awk -F"'" -v i="$IF" '/\.ifname=/{if($2==i)f=s} /=wifi-iface/{s=$0} END{}' )"
+  mode="$(printf '%s\n' "$cliinfo" | sed -n 's/.*Mode: \([A-Za-z]*\).*/\1/p' | head -1)"
+  case "$ssid" in ''|CR6608-Recovery) [ "$mode" = "Master" ] || continue ;; esac
+  [ -n "$ssid" ] || ssid="(hidden)"
   channel="$(printf '%s' "$info" | jsonfilter -e '@.channel' 2>/dev/null)"
+  [ -n "$channel" ] || channel="$(printf '%s\n' "$cliinfo" | awk '/Channel:/{for(i=1;i<=NF;i++)if($i=="Channel:"){print $(i+1);exit}}')"
   signal="$(printf '%s' "$info" | jsonfilter -e '@.signal' 2>/dev/null)"
   noise="$(printf '%s' "$info" | jsonfilter -e '@.noise' 2>/dev/null)"
   bitk="$(printf '%s' "$info" | jsonfilter -e '@.bitrate' 2>/dev/null)"
   bitrate="$(awk -v r="$bitk" 'BEGIN{if(r!="")printf "%.0f", r/1000}')"
   hw="$(printf '%s' "$info" | jsonfilter -e '@.hwmodes[*]' 2>/dev/null | tr '\n' '/' | sed 's#/$##')"
   [ -n "$hw" ] && hw="802.11$hw"
+  [ -n "$hw" ] || hw="$(printf '%s\n' "$cliinfo" | sed -n 's/.*HW Mode(s): \(.*\)$/\1/p' | head -1)"
   htmode="$(printf '%s' "$info" | jsonfilter -e '@.htmodes[*]' 2>/dev/null | grep -E 'HE|EHT|VHT|HT' | tail -1)"
-  [ -n "$htmode" ] || htmode="$(uci -q get wireless.radio${IF#phy}.htmode 2>/dev/null)"
+  [ -n "$htmode" ] || htmode="$(printf '%s\n' "$cliinfo" | sed -n 's/.*HT Mode: \([^ ]*\).*/\1/p' | head -1)"
   if printf '%s' "$info" | jsonfilter -e '@.encryption.enabled' 2>/dev/null | grep -q true; then
     enc="$(printf '%s' "$info" | jsonfilter -e '@.encryption.description[*]' 2>/dev/null | tr '\n' '/' | sed 's#/$##')"
     [ -n "$enc" ] || enc="encrypted"
   else
-    enc="none (open network)"
+    enc="$(printf '%s\n' "$cliinfo" | sed -n 's/.*Encryption: \(.*\)$/\1/p' | head -1)"
+    [ -n "$enc" ] || enc="none (open network)"
   fi
-  al="$(ubus call iwinfo assoclist "{\"device\":\"$IF\"}" 2>/dev/null)"
-  clients_w="$(printf '%s' "$al" | jsonfilter -e '@.results[*].mac' 2>/dev/null | grep -c .)"
+  # clients + stations from the multi-source assoc table (ubus -> CLI -> iw)
+  al_lines="$(assoc_lines "$IF")"
+  clients_w="$(printf '%s' "$al_lines" | grep -c .)"
   case "$channel" in ''|*[!0-9]*) band="WiFi" ;; *) [ "$channel" -ge 36 ] 2>/dev/null && band="5G" || band="2.4G" ;; esac
-  stations="$(station_json "$al")"
+  stations="$(station_json "$IF")"
   survey="$(survey_json "$IF")"
   bpv="$(printf '%s' "$survey" | jsonfilter -e '@.busy_pct' 2>/dev/null)"
   case "$bpv" in ''|null) ;; *) [ "$bpv" -gt "$busy_max" ] 2>/dev/null && busy_max="$bpv" ;; esac
@@ -277,8 +326,7 @@ for IF in $wifi_ifaces; do
   first=0
 done
 wifi="$wifi]"
-# fallback: if iwinfo gave nothing, show configured SSIDs from uci so the
-# 2.4G/5G cards are never "unavailable"
+# last resort: still nothing -> show configured SSIDs from uci so the cards are never empty
 if [ "$wifi" = "[]" ]; then
   wifi="["; wf=1
   for r in radio0 radio1; do
@@ -294,37 +342,34 @@ if [ "$wifi" = "[]" ]; then
   wifi="$wifi]"
 fi
 
-# Devices: merge the ARP table (MAC+IP) with the bridge forwarding database
-# (`bridge fdb show`) so devices behind a downstream switch — which have a MAC on the
-# bridge but may have no ARP/IP entry yet — also appear. Keyed by MAC to dedupe.
+# Devices: merge three L2/L3 sources — bridge FDB (every learned MAC, incl. behind a
+# switch), the ARP table and `ip neigh` (MAC->IP), then attach a hostname from DHCP
+# leases when present. Deduped by MAC; a device known only at L2 still shows (IP blank).
 devices_body="$(
   dfirst=1
-  # 1) ARP: MAC -> IP (has both)
-  seen=""
-  if [ -r /proc/net/arp ]; then
-    while read -r ip hw fl mac mask iface; do
-      case "$mac" in ''|00:00:00:00:00:00) continue ;; esac
-      case "$ip" in ''|0.0.0.0|IP) continue ;; esac
-      lmac="$(printf '%s' "$mac" | tr A-F a-f)"
-      seen="$seen $lmac"
-      case "$iface" in phy*) dtype="WiFi" ;; br-lan) dtype="LAN" ;; lan*) dtype="Ethernet" ;; *) dtype="Device" ;; esac
-      [ "$dfirst" = 1 ] || printf ','
-      printf '{"ip":%s,"mac":%s,"iface":%s,"type":%s}' "$(jstr "$ip")" "$(jstr "$mac")" "$(jstr "$iface")" "$(jstr "$dtype")"
-      dfirst=0
-    done < /proc/net/arp
-  fi
-  # 2) bridge FDB: every MAC the bridge has learned (incl. behind a switch), even w/o IP
-  bridge fdb show 2>/dev/null | while read -r mac rest; do
-    case "$mac" in ''|*[!0-9a-fA-F:]*) continue ;; esac
+  {
+    # FDB: mac  (blank ip)  dev
+    bridge fdb show 2>/dev/null | while read -r m rest; do
+      [ "${#m}" = 17 ] || continue
+      case "$m" in *[!0-9a-fA-F:]*) continue ;; esac
+      case "$rest" in *self*|*permanent*) continue ;; esac
+      d="$(printf '%s' "$rest" | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+      printf '%s\t\t%s\n' "$(printf '%s' "$m" | tr A-F a-f)" "$d"
+    done
+    # ARP: mac  ip  dev
+    awk 'NR>1 && $4!~/00:00:00:00:00:00/ && $1 ~ /\./ {print tolower($4)"\t"$1"\t"$6}' /proc/net/arp 2>/dev/null
+    # ip neigh: mac  ip  dev
+    ip neigh show 2>/dev/null | awk '$1 ~ /\./ && $5 ~ /:/ {print tolower($5)"\t"$1"\t"$3}'
+  } | awk -F'\t' '
+    { mac=$1; if($2!="" && !(mac in ipm)) ipm[mac]=$2; if($3!="" && !(mac in devm)) devm[mac]=$3; seen[mac]=1 }
+    END{ for(m in seen) printf "%s|%s|%s\n", m, ipm[m], devm[m] }
+  ' | while IFS='|' read -r mac ip dev; do
     [ "${#mac}" = 17 ] || continue
-    lmac="$(printf '%s' "$mac" | tr A-F a-f)"
-    case " $seen " in *" $lmac "*) continue ;; esac
-    # skip our own bridge/interface MACs and multicast/permanent local entries
-    case "$rest" in *self*|*permanent*) continue ;; esac
-    dev="$(printf '%s' "$rest" | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-    case "$dev" in phy*) dtype="WiFi" ;; lan*) dtype="Ethernet" ;; *) dtype="LAN" ;; esac
+    host="$(awk -v m="$mac" 'tolower($2)==m{print $4; exit}' /tmp/dhcp.leases 2>/dev/null)"
+    case "$host" in '*'|'') host="" ;; esac
+    case "$dev" in phy*) dtype="WiFi" ;; lan*) dtype="Ethernet" ;; br-*) dtype="LAN" ;; *) dtype="Device" ;; esac
     [ "$dfirst" = 1 ] || printf ','
-    printf '{"ip":%s,"mac":%s,"iface":%s,"type":%s}' "$(jstr "")" "$(jstr "$mac")" "$(jstr "${dev:-br-lan}")" "$(jstr "$dtype")"
+    printf '{"ip":%s,"mac":%s,"iface":%s,"type":%s,"host":%s}' "$(jstr "$ip")" "$(jstr "$mac")" "$(jstr "${dev:-br-lan}")" "$(jstr "$dtype")" "$(jstr "$host")"
     dfirst=0
   done
 )"
