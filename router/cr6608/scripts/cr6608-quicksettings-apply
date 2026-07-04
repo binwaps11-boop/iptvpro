@@ -273,9 +273,9 @@ apply_config() {
 			;;
 	esac
 
-	# DHCP by mode: broadband/PPPoE router mode serves DHCP to clients; every AP mode keeps it
-	# fully off. Detect broadband by a live pppoe wan.
-	if [ "$(uci -q get network.wan.proto)" = "pppoe" ] && [ "$(uci -q get network.wan.disabled)" != "1" ]; then
+	# DHCP is tied to the saved mode: only PPPoE-client mode serves DHCP; every AP mode keeps it
+	# off. This is the save action itself (no automatic/background enabling).
+	if [ "$mode" = "pppoe" ]; then
 		uci -q get dhcp.lan >/dev/null 2>&1 || { uci set dhcp.lan=dhcp; uci set dhcp.lan.interface='lan'; uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'; }
 		uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
 		uci -q set dhcp.lan.dhcpv6='disabled'; uci -q set dhcp.lan.ra='disabled'; uci -q set dhcp.lan.ndp='disabled'

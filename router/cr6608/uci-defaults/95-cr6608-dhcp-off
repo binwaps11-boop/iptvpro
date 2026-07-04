@@ -1,22 +1,12 @@
 #!/bin/sh
-# Address-handout policy. In AP modes there is NO IPv4 DHCP and no IPv6 whatsoever — the
-# upstream router (Mikrotik) is the only address server. In broadband/PPPoE router mode the
-# device IS the main router, so it serves IPv4 DHCP to its clients (still no IPv6).
+# Address-handout policy. IPv6 is fully off everywhere. IPv4 DHCP is added ONLY when the user
+# saves + enables the PPPoE-client mode in Quick Settings; the shipped default (Access Point)
+# has no DHCP pool, and nothing enables one automatically.
 
-# --- IPv4 DHCP policy by mode ---
-# Broadband/PPPoE router mode (wan is a live pppoe uplink): the device is the main router,
-# so it MUST serve DHCP to its clients -> ensure a working LAN pool. Every other (AP) mode:
-# DELETE all pools so nothing serves or appears.
-if [ "$(uci -q get network.wan.proto)" = "pppoe" ] && [ "$(uci -q get network.wan.disabled)" != "1" ]; then
-	uci -q get dhcp.lan >/dev/null 2>&1 || { uci -q set dhcp.lan=dhcp; uci -q set dhcp.lan.interface='lan'; uci -q set dhcp.lan.start='100'; uci -q set dhcp.lan.limit='150'; uci -q set dhcp.lan.leasetime='12h'; }
-	uci -q delete dhcp.lan.ignore
-	uci -q delete dhcp.lan.dhcpv4
-	uci -q set dhcp.lan.dhcpv6='disabled'; uci -q set dhcp.lan.ra='disabled'; uci -q set dhcp.lan.ndp='disabled'
-else
-	for s in $(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dhcp$/\1/p"); do
-		uci -q delete dhcp."$s"
-	done
-fi
+# --- IPv4 DHCP: the shipped config carries NO pool, and DHCP is turned on ONLY by saving the
+# PPPoE-client mode in Quick Settings. Nothing here (and nothing on later boots) adds or
+# removes a pool automatically, so the DHCP state is exactly whatever the last save produced.
+# On this first-boot default (Access Point) there is simply no pool, so no DHCP is served.
 uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'   # never answer IPv6 (AAAA) DNS either
 # odhcpd (DHCPv6/RA server) hard-off; also stop+disable the service if it ever exists
 uci -q set dhcp.odhcpd.disabled='1' 2>/dev/null || true
