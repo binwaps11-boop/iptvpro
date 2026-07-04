@@ -584,7 +584,9 @@ EOF
     backup="$(backup_cfg lan-dhcp)"
     uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
     uci set dhcp.lan.start="$start"; uci set dhcp.lan.limit="$limit"; uci set dhcp.lan.leasetime="${leasetime:-12h}"
-    if [ "$enabled" = "1" ]; then uci -q delete dhcp.lan.ignore; else uci set dhcp.lan.ignore='1'; fi
+    # DHCP is hard-off on this AP by owner policy: the LAN IP/netmask can be changed, but the
+    # server stays disabled no matter what the toggle says ($enabled is intentionally ignored).
+    uci set dhcp.lan.ignore='1'; uci set dhcp.lan.dhcpv4='disabled'
     uci commit network; uci commit dhcp
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
     emit true "LAN / DHCP" "Applied with backup" "[]" "Backup: $backup\nNetwork and dnsmasq reloaded. If access changes, restore the backup from SSH." "[]" "[]"; exit 0 ;;
@@ -803,10 +805,10 @@ EOF
       done
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
-    # DHCP follows the user's choice in every mode. In VLAN mode the bridge is INSIDE the
-    # client VLAN, so keep it off (default) and let the Mikrotik hand out addresses --
-    # enabling it here would fight the Mikrotik's DHCP on that VLAN.
-    if [ "$dhcp_server" = "1" ]; then uci -q delete dhcp.lan.ignore; else uci set dhcp.lan.ignore='1'; fi
+    # DHCP is hard-off on this AP by owner policy. Regardless of the wizard's dhcp_server
+    # value, the LAN DHCP server stays disabled (ignore + dhcpv4 disabled) so the unit never
+    # hands out an address on any mode -- the upstream Mikrotik is the only DHCP server.
+    uci set dhcp.lan.ignore='1'; uci set dhcp.lan.dhcpv4='disabled'
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
     [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then

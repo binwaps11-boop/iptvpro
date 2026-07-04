@@ -21,20 +21,21 @@ config dnsmasq
 	option filter_aaaa '1'
 	option filter_a '0'
 
+# DHCP is HARD-OFF on this Access Point. Every pool carries BOTH:
+#   ignore=1        -> dnsmasq starts with --no-dhcp-interface=<if> (won't serve DHCP there)
+#   dhcpv4=disabled -> the init emits NO --dhcp-range for the pool at all (nothing to hand out)
+# plus dhcpv6/ra/ndp disabled. So dnsmasq runs as a DNS-only resolver and can never lease an
+# address, even if a single flag were flipped. The upstream router (Mikrotik) is the only DHCP.
 config dhcp 'lan'
 	option interface 'lan'
 	option start '100'
 	option limit '150'
 	option leasetime '12h'
 	option ignore '1'
+	option dhcpv4 'disabled'
 	option dhcpv6 'disabled'
 	option ra 'disabled'
 	option ndp 'disabled'
-
-config odhcpd 'odhcpd'
-	option disabled '1'
-	option maindhcp '0'
-
 
 config dhcp 'recovery'
 	option interface 'recovery'
@@ -42,3 +43,12 @@ config dhcp 'recovery'
 	option limit '150'
 	option leasetime '12h'
 	option ignore '1'
+	option dhcpv4 'disabled'
+	option dhcpv6 'disabled'
+	option ra 'disabled'
+	option ndp 'disabled'
+
+# DHCPv6 / RA daemon is disabled here AND the odhcpd binary is not even shipped in this build.
+config odhcpd 'odhcpd'
+	option disabled '1'
+	option maindhcp '0'

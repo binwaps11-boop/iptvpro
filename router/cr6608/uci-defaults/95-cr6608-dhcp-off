@@ -3,14 +3,19 @@
 # The upstream router (Mikrotik) is the only address server. Enforced at every boot so a
 # reset or a stray toggle can never turn address handout back on automatically.
 
-# --- IPv4 DHCP: every pool ignored, and no RA/DHCPv6/NDP on any pool ---
+# --- IPv4 DHCP: every pool ignored AND dhcpv4 disabled (no --dhcp-range emitted), no v6 ---
 for s in $(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dhcp$/\1/p"); do
 	uci -q set dhcp."$s".ignore='1'
+	uci -q set dhcp."$s".dhcpv4='disabled'
 	uci -q set dhcp."$s".ra='disabled'
 	uci -q set dhcp."$s".dhcpv6='disabled'
 	uci -q set dhcp."$s".ndp='disabled'
 done
 uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'   # never answer IPv6 (AAAA) DNS either
+# odhcpd (DHCPv6/RA server) hard-off; also stop+disable the service if it ever exists
+uci -q set dhcp.odhcpd.disabled='1' 2>/dev/null || true
+uci -q set dhcp.odhcpd.maindhcp='0' 2>/dev/null || true
+[ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd stop >/dev/null 2>&1; /etc/init.d/odhcpd disable >/dev/null 2>&1; }
 uci -q commit dhcp
 
 # --- IPv6: disable on every network interface (the kernel here also has no IPv6 at all) ---
