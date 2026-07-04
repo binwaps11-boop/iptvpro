@@ -1487,8 +1487,20 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     if(!rows) rows="<div class='empty'>"+(A?"لا توجد بيانات طاقة":"No power data")+"</div>";
     return H.card(A?"طاقة البث":"TX Power",rows,"35 dBm","signal");
   }});
+  // Defensive: strip null/non-object elements from the live arrays so a stray null in
+  // d.wifi / d.devices / d.interfaces / stations can never throw inside a card.
+  function sanitizeData(data) {
+    var d = data || {};
+    var okArr = function (a) { return Array.isArray(a) ? a.filter(function (x) { return x && typeof x === "object"; }) : []; };
+    var out = {}; for (var k in d) if (Object.prototype.hasOwnProperty.call(d, k)) out[k] = d[k];
+    out.wifi = okArr(d.wifi).map(function (w) { var c = {}; for (var k in w) c[k] = w[k]; c.stations = okArr(w.stations); return c; });
+    out.devices = okArr(d.devices);
+    out.interfaces = okArr(d.interfaces);
+    return out;
+  }
   function renderProInsights(data) {
     if (!PRO_FEATURES.length) return sectionHead(tr("insights"), "Pro", "") + '<div class="empty">' + tr("loading") + '</div>';
+    data = sanitizeData(data);
     var cats = {};
     PRO_FEATURES.forEach(function (f) { (cats[f.cat] = cats[f.cat] || []).push(f); });
     var out = sectionHead(tr("insights"), state.lang === "ar" ? "لوحات احترافية — تحليلات حية" : "Professional live analytics", PRO_FEATURES.length + "");
