@@ -51,7 +51,7 @@
       lanScanHint: "يفحص كل المنافذ ويكشف الأجهزة خلف أي سويتش — يعرض الاسم والـ IP والـ MAC والمنفذ.",
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
-      lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
+      lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", noLldpNeighbors: "لا توجد أجهزة LLDP/CDP مُدارة. تأكد أن السويتش/الراوتر يدعم LLDP ثم أعد الفحص.", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
       portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", total: "الإجمالي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية", clientTraffic: "التحميل / الرفع",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
@@ -107,7 +107,7 @@
       lanScanHint: "Scans every port and reveals devices behind any switch — shows name, IP, MAC and port.",
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
-      lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
+      lldpNeighbors: "Managed devices (LLDP/CDP)", noLldpNeighbors: "No managed LLDP/CDP devices found. Make sure the switch/router advertises LLDP, then scan again.", platform: "Platform", localPort: "Our port", remotePort: "Their port",
       portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", total: "Total", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports", clientTraffic: "Down / Up",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
@@ -755,8 +755,9 @@
     body += '<div style="text-align:center;margin-bottom:6px"><div class="latin" style="font-size:24px;font-weight:800;color:var(--accent)">' +
       bps((finite(gRx) ? gRx : 0) + (finite(gTx) ? gTx : 0)) + '</div><div style="font-size:11px;color:var(--muted)">' + esc(tr("totalRate")) +
       ' · ↓ ' + (finite(gRx) ? bps(gRx) : "—") + ' · ↑ ' + (finite(gTx) ? bps(gTx) : "—") + '</div></div>';
-    // Wi-Fi per band
-    var wifiRows = Object.keys(wifiAgg).map(function (b) { return throughputRow("WiFi " + b, wifiAgg[b].rx, wifiAgg[b].tx, wifiAgg[b].up, b); }).join("");
+    // Wi-Fi per band — on an AP interface, TX = data sent to clients (download) and RX =
+    // data from clients (upload), so pass tx as the ↓ (download) and rx as the ↑ (upload).
+    var wifiRows = Object.keys(wifiAgg).map(function (b) { return throughputRow("WiFi " + b, wifiAgg[b].tx, wifiAgg[b].rx, wifiAgg[b].up, b); }).join("");
     if (wifiRows) body += '<h4 style="margin:8px 0 2px">' + esc(tr("wifiRate")) + '</h4>' + wifiRows;
     // wired ports
     var portRows = ports.map(function (i) { return throughputRow(i.name, num(i.rx_bps), num(i.tx_bps), i.connected, i.connected ? (i.speed_mbps ? i.speed_mbps + "M" : "up") : "down"); }).join("");
@@ -798,7 +799,7 @@
     var scanCard = card(tr("lanNeighbors"),
       '<p class="muted" style="margin:0 0 8px">' + esc(tr("lanScanHint")) + '</p>' +
       '<div class="branch-actions"><button class="btn primary" id="lanScanBtn">' + esc(tr("scanLan")) + '</button></div>' +
-      '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "LLDP · ARP · FDB", "net");
+      '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "LLDP / CDP", "net");
     var live = rows.length ? sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
       '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("clientTraffic") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
@@ -835,33 +836,15 @@
   }
   function renderLanScan(d) {
     if (!d || !d.ok) return '<div class="ctl-status">' + esc(tr("noLanDevices")) + '</div>';
-    // LLDP/CDP neighbours first — the managed switches/routers (the "source" neighbors).
+    // Show ONLY the LLDP/CDP managed devices (switches / routers / APs — the "source"
+    // neighbors). The raw ARP/FDB list is intentionally not shown (owner request).
     var lldp = (d.lldp || []);
-    var lldpHtml = "";
-    if (lldp.length) {
-      lldpHtml = '<h4 style="margin:10px 0 6px">' + tr("lldpNeighbors") + ' (' + lldp.length + ')</h4>' +
-        '<div class="table-wrap"><table><thead><tr><th>' + tr("deviceName") + '</th><th>' + tr("platform") + '</th><th>IP</th><th>' + tr("localPort") + '</th><th>' + tr("remotePort") + '</th></tr></thead><tbody>' +
-        lldp.map(function (n) {
-          return '<tr><td>' + esc(n.name || "—") + '</td><td>' + esc(n.platform || "—") + '</td><td class="latin">' + esc(n.ip || "—") + '</td><td class="latin">' + esc(n.local_port || "—") + '</td><td class="latin">' + esc(n.remote_port || "—") + '</td></tr>';
-        }).join("") + '</tbody></table></div>';
-    }
-    // ARP/FDB device list — filtered to real unicast MACs, real devices first (with IP/name).
-    var devs = (d.devices || []).filter(function (x) { return isRealMac(x && x.mac); }).sort(function (a, b) {
-      var ra = (a.ip || a.host) ? 0 : 1, rb = (b.ip || b.host) ? 0 : 1; if (ra !== rb) return ra - rb;
-      function ipn(x) { var p = String(x && x.ip || "").split("."); return p.length === 4 ? (((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3]) : 4294967295; }
-      return ipn(a) - ipn(b);
-    });
-    var body = devs.length ? '<h4 style="margin:14px 0 6px">' + tr("neighbors") + ' (' + devs.length + ')</h4><div class="table-wrap"><table><thead><tr><th>' + tr("host") + '</th><th>IP</th><th>MAC</th><th>' + tr("port") + '</th><th>' + tr("vendor") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
-      devs.map(function (x) {
-        var mac = String(x.mac || "");
-        var vn = deviceName(mac) || (typeof ouiVendor === "function" ? ouiVendor(mac) : "") || tr("unknownVendor");
-        var nm = x.host ? esc(x.host) : '<span class="muted">—</span>';
-        var acts = mac ? '<button class="btn dev-action" data-dev-mac="' + esc(mac) + '" data-dev-act="block_mac">' + tr("block") + '</button>' : "";
-        var port = esc(x.port || x.iface || "");
-        return '<tr><td>' + nm + '</td><td class="latin">' + esc(x.ip || "—") + '</td><td class="latin">' + esc(mac.toUpperCase()) + '</td><td class="latin">' + port + '</td><td>' + esc(vn) + '</td><td>' + acts + '</td></tr>';
-      }).join("") + '</tbody></table></div>' : "";
-    if (!lldpHtml && !body) return '<div class="empty">' + tr("noLanDevices") + '</div>';
-    return lldpHtml + body;
+    if (!lldp.length) return '<div class="empty">' + tr("noLldpNeighbors") + '</div>';
+    return '<h4 style="margin:10px 0 6px">' + tr("lldpNeighbors") + ' (' + lldp.length + ')</h4>' +
+      '<div class="table-wrap"><table><thead><tr><th>' + tr("deviceName") + '</th><th>' + tr("platform") + '</th><th>IP</th><th>' + tr("localPort") + '</th><th>' + tr("remotePort") + '</th></tr></thead><tbody>' +
+      lldp.map(function (n) {
+        return '<tr><td>' + esc(n.name || "—") + '</td><td>' + esc(n.platform || "—") + '</td><td class="latin">' + esc(n.ip || "—") + '</td><td class="latin">' + esc(n.local_port || "—") + '</td><td class="latin">' + esc(n.remote_port || "—") + '</td></tr>';
+      }).join("") + '</tbody></table></div>';
   }
   async function scanLan() {
     var btn = $("lanScanBtn"), box = $("lanScanResult");
@@ -1479,7 +1462,7 @@ return H.card(A?'مرشحو التجوال':'Roaming Candidates',h,String(n)+(A?
 return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.length)+(A?' جهاز':' clients'),'device')}},
    {key:"client_bw_share",ar:"حصة العملاء من النطاق",en:"Client Bandwidth Share",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',t=a?'حصة العملاء':'Client Bandwidth Share',st=[],tot=0;(d.wifi||[]).forEach(function(w){(w.stations||[]).forEach(function(s){var e=H.num(s.expected_mbps);if(H.finite(e)&&e>0){st.push({k:s.ip||s.mac||'?',e:e});tot+=e}})});if(!st.length)return H.card(t,'<div class="empty">'+(a?'لا عملاء':'No data')+'</div>',null,'device');st.sort(function(x,y){return y.e-x.e});var top=st.slice(0,5),r=tot;top.forEach(function(x){r-=x.e});if(r>0)top.push({k:a?'أخرى':'Other',e:r});var cs='primary,accent,excellent,good,mid,muted'.split(','),acc=0,seg='',leg='';top.forEach(function(x,i){var f=x.e/tot,c='var(--'+cs[i%6]+')';seg+='<circle cx="60" cy="60" r="46" fill="none" stroke="'+c+'" stroke-width="14" stroke-dasharray="'+(f*289).toFixed(1)+' 289" stroke-dashoffset="'+(-acc*289).toFixed(1)+'" transform="rotate(-90 60 60)"/>';acc+=f;leg+='<div style="display:flex;justify-content:space-between;font-size:11px;margin:3px 0"><span class="latin" style="color:'+c+'">'+H.esc(x.k)+'</span><span class="latin">'+H.fmt(f*100,0)+'%·'+H.fmt(x.e,0)+'M</span></div>'});var svg='<svg width="120" height="120" viewBox="0 0 120 120" style="display:block;margin:0 auto">'+seg+'<text x="60" y="66" text-anchor="middle" font-size="17" fill="var(--text)">'+st.length+' '+(a?'عميل':'cl')+'</text></svg>';return H.card(t,svg+'<div style="margin-top:8px">'+leg+'</div>',H.fmt(tot,0)+'M','device');}},
    {key:"bridge_pps_tile",ar:"معدل الجسر الكلي",en:"Bridge Throughput",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',t=a?'معدل الجسر الكلي':'Bridge Throughput',tr=d.traffic||{},rx=H.num(tr.rx_bps)||0,tx=H.num(tr.tx_bps)||0,tot=rx+tx;if(!tot&&!(H.num(tr.rx_bytes)||0))return H.card(t,'<div class="empty">'+(a?'لا بيانات':'No data')+'</div>',null,'net');var pps=tot/6000,pl=pps>=1000?H.fmt(pps/1000,1)+'k':H.fmt(pps,0),cap=0;(d.interfaces||[]).forEach(function(i){i=i||{};var s=H.num(i.speed_mbps);if(i.connected&&H.finite(s)&&s>cap)cap=s});var use=cap?H.clamp(tot/(cap*1e6)*100,0,100):0,col=!cap?'var(--primary)':use<40?'var(--excellent)':use<70?'var(--good)':use<90?'var(--mid)':'var(--weak)';var body='<div style="text-align:center"><div class="latin" style="font-size:30px;font-weight:800;color:'+col+'">'+H.bps(tot)+'</div><div style="font-size:11px;color:var(--muted)">≈ '+pl+' pps @750B</div></div><div class="grid two"><div class="traffic-box"><span>↓ RX</span><b class="latin" style="color:var(--accent)">'+H.bps(rx)+'</b></div><div class="traffic-box"><span>↑ TX</span><b class="latin" style="color:var(--primary)">'+H.bps(tx)+'</b></div></div>'+(cap?'<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)"><span>'+(a?'استخدام الوصلة':'Link use')+'</span><span class="latin">'+H.fmt(use,1)+'%/'+cap+'M</span></div>'+H.bar(use,100,col)+'</div>':'');return H.card(t,body,null,'bolt');}},
-   {key:"setup_checklist",ar:"قائمة فحص الإعداد",en:"Setup Checklist",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'قائمة فحص الإعداد':'Setup Checklist';d=d||{};var hs=H.num((d.health||{}).score),tc=H.num(d.temperature_c),lt=H.num(d.latency_ms),cl=H.num(d.clients),bo=(d.backhaul||{}).online;var L=[[A?'الوصلة الرئيسية متصلة':'Upstream online',bo===true,bo==null],[A?'يوجد أجهزة متصلة':'Clients connected',cl>0,!H.finite(cl)],[(A?'الصحة':'Health')+' &gt; 70',hs>70,!H.finite(hs)],[(A?'الحرارة':'Temp')+' &lt; 70°C',tc<70,!H.finite(tc)],[(A?'الاستجابة':'Latency')+' &lt; 20ms',lt<20,!H.finite(lt)]];var ok=0,tot=0,r='';for(var i=0;i<5;i++){var u=L[i][2],p=L[i][1];if(!u){tot++;if(p)ok++}var c=u?'var(--muted)':p?'var(--excellent)':'var(--weak)';r+='<div style="display:flex;align-items:center;gap:9px;margin:7px 0;font-size:12px"><span style="flex:0 0 20px;height:20px;border-radius:50%;border:1.5px solid '+c+';color:'+c+';font-weight:700;display:flex;align-items:center;justify-content:center">'+(u?'—':p?'✓':'✕')+'</span><span style="flex:1">'+L[i][0]+'</span></div>'}var pc=tot?ok/tot*100:0,col=pc>=100?'var(--excellent)':pc>=60?'var(--good)':pc>=40?'var(--mid)':'var(--weak)';return H.card(t,'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+(A?'اكتمال الإعداد':'Setup complete')+'</span><b style="color:'+col+'">'+ok+'/'+tot+'</b></div>'+H.bar(pc,100,col)+'<div style="height:6px"></div>'+r,ok+'/'+tot,'gear')}},
+   {key:"setup_checklist",ar:"قائمة فحص الإعداد",en:"Setup Checklist",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'قائمة فحص الإعداد':'Setup Checklist';d=d||{};var hs=H.num((d.health||{}).score),tc=H.num(d.temperature_c),lt=H.num(d.latency_ms),cl=H.num(d.clients),bo=(d.backhaul||{}).online;var L=[[A?'الوصلة الرئيسية متصلة':'Upstream online',bo===true,bo!==true],[A?'يوجد أجهزة متصلة':'Clients connected',cl>0,!H.finite(cl)],[A?'الصحة أعلى من 70':'Health &gt; 70',hs>70,!H.finite(hs)],[A?'الحرارة أقل من 70°C':'Temp &lt; 70°C',tc<70,!H.finite(tc)],[A?'الاستجابة أقل من 20ms':'Latency &lt; 20ms',lt<20,!H.finite(lt)]];var ok=0,tot=0,r='';for(var i=0;i<5;i++){var u=L[i][2],p=L[i][1];if(!u){tot++;if(p)ok++}var c=u?'var(--muted)':p?'var(--excellent)':'var(--weak)';r+='<div style="display:flex;align-items:center;gap:9px;margin:7px 0;font-size:12px"><span style="flex:0 0 20px;height:20px;border-radius:50%;border:1.5px solid '+c+';color:'+c+';font-weight:700;display:flex;align-items:center;justify-content:center">'+(u?'—':p?'✓':'✕')+'</span><span style="flex:1">'+L[i][0]+'</span></div>'}var pc=tot?ok/tot*100:0,col=pc>=100?'var(--excellent)':pc>=60?'var(--good)':pc>=40?'var(--mid)':'var(--weak)';return H.card(t,'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+(A?'اكتمال الإعداد':'Setup complete')+'</span><b style="color:'+col+'">'+ok+'/'+tot+'</b></div>'+H.bar(pc,100,col)+'<div style="height:6px"></div>'+r,ok+'/'+tot,'gear')}},
    {key:"uptime_milestones",ar:"إنجازات التشغيل",en:"Uptime Milestones",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'إنجازات التشغيل':'Uptime Milestones';var up=H.num((d||{}).uptime);if(!H.finite(up)||up<0)return H.card(t,"<div class='empty'>—</div>",null,'bolt');var M=[[3600,'1h'],[86400,'1d'],[604800,'1w'],[2592e3,'30d'],[864e4,'100d'],[31536e3,'1y']],g=0,nx=null,pl='';for(var i=0;i<6;i++){var a=up>=M[i][0];if(a)g++;else if(!nx)nx=M[i];var c=a?'var(--excellent)':'var(--muted)';pl+='<div style="flex:1;margin:3px;padding:6px 0;text-align:center;border-radius:8px;font-size:14px;border:1px solid '+(a?c:'var(--border)')+';color:'+c+'">'+(a?'★':'☆')+'<div style="font-size:10px">'+M[i][1]+'</div></div>'}var hd='<div style="text-align:center;margin-bottom:8px;font-size:22px;font-weight:700;color:var(--primary)">'+H.esc(H.uptime(up))+'<div style="font-size:11px;font-weight:400;color:var(--muted)">'+(A?'تشغيل متواصل':'uptime streak')+'</div></div>',ft;if(nx){var p=H.clamp(up/nx[0]*100,0,100);ft='<div style="font-size:11px;margin:8px 0 3px;color:var(--muted)">'+(A?'التالي: ':'Next: ')+nx[1]+' · <b style="color:var(--accent)">'+H.fmt(p,0)+'%</b> · '+H.esc(H.uptime(nx[0]-up))+(A?' متبقية':' left')+'</div>'+H.bar(p,100,'var(--accent)')}else ft='<div style="margin-top:8px;text-align:center;color:var(--excellent);font-size:12px">'+(A?'اكتمل الكل!':'All achieved!')+'</div>';return H.card(t,hd+'<div style="display:flex;flex-wrap:wrap">'+pl+'</div>'+ft,g+'/6','bolt')}},
 ];
   PRO_FEATURES.forEach(function (f) {

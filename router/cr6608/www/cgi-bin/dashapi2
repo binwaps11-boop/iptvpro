@@ -121,10 +121,16 @@ for dev in br-lan eth0 wan lan1 lan2 lan3 phy0-ap0 phy0-ap1 phy1-ap0; do
 done
 interfaces="$interfaces]"
 
+# Directional download/upload measured at the Wi-Fi client edge only. On a bridging AP
+# every forwarded byte is both RX on the uplink port AND TX on the client port, so summing
+# all ports makes RX==TX (the old bug). The Wi-Fi radios are always the client side, so:
+#   download (to clients) = TX bytes on phyX-apY   -> reported as traffic rx (وارد)
+#   upload   (from clients) = RX bytes on phyX-apY  -> reported as traffic tx (صادر)
+# $2 = rx_bytes, $10 = tx_bytes in /proc/net/dev.
 set -- $(awk '
-  BEGIN{rx=0; tx=0}
-  $1=="lan1:" || $1=="lan2:" || $1=="lan3:" || $1=="wan:" || $1=="phy0-ap0:" || $1=="phy0-ap1:" || $1=="phy1-ap0:" {rx+=$2; tx+=$10}
-  END{printf "%s %s", rx, tx}
+  BEGIN{dl=0; ul=0}
+  $1 ~ /^phy[0-9]+-ap[0-9]+:$/ {dl+=$10; ul+=$2}
+  END{printf "%s %s", dl, ul}
 ' /proc/net/dev 2>/dev/null)
 traffic_rx="${1:-0}"; traffic_tx="${2:-0}"
 traffic_now="$now_s"
