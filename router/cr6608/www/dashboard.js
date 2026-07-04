@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -442,6 +442,14 @@
     var b1 = parseInt(hex.slice(0, 2), 16);
     if (b1 & 0x02) return state.lang === "ar" ? "خاص (عشوائي)" : "Private (random)";
     return OUI[hex.slice(0, 6)] || "";
+  }
+  // Custom device names — user-assigned, keyed by MAC, stored locally on the phone/PC.
+  function devNamesMap() { try { return JSON.parse(localStorage.getItem(LS + "devNames") || "{}") || {}; } catch (e) { return {}; } }
+  function deviceName(mac) { if (!mac) return ""; return devNamesMap()[String(mac).toLowerCase()] || ""; }
+  function setDeviceName(mac, name) {
+    if (!mac) return; var m = devNamesMap(); var k = String(mac).toLowerCase();
+    if (name) m[k] = String(name).slice(0, 32); else delete m[k];
+    try { localStorage.setItem(LS + "devNames", JSON.stringify(m)); } catch (e) {}
   }
   function mergeDevices(data) {
     var map = {};
@@ -785,8 +793,12 @@
       rows.map(function (d) {
         var vn = d.vendor || tr("unknownVendor");
         var m = esc(d.mac || "");
-        var acts = m ? '<button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="block_mac">' + tr("block") + '</button> <button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="unblock_mac">' + tr("allow") + '</button>' : "";
-        var ipHost = esc(d.ip || tr("unavailable")) + (d.host ? '<br><small class="muted latin">' + esc(d.host) + '</small>' : "");
+        var cn = deviceName(d.mac);
+        var rename = m ? ' <button class="btn dev-rename" data-dev-mac="' + m + '" title="' + esc(tr("rename")) + '">✎</button>' : "";
+        var acts = (m ? '<button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="block_mac">' + tr("block") + '</button> <button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="unblock_mac">' + tr("allow") + '</button>' : "") + rename;
+        // show the user-assigned name first (if any), then the DHCP host as a sub-line
+        var nameLine = cn ? '<b>' + esc(cn) + '</b><br>' : "";
+        var ipHost = nameLine + esc(d.ip || tr("unavailable")) + (d.host ? '<br><small class="muted latin">' + esc(d.host) + '</small>' : "");
         return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + acts + '</td></tr>';
       }).join("") +
       '</tbody></table></div>' :
@@ -1548,6 +1560,50 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     var note=days<7?"<div style='font-size:10px;color:var(--muted);margin-top:6px'>"+(A?"يتراكم على مدى الأسبوع ("+days+"/7 يوم)":"builds up over a week ("+days+"/7 days)")+"</div>":"";
     return H.card(A?"التقرير الأسبوعي":"Weekly Report",head+rows+note,days+"/7","gear");
   }});
+  // #60 — bandwidth hog: the client pulling the most right now + one-tap limit.
+  PRO_FEATURES.push({key:"bandwidth_hog",ar:"ملتهم النطاق",en:"Bandwidth Hog",cat:"Traffic & Bandwidth",fn:function(d,H){
+    var A=H.lang==="ar", rows=(H.stationTrafficRows&&H.stationTrafficRows(d))||[];
+    if(!rows.length){ // fall back to expected_mbps if driver byte counters absent
+      ((d&&d.wifi)||[]).forEach(function(w){((w&&w.stations)||[]).forEach(function(s){ if(!s)return; var e=H.num(s.expected_mbps); if(H.finite(e)&&e>0) rows.push({label:s.ip||s.mac||"?",mac:s.mac||"",totalRate:e*125000,up:0,down:e*125000}); }); }); }
+    if(!rows.length) return H.card(A?"ملتهم النطاق":"Bandwidth Hog","<div class='empty'>"+(A?"لا حركة حالية":"No live traffic")+"</div>",null,"bolt");
+    rows.sort(function(a,b){return (b.totalRate||0)-(a.totalRate||0);});
+    var top=rows.slice(0,5), mx=top[0].totalRate||1;
+    var body=top.map(function(r,i){ var nm=(typeof deviceName==="function"?deviceName(r.mac):"")||r.label;
+      var lim=r.mac?"<button class='btn dev-action' data-dev-mac='"+H.esc(r.mac)+"' data-dev-act='__limit' style='font-size:10px;padding:2px 8px'>"+(A?"حدّ":"limit")+"</button>":"";
+      return "<div style='margin:6px 0'><div style='display:flex;justify-content:space-between;font-size:12px;gap:6px'><b>"+(i===0?"&#128293; ":"")+H.esc(nm)+"</b><span class='latin'>"+H.bps(r.totalRate||0)+" "+lim+"</span></div>"+
+        H.bar(r.totalRate||0,mx,i===0?"var(--weak)":"var(--accent)")+"<div style='font-size:10px;color:var(--muted)'>&#8595; "+H.bps(r.down||0)+" &#183; &#8593; "+H.bps(r.up||0)+"</div></div>"; }).join("");
+    return H.card(A?"ملتهم النطاق":"Bandwidth Hog",body,String(rows.length),"bolt");
+  }});
+  // #61 — internet outage log: records backhaul up/down transitions with duration.
+  PRO_FEATURES.push({key:"outage_log",ar:"سجل انقطاع الإنترنت",en:"Internet Outage Log",cat:"Automation & UX",fn:function(d,H){
+    var A=H.lang==="ar", online=!!((d&&d.backhaul)||{}).online;
+    var st; try{ st=JSON.parse(localStorage.getItem(LS+"outageLog")||"{}"); }catch(e){ st={}; }
+    if(typeof st.online==="undefined") st={online:online,since:Date.now(),events:[]};
+    if(!Array.isArray(st.events)) st.events=[];
+    if(online!==st.online){ var dur=Math.max(0,Date.now()-(st.since||Date.now()));
+      if(!st.online) st.events.unshift({t:Date.now(),down:dur}); // came back up -> log the outage length
+      st.online=online; st.since=Date.now(); st.events=st.events.slice(0,20);
+      try{ localStorage.setItem(LS+"outageLog",JSON.stringify(st)); }catch(e){}
+    } else { try{ localStorage.setItem(LS+"outageLog",JSON.stringify(st)); }catch(e){} }
+    function dhm(ms){ var s=Math.round(ms/1000); if(s<60)return s+"s"; if(s<3600)return Math.floor(s/60)+"m "+(s%60)+"s"; return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m"; }
+    var cur="<div style='text-align:center;margin-bottom:8px'><span style='color:"+(online?"var(--excellent)":"var(--weak)")+";font-weight:700'>"+(online?(A?"متصل":"Online"):(A?"مقطوع":"Offline"))+"</span> <small class='muted'>"+(A?"منذ ":"for ")+dhm(Date.now()-(st.since||Date.now()))+"</small></div>";
+    var list=st.events.length?st.events.map(function(e){ var dt=new Date(e.t); var hh=("0"+dt.getHours()).slice(-2)+":"+("0"+dt.getMinutes()).slice(-2);
+      return "<div style='display:flex;justify-content:space-between;font-size:11px;margin:4px 0'><span class='latin'>"+hh+"</span><span style='color:var(--weak)'>"+(A?"انقطاع ":"down ")+dhm(e.down)+"</span></div>"; }).join(""):"<div style='font-size:11px;color:var(--excellent);text-align:center'>"+(A?"لا انقطاعات مسجّلة":"No outages recorded")+"</div>";
+    return H.card(A?"سجل انقطاع الإنترنت":"Internet Outage Log",cur+list,String(st.events.length),"net");
+  }});
+  // #62 — latency monitor: gateway round-trip over time (sparkline + now/avg/max).
+  PRO_FEATURES.push({key:"latency_monitor",ar:"مراقب زمن الاستجابة",en:"Latency Monitor",cat:"Traffic & Bandwidth",fn:function(d,H){
+    var A=H.lang==="ar", lt=H.num(d&&d.latency_ms);
+    var hist; try{ hist=JSON.parse(localStorage.getItem(LS+"latHist")||"[]"); }catch(e){ hist=[]; }
+    if(!Array.isArray(hist)) hist=[];
+    if(H.finite(lt)){ hist.push(lt); if(hist.length>60) hist.shift(); try{ localStorage.setItem(LS+"latHist",JSON.stringify(hist)); }catch(e){} }
+    if(!hist.length) return H.card(A?"مراقب زمن الاستجابة":"Latency Monitor","<div class='empty'>"+(A?"لا بيانات":"No data")+"</div>",null,"net");
+    var avg=hist.reduce(function(a,b){return a+b;},0)/hist.length, mx=Math.max.apply(null,hist), now=hist[hist.length-1];
+    var col=now<20?"var(--excellent)":now<50?"var(--good)":now<100?"var(--mid)":"var(--weak)";
+    var body="<div style='text-align:center'><div class='latin' style='font-size:28px;font-weight:800;color:"+col+"'>"+H.fmt(now,1)+" ms</div></div>"+
+      H.spark(hist,col)+"<div class='grid two' style='margin-top:8px'><div class='traffic-box'><span>"+(A?"متوسط":"avg")+"</span><b class='latin'>"+H.fmt(avg,1)+" ms</b></div><div class='traffic-box'><span>"+(A?"أقصى":"max")+"</span><b class='latin'>"+H.fmt(mx,1)+" ms</b></div></div>";
+    return H.card(A?"مراقب زمن الاستجابة":"Latency Monitor",body,H.fmt(now,0)+"ms","net");
+  }});
   // Defensive: strip null/non-object elements from the live arrays so a stray null in
   // d.wifi / d.devices / d.interfaces / stations can never throw inside a card.
   function sanitizeData(data) {
@@ -1766,6 +1822,17 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       b.onclick = async function () {
         var mac = b.dataset.devMac, act = b.dataset.devAct;
         if (!mac || !act) return toast(tr("simulated"));
+        if (act === "__limit") { // bandwidth-hog "limit" -> ask Mbps, set per-client QoS
+          var mb = window.prompt(tr("limitPrompt"), "10"); if (mb === null) return;
+          mb = String(mb).replace(/[^0-9]/g, ""); if (!mb) return;
+          try {
+            var rl = await fetch(CTL, { method:"POST", cache:"no-store", headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+              body:"section=devices&action=set_client_limit&mac=" + encodeURIComponent(mac) + "&limit_down=" + mb + "&limit_up=" + mb + "&" + sidQuery() + "&_=" + Date.now() });
+            if (rl.status === 403) return requireLogin(tr("loginBad"));
+            var jl = await rl.json(); toast(jl.summary || tr("ok")); event("Limit " + mac + " " + mb + "Mbps");
+          } catch (e) { toast(e.message); }
+          return;
+        }
         try {
           var r = await fetch(CTL, { method:"POST", cache:"no-store",
             headers:{ "Content-Type":"application/x-www-form-urlencoded" },
@@ -1776,6 +1843,17 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
           event((act === "block_mac" ? "Block " : "Allow ") + mac);
           setTimeout(loadData, 400);
         } catch (e) { toast(e.message); }
+      };
+    });
+    // device rename (custom names stored locally)
+    Array.prototype.forEach.call(document.querySelectorAll(".dev-rename"), function (b) {
+      b.onclick = function () {
+        var mac = b.dataset.devMac; if (!mac) return;
+        var cur = deviceName(mac);
+        var nm = window.prompt(tr("renamePrompt"), cur || "");
+        if (nm === null) return;
+        setDeviceName(mac, nm.trim());
+        if (state.latest) render(state.latest);
       };
     });
     var scanBtn = $("wifiScanBtn");

@@ -1043,6 +1043,22 @@ EOF
     [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
     emit true "Best Channel" "Channels applied (Apply & Keep)" "[]" "Backup: $backup\n2.4G=${ch24:-unchanged}, 5G=${ch5:-unchanged}. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  save_autochannel)
+    # enable/disable the nightly auto best-channel (cron runs smartap-autochannel at 3:30am)
+    en="$(safe_num "$(param autochannel_enabled)")"
+    uci -q get smartap.autochannel >/dev/null 2>&1 || uci set smartap.autochannel='autochannel'
+    uci set smartap.autochannel.enabled="${en:-0}"; uci commit smartap
+    if [ "$en" = "1" ]; then
+      emit true "أفضل قناة تلقائياً" "مفعّل" "[]" "سيفحص الجهاز كل ليلة 3:30ص ويبدّل تلقائياً لأقل قناة ازدحاماً (2.4G: 1/6/11، 5G: بلا DFS). يمكنك التشغيل الآن يدوياً من زر الفحص." "[]" "[]"; exit 0
+    else
+      emit true "أفضل قناة تلقائياً" "معطّل" "[]" "أُلغيت الجدولة التلقائية. تقدر تختار القناة يدوياً وقتما تشاء." "[]" "[]"; exit 0
+    fi ;;
+  run_autochannel_now)
+    uci -q get smartap.autochannel >/dev/null 2>&1 || uci set smartap.autochannel='autochannel'
+    uci set smartap.autochannel.enabled='1'; uci commit smartap
+    /usr/sbin/smartap-autochannel >/dev/null 2>&1
+    c24="$(uci -q get wireless.radio0.channel)"; c5="$(uci -q get wireless.radio1.channel)"
+    emit true "أفضل قناة الآن" "تم الفحص والتطبيق" "[]" "القنوات الحالية: 2.4G=$c24 · 5G=$c5" "[]" "[]"; exit 0 ;;
   enable_stp)
     confirm_required "Loop Guard"
     backup="$(backup_cfg loopguard)"
@@ -1235,7 +1251,7 @@ device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضا�
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
-ch5|قناة 5G|${ch5:-149}|الأفضل للطاقة والسرعة: 149 أو 157 (UNII-3، طاقة أعلى وبلا DFS)|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
+ch5|قناة 5G|${ch5:-36}|القناة 36 (UNII-1، توافق أوسع مع كل الأجهزة)|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G|text|0|device|mesh,mesh_vlan|
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسل: يبث للجوالات على 2.4 و5G ويحمل رابط الميش. المستقبل: يستقبل عبر 5G ويبث للجوالات على 2.4 فقط|select|0|device|mesh,mesh_vlan|sender:مرسل (يبث 2.4+5G),receiver:مستقبل (يبث 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
