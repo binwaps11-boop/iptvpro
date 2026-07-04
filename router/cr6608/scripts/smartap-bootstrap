@@ -112,6 +112,19 @@ if [ -n "$zone" ]; then
   add_list_once "firewall.$zone" network mgmt firewall
 fi
 
+
+# Rescue programming IP (reference-source behavior): 221.221.221.221 on the bridge,
+# reachable over Wi-Fi with a static client IP regardless of VLAN/mesh programming.
+ensure_section network.wlanrescue interface network
+setv network.wlanrescue.proto static network
+setv network.wlanrescue.device br-lan network
+setv network.wlanrescue.ipaddr 221.221.221.221 network
+setv network.wlanrescue.netmask 255.255.255.0 network
+setv network.wlanrescue.ipv6 0 network
+if [ -n "$zone" ]; then
+  add_list_once "firewall.$zone" network wlanrescue firewall
+fi
+
 # Configure requested Tx power in UCI, while the driver/regulatory layer still
 # enforces the real maximum power supported by the country/radio.
 uci -q get wireless.radio0 >/dev/null 2>&1 && setv wireless.radio0.txpower 35 wireless

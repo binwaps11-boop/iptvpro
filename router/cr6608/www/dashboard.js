@@ -1709,4 +1709,93 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     showLogin();
   }
   document.addEventListener("DOMContentLoaded", init);
+  // ===== v44 UX pack: auto day/night theme, quick search, draggable cards, speed gauge =====
+  // (7) local speed test with an animated needle gauge — replaces the plain toast
+  var _speedPlain = speedTest;
+  speedTest = async function () {
+    var ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(2,6,23,.72);display:flex;align-items:center;justify-content:center;z-index:9999";
+    ov.innerHTML = '<div style="background:var(--card,#0B1220);border:1px solid var(--border);border-radius:16px;padding:22px;text-align:center;min-width:260px">' +
+      '<svg width="220" height="130" viewBox="0 0 220 130">' +
+      '<path d="M20 120 A 90 90 0 0 1 200 120" fill="none" stroke="var(--border)" stroke-width="14" stroke-linecap="round"/>' +
+      '<path id="sgArc" d="M20 120 A 90 90 0 0 1 200 120" fill="none" stroke="var(--accent)" stroke-width="14" stroke-linecap="round" stroke-dasharray="0 999"/>' +
+      '<line id="sgNeedle" x1="110" y1="120" x2="30" y2="118" stroke="var(--primary)" stroke-width="4" stroke-linecap="round"/>' +
+      '<circle cx="110" cy="120" r="7" fill="var(--primary)"/></svg>' +
+      '<div id="sgVal" class="latin" style="font-size:26px;font-weight:800;margin-top:4px">0 Mbps</div>' +
+      '<div id="sgSub" style="color:var(--muted);font-size:12px;margin-top:2px">&nbsp;</div>' +
+      '<button id="sgClose" class="btn" style="margin-top:12px">OK</button></div>';
+    document.body.appendChild(ov);
+    ov.querySelector("#sgClose").onclick = function () { ov.parentNode && ov.parentNode.removeChild(ov); };
+    function setG(mbps) {
+      var f = Math.min(mbps / 1000, 1), ang = (-180 + f * 180) * Math.PI / 180;
+      var n = ov.querySelector("#sgNeedle");
+      n.setAttribute("x2", 110 + 85 * Math.cos(ang)); n.setAttribute("y2", 120 + 85 * Math.sin(ang));
+      ov.querySelector("#sgArc").setAttribute("stroke-dasharray", (f * 283).toFixed(1) + " 999");
+      ov.querySelector("#sgVal").textContent = fmt(mbps, mbps < 100 ? 1 : 0) + " Mbps";
+    }
+    var total = 0, t0 = performance.now();
+    try {
+      for (var i = 0; i < 6; i++) {
+        var r = await fetch("dashboard.js?sp=" + Math.random(), { cache: "no-store" });
+        var b = await r.arrayBuffer(); total += b.byteLength;
+        setG(total * 8 / ((performance.now() - t0) / 1000) / 1e6);
+      }
+      ov.querySelector("#sgSub").textContent = state.lang === "ar" ? "سرعة القراءة من الجهاز عبر الشبكة المحلية" : "LAN read speed from the router";
+    } catch (e) { ov.querySelector("#sgSub").textContent = "test: " + e.message; }
+  };
+  document.addEventListener("DOMContentLoaded", function () {
+    try {
+      // (15) auto day/night theme: the theme button cycles dark -> light -> auto
+      var themePref = localStorage.getItem(LS + "themePref") || state.theme;
+      function resolveTheme(p) { if (p !== "auto") return p; var h = new Date().getHours(); return (h >= 18 || h < 6) ? "dark" : "light"; }
+      function applyPref(p) {
+        themePref = p; localStorage.setItem(LS + "themePref", p);
+        state.theme = resolveTheme(p); localStorage.setItem(LS + "theme", state.theme);
+        renderChrome(); if (state.latest) render(state.latest);
+        var b = $("themeBtn"); if (b && p === "auto") b.textContent = state.lang === "ar" ? "تلقائي" : "Auto";
+      }
+      var tb = $("themeBtn");
+      if (tb) tb.onclick = function () { applyPref(themePref === "dark" ? "light" : themePref === "light" ? "auto" : "dark"); };
+      if (themePref === "auto") applyPref("auto");
+      setInterval(function () { if (themePref === "auto" && resolveTheme("auto") !== state.theme) applyPref("auto"); }, 60000);
+      // (18) quick search: filters the section menu as you type
+      var navEl = document.querySelector(".nav");
+      if (navEl && navEl.parentElement && !$("navSearch")) {
+        var si = document.createElement("input");
+        si.id = "navSearch"; si.type = "search";
+        si.placeholder = state.lang === "ar" ? "بحث سريع…" : "Quick search…";
+        si.style.cssText = "width:100%;margin:0 0 8px;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);font:inherit";
+        navEl.parentElement.insertBefore(si, navEl);
+        si.oninput = function () {
+          var q = si.value.trim().toLowerCase();
+          Array.prototype.forEach.call(navEl.querySelectorAll("button"), function (b) {
+            b.style.display = (!q || b.textContent.toLowerCase().indexOf(q) > -1) ? "" : "none";
+          });
+        };
+      }
+      // (14) draggable insight cards — order persists per card title (grid `order`)
+      var ORDER_KEY = LS + "cardOrder", dragSrc = null;
+      function cardTitle(el) { var h = el.querySelector("h3,h4,header,b"); return ((h ? h.textContent : el.textContent) || "").slice(0, 60); }
+      function bindDrag(box) {
+        var map = JSON.parse(localStorage.getItem(ORDER_KEY) || "{}");
+        Array.prototype.forEach.call(box.querySelectorAll(".card"), function (c, i) {
+          var t = cardTitle(c);
+          c.style.order = map[t] != null ? map[t] : i;
+          c.setAttribute("draggable", "true");
+          c.ondragstart = function () { dragSrc = c; };
+          c.ondragover = function (e) { e.preventDefault(); };
+          c.ondrop = function (e) {
+            e.preventDefault(); if (!dragSrc || dragSrc === c) return;
+            var a = Number(dragSrc.style.order || 0), b2 = Number(c.style.order || 0);
+            dragSrc.style.order = b2; c.style.order = a;
+            var m = JSON.parse(localStorage.getItem(ORDER_KEY) || "{}");
+            m[cardTitle(dragSrc)] = b2; m[t] = a;
+            localStorage.setItem(ORDER_KEY, JSON.stringify(m)); dragSrc = null;
+          };
+        });
+      }
+      var insBox = $("insights");
+      if (insBox && window.MutationObserver) new MutationObserver(function () { try { bindDrag(insBox); } catch (e) {} }).observe(insBox, { childList: true });
+    } catch (e) { /* UX pack must never break the dashboard */ }
+  });
 }());

@@ -51,3 +51,14 @@ config interface 'wan'
 	option ipv6 '0'
 	option disabled '1'
 	option auto '0'
+
+# Rescue programming IP (mirrors the reference source): 221.221.221.221 always answers
+# on the bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like
+# 221.221.221.100/24 on your phone/laptop, and open http://221.221.221.221/ to reach
+# the programming page — no matter how the unit is programmed (VLAN/mesh/AP).
+config interface 'wlanrescue'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '221.221.221.221'
+	option netmask '255.255.255.0'
+	option ipv6 '0'

@@ -1018,6 +1018,46 @@ EOF
     for s in $(uci show firewall | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m"\047" {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
     uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
     emit true "Connected Devices" "MAC unblock attempted" "[]" "Backup: $backup\nMatching CR6608 block rules removed for $mac." "[]" "[]"; exit 0 ;;
+  set_client_limit)
+    # Per-client speed limit (simple QoS): tc HTB per MAC — download shaped on the
+    # client-facing ports, upload shaped on the uplink. Persisted in uci smartap and
+    # re-applied at boot by /etc/init.d/smartap-qos.
+    mac="$(safe_mac "$(param mac)")"
+    [ "${#mac}" = 17 ] || { emit false "Speed limit" "Invalid MAC" "[]" "Enter MAC as aa:bb:cc:dd:ee:ff." "[]" "[]"; exit 0; }
+    dn="$(safe_num "$(param limit_down)")"; up="$(safe_num "$(param limit_up)")"
+    [ -n "$dn$up" ] || { emit false "Speed limit" "No limit given" "[]" "Set download and/or upload Mbps (1-1000)." "[]" "[]"; exit 0; }
+    for v in $dn $up; do [ "$v" -ge 1 ] 2>/dev/null && [ "$v" -le 1000 ] 2>/dev/null || { emit false "Speed limit" "Out of range" "[]" "Mbps must be 1-1000." "[]" "[]"; exit 0; }; done
+    key="qos_$(printf '%s' "$mac" | tr -d ':' | tr A-F a-f)"
+    uci -q set smartap."$key"='qos'; uci set smartap."$key".mac="$mac"
+    [ -n "$dn" ] && uci set smartap."$key".down="$dn" || uci -q delete smartap."$key".down
+    [ -n "$up" ] && uci set smartap."$key".up="$up" || uci -q delete smartap."$key".up
+    uci commit smartap
+    /usr/sbin/smartap-qos-apply >/tmp/dashctl.action 2>&1
+    emit true "Speed limit" "تم تفعيل حد السرعة" "[]" "الجهاز $mac: تنزيل ${dn:-بدون} Mbps · رفع ${up:-بدون} Mbps. يُعاد تطبيقه تلقائياً بعد إعادة التشغيل." "[]" "[]"; exit 0 ;;
+  clear_client_limits)
+    confirm_required "Speed limits"
+    for s in $(uci -q show smartap 2>/dev/null | awk -F'[.=]' '/=qos$/{print $2}'); do uci -q delete smartap."$s"; done
+    uci commit smartap
+    /usr/sbin/smartap-qos-apply >/tmp/dashctl.action 2>&1
+    emit true "Speed limits" "أُلغيت كل حدود السرعة" "[]" "أُزيلت كل قواعد tc وحُذفت الإعدادات المحفوظة." "[]" "[]"; exit 0 ;;
+  save_wifi_timer)
+    # Nightly Wi-Fi off/on schedule (cron). Empty times or enabled=0 removes the timer.
+    ena="$(safe_num "$(param wifi_timer_enabled)")"
+    offt="$(param wifi_off_time | sed 's/[^0-9:]//g' | cut -c1-5)"
+    ont="$(param wifi_on_time | sed 's/[^0-9:]//g' | cut -c1-5)"
+    valid_hm() { printf '%s' "$1" | grep -qE '^([01]?[0-9]|2[0-3]):[0-5][0-9]$'; }
+    cr=/etc/crontabs/root; touch "$cr"
+    grep -v '# smartap-wifi-timer' "$cr" > "$cr.tmp" 2>/dev/null; mv "$cr.tmp" "$cr"
+    if [ "$ena" = "1" ]; then
+      valid_hm "$offt" && valid_hm "$ont" || { emit false "Wi-Fi timer" "Invalid time" "[]" "استخدم صيغة HH:MM مثل 23:30 و 06:00." "[]" "[]"; exit 0; }
+      echo "${offt#*:} ${offt%%:*} * * * /sbin/wifi down # smartap-wifi-timer" >> "$cr"
+      echo "${ont#*:} ${ont%%:*} * * * /sbin/wifi up # smartap-wifi-timer" >> "$cr"
+      /etc/init.d/cron reload >/dev/null 2>&1
+      emit true "Wi-Fi timer" "مؤقت الواي فاي مفعل" "[]" "إطفاء $offt · تشغيل $ont يومياً. لوحة التحكم تبقى شغالة عبر الكيبل." "[]" "[]"; exit 0
+    else
+      /etc/init.d/cron reload >/dev/null 2>&1
+      emit true "Wi-Fi timer" "مؤقت الواي فاي معطل" "[]" "أُزيلت جدولة الإطفاء/التشغيل." "[]" "[]"; exit 0
+    fi ;;
   deauth_client)
     confirm_required "Wi-Fi Clients"
     mac="$(safe_mac "$(param mac)")"; iface="$(safe_word "$(param iface)")"; [ -n "$iface" ] || iface='phy0-ap0'
@@ -1249,9 +1289,11 @@ EOF
 )"
     form="$(form_json <<EOF
 mac|Client MAC||aa:bb:cc:dd:ee:ff
+limit_down|تنزيل Mbps / Download|10|حد التنزيل لهذا الجهاز بالميغابت|number
+limit_up|رفع Mbps / Upload|5|حد الرفع لهذا الجهاز بالميغابت|number
 EOF
 )"
-    emit true "Connected Devices" "DHCP, neighbors, ARP and block/unblock" "$cards" "$text" '[{"id":"block_mac","label":"Block MAC","confirm":true},{"id":"unblock_mac","label":"Unblock MAC","confirm":true}]' "$form" ;;
+    emit true "Connected Devices" "DHCP, neighbors, ARP and block/unblock" "$cards" "$text" '[{"id":"block_mac","label":"Block MAC","confirm":true},{"id":"unblock_mac","label":"Unblock MAC","confirm":true},{"id":"set_client_limit","label":"حد السرعة لهذا الجهاز / Set speed limit"},{"id":"clear_client_limits","label":"إلغاء كل حدود السرعة / Clear all limits","confirm":true}]' "$form" ;;
   clients)
     ifaces="$(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}' | tr '\n' ' ')"
     text="أجهزة الواي فاي المتصلة وقوة إشارتها معروضة أعلاه؛ يمكنك فصل أي جهاز."
@@ -1328,6 +1370,9 @@ wifi_ssid|SSID|${ssid:-Smart-AP}|Wireless name
 wifi_encryption|Security|${enc:-none}|none / WPA2 / WPA3 mixed|select|0|||none:Open,psk2:WPA2,sae-mixed:WPA3 mixed
 wifi_key|Wi-Fi key||Leave blank to keep the current key|password
 wifi_channel|Channel|${channel:-1}|Channel for selected radio|number
+wifi_timer_enabled|مؤقت الواي فاي الليلي|$(grep -q 'smartap-wifi-timer' /etc/crontabs/root 2>/dev/null && echo 1 || echo 0)|إطفاء وتشغيل الواي فاي تلقائياً كل يوم|select|0|||0:معطل,1:مفعل
+wifi_off_time|وقت الإطفاء|$(sed -n 's/^\([0-9]*\) \([0-9]*\) \* \* \* \/sbin\/wifi down.*/\2:\1/p' /etc/crontabs/root 2>/dev/null | head -1)|مثال 23:30
+wifi_on_time|وقت التشغيل|$(sed -n 's/^\([0-9]*\) \([0-9]*\) \* \* \* \/sbin\/wifi up.*/\2:\1/p' /etc/crontabs/root 2>/dev/null | head -1)|مثال 06:00
 wifi_htmode|HT mode|${htmode:-HE20}|HT20/HT40/VHT80/HE80
 wifi_disabled|Disabled|${disabled:-0}|1 disabled, 0 enabled|select|0|||0:Enabled,1:Disabled
 wifi_hidden|Hidden SSID|${hidden:-0}|1 hidden, 0 visible|select|0|||0:Visible,1:Hidden
@@ -1354,7 +1399,7 @@ Selected|$wifi_if|wifi-iface section|ok
 5G|$(uci -q get wireless.radio1.htmode) ch $(uci -q get wireless.radio1.channel)|radio1|neutral
 EOF
 )"
-    emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
+    emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"save_wifi_timer","label":"حفظ مؤقت الواي فاي / Save Wi-Fi timer"},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
   analyzer|channel_analysis)
     nearby="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
       run_limit 6 /usr/bin/iwinfo "$i" scan 2>/dev/null
