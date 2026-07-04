@@ -600,6 +600,8 @@ EOF
     for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
     for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
     uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
+    uci -q delete network.smartap_devip; lan_zone_del smartap_devip
+    uci set network.lan.ipaddr='192.168.1.1'; uci set network.lan.netmask='255.255.255.0'
     lan_zone_del smartap_vlan
     # unwind any AP-VLAN (old bridge-vlans + new separate bridge): plain bridge, all ports back,
     # radios back on management LAN, management DHCP back to closed (its shipped default).
@@ -651,7 +653,22 @@ EOF
       for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
     }
     store_royal_config
-    [ -n "$device_ip" ] && uci set network.lan.ipaddr="$device_ip"
+    # Ethernet access stays FIXED at 192.168.1.1 always (built-in, never overwritten by
+    # programming). The IP the user types is added as an EXTRA always-on alias on the same
+    # bridge, so the unit answers at BOTH 192.168.1.1 and the chosen IP — over cable and
+    # Wi-Fi — even in VLAN/mesh. (Wi-Fi rescue 221.221.221.221 and 192.168.66.1 also stay.)
+    uci set network.lan.ipaddr='192.168.1.1'; uci set network.lan.netmask='255.255.255.0'
+    if [ -n "$device_ip" ] && [ "$device_ip" != "192.168.1.1" ]; then
+      uci set network.smartap_devip='interface'
+      uci set network.smartap_devip.device='br-lan'
+      uci set network.smartap_devip.proto='static'
+      uci set network.smartap_devip.ipaddr="$device_ip"
+      uci set network.smartap_devip.netmask='255.255.255.0'
+      uci set network.smartap_devip.ipv6='0'
+      lan_zone_add smartap_devip
+    else
+      uci -q delete network.smartap_devip
+    fi
     ifc24="$(config_radio_iface radio0)"; [ -n "$ifc24" ] || ifc24="wifinet0"
     ifc5="$(config_radio_iface radio1)"; [ -n "$ifc5" ] || ifc5="wifinet1"
     # default both client APs ON; a mesh "receiver" below turns the 5G client AP off,
@@ -1214,7 +1231,7 @@ EOF
     reset_mode="$(saved reset_mode)"; [ -n "$reset_mode" ] || reset_mode="factory"
     form="$(form_json <<EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
-device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان الدخول الأساسي في كل الأوضاع. حتى في الفيلان/الميش يبقى الوصول مضموناً بثلاث طرق دائماً: (1) هذا العنوان عبر الكيبل والواي فاي، (2) بالكيبل على 219.219.219.219، (3) بالواي فاي على 221.221.221.221 — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
+device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضافي تدخل به على الجهاز. حتى في الفيلان/الميش يبقى الوصول مضموناً دائماً: (1) بالكيبل على 192.168.1.1 الثابت، (2) بالكيبل والواي فاي على هذا العنوان، (3) بالواي فاي على 221.221.221.221 الاحتياطي — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|

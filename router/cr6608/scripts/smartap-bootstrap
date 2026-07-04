@@ -84,6 +84,11 @@ for n in 1 2 3; do
   setv "smartap.lan$n.vlan" 1 smartap
 done
 
+# Fixed ethernet access address: 192.168.1.1 always answers over any LAN cable.
+ensure_section network.lan interface network
+setv network.lan.ipaddr 192.168.1.1 network
+setv network.lan.netmask 255.255.255.0 network
+
 # Always-on local recovery address. Users can open the dashboard by assigning
 # a client IP in 192.168.66.0/24 and browsing http://192.168.66.1/.
 ensure_section network.recovery interface network
@@ -126,17 +131,6 @@ if [ -n "$zone" ]; then
 fi
 
 
-# Cable rescue IP (reference-source 219.219.219.219): always reachable over any LAN cable,
-# even after the unit is programmed on a VLAN/mesh — open http://219.219.219.219/.
-ensure_section network.cablerescue interface network
-setv network.cablerescue.proto static network
-setv network.cablerescue.device br-lan network
-setv network.cablerescue.ipaddr 219.219.219.219 network
-setv network.cablerescue.netmask 255.255.255.0 network
-setv network.cablerescue.ipv6 0 network
-if [ -n "$zone" ]; then
-  add_list_once "firewall.$zone" network cablerescue firewall
-fi
 
 # Configure requested Tx power in UCI, while the driver/regulatory layer still
 # enforces the real maximum power supported by the country/radio.

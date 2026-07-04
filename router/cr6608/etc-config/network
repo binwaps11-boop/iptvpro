@@ -63,14 +63,7 @@ config interface 'wlanrescue'
 	option netmask '255.255.255.0'
 	option ipv6 '0'
 
-# Cable rescue IP (mirrors the reference source's ethernet bridge 219.219.219.219): always
-# answers on the bridge over ANY LAN cable. After you program the unit on a VLAN and give it
-# its own IP, you can still open the dashboard over cable at http://219.219.219.219/ (set a
-# static 219.219.219.100/24 on your laptop) — or over Wi-Fi at 221.221.221.221 — or at the
-# device's own programmed IP. All stay reachable regardless of VLAN/mesh.
-config interface 'cablerescue'
-	option device 'br-lan'
-	option proto 'static'
-	option ipaddr '219.219.219.219'
-	option netmask '255.255.255.0'
-	option ipv6 '0'
+# Cable access is the fixed LAN address 192.168.1.1 (the 'lan' interface above). It stays
+# put no matter how the unit is programmed (VLAN/mesh) because Quick Settings never
+# overwrites it — the IP you type when programming is added as an extra alias instead. So
+# over any LAN cable the dashboard always answers at http://192.168.1.1/.
