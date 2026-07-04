@@ -1,0 +1,35 @@
+#!/bin/sh
+# Make the Wi-Fi rescue IP 221.221.221.221 reachable ONLY over Wi-Fi — the same result the
+# reference source gets by putting 221 on a Wi-Fi-only bridge (br-wlan = phy0-ap0 phy1-ap0).
+#
+# On this device the Wi-Fi radios and the wired ports share one bridge (br-lan) so Wi-Fi
+# clients can reach the upstream Mikrotik untagged. To still keep 221 off the wired side, an
+# nftables *bridge*-family rule drops every ARP/IP frame for 221.221.221.221 on the WIRED
+# ports (lan1/lan2/lan3/wan). Effect:
+#   * the Mikrotik (or anything on a cable) can never reach or ping 221.221.221.221, and
+#   * the AP never announces it toward the cable, so it does not appear upstream;
+#   * the Wi-Fi AP interfaces (phy*-ap*) are untouched, so 221 opens normally over Wi-Fi.
+#
+# Matches ONLY 221.221.221.221 — all other traffic is policy-accept, so nothing else is
+# affected. Fail-safe: if nft is missing or the ruleset errors it does nothing, and cable
+# access at 192.168.1.1 always remains.
+[ -x /usr/sbin/nft ] || exit 0
+RIP="221.221.221.221"
+WIRED='"lan1", "lan2", "lan3", "wan"'
+nft -f - 2>/dev/null <<EOF || exit 0
+table bridge rescue221 {}
+delete table bridge rescue221
+table bridge rescue221 {
+	chain ingress {
+		type filter hook prerouting priority -300; policy accept;
+		iifname { $WIRED } ether type arp arp daddr ip $RIP drop
+		iifname { $WIRED } ether type ip ip daddr $RIP drop
+	}
+	chain egress {
+		type filter hook postrouting priority 300; policy accept;
+		oifname { $WIRED } ether type arp arp saddr ip $RIP drop
+		oifname { $WIRED } ether type ip ip saddr $RIP drop
+	}
+}
+EOF
+exit 0

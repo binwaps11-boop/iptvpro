@@ -1,0 +1,8 @@
+#!/bin/sh /etc/rc.common
+# Applies the Wi-Fi-only guard for the rescue IP 221.221.221.221 after the network is up.
+START=99
+STOP=10
+boot() { start; }
+start() { /usr/sbin/cr6608-rescue-guard; }
+stop() { [ -x /usr/sbin/nft ] && nft delete table bridge rescue221 2>/dev/null; return 0; }
+restart() { start; }
