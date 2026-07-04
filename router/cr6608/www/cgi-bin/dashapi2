@@ -49,19 +49,29 @@ ma="$(awk '/^MemAvailable:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"
 set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%s %s %s", $2*1024, $3*1024, $4*1024}')
 st_total="${1:-0}"; st_used="${2:-0}"; st_avail="${3:-0}"
 
+# CPU%: honest average over a >=15s window. Back-to-back dashboard polls used to make the
+# delta window equal the collector's OWN busy burst (2 polls within ~1s -> "97%" while
+# loadavg showed 0.00) — short windows now REUSE the last good reading and keep the old
+# baseline instead of resampling.
 set -- $(awk '/^cpu /{total=0; for(i=2;i<=NF;i++) total+=$i; idle=$5+$6; busy=total-idle; printf "%s %s", total, busy}' /proc/stat 2>/dev/null)
 cpu_total="${1:-0}"; cpu_busy="${2:-0}"; cpu_pct=""
 cpu_prev="/tmp/dashapi2.cpu"
 if [ -r "$cpu_prev" ]; then
-  read old_total old_busy < "$cpu_prev"
-  dt_cpu=$((cpu_total - old_total))
-  db_cpu=$((cpu_busy - old_busy))
-  if [ "$dt_cpu" -gt 0 ] 2>/dev/null && [ "$db_cpu" -ge 0 ] 2>/dev/null; then
+  read old_total old_busy old_ts old_pct < "$cpu_prev"
+  dt_wall=$((uptime_s - ${old_ts:-0}))
+  dt_cpu=$((cpu_total - ${old_total:-0}))
+  db_cpu=$((cpu_busy - ${old_busy:-0}))
+  if [ -n "$old_ts" ] && [ "$dt_wall" -ge 15 ] 2>/dev/null && [ "$dt_cpu" -gt 0 ] 2>/dev/null && [ "$db_cpu" -ge 0 ] 2>/dev/null; then
     cpu_pct="$(awk -v b="$db_cpu" -v t="$dt_cpu" 'BEGIN{v=(b/t)*100; if(v<0)v=0; if(v>100)v=100; printf "%d", v}')"
+    printf '%s %s %s %s\n' "$cpu_total" "$cpu_busy" "$uptime_s" "$cpu_pct" > "$cpu_prev" 2>/dev/null
+  elif [ "$old_pct" -ge 0 ] 2>/dev/null; then
+    cpu_pct="$old_pct"
   fi
 fi
-printf '%s %s\n' "$cpu_total" "$cpu_busy" > "$cpu_prev" 2>/dev/null
-[ -n "$cpu_pct" ] || cpu_pct="$(awk -v l="$l1" 'BEGIN{printf "%d", (l*100)/2}')"
+if [ -z "$cpu_pct" ]; then
+  cpu_pct="$(awk -v l="$l1" 'BEGIN{v=(l*100)/2; if(v<0)v=0; if(v>100)v=100; printf "%d", v}')"
+  printf '%s %s %s %s\n' "$cpu_total" "$cpu_busy" "$uptime_s" "$cpu_pct" > "$cpu_prev" 2>/dev/null
+fi
 
 temp_c=""
 for t in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
@@ -375,7 +385,17 @@ health="{\"score\":$score,\"grade\":$(jstr "$grade"),\"busy_pct\":$(jnum "$healt
 # Performance pack live state (read from uci/sysfs so the dashboard shows the REAL config).
 pget() { uci -q get "$1" 2>/dev/null; }
 pb() { [ "$1" = "1" ] && echo true || echo false; }
-perf="{\"txpower\":$(jnum "$(pget wireless.radio1.txpower)"),\"dynack\":$([ "$(pget wireless.radio0.distance)" = "auto" ] && echo true || echo false),\"ldpc\":$(pb "$(pget wireless.radio1.ldpc)"),\"stbc\":$(pb "$(pget wireless.radio1.tx_stbc)"),\"sgi\":$(pb "$(pget wireless.radio1.short_gi_80)"),\"su_bf\":$(pb "$(pget wireless.radio1.he_su_beamformer)"),\"mu_bf_he\":$(pb "$(pget wireless.radio1.he_mu_beamformer)"),\"mu_bf_vht\":$(pb "$(pget wireless.radio1.mu_beamformer)"),\"spatial_reuse\":$([ -n "$(pget wireless.radio1.he_spr_sr_control)" ] && echo true || echo false),\"bss_color\":$(pb "$(pget wireless.radio1.he_bss_color)"),\"airtime\":$(pb "$(pget wireless.radio0.airtime_mode)"),\"kv\":$(pb "$(pget wireless.wifinet0.ieee80211k)"),\"m2u\":$(pb "$(pget wireless.wifinet0.multicast_to_unicast)"),\"maxassoc\":$(jnum "$(pget wireless.wifinet0.maxassoc)"),\"max_inact\":$(jnum "$(pget wireless.wifinet0.max_inactivity)"),\"keep_weak\":$([ "$(pget wireless.wifinet0.disassoc_low_ack)" = "0" ] && echo true || echo false),\"hw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading_hw)"),\"sw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading)"),\"rps\":$(pb "$(pget network.globals.packet_steering)"),\"dns_cache\":$(jnum "$(pget dhcp.@dnsmasq[0].cachesize)"),\"fastopen\":$([ "$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null)" = "3" ] && echo true || echo false),\"backlog\":$(jnum "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)")}"
+# perf JSON is ~24 uci/sysfs forks; cache it for 60s so fast dashboard polls don't burn CPU.
+perf_cache="/tmp/dashapi2.perf"
+perf=""
+if [ -r "$perf_cache" ]; then
+  pc_ts="$(sed -n '1p' "$perf_cache" 2>/dev/null)"
+  [ "$((uptime_s - ${pc_ts:-0}))" -lt 60 ] 2>/dev/null && perf="$(sed -n '2p' "$perf_cache" 2>/dev/null)"
+fi
+if [ -z "$perf" ]; then
+  perf="{\"txpower\":$(jnum "$(pget wireless.radio1.txpower)"),\"dynack\":$([ "$(pget wireless.radio0.distance)" = "auto" ] && echo true || echo false),\"ldpc\":$(pb "$(pget wireless.radio1.ldpc)"),\"stbc\":$(pb "$(pget wireless.radio1.tx_stbc)"),\"sgi\":$(pb "$(pget wireless.radio1.short_gi_80)"),\"su_bf\":$(pb "$(pget wireless.radio1.he_su_beamformer)"),\"mu_bf_he\":$(pb "$(pget wireless.radio1.he_mu_beamformer)"),\"mu_bf_vht\":$(pb "$(pget wireless.radio1.mu_beamformer)"),\"spatial_reuse\":$([ -n "$(pget wireless.radio1.he_spr_sr_control)" ] && echo true || echo false),\"bss_color\":$(pb "$(pget wireless.radio1.he_bss_color)"),\"airtime\":$(pb "$(pget wireless.radio0.airtime_mode)"),\"kv\":$(pb "$(pget wireless.wifinet0.ieee80211k)"),\"m2u\":$(pb "$(pget wireless.wifinet0.multicast_to_unicast)"),\"maxassoc\":$(jnum "$(pget wireless.wifinet0.maxassoc)"),\"max_inact\":$(jnum "$(pget wireless.wifinet0.max_inactivity)"),\"keep_weak\":$([ "$(pget wireless.wifinet0.disassoc_low_ack)" = "0" ] && echo true || echo false),\"hw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading_hw)"),\"sw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading)"),\"rps\":$(pb "$(pget network.globals.packet_steering)"),\"dns_cache\":$(jnum "$(pget dhcp.@dnsmasq[0].cachesize)"),\"fastopen\":$([ "$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null)" = "3" ] && echo true || echo false),\"backlog\":$(jnum "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)")}"
+  { echo "$uptime_s"; echo "$perf"; } > "$perf_cache" 2>/dev/null
+fi
 
 printf '{"ok":true,"hostname":%s,"model":%s,"board_name":"xiaomi,mi-router-cr6608","target":"ramips/mt7621","os":%s,"kernel":%s,"uptime":%s,"load":[%s,%s,%s],"cpu":{"cores":2,"percent":%s,"source":"/proc/stat"},"mem":{"total":%s,"free":%s,"available":%s,"source":"/proc/meminfo"},"storage":{"total":%s,"used":%s,"available":%s,"source":"df -k /overlay"},"temperature_c":%s,"lan_ip":%s,"clients":%s,"backhaul":{"online":%s,"default_route":%s,"device":%s,"gateway":%s},"traffic":{"source":"/proc/net/dev","rx_bytes":%s,"tx_bytes":%s,"rx_bps":%s,"tx_bps":%s},"switch":{"mode":"DSA","ipv6_lan":false},"latency_ms":%s,"health":%s,"perf":%s,"lte":{"available":false},"interfaces":%s,"wifi":%s,"devices":%s}\n' \
   "$(jstr "$host")" "$(jstr "$model")" "$(jstr "$osver")" "$(jstr "$kernel")" "$(jnum "$uptime_s")" \

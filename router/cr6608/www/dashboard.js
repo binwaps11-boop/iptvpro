@@ -455,7 +455,9 @@
     var map = {};
     (data.devices || []).forEach(function (d) { var k = String(d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet", host:d.host }; });
     (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); var t = stationTraffic(s); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate, down:t.down, up:t.up, downBytes:t.downBytes, upBytes:t.upBytes, hasTraffic:t.hasCounters }); }); });
-    return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; });
+    // Owner rule: the devices list shows Wi-Fi clients ONLY (2.4G + 5G). Wired/managed
+    // gear on lan1..wan already appears in the LLDP/CDP neighbours section — no repeats.
+    return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; }).filter(function (e) { return e.type === "WiFi"; });
   }
   function wifiBand(data, band) { return (data.wifi || []).filter(function (w) { return w.band === band; })[0] || null; }
   function updateAvailability(ok) {
@@ -648,7 +650,7 @@
       [tr("model"), data.model || tr("unavailable"), "model", 1],
       [tr("firmware"), "OpenWrt " + (data.os || ""), "firmware", 1],
       [tr("internet"), internet, "internet", back.online ? 1 : 0],
-      [tr("deviceCount"), String(Math.max(Number(data.clients)||0, mergeDevices(data).length, (w24?Number(w24.clients)||0:0)+(w5?Number(w5.clients)||0:0))), "devices", 1],
+      [tr("deviceCount"), String(Math.max(mergeDevices(data).length, (w24?Number(w24.clients)||0:0)+(w5?Number(w5.clients)||0:0))), "devices", 1],
       ["2.4G", w24 ? ((w24.ssid || "2.4G") + " · " + (w24.clients || 0)) : tr("unavailable"), "w24", w24 ? 1 : 0],
       ["5G", w5 ? ((w5.ssid || "5G") + " · " + (w5.clients || 0)) : tr("unavailable"), "w5", w5 ? 1 : 0],
       [tr("updated"), nowTime(), "updated", 1]
