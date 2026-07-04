@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", total: "الإجمالي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", total: "الإجمالي", rename: "تسمية الجهاز", renamePrompt: "اسم الجهاز:", limitPrompt: "حد السرعة (ميغابت/ث):", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية", clientTraffic: "التحميل / الرفع",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", total: "Total", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", total: "Total", rename: "Rename device", renamePrompt: "Device name:", limitPrompt: "Speed limit (Mbps):", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports", clientTraffic: "Down / Up",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -454,7 +454,7 @@
   function mergeDevices(data) {
     var map = {};
     (data.devices || []).forEach(function (d) { var k = String(d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet", host:d.host }; });
-    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate }); }); });
+    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); var t = stationTraffic(s); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate, down:t.down, up:t.up, downBytes:t.downBytes, upBytes:t.upBytes, hasTraffic:t.hasCounters }); }); });
     return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; });
   }
   function wifiBand(data, band) { return (data.wifi || []).filter(function (w) { return w.band === band; })[0] || null; }
@@ -800,7 +800,7 @@
       '<div class="branch-actions"><button class="btn primary" id="lanScanBtn">' + esc(tr("scanLan")) + '</button></div>' +
       '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "LLDP · ARP · FDB", "net");
     var live = rows.length ? sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
-      '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("clientTraffic") + '</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
         var vn = d.vendor || tr("unknownVendor");
         var m = esc(d.mac || "");
@@ -810,7 +810,11 @@
         // show the user-assigned name first (if any), then the DHCP host as a sub-line
         var nameLine = cn ? '<b>' + esc(cn) + '</b><br>' : "";
         var ipHost = nameLine + esc(d.ip || tr("unavailable")) + (d.host ? '<br><small class="muted latin">' + esc(d.host) + '</small>' : "");
-        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + acts + '</td></tr>';
+        // live per-client download / upload (from the Wi-Fi driver station counters)
+        var traf = d.hasTraffic
+          ? '<span class="latin" style="color:var(--accent);white-space:nowrap">↓ ' + bps(d.down || 0) + '</span><br><span class="latin" style="color:var(--primary);white-space:nowrap">↑ ' + bps(d.up || 0) + '</span>'
+          : '<span class="muted">—</span>';
+        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + traf + '</td><td>' + acts + '</td></tr>';
       }).join("") +
       '</tbody></table></div>' :
       sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';

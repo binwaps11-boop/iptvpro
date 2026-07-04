@@ -36,22 +36,9 @@ config interface 'recovery'
 	option netmask '255.255.255.0'
 	option ipv6 '0'
 
-# Upstream detector: a DHCP client on the bridge. If it gets a lease, an upstream router
-# (the Mikrotik) is present -> the recovery DHCP server is auto-disabled by the guard
-# hotplug, so there is never a two-DHCP conflict in production.
-config interface 'mgmt'
-	option device 'br-lan'
-	option proto 'dhcp'
-	option hostname 'CR6608-Smart-AP'
-	option metric '10'
-	option ipv6 '0'
-
-config interface 'wan'
-	option device 'wan'
-	option proto 'dhcp'
-	option ipv6 '0'
-	option disabled '1'
-	option auto '0'
+# NOTE: there is deliberately NO DHCP client interface here. The device never requests
+# an address from anywhere and never hands one out. The 'wan' physical port stays a plain
+# member of br-lan (a 4th LAN port). Access is always the static addresses below.
 
 # Wi-Fi rescue IP (mirrors the reference source): 221.221.221.221 always answers on the
 # bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like

@@ -31,10 +31,6 @@ config dhcp 'lan'
 	option ra 'disabled'
 	option ndp 'disabled'
 
-config dhcp 'wan'
-	option interface 'wan'
-	option ignore '1'
-
 config odhcpd 'odhcpd'
 	option disabled '1'
 	option maindhcp '0'

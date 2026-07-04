@@ -11,7 +11,6 @@ config defaults
 config zone
 	option name 'lan'
 	list network 'lan'
-	list network 'mgmt'
 	list network 'recovery'
 	list network 'wlanrescue'
 	option input 'ACCEPT'

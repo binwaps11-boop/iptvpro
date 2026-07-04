@@ -99,22 +99,18 @@ setv network.recovery.netmask 255.255.255.0 network
 setv network.recovery.ipv6 0 network
 setv network.recovery.auto 1 network
 
-# DHCP management alias used on upstream/Mikrotik networks. smartap-mgmt-sync
-# reflects this lease into the kernel route table when netifd misses it.
-ensure_section network.mgmt interface network
-setv network.mgmt.proto dhcp network
-setv network.mgmt.device br-lan network
-setv network.mgmt.metric 10 network
-setv network.mgmt.ipv6 0 network
-setv network.mgmt.hostname "$host" network
+# No DHCP client here. The device must never request an address from upstream nor hand
+# one out. Any leftover 'mgmt' DHCP-client interface from an older build is removed so it
+# can never reappear in LuCI or pull a lease.
+uci -q delete network.mgmt 2>/dev/null || true
+uci -q delete network.wan 2>/dev/null || true
 
-# Keep the recovery and DHCP management interfaces inside the trusted LAN zone.
+# Keep the recovery interface inside the trusted LAN zone.
 zone="$(find_lan_zone)"
 if [ -n "$zone" ]; then
   setv "firewall.$zone.input" ACCEPT firewall
   add_list_once "firewall.$zone" network lan firewall
   add_list_once "firewall.$zone" network recovery firewall
-  add_list_once "firewall.$zone" network mgmt firewall
 fi
 
 
