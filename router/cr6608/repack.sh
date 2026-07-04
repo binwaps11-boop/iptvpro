@@ -80,7 +80,7 @@ else
 fi
 "$FWTOOL" -I "$META" "$OUT"
 # تحقّق أن metadata أصبحت موجودة وتطابق اللوحة
-"$FWTOOL" -q -i "$WORK/verify-meta.json" "$OUT" && grep -q 'xiaomi,mi-router-cr6608' "$WORK/verify-meta.json" \
+"$FWTOOL" -q -i "$WORK/verify-meta.json" "$OUT" && grep -q 'new_supported_devices' "$WORK/verify-meta.json" && grep -q 'xiaomi,mi-router-cr6608' "$WORK/verify-meta.json" \
 	&& echo "✓ metadata مضافة واللوحة مطابقة" || { echo "خطأ: فشل التحقق من metadata" >&2; exit 1; }
 
 echo "تم: $OUT"
