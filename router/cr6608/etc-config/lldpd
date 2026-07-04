@@ -6,4 +6,8 @@ config lldpd 'config'
 	option lldp_class '4'
 	option lldp_description 'Smart AP CR6608'
 	option lldp_hostname 'CR6608-Smart-AP'
+	# Do NOT advertise any management IP to neighbours. The AP still appears in the
+	# Mikrotik's neighbour list by name, but its addresses (especially the Wi-Fi rescue
+	# IP 221.221.221.221) never leak into the Mikrotik.
+	option lldp_mgmt_addr_advertisements '0'
 	list interface 'br-lan'
