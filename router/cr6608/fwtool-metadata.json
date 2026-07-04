@@ -1,1 +1,12 @@
-{  "metadata_version": "1.1", "compat_version": "1.1",  "new_supported_devices": ["xiaomi,mi-router-cr6608"], "supported_devices": ["xiaomi,mi-router-cr6608 - Image version mismatch: image 1.1, device 1.0. Please wipe config during upgrade (force required) or reinstall. Please check documentation ..."],  "version": { "dist": "OpenWrt", "version": "24.10.6", "revision": "r29141-81be8a8869", "target": "ramips/mt7621", "board": "xiaomi_mi-router-cr6608" } }
+{
+	"metadata_version": "1.1",
+	"compat_version": "1.0",
+	"supported_devices": ["xiaomi,mi-router-cr6608"],
+	"version": {
+		"dist": "OpenWrt",
+		"version": "24.10.6",
+		"revision": "r29141-81be8a8869",
+		"target": "ramips/mt7621",
+		"board": "xiaomi_mi-router-cr6608"
+	}
+}

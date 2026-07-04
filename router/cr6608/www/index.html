@@ -157,13 +157,25 @@
     .btn.dev-action { min-height:32px; padding:0 10px; border-radius:9px; font-size:12px; }
     .prox { display:inline-block; margin-inline-start:6px; font-size:11px; font-weight:700; letter-spacing:.5px;
       padding:1px 7px; border-radius:8px; background:rgba(148,185,255,.10); white-space:nowrap; }
+    .hs-wrap { display:flex; gap:14px; align-items:center; }
+    .hs-score { flex:0 0 auto; width:84px; height:84px; border-radius:50%; border:4px solid; display:flex;
+      flex-direction:column; align-items:center; justify-content:center; }
+    .hs-score b { font-size:26px; font-weight:800; line-height:1; }
+    .hs-score small { font-size:11px; opacity:.7; }
+    .hs-reasons { flex:1 1 auto; display:flex; flex-direction:column; gap:5px; }
+    .hs-reason { font-size:12.5px; padding:5px 9px; border-radius:8px; background:rgba(148,185,255,.08);
+      padding-inline-start:9px; line-height:1.35; }
     .seg { display:flex; gap:4px; padding:4px; border:1px solid rgba(148,180,255,.18); border-radius:14px; background:rgba(5,9,20,.5); }
     .seg button { min-height:30px; padding:0 10px; border-color:transparent; background:transparent; color:rgba(206,220,244,.72); }
     .seg button.active { background:linear-gradient(135deg,rgba(37,99,235,.85),rgba(6,182,212,.65)); color:#fff; box-shadow:0 4px 14px rgba(6,182,212,.28); }
     html[data-theme="light"] .btn, html[data-theme="light"] select, html[data-theme="light"] input { background:#FFFFFF; border-color:rgba(18,32,71,.16); color:var(--text); }
     html[data-theme="light"] .seg { background:#FFFFFF; border-color:rgba(18,32,71,.16); }
     html[data-theme="light"] .seg button { color:var(--muted); background:transparent; }
-    html[data-theme="light"] .seg button.active, html[data-theme="light"] .btn.active, html[data-theme="light"] .btn.primary { color:#fff; }
+    html[data-theme="light"] .seg button.active { color:#fff; }
+    /* light-theme .btn sets a white background; primary/active MUST also restore their
+       gradient background here, otherwise it's white text on a white button (invisible). */
+    html[data-theme="light"] .btn.primary { background:var(--grad); border-color:transparent; color:#fff; box-shadow:0 12px 32px rgba(37,99,235,.32), inset 0 1px 0 rgba(255,255,255,.28); }
+    html[data-theme="light"] .btn.active { background:linear-gradient(135deg,rgba(37,99,235,.9),rgba(6,182,212,.7)); border-color:transparent; color:#fff; box-shadow:0 10px 28px rgba(6,182,212,.22); }
     /* hero keeps its royal-dark controls even in light theme */
     html[data-theme="light"] .hero .btn, html[data-theme="light"] .hero select { background:rgba(5,9,20,.55); border-color:rgba(148,180,255,.2); color:#EDF2FC; }
     html[data-theme="light"] .hero .seg { background:rgba(5,9,20,.5); border-color:rgba(148,180,255,.2); }

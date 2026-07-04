@@ -66,9 +66,22 @@ for m in src.getmembers():
 src.close(); dst.close()
 PYEOF
 
-# 7) إلحاق metadata (بدون توقيع — الجهاز بلا /usr/bin/ucert فلا يتحقق من التواقيع)
+# 7) إلحاق metadata — إلزامي حتى يقبلها sysupgrade (بدون هذه الخطوة يظهر خطأ
+#    "Image metadata not present"). نفضّل ملف fwtool-metadata.json المرفق بالمستودع
+#    (compat_version 1.0 + supported_devices الصحيح) لأن الصورة الأصلية قد تكون بلا metadata.
 cp "$WORK/new.tar" "$OUT"
-"$FWTOOL" -I "$WORK/meta.json" "$OUT"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -s "$SCRIPT_DIR/fwtool-metadata.json" ]; then
+	META="$SCRIPT_DIR/fwtool-metadata.json"
+elif [ -s "$WORK/meta.json" ]; then
+	META="$WORK/meta.json"
+else
+	echo "خطأ: لا يوجد ملف metadata — الصورة لن تُقبل بدون -F" >&2; exit 1
+fi
+"$FWTOOL" -I "$META" "$OUT"
+# تحقّق أن metadata أصبحت موجودة وتطابق اللوحة
+"$FWTOOL" -q -i "$WORK/verify-meta.json" "$OUT" && grep -q 'xiaomi,mi-router-cr6608' "$WORK/verify-meta.json" \
+	&& echo "✓ metadata مضافة واللوحة مطابقة" || { echo "خطأ: فشل التحقق من metadata" >&2; exit 1; }
 
 echo "تم: $OUT"
 echo "الفلاش: LuCI → System → Backup/Flash Firmware، أو: sysupgrade -v $OUT"

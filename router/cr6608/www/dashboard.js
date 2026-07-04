@@ -42,6 +42,11 @@
       signal: "الإشارة", network: "الترافيك", devices: "الأجهزة", wifi: "WiFi",
       system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
       vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف", near: "قريب", mid: "متوسط", far: "بعيد",
+      scanNeighbors: "فحص القنوات والشبكات المجاورة", scanning: "جاري الفحص…", bestChannel: "أفضل قناة",
+      neighbors: "الشبكات المجاورة", noNeighbors: "لم يُعثر على شبكات مجاورة", applyBest: "طبّق أفضل قناة",
+      recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
+      healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
+      clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
       netmgr: "الشبكة", wifimgr: "لاسلكي", sysmgr: "النظام",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -80,6 +85,11 @@
       signal: "Signal", network: "Traffic", devices: "Devices", wifi: "WiFi",
       system: "System Health", actions: "Actions", isolation: "Isolation",
       vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown", near: "Near", mid: "Medium", far: "Far",
+      scanNeighbors: "Scan channels & neighbors", scanning: "Scanning…", bestChannel: "Best channel",
+      neighbors: "Neighboring networks", noNeighbors: "No neighboring networks found", applyBest: "Apply best channel",
+      recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
+      healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
+      clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
       netmgr: "Network", wifimgr: "Wireless", sysmgr: "System",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -595,25 +605,150 @@
       }).join("") +
       '</tbody></table></div>';
   }
+  function healthCard(data) {
+    var h = data.health; if (!h) return "";
+    var score = num(h.score); if (!finite(score)) return "";
+    var col = score >= 85 ? "var(--excellent)" : score >= 70 ? "var(--good)" : score >= 50 ? "var(--mid)" : "var(--weak)";
+    var reasons = (h.reasons || []).map(function (r) {
+      var rc = r.level === "ok" ? "var(--excellent)" : r.level === "mid" ? "var(--mid)" : "var(--weak)";
+      var msg = state.lang === "ar" ? (r.ar || r.en) : (r.en || r.ar);
+      return '<div class="hs-reason" style="border-inline-start:3px solid ' + rc + '">' + esc(msg) + '</div>';
+    }).join("");
+    var extra = '<div class="grid two" style="margin-top:10px">' +
+      '<div class="traffic-box"><span>' + tr("airtime") + '</span><b class="latin">' + (finite(num(h.busy_pct)) ? h.busy_pct + "%" : tr("unavailable")) + '</b></div>' +
+      '<div class="traffic-box"><span>' + tr("latency") + '</span><b class="latin">' + (finite(num(data.latency_ms)) ? fmt(num(data.latency_ms), 1) + " ms" : tr("unavailable")) + '</b></div></div>';
+    var body = '<div class="hs-wrap"><div class="hs-score" style="color:' + col + ';border-color:' + col + '"><b>' + score + '</b><small>/100</small></div>' +
+      '<div class="hs-reasons">' + (reasons || '<div class="hs-reason">' + esc(tr("ok")) + '</div>') + '</div></div>' + extra;
+    return card(tr("healthScore"), body, tr(h.grade === "excellent" ? "ok" : h.grade === "weak" ? "warn" : "ok"), "shield");
+  }
   function renderWifi(data) {
     var w = data.wifi || [];
     var body = w.length ? '<div class="grid two">' + w.map(function (x) {
       var sig = num(x.signal_dbm), q = quality("rssi", sig);
+      var busy = x.survey ? num(x.survey.busy_pct) : null;
       var sta = (x.stations || []).map(function (s) {
         var ss = num(s.signal_dbm), qq = quality("rssi", ss);
-        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + '</span><b class="latin">' + (finite(ss) ? ss + " dBm" : tr("unavailable")) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + '</div>';
+        var rate = num(s.tx_rate), rrate = num(s.rx_rate), exp = num(s.expected_mbps);
+        var meta = [];
+        if (finite(rate)) meta.push("TX " + fmt(rate, 0));
+        if (finite(rrate)) meta.push("RX " + fmt(rrate, 0));
+        if (finite(exp)) meta.push("~" + fmt(exp, 0));
+        var metaStr = meta.length ? '<small class="muted latin">' + esc(meta.join(" · ") + " Mbps") + '</small>' : "";
+        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + metaStr + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
-      return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>Channel</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div></div><h4>Clients</h4>' + sta, esc(x.hw_modes || ""), "wifi");
+      var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
+      return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>' + tr("channel") + '</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div>' + busyRow + '</div><h4>Clients · ' + tr("linkRate") + '</h4>' + sta, esc(x.hw_modes || ""), "wifi");
     }).join("") + '</div>' : '<div class="empty">' + tr("unavailable") + '</div>';
+    // count total connected stations to decide whether to show the radar
+    var totalSta = w.reduce(function (a, x) { return a + ((x.stations || []).length); }, 0);
     if (w.length) {
-      // draw now, then once more after the section finishes expanding (canvas measured
-      // too early renders scaled-up, overlapping labels)
       setTimeout(function () { drawChannels($("channelCanvas"), w); }, 0);
       setTimeout(function () { drawChannels($("channelCanvas"), w); }, 450);
+      setTimeout(function () { drawConstellation($("constellationCanvas"), w); }, 0);
+      setTimeout(function () { drawConstellation($("constellationCanvas"), w); }, 450);
     }
     var chanCard = w.length ? card(state.lang === "ar" ? "إشغال القنوات" : "Channel occupancy",
       '<canvas id="channelCanvas" style="width:100%;height:150px"></canvas>', "2.4G / 5G", "signal") : "";
-    return sectionHead("WiFi AX / AC / N", "Clients, RSSI, link rate", "offline") + chanCard + body;
+    var radarCard = totalSta ? card(tr("clientRadar"),
+      '<canvas id="constellationCanvas" style="width:100%;height:230px"></canvas><p class="muted" style="text-align:center">' + esc(tr("constellation")) + '</p>', totalSta + "", "device") : "";
+    // best-channel scan + neighboring networks (on-demand; scanning briefly dips throughput)
+    var scanCard = card(tr("bestChannel") + " · " + tr("neighbors"),
+      '<div class="branch-actions"><button class="btn primary" id="wifiScanBtn">' + esc(tr("scanNeighbors")) + '</button></div>' +
+      '<div id="wifiScanResult"></div>', "iw scan", "signal");
+    return sectionHead("WiFi AX / AC / N", "Clients, RSSI, " + tr("linkRate"), "offline") +
+      healthCard(data) + chanCard + scanCard + radarCard + body;
+  }
+  // Client constellation radar: clients orbit the AP, radius = signal (strong→center),
+  // colour = band, dot size = link rate. Pure offline canvas over live assoclist data.
+  function drawConstellation(canvas, wifiList) {
+    if (!canvas) return;
+    var host = canvas.parentElement || canvas, dpr = window.devicePixelRatio || 1;
+    var hostW = host.getBoundingClientRect().width;
+    if (window.getComputedStyle) { var cs = getComputedStyle(host); hostW -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0); }
+    var w = Math.max(260, Math.floor(hostW || 300)), h = 230;
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+    var ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+    var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 18;
+    var grid = cssVar("--border", "rgba(148,163,184,.16)"), muted = cssVar("--muted", "#94A3B8");
+    var accent = cssVar("--accent", "#06B6D4"), primary = cssVar("--primary", "#3B82F6");
+    // range rings (−45/−60/−75/−90 dBm)
+    ctx.strokeStyle = grid; ctx.lineWidth = 1;
+    [0.33, 0.66, 1].forEach(function (f) { ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); ctx.stroke(); });
+    ctx.fillStyle = muted; ctx.font = "9px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("-45", cx, cy - R * 0.33 + 3); ctx.fillText("-75", cx, cy - R * 0.66 + 3); ctx.fillText("-90", cx, cy - R + 3);
+    // centre AP
+    ctx.fillStyle = primary; ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
+    var pts = [];
+    (wifiList || []).forEach(function (x) {
+      var band5 = x.band === "5G";
+      (x.stations || []).forEach(function (s) { pts.push({ sig: num(s.signal_dbm), rate: num(s.tx_rate), band5: band5, mac: s.mac }); });
+    });
+    var n = pts.length || 1, i = 0;
+    pts.forEach(function (p) {
+      var sig = finite(p.sig) ? clamp(p.sig, -95, -30) : -75;
+      var frac = (-30 - sig) / (-30 - -95); // 0 (strong, near) .. 1 (weak, far)
+      var rad = 16 + frac * (R - 20);
+      var ang = (i / n) * Math.PI * 2 - Math.PI / 2; i++;
+      var px = cx + rad * Math.cos(ang), py = cy + rad * Math.sin(ang);
+      var col = p.band5 ? primary : accent;
+      var sz = 4 + clamp((finite(p.rate) ? p.rate : 100) / 200, 0, 6);
+      ctx.strokeStyle = hexA(col, 0.35); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.stroke();
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(px, py, sz, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hexA(col, 0.18); ctx.beginPath(); ctx.arc(px, py, sz + 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = muted; ctx.font = "9px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(finite(p.sig) ? p.sig + "" : "?", px, py - sz - 4);
+    });
+  }
+  async function scanWifi() {
+    var btn = $("wifiScanBtn"), box = $("wifiScanResult");
+    if (!btn || !box) return;
+    btn.disabled = true; var old = btn.textContent; btn.textContent = tr("scanning");
+    box.innerHTML = '<div class="ctl-status">' + esc(tr("scanning")) + '</div>';
+    try {
+      var r = await fetch(CTL, { method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "section=wifiscan&action=secscan_run&" + sidQuery() + "&_=" + Date.now() });
+      if (r.status === 403) { requireLogin(tr("loginBad")); return; }
+      var d = await r.json();
+      box.innerHTML = renderScanResult(d);
+      bindDynamic();
+    } catch (e) {
+      box.innerHTML = '<div class="ctl-status">' + esc("scan: " + e.message) + '</div>';
+    } finally { btn.disabled = false; btn.textContent = old; }
+  }
+  function renderScanResult(d) {
+    if (!d || !d.ok) return '<div class="ctl-status">' + esc(tr("noNeighbors")) + '</div>';
+    var neigh = (d.neighbors || []).slice().sort(function (a, b) { return (num(b.signal) || -999) - (num(a.signal) || -999); });
+    var rogues = neigh.filter(function (x) { return x.rogue; });
+    var best24 = num(d.best24), best5 = num(d.best5), cur24 = num(d.cur24), cur5 = num(d.cur5);
+    var reco = '<div class="grid two" style="margin-bottom:10px">' +
+      '<div class="ctl-card ok"><span>2.4G ' + tr("recommended") + '</span><b class="latin">' + (finite(best24) ? best24 : "-") + '</b><small>' + tr("current") + ": " + (finite(cur24) ? cur24 : "-") + '</small></div>' +
+      '<div class="ctl-card ok"><span>5G ' + tr("recommended") + '</span><b class="latin">' + (finite(best5) ? best5 : "-") + '</b><small>' + tr("current") + ": " + (finite(cur5) ? cur5 : "-") + '</small></div></div>';
+    var applyBtn = (finite(best24) || finite(best5)) ?
+      '<div class="branch-actions"><button class="btn primary" id="wifiApplyChanBtn" data-ch24="' + (finite(best24) ? best24 : "") + '" data-ch5="' + (finite(best5) ? best5 : "") + '">' + esc(tr("applyBest")) + ' (2.4G ' + (finite(best24) ? best24 : "-") + ' · 5G ' + (finite(best5) ? best5 : "-") + ')</button></div>' : "";
+    var rogueHtml = rogues.length ? '<div class="hs-reason" style="border-inline-start:3px solid var(--weak);margin-bottom:8px"><b>⚠ ' + esc(tr("rogueAlert")) + '</b> — ' + esc(tr("rogueDesc")) + ' (' + rogues.length + ')</div>' : "";
+    var list = neigh.length ? '<div class="table-wrap"><table><thead><tr><th>SSID</th><th>' + tr("channel") + '</th><th>Signal</th><th>BSSID</th></tr></thead><tbody>' +
+      neigh.slice(0, 30).map(function (x) {
+        var sg = num(x.signal);
+        return '<tr' + (x.rogue ? ' style="background:rgba(239,68,68,.12)"' : '') + '><td>' + esc(x.ssid || "—") + (x.rogue ? ' ⚠' : '') + '</td><td class="latin">' + esc(x.ch || "?") + '</td><td class="latin">' + (finite(sg) ? sg + " dBm " + proximity(sg) : "?") + '</td><td class="latin">' + esc((x.bssid || "").toUpperCase()) + '</td></tr>';
+      }).join("") + '</tbody></table></div>' : '<div class="empty">' + tr("noNeighbors") + '</div>';
+    return reco + applyBtn + '<h4>' + tr("neighbors") + ' (' + neigh.length + ')</h4>' + rogueHtml + list;
+  }
+  async function applyBestChannels(ch24, ch5) {
+    try {
+      var body = "section=wifiscan&action=apply_best_channels&confirm=1";
+      if (ch24) body += "&ch24=" + encodeURIComponent(ch24);
+      if (ch5) body += "&ch5=" + encodeURIComponent(ch5);
+      var r = await fetch(CTL, { method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body + "&" + sidQuery() + "&_=" + Date.now() });
+      if (r.status === 403) { requireLogin(tr("loginBad")); return; }
+      var j = await r.json();
+      toast(j.summary || tr("ok"));
+      event("Best channel applied: 2.4G=" + (ch24 || "-") + " 5G=" + (ch5 || "-"));
+      setTimeout(loadData, 800);
+    } catch (e) { toast(e.message); }
   }
   // theme-aware Wi-Fi channel occupancy (net-new, offline canvas)
   function drawChannels(canvas, wifiList) {
@@ -657,8 +792,12 @@
       ctx.fillStyle = hexA(color, 0.28); ctx.fill();
       ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
       ctx.moveTo(cx - span, base); ctx.quadraticCurveTo(cx, base - bh - 14, cx + span, base); ctx.stroke();
-      ctx.fillStyle = color; ctx.font = "bold 11px system-ui"; ctx.textAlign = "center";
-      ctx.fillText((band5 ? "5G·" : "2.4G·") + ch + " (" + cl + ")", cx, base - bh - 18);
+      ctx.fillStyle = color; ctx.font = "bold 11px system-ui";
+      // 2.4G labels anchor to the right of the peak, 5G to the left, and the two bands
+      // sit at different heights — so an adjacent 11|36 pair never glues into one string.
+      ctx.textAlign = band5 ? "left" : "right";
+      var lx = band5 ? cx + 3 : cx - 3, ly = base - bh - (band5 ? 6 : 20);
+      ctx.fillText((band5 ? "5G " : "2.4G ") + ch + " (" + cl + ")", lx, ly);
     });
   }
   // rgba() from a hex/color var with alpha
@@ -1132,6 +1271,10 @@
         } catch (e) { toast(e.message); }
       };
     });
+    var scanBtn = $("wifiScanBtn");
+    if (scanBtn) scanBtn.onclick = scanWifi;
+    var applyChan = $("wifiApplyChanBtn");
+    if (applyChan) applyChan.onclick = function () { applyBestChannels(applyChan.dataset.ch24, applyChan.dataset.ch5); };
     var d = $("dailyBudget"), m = $("monthBudget");
     if (d) d.onchange = function () { localStorage.setItem(LS + "dailyBudgetGb", Math.max(1, Number(d.value)||5)); loadData(); };
     if (m) m.onchange = function () { localStorage.setItem(LS + "monthBudgetGb", Math.max(1, Number(m.value)||100)); loadData(); };

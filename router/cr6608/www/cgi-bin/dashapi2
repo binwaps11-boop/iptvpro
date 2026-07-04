@@ -189,6 +189,22 @@ if [ -r "$traffic_prev" ]; then
 fi
 printf '%s %s %s\n' "$traffic_rx" "$traffic_tx" "$traffic_now" > "$traffic_prev" 2>/dev/null || true
 
+# Per-radio channel survey (real airtime): busy%, noise floor, active/busy ms.
+# Uses nl80211 survey; the "[in use]" block is the channel the radio is actually on.
+survey_json() {
+  ifname="$1"
+  iw dev "$ifname" survey dump 2>/dev/null | awk '
+    /\[in use\]/{inuse=1; next}
+    inuse && /noise:/{ v=$0; gsub(/[^0-9-]/,"",v); n=v }
+    inuse && /channel active time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) a=$i }
+    inuse && /channel busy time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) b=$i }
+    inuse && /^[[:space:]]*$/{ inuse=0 }
+    END{
+      if (a>0) printf "{\"busy_pct\":%d,\"noise_dbm\":%d,\"active_ms\":%d,\"busy_ms\":%d}", int(b*100/a), n+0, a+0, b+0;
+      else printf "{\"busy_pct\":null,\"noise_dbm\":%d,\"active_ms\":0,\"busy_ms\":0}", n+0;
+    }'
+}
+
 station_json() {
   ifname="$1"
   printf '['
@@ -202,8 +218,17 @@ station_json() {
         snr="$(printf '%s\n' "$line" | sed -n 's/.*SNR \([-0-9.]*\).*/\1/p')"
         ip="$(awk -v m="$(printf '%s' "$mac" | tr A-F a-f)" 'tolower($4)==m{print $1; exit}' /proc/net/arp 2>/dev/null)"
         [ -n "$ip" ] || ip="$(awk -v m="$(printf '%s' "$mac" | tr A-F a-f)" 'tolower($2)==m{print $3; exit}' /tmp/dhcp.leases 2>/dev/null)"
+        # nl80211 per-station PHY facts (rate/airtime/retries) — explains "good signal but slow"
+        sg="$(iw dev "$ifname" station get "$mac" 2>/dev/null)"
+        txr="$(printf '%s\n' "$sg" | sed -n 's/.*tx bitrate:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)"
+        rxr="$(printf '%s\n' "$sg" | sed -n 's/.*rx bitrate:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)"
+        inact="$(printf '%s\n' "$sg" | sed -n 's/.*inactive time:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+        conn="$(printf '%s\n' "$sg" | sed -n 's/.*connected time:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+        exp="$(printf '%s\n' "$sg" | sed -n 's/.*expected throughput:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)"
         [ "$sf" = 1 ] || printf ','
-        printf '{"mac":%s,"ip":%s,"signal_dbm":%s,"noise_dbm":%s,"snr":%s}' "$(jstr "$mac")" "$(jstr "$ip")" "$(jnum "$sig")" "$(jnum "$noise")" "$(jnum "$snr")"
+        printf '{"mac":%s,"ip":%s,"signal_dbm":%s,"noise_dbm":%s,"snr":%s,"tx_rate":%s,"rx_rate":%s,"inactive_ms":%s,"conn_s":%s,"expected_mbps":%s}' \
+          "$(jstr "$mac")" "$(jstr "$ip")" "$(jnum "$sig")" "$(jnum "$noise")" "$(jnum "$snr")" \
+          "$(jnum "$txr")" "$(jnum "$rxr")" "$(jnum "$inact")" "$(jnum "$conn")" "$(jnum "$exp")"
         sf=0
         ;;
     esac
@@ -213,7 +238,14 @@ station_json() {
 
 wifi="["
 first=1
-for IF in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
+busy_max=0
+# Enumerate wireless interfaces robustly. `iw dev` is the reliable source of AP
+# interface names (phy0-ap0, phy1-ap0, ...); fall back to iwinfo only if iw is absent.
+wifi_ifaces="$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')"
+[ -n "$wifi_ifaces" ] || wifi_ifaces="$(iwinfo 2>/dev/null | awk '/ESSID/{print $1}')"
+for IF in $wifi_ifaces; do
+  # only real AP interfaces carry an SSID in iwinfo; skip monitor/mesh/etc.
+  iwinfo "$IF" info 2>/dev/null | grep -q 'ESSID' || continue
   d="$(iwinfo "$IF" info 2>/dev/null)"
   ssid="$(printf '%s\n' "$d" | sed -n 's/.*ESSID: "\([^"]*\)".*/\1/p' | head -1)"
   channel="$(printf '%s\n' "$d" | awk '/Channel:/{for(i=1;i<=NF;i++){if($i=="Channel:"){print $(i+1); exit}}}')"
@@ -226,8 +258,11 @@ for IF in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
   clients_w="$(iwinfo "$IF" assoclist 2>/dev/null | grep -Ec '^[0-9A-Fa-f]{2}:')"
   case "$channel" in ''|*[!0-9]*) band="WiFi" ;; *) [ "$channel" -ge 36 ] 2>/dev/null && band="5G" || band="2.4G" ;; esac
   stations="$(station_json "$IF")"
+  survey="$(survey_json "$IF")"
+  bpv="$(printf '%s' "$survey" | jsonfilter -e '@.busy_pct' 2>/dev/null)"
+  case "$bpv" in ''|null) ;; *) [ "$bpv" -gt "$busy_max" ] 2>/dev/null && busy_max="$bpv" ;; esac
   [ "$first" = 1 ] || wifi="$wifi,"
-  wifi="$wifi{\"iface\":$(jstr "$IF"),\"ssid\":$(jstr "$ssid"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$channel"),\"htmode\":$(jstr "$htmode"),\"signal_dbm\":$(jnum "$signal"),\"noise_dbm\":$(jnum "$noise"),\"bitrate_mbps\":$(jnum "$bitrate"),\"hw_modes\":$(jstr "$hw"),\"encryption\":$(jstr "$enc"),\"clients\":$(jnum "$clients_w"),\"up\":true,\"stations\":$stations}"
+  wifi="$wifi{\"iface\":$(jstr "$IF"),\"ssid\":$(jstr "$ssid"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$channel"),\"htmode\":$(jstr "$htmode"),\"signal_dbm\":$(jnum "$signal"),\"noise_dbm\":$(jnum "$noise"),\"bitrate_mbps\":$(jnum "$bitrate"),\"hw_modes\":$(jstr "$hw"),\"encryption\":$(jstr "$enc"),\"clients\":$(jnum "$clients_w"),\"up\":true,\"survey\":$survey,\"stations\":$stations}"
   first=0
 done
 wifi="$wifi]"
@@ -265,10 +300,52 @@ devices="[$devices_body]"
 lte_objs="$(ubus list 2>/dev/null | grep -Ei 'modem|lte|qmi|gsm|wwan|sim' | tr '\n' ' ')"
 [ -n "$lte_objs" ] && lte_available=true || lte_available=false
 
+# --- Latency to the upstream gateway (single hop, Mikrotik) — real link health ---
+latency_ms=""
+if [ -n "$default_gw" ]; then
+  latency_ms="$(/bin/busybox timeout 3 ping -c 1 -W 1 "$default_gw" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)"
+fi
+
+# --- Health Score (0-100): fuses RF airtime, thermal, memory and CPU pressure ---
+mem_used_pct=0
+[ "$mt" -gt 0 ] 2>/dev/null && mem_used_pct=$(( (mt - ma) * 100 / mt ))
+temp_int="$(printf '%s' "$temp_c" | cut -d. -f1)"
+case "$temp_int" in ''|*[!0-9-]*) temp_int=-1 ;; esac
+score=100
+reasons=""
+rn=1
+add_reason() {
+  [ "$rn" = 1 ] || reasons="$reasons,"
+  reasons="$reasons{\"level\":$(jstr "$1"),\"ar\":$(jstr "$2"),\"en\":$(jstr "$3")}"
+  rn=0
+}
+if [ "$busy_max" -ge 70 ] 2>/dev/null; then
+  score=$((score - 25)); add_reason "weak" "القناة مزدحمة جداً ($busy_max% إشغال هواء) — تداخل من جيران على نفس القناة" "Channel very busy ($busy_max% airtime) — co-channel interference"
+elif [ "$busy_max" -ge 45 ] 2>/dev/null; then
+  score=$((score - 12)); add_reason "mid" "إشغال القناة متوسط ($busy_max%) — راقب الازدحام وقت الذروة" "Moderate channel load ($busy_max%) — watch peak-hour congestion"
+fi
+if [ "$temp_int" -ge 82 ] 2>/dev/null; then
+  score=$((score - 20)); add_reason "weak" "حرارة الرقاقة مرتفعة (${temp_c}°) — قد تخفّض الأداء" "SoC temperature high (${temp_c}°) — may throttle"
+elif [ "$temp_int" -ge 68 ] 2>/dev/null; then
+  score=$((score - 8)); add_reason "mid" "حرارة الرقاقة دافئة (${temp_c}°)" "SoC running warm (${temp_c}°)"
+fi
+if [ "$mem_used_pct" -ge 90 ] 2>/dev/null; then
+  score=$((score - 15)); add_reason "weak" "استهلاك الذاكرة مرتفع ($mem_used_pct%)" "Memory pressure high ($mem_used_pct%)"
+elif [ "$mem_used_pct" -ge 80 ] 2>/dev/null; then
+  score=$((score - 8)); add_reason "mid" "استهلاك الذاكرة متوسط ($mem_used_pct%)" "Memory usage elevated ($mem_used_pct%)"
+fi
+if [ "$cpu_pct" -ge 90 ] 2>/dev/null; then
+  score=$((score - 12)); add_reason "mid" "حمل المعالج مرتفع ($cpu_pct%)" "CPU load high ($cpu_pct%)"
+fi
+[ "$score" -lt 0 ] 2>/dev/null && score=0
+[ "$rn" = 1 ] && add_reason "ok" "الأداء ممتاز — لا مشاكل مكتشفة" "Performance excellent — no issues detected"
+if [ "$score" -ge 85 ]; then grade="excellent"; elif [ "$score" -ge 70 ]; then grade="good"; elif [ "$score" -ge 50 ]; then grade="mid"; else grade="weak"; fi
+health="{\"score\":$score,\"grade\":$(jstr "$grade"),\"busy_pct\":$(jnum "$busy_max"),\"mem_pct\":$(jnum "$mem_used_pct"),\"reasons\":[$reasons]}"
+
 cache_tmp="${cache_file}.$$"
 {
 cat <<JEOF
-{"ok":true,"hostname":$(jstr "$host"),"model":$(jstr "$model"),"board_name":$(jstr "$board_name"),"target":$(jstr "$target"),"os":$(jstr "$osver"),"kernel":$(jstr "$kernel"),"uptime":$(jnum "$uptime"),"load":[$(jnum "$l1"),$(jnum "$l5"),$(jnum "$l15")],"cpu":{"cores":$(jnum "$cores"),"percent":$(jnum "$cpu_pct"),"source":"/proc/stat","jiffies":{"total":$(jnum "$cpu_total"),"busy":$(jnum "$cpu_busy")}},"mem":{"total":$(jnum "$mt"),"free":$(jnum "$mf"),"available":$(jnum "$ma"),"source":"ubus call system info"},"storage":{"total":$(jnum "$st"),"used":$(jnum "$su"),"available":$(jnum "$sa"),"source":"df -k /overlay"},"temperature_c":$(jnum "$temp_c"),"lan_ip":$(jstr "$lanip"),"clients":$(jnum "$clients"),"backhaul":{"online":$internet_online,"default_route":$(jstr "$default4"),"device":$(jstr "$default_dev"),"gateway":$(jstr "$default_gw")},"traffic":{"source":"/proc/net/dev","rx_bytes":$(jnum "$traffic_rx"),"tx_bytes":$(jnum "$traffic_tx"),"rx_bps":$(jnum "$traffic_rx_bps"),"tx_bps":$(jnum "$traffic_tx_bps")},"switch":{"mode":"DSA","ipv6_lan":false},"lte":{"available":$lte_available,"objects":$(jstr "$lte_objs"),"operator":null,"tech":null,"band":null,"earfcn":null,"pci":null,"rsrp":null,"rsrq":null,"sinr":null,"rssi":null,"source":"ubus modem/lte/qmi scan; no object found"},"interfaces":$interfaces,"wifi":$wifi,"devices":$devices}
+{"ok":true,"hostname":$(jstr "$host"),"model":$(jstr "$model"),"board_name":$(jstr "$board_name"),"target":$(jstr "$target"),"os":$(jstr "$osver"),"kernel":$(jstr "$kernel"),"uptime":$(jnum "$uptime"),"load":[$(jnum "$l1"),$(jnum "$l5"),$(jnum "$l15")],"cpu":{"cores":$(jnum "$cores"),"percent":$(jnum "$cpu_pct"),"source":"/proc/stat","jiffies":{"total":$(jnum "$cpu_total"),"busy":$(jnum "$cpu_busy")}},"mem":{"total":$(jnum "$mt"),"free":$(jnum "$mf"),"available":$(jnum "$ma"),"source":"ubus call system info"},"storage":{"total":$(jnum "$st"),"used":$(jnum "$su"),"available":$(jnum "$sa"),"source":"df -k /overlay"},"temperature_c":$(jnum "$temp_c"),"lan_ip":$(jstr "$lanip"),"clients":$(jnum "$clients"),"backhaul":{"online":$internet_online,"default_route":$(jstr "$default4"),"device":$(jstr "$default_dev"),"gateway":$(jstr "$default_gw")},"traffic":{"source":"/proc/net/dev","rx_bytes":$(jnum "$traffic_rx"),"tx_bytes":$(jnum "$traffic_tx"),"rx_bps":$(jnum "$traffic_rx_bps"),"tx_bps":$(jnum "$traffic_tx_bps")},"switch":{"mode":"DSA","ipv6_lan":false},"latency_ms":$(jnum "$latency_ms"),"health":$health,"lte":{"available":$lte_available,"objects":$(jstr "$lte_objs"),"operator":null,"tech":null,"band":null,"earfcn":null,"pci":null,"rsrp":null,"rsrq":null,"sinr":null,"rssi":null,"source":"ubus modem/lte/qmi scan; no object found"},"interfaces":$interfaces,"wifi":$wifi,"devices":$devices}
 JEOF
 } > "$cache_tmp" 2>/dev/null
 [ -s "$cache_tmp" ] && mv "$cache_tmp" "$cache_file" 2>/dev/null || rm -f "$cache_tmp"

@@ -185,7 +185,7 @@ tx1="$(uci -q get wireless.radio1.txpower 2>/dev/null)"
 case "$action" in
   keep_changes) rm -f /tmp/smartap-rollback-armed /tmp/smartap-rollback-backup; emit true "Keep changes" "Rollback timer cancelled" "[]" "The current settings are kept." "[]" "[]"; exit 0 ;;
   apply_isolation)
-    confirm_required "Security"
+    # instant one-click apply (Apply & Keep) — no confirmation, no auto-revert
     backup="$(backup_cfg security)"
     [ -f /etc/config/smartap ] || : > /etc/config/smartap
     uci -q get smartap.security >/dev/null 2>&1 || { uci set smartap.security='security'; }
@@ -588,10 +588,10 @@ EOF
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
     emit true "LAN / DHCP" "Applied with backup" "[]" "Backup: $backup\nNetwork and dnsmasq reloaded. If access changes, restore the backup from SSH." "[]" "[]"; exit 0 ;;
   save_royal)
-    confirm_required "Quick Setup"
+    # instant one-click save — no confirmation
     backup="$(backup_cfg royal-save)"
     store_royal_config
-    emit true "Quick Setup" "Saved" "[]" "Backup: $backup\nQuick Setup values were saved in Xiaomi CR6608 config. No service was reloaded. TX Power was not changed." '[{"id":"apply_royal","label":"Save & Apply","confirm":true},{"id":"reset_royal","label":"Reset Quick Setup","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Saved" "[]" "Backup: $backup\nQuick Setup values were saved in Xiaomi CR6608 config. No service was reloaded. TX Power was not changed." '[{"id":"apply_royal","label":"Save & Apply"},{"id":"reset_royal","label":"Reset Quick Setup","confirm":true}]' "[]"; exit 0 ;;
   reset_royal)
     confirm_required "Quick Setup reset"
     backup="$(backup_cfg royal-reset)"
@@ -619,7 +619,8 @@ EOF
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     emit true "Quick Setup" "Reset applied with rollback" "[]" "Backup: $backup\nOnly Xiaomi CR6608-created quick setup sections were removed. TX Power was not changed. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   apply_royal)
-    confirm_required "Quick Setup"
+    # instant one-click apply (Apply & Keep) — no confirmation, no auto-revert; a backup
+    # is still recorded so the manual "Rollback now" button can restore on demand.
     program_mode="$(safe_word "$(param program_mode)")"; [ -n "$program_mode" ] || program_mode="ap"
     case "$program_mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe_ap) : ;; *) emit false "Quick Setup" "Invalid mode" "[]" "Unknown programming mode." "[]" "[]"; exit 0 ;; esac
     device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; ssid="$(param ssid | cut -c1-32)"
@@ -773,8 +774,8 @@ EOF
       chmod +x /etc/rc.button/reset
     fi
     if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
-    # TX Power policy: every Quick Setup apply EXPLICITLY pins 30 dBm on both radios --
-    # never left on driver default, and nothing in the wizard can lower or unset it.
+    # TX Power: apply the user's selected value (default max 35 dBm) on both radios --
+    # selectable 20..35 from the Advanced tab, never left on driver default.
     txp="$(safe_num "$(param txpower)")"; [ -n "$txp" ] || txp=35
     [ "$txp" -ge 1 ] 2>/dev/null && [ "$txp" -le 35 ] 2>/dev/null || txp=35
     uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
@@ -784,7 +785,7 @@ EOF
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
     health="$(ubus call system board >/dev/null 2>&1 && echo OK || echo CHECK)"
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck locked, not changed.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck dBm applied.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_quick)
     confirm_required "Quick Setup"
     ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
@@ -835,9 +836,9 @@ EOF
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately. Use "Rollback now" only if you want to restore the previous state. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately. Use Rollback now only if you want to restore the previous state. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   auto_optimize)
-    confirm_required "Auto optimize"
+    # instant one-click apply — no confirmation
     backup="$(backup_cfg auto-optimize)"
     bestc=""; bestn=""
     for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c "Channel: $c" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
@@ -846,6 +847,59 @@ EOF
     uci set wireless.radio0.legacy_rates='0'; uci set wireless.radio1.legacy_rates='0'
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
     emit true "Auto optimize" "Safe Wi-Fi optimization applied" "[]" "Backup: $backup\n2.4G channel=${bestc:-1}, 5G channel=36, WMM/DTIM/802.11k/v enabled where supported. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  secscan_run)
+    # On-demand neighbor scan: neighboring SSIDs, their channels/signal, rogue/evil-twin
+    # detection (foreign BSSID broadcasting our SSID), and least-congested channel advice.
+    # Read-only; no confirm needed. Scanning briefly dips throughput, hence button-driven.
+    our_ssids="$(uci -q show wireless 2>/dev/null | awk -F"'" '/\.ssid=/{print $2}' | sort -u)"
+    our_bssids="$(iwinfo 2>/dev/null | awk '/Access Point/{print tolower($NF)}' | sort -u)"
+    scan="$(for IF in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do iw dev "$IF" scan 2>/dev/null; done)"
+    parsed="$(printf '%s\n' "$scan" | awk '
+      function chan(f){ if(f==2484)return 14; if(f>=2412&&f<=2472)return int((f-2407)/5); if(f>=5000&&f<=5900)return int((f-5000)/5); return 0 }
+      /^BSS /{ if(bs!=""){printf "%s\t%s\t%d\t%s\n",bs,sig,chan(fr),ss} bs=$2; sub(/\(.*/,"",bs); sig="0"; fr=0; ss="" }
+      /^[ \t]*freq:/{ fr=$2 }
+      /^[ \t]*signal:/{ sig=$2 }
+      /^[ \t]*SSID:/{ ss=substr($0,index($0,"SSID:")+6) }
+      END{ if(bs!=""){printf "%s\t%s\t%d\t%s\n",bs,sig,chan(fr),ss} }
+    ')"
+    total="$(printf '%s' "$parsed" | grep -c .)"
+    # build neighbors JSON + rogue detection
+    neigh_json="["; nf=1; rogues=0
+    OIFS="$IFS"; IFS='
+'
+    for row in $parsed; do
+      [ -n "$row" ] || continue
+      b="$(printf '%s' "$row" | cut -f1)"; s="$(printf '%s' "$row" | cut -f2)"; c="$(printf '%s' "$row" | cut -f3)"; e="$(printf '%s' "$row" | cut -f4)"
+      rogue=false
+      if [ -n "$e" ] && printf '%s\n' "$our_ssids" | grep -qxF "$e"; then
+        printf '%s\n' "$our_bssids" | grep -qxF "$(printf '%s' "$b" | tr A-F a-f)" || { rogue=true; rogues=$((rogues+1)); }
+      fi
+      si="$(printf '%s' "$s" | sed 's/\..*//; s/[^0-9-]//g')"
+      [ "$nf" = 1 ] || neigh_json="$neigh_json,"
+      neigh_json="$neigh_json{\"ssid\":$(jstr "${e:-<hidden>}"),\"bssid\":$(jstr "$b"),\"ch\":$(jnum "$c"),\"signal\":$(jnum "$si"),\"rogue\":$rogue}"
+      nf=0
+    done
+    IFS="$OIFS"
+    neigh_json="$neigh_json]"
+    # least-congested channel advice (overlap-weighted 2.4G; exact-count non-DFS 5G)
+    best24="$(printf '%s' "$parsed" | awk -F'\t' '$3>0&&$3<=14{cnt[$3]++} END{ best=1; bw=1e9; split("1 6 11",cand," "); for(i in cand){c=cand[i]; w=0; for(ch in cnt) if((ch-c)<=2&&(c-ch)<=2) w+=cnt[ch]; if(w<bw){bw=w; best=c}} print best }')"
+    best5="$(printf '%s' "$parsed" | awk -F'\t' '$3>=36{cnt[$3]++} END{ best=36; bw=1e9; split("36 40 44 48 149 153 157 161",cand," "); for(i in cand){c=cand[i]; w=cnt[c]+0; if(w<bw){bw=w; best=c}} print best }')"
+    [ -n "$best24" ] || best24=1; [ -n "$best5" ] || best5=36
+    cur24="$(uci -q get wireless.radio0.channel)"; cur5="$(uci -q get wireless.radio1.channel)"
+    printf '{"ok":true,"section":"wifiscan","total":%s,"rogues":%s,"best24":%s,"best5":%s,"cur24":%s,"cur5":%s,"neighbors":%s}\n' \
+      "$(jnum "$total")" "$(jnum "$rogues")" "$(jnum "$best24")" "$(jnum "$best5")" "$(jnum "$cur24")" "$(jnum "$cur5")" "$neigh_json"
+    exit 0 ;;
+  apply_best_channels)
+    # instant one-click apply — no confirmation
+    ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"
+    case "$ch24" in 1|2|3|4|5|6|7|8|9|10|11|12|13) : ;; *) ch24="" ;; esac
+    case "$ch5" in 36|40|44|48|149|153|157|161) : ;; *) ch5="" ;; esac
+    [ -n "$ch24$ch5" ] || { emit false "Best Channel" "No valid channel" "[]" "Choose a 2.4G (1-13) or 5G (non-DFS) channel." "[]" "[]"; exit 0; }
+    backup="$(backup_cfg best-channel)"
+    [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
+    [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+    uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    emit true "Best Channel" "Channels applied (Apply & Keep)" "[]" "Backup: $backup\n2.4G=${ch24:-unchanged}, 5G=${ch5:-unchanged}. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   enable_stp)
     confirm_required "Loop Guard"
     backup="$(backup_cfg loopguard)"
@@ -951,7 +1005,7 @@ lan3_vlan|VLAN لمنفذ LAN3|$vl3|اتركه 1 عادةً. غيّره فقط �
 EOF
 )"
     text="الوصول للوحة مضمون دائماً على العنوان الذي تضبطه — عبر الواي فاي وكل منافذ الكيبل، ولوحة الطوارئ 192.168.66.1 عند الحاجة."
-    emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ وتطبيق فوري (Apply & Keep) + زر إرجاع يدوي" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات","confirm":true}]' "$form" ;;
+    emit true "الحماية والمنافذ" "حمايات اختيارية (مفعّلة، تقدر تلغيها) + تحكم كامل بالمنافذ والـ VLAN — حفظ وتطبيق فوري (Apply & Keep) + زر إرجاع يدوي" "$cards" "$text" '[{"id":"apply_isolation","label":"تطبيق الإعدادات"}]' "$form" ;;
   control|dashboard)
     cards="$(cards_json <<EOF
 Dashboard|Xiaomi CR6608|Active interface|ok
@@ -1020,13 +1074,13 @@ txpower|طاقة البث (dBm)|${tx0:-35}|أقصى طاقة 35. القيمة ا
 EOF
 )"
     cards="$(cards_json <<EOF
-Rollback|30 seconds|Keep changes after apply|warn
+Rollback|Apply & Keep|Manual rollback available|ok
 WPA mode|WPA2/WPA3 mixed|When password is entered|ok
-TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
+TX Power|${tx0:-35}/${tx1:-35} dBm|Selectable up to 35|ok
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to your choice (default max 35 dBm) on both radios." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to your choice (default max 35 dBm) on both radios." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply"},{"id":"save_royal","label":"حفظ / Save"},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
@@ -1040,8 +1094,8 @@ EOF
     emit true "Device Info" "Live OpenWrt system data" "$cards" "$text" '[{"id":"clear_api_cache","label":"Clear API cache"}]' '[]' ;;
   power)
     cards="$(cards_json <<EOF
-radio0 TX Power|${tx0:-unknown} dBm|Locked read-only|warn
-radio1 TX Power|${tx1:-unknown} dBm|Locked read-only|warn
+radio0 TX Power|${tx0:-35} dBm|Selectable up to 35|ok
+radio1 TX Power|${tx1:-35} dBm|Selectable up to 35|ok
 Policy|قابل للتعديل|من الإعدادات السريعة ← متقدم|ok
 EOF
 )"

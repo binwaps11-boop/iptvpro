@@ -1,0 +1,9 @@
+#!/bin/sh
+# Start TX power at the maximum (35 dBm) on both radios after a flash, so the panel shows
+# 35 and the selector is at max out of the box. The operator can still lower it any time
+# from Quick Settings -> Advanced (that choice persists across reboots; a re-flash resets
+# to 35). Runs once. The chip's real radiated power is still bounded by its regulatory table.
+uci -q set wireless.radio0.txpower='35'
+uci -q set wireless.radio1.txpower='35'
+uci -q commit wireless
+exit 0
