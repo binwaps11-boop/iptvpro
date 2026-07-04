@@ -125,7 +125,7 @@ lan_zone_del() {
 store_royal_config() {
   touch /etc/config/smartap 2>/dev/null
   uci -q set smartap.quick='quicksettings'
-  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
+  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id mesh_role wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
@@ -625,6 +625,7 @@ EOF
     case "$program_mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe_ap) : ;; *) emit false "Quick Setup" "Invalid mode" "[]" "Unknown programming mode." "[]" "[]"; exit 0 ;; esac
     device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; ssid="$(param ssid | cut -c1-32)"
     ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"; mesh_id="$(param mesh_id | cut -c1-48)"
+    mesh_role="$(safe_word "$(param mesh_role)")"; case "$mesh_role" in sender|receiver) : ;; *) mesh_role="sender" ;; esac
     wds_peer_ssid="$(param wds_peer_ssid | cut -c1-32)"; hide_ssid="$(safe_num "$(param hide_ssid)")"; security="$(safe_word "$(param security)")"
     wifi_password="$(param wifi_password | cut -c1-64)"; device_password="$(param device_password | cut -c1-80)"
     delete_previous="$(safe_num "$(param delete_previous)")"; pppoe_user="$(param pppoe_user | cut -c1-64)"; pppoe_pass="$(param pppoe_pass | cut -c1-64)"
@@ -653,6 +654,11 @@ EOF
     [ -n "$device_ip" ] && uci set network.lan.ipaddr="$device_ip"
     ifc24="$(config_radio_iface radio0)"; [ -n "$ifc24" ] || ifc24="wifinet0"
     ifc5="$(config_radio_iface radio1)"; [ -n "$ifc5" ] || ifc5="wifinet1"
+    # default both client APs ON; a mesh "receiver" below turns the 5G client AP off,
+    # and any previous receiver programming is cleared here so re-programming AP re-enables 5G.
+    uci set wireless."$ifc24".disabled='0'; uci set wireless."$ifc5".disabled='0'
+    # remove any mesh iface from prior programming unless this run is a mesh mode
+    case "$program_mode" in mesh|mesh_vlan) : ;; *) uci -q delete wireless.smartap_mesh ;; esac
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
     [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
     [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
@@ -711,13 +717,15 @@ EOF
     fi
     case "$program_mode" in
       mesh|mesh_vlan)
-        # 802.11s mesh — the settings the reference build proved on-device:
-        #   * mesh_fwding=1 so units FORWARD each other's traffic (a mesh that joins but
-        #     forwards nothing looks exactly like "mesh refuses the 2nd unit"),
-        #   * matching encryption on BOTH units: SAE when a Wi-Fi password is set
-        #     (wpad-openssl supports it), plain open mesh when the network is open,
-        #   * mesh peers MUST share mesh_id AND the SAME 5G channel (set ch5 identically
-        #     on every unit), and no leftover ssid/isolate options on the mesh iface.
+        # 802.11s mesh backhaul on the 5G radio (radio1), plus client APs.
+        #  Both units share: same mesh_id, same 5G channel (ch5), same encryption.
+        #  mesh_fwding=1 so nodes FORWARD each other's traffic (without it the 2nd unit
+        #  "joins but nothing passes" — looks like a refusal). mesh_rssi_threshold=0.
+        #  Role split (what the user asked for):
+        #   * SENDER  : 2.4G AP + 5G AP for phones (clients on BOTH bands) AND the 5G
+        #               mesh backhaul on the same radio1 channel.
+        #   * RECEIVER: receives over the 5G mesh backhaul and serves phones on 2.4G
+        #               only; its 5G AP is disabled so radio1 is dedicated to backhaul.
         uci -q get wireless.smartap_mesh >/dev/null || uci set wireless.smartap_mesh='wifi-iface'
         uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network="${client_net:-lan}"; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
         uci set wireless.smartap_mesh.mesh_fwding='1'; uci set wireless.smartap_mesh.mesh_rssi_threshold='0'
@@ -727,6 +735,15 @@ EOF
           uci set wireless.smartap_mesh.encryption='none'; uci -q delete wireless.smartap_mesh.key
         fi
         uci -q delete wireless.smartap_mesh.ssid; uci -q delete wireless.smartap_mesh.isolate
+        # 2.4G AP always serves phones on both roles
+        uci set wireless."$ifc24".disabled='0'
+        if [ "$mesh_role" = "receiver" ]; then
+          # receiver: dedicate 5G to backhaul — turn off the 5G client AP
+          uci set wireless."$ifc5".disabled='1'
+        else
+          # sender: 5G client AP stays on, sharing radio1's channel with the mesh
+          uci set wireless."$ifc5".disabled='0'
+        fi
         ;;
       wds_sender|wds_sender_vlan)
         uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
@@ -1169,6 +1186,7 @@ EOF
     ch24="$(saved ch24)"; [ -n "$ch24" ] || ch24="$(uci -q get wireless.radio0.channel)"
     ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
     mesh_id="$(saved mesh_id)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.smartap_mesh.mesh_id 2>/dev/null)"
+    mesh_role="$(saved mesh_role)"; [ -n "$mesh_role" ] || mesh_role="sender"
     wds_peer="$(saved wds_peer_ssid)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.smartap_wds.ssid 2>/dev/null)"
     hide_ssid="$(saved hide_ssid)"; [ -n "$hide_ssid" ] || hide_ssid="$(uci -q get wireless.wifinet0.hidden 2>/dev/null)"
     enc="$(uci -q get wireless.wifinet0.encryption 2>/dev/null)"
@@ -1187,7 +1205,8 @@ vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — �
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 ch5|قناة 5G|${ch5:-36}|يفضل قناة غير DFS مثل 36/40/44/48|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
-mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID / عنوان الشبكة المتشابكة|text|0|device|mesh,mesh_vlan|
+mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G|text|0|device|mesh,mesh_vlan|
+mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسل: يبث للجوالات على 2.4 و5G ويحمل رابط الميش. المستقبل: يستقبل عبر 5G ويبث للجوالات على 2.4 فقط|select|0|device|mesh,mesh_vlan|sender:مرسل (يبث 2.4+5G),receiver:مستقبل (يبث 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
 hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور|select|0|device|wds_sender,wds_sender_vlan|0:ظاهر,1:مخفي
 security|نوع الحماية|${royal_security:-wpa2}|Open / WPA2 / WPA3 mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3 mixed
