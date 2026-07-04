@@ -804,6 +804,15 @@ EOF
       done
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
+    # Switching to any NON-PPPoE mode (AP / VLAN / mesh / WDS) fully REMOVES the PPPoE client:
+    # revert the wan proto and clear its credentials so no PPPoE config lingers.
+    if [ "$program_mode" != "pppoe_ap" ] && [ "$broadband_enabled" != "1" ]; then
+      if [ "$(uci -q get network.wan.proto)" = "pppoe" ]; then
+        uci set network.wan.proto='none'
+        uci -q delete network.wan.username
+        uci -q delete network.wan.password
+      fi
+    fi
     # DHCP policy by mode. In broadband/PPPoE the device IS the main router, so it MUST hand
     # out addresses to its Wi-Fi/LAN clients (they get internet automatically, no manual IP).
     # In every AP mode there is an upstream router, so DHCP stays fully off.
