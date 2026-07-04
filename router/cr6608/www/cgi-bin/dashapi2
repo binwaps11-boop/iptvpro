@@ -163,6 +163,41 @@ uci_iface_for_if() {
   '
 }
 
+survey_raw() {
+  IF="$1"; fallback_noise="$2"
+  iw dev "$IF" survey dump 2>/dev/null | awk -v fb="$fallback_noise" '
+    /^Survey data/ { inuse=0 }
+    /\[in use\]/ { inuse=1 }
+    inuse && /noise:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^-?[0-9]+$/) { noise=$i; break }
+    }
+    inuse && /channel active time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { active=$i; break }
+    }
+    inuse && /channel busy time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { busy=$i; break }
+    }
+    inuse && /channel receive time:/ && $0 !~ /BSS/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { rx=$i; break }
+    }
+    inuse && /channel BSS receive time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { bss=$i; break }
+    }
+    inuse && /channel transmit time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { tx=$i; break }
+    }
+    END {
+      if (noise == "") noise=fb
+      if (noise == "") noise="null"
+      if (active == "") active=0
+      if (busy == "") busy=0
+      if (rx == "") rx=0
+      if (tx == "") tx=0
+      if (bss == "") bss=0
+      printf "%s %s %s %s %s %s\n", noise, active, busy, rx, tx, bss
+    }'
+}
+
 device_rows="/tmp/dashapi2.devices.$$"
 : > "$device_rows"
 station_json() {
@@ -222,6 +257,7 @@ station_json() {
 
 wifi="["
 wf=1
+health_busy_max=""
 for IF in $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E '^(phy[0-9]+-(ap|mesh)[0-9]+|mesh[0-9]+)$' | sort -u); do
   [ -d "/sys/class/net/$IF" ] || continue
   [ "$IF" = "phy0-ap1" ] && continue
@@ -241,21 +277,47 @@ for IF in $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E '^(ph
   [ -n "$enc" ] || enc="$(uci -q get wireless."$ifc".encryption 2>/dev/null)"
   [ -n "$enc" ] || enc="none"
   case "$channel" in ''|*[!0-9]*) band="WiFi" ;; *) [ "$channel" -ge 36 ] 2>/dev/null && band="5G" || band="2.4G" ;; esac
-  # real airtime: busy/active ms of the in-use channel from the driver survey
-  set -- $(iw dev "$IF" survey dump 2>/dev/null | awk '/\[in use\]/{f=1} f&&/channel active time:/{a=$4} f&&/channel busy time:/{b=$4; exit} END{print a+0" "b+0}')
-  act_ms="${1:-0}"; busy_ms="${2:-0}"; busy_pct=""
-  [ "$act_ms" -gt 0 ] 2>/dev/null && busy_pct="$(awk -v a="$act_ms" -v b="$busy_ms" 'BEGIN{v=b*100/a; if(v<0)v=0; if(v>100)v=100; printf "%d", v}')"
+  dev="$(wifi_dev_for_if "$IF")"
+  tx_req="$(uci -q get wireless."$dev".txpower 2>/dev/null)"
+  [ -n "$tx_req" ] || tx_req="$(uci -q get wireless."$ifc".txpower 2>/dev/null)"
+  tx_applied="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2; exit}')"
+  tx_max="$(iwinfo "$IF" txpower 2>/dev/null | awk '/dBm/{v=$1} END{print v}')"
+  set -- $(survey_raw "$IF" "$noise")
+  survey_noise="${1:-null}"; survey_active="${2:-0}"; survey_busy="${3:-0}"; survey_rx="${4:-0}"; survey_tx="${5:-0}"; survey_bss="${6:-0}"
+  [ "$survey_noise" != "null" ] && [ -n "$survey_noise" ] && noise="$survey_noise"
+  survey_busy_pct=""
+  safe_if="$(printf '%s' "$IF" | tr -c 'A-Za-z0-9_.-' '_')"
+  survey_prev="/tmp/dashapi2.survey.$safe_if"
+  if [ "$survey_active" -gt 0 ] 2>/dev/null; then
+    if [ -r "$survey_prev" ]; then
+      read old_active old_busy old_rx old_tx old_bss old_ts < "$survey_prev"
+      da=$((survey_active - old_active))
+      db=$((survey_busy - old_busy))
+      [ "$da" -lt 0 ] 2>/dev/null && da=0
+      [ "$db" -lt 0 ] 2>/dev/null && db=0
+      if [ "$da" -gt 0 ] 2>/dev/null; then
+        survey_busy_pct="$(awk -v b="$db" -v a="$da" 'BEGIN{v=b*100/a; if(v<0)v=0; if(v>100)v=100; printf "%.1f", v}')"
+      fi
+    fi
+    [ -n "$survey_busy_pct" ] || survey_busy_pct="$(awk -v b="$survey_busy" -v a="$survey_active" 'BEGIN{v=b*100/a; if(v<0)v=0; if(v>100)v=100; printf "%.1f", v}')"
+  fi
+  printf '%s %s %s %s %s %s\n' "$survey_active" "$survey_busy" "$survey_rx" "$survey_tx" "$survey_bss" "$now_s" > "$survey_prev" 2>/dev/null
+  if [ -n "$survey_busy_pct" ]; then
+    if [ -z "$health_busy_max" ] || awk -v b="$survey_busy_pct" -v m="$health_busy_max" 'BEGIN{exit !(b>m)}'; then
+      health_busy_max="$survey_busy_pct"
+    fi
+  fi
   stations="$(station_json "$IF" "$noise")"
   clients_w="$(printf '%s' "$stations" | grep -o '"mac"' | wc -l | tr -d ' ')"
   [ "$wf" = 1 ] || wifi="$wifi,"
-  wifi="$wifi{\"iface\":$(jstr "$IF"),\"ssid\":$(jstr "$ssid"),\"mode\":$(jstr "$mode"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$channel"),\"htmode\":$(jstr "$htmode"),\"signal_dbm\":$(jnum "$signal"),\"noise_dbm\":$(jnum "$noise"),\"bitrate_mbps\":$(jnum "$bitrate"),\"hw_modes\":$(jstr "$hw"),\"encryption\":$(jstr "$enc"),\"clients\":$(jnum "$clients_w"),\"up\":true,\"survey\":{\"busy_pct\":$(jnum "$busy_pct"),\"noise_dbm\":$(jnum "$noise"),\"active_ms\":$(jnum "$act_ms"),\"busy_ms\":$(jnum "$busy_ms")},\"stations\":$stations}"
+  wifi="$wifi{\"iface\":$(jstr "$IF"),\"ssid\":$(jstr "$ssid"),\"mode\":$(jstr "$mode"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$channel"),\"htmode\":$(jstr "$htmode"),\"signal_dbm\":$(jnum "$signal"),\"noise_dbm\":$(jnum "$noise"),\"bitrate_mbps\":$(jnum "$bitrate"),\"hw_modes\":$(jstr "$hw"),\"encryption\":$(jstr "$enc"),\"clients\":$(jnum "$clients_w"),\"up\":true,\"txpower\":{\"requested_dbm\":$(jnum "$tx_req"),\"applied_dbm\":$(jnum "$tx_applied"),\"max_dbm\":$(jnum "$tx_max"),\"source\":\"uci+iw\"},\"survey\":{\"source\":\"iw survey dump\",\"busy_pct\":$(jnum "$survey_busy_pct"),\"noise_dbm\":$(jnum "$noise"),\"active_ms\":$(jnum "$survey_active"),\"busy_ms\":$(jnum "$survey_busy"),\"receive_ms\":$(jnum "$survey_rx"),\"transmit_ms\":$(jnum "$survey_tx"),\"bss_receive_ms\":$(jnum "$survey_bss")},\"stations\":$stations}"
   wf=0
 done
 wifi="$wifi]"
 
 # LIVE devices only — no phantoms. A wired device counts as PRESENT only while the
 # bridge FDB still holds its MAC on a port (the switch ages dead entries out within
-# minutes); stale ARP leftovers are dropped (and ARP must be COMPLETE, flags 0x2).
+# minutes); stale ARP leftovers are dropped (ARP must be COMPLETE, flags 0x2).
 # Hostnames come from DHCP leases; the port column shows the physical port (lan1..).
 arp_rows="/tmp/dashapi2.arp.$$"
 fdb_live="/tmp/dashapi2.fdb.$$"
@@ -302,7 +364,7 @@ score=100
 if [ -n "$temp_c" ]; then awk -v t="$temp_c" 'BEGIN{exit !(t>=70)}' && score=$((score-15)); fi
 [ "$score" -lt 0 ] && score=0
 if [ "$score" -ge 95 ]; then grade="excellent"; elif [ "$score" -ge 70 ]; then grade="ok"; else grade="weak"; fi
-health="{\"score\":$score,\"grade\":$(jstr "$grade"),\"busy_pct\":null,\"reasons\":[{\"level\":\"ok\",\"ar\":\"الواجهة متزامنة مع قراءات النظام الحية\",\"en\":\"Dashboard is synced with live system counters\"}]}"
+health="{\"score\":$score,\"grade\":$(jstr "$grade"),\"busy_pct\":$(jnum "$health_busy_max"),\"reasons\":[{\"level\":\"ok\",\"ar\":\"الواجهة متزامنة مع قراءات النظام الحية\",\"en\":\"Dashboard is synced with live system counters\"}]}"
 
 printf '{"ok":true,"hostname":%s,"model":%s,"board_name":"xiaomi,mi-router-cr6608","target":"ramips/mt7621","os":%s,"kernel":%s,"uptime":%s,"load":[%s,%s,%s],"cpu":{"cores":2,"percent":%s,"source":"/proc/stat"},"mem":{"total":%s,"free":%s,"available":%s,"source":"/proc/meminfo"},"storage":{"total":%s,"used":%s,"available":%s,"source":"df -k /overlay"},"temperature_c":%s,"lan_ip":%s,"clients":%s,"backhaul":{"online":%s,"default_route":%s,"device":%s,"gateway":%s},"traffic":{"source":"/proc/net/dev","rx_bytes":%s,"tx_bytes":%s,"rx_bps":%s,"tx_bps":%s},"switch":{"mode":"DSA","ipv6_lan":false},"latency_ms":%s,"health":%s,"lte":{"available":false},"interfaces":%s,"wifi":%s,"devices":%s}\n' \
   "$(jstr "$host")" "$(jstr "$model")" "$(jstr "$osver")" "$(jstr "$kernel")" "$(jnum "$uptime_s")" \
