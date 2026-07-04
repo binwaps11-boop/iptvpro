@@ -125,7 +125,7 @@ lan_zone_del() {
 store_royal_config() {
   touch /etc/config/smartap 2>/dev/null
   uci -q set smartap.quick='quicksettings'
-  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id mesh_role wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
+  for k in program_mode device_ip vlan_id ssid ch24 ch5 htmode24 htmode5 mesh_id mesh_role wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
@@ -628,6 +628,7 @@ EOF
     case "$program_mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe_ap) : ;; *) emit false "Quick Setup" "Invalid mode" "[]" "Unknown programming mode." "[]" "[]"; exit 0 ;; esac
     device_ip="$(param device_ip | cut -c1-32)"; vlan_id="$(safe_num "$(param vlan_id)")"; ssid="$(param ssid | cut -c1-32)"
     ch24="$(safe_num "$(param ch24)")"; ch5="$(safe_num "$(param ch5)")"; mesh_id="$(param mesh_id | cut -c1-48)"
+    htmode24="$(safe_word "$(param htmode24)")"; htmode5="$(safe_word "$(param htmode5)")"
     mesh_role="$(safe_word "$(param mesh_role)")"; case "$mesh_role" in sender|receiver) : ;; *) mesh_role="sender" ;; esac
     wds_peer_ssid="$(param wds_peer_ssid | cut -c1-32)"; hide_ssid="$(safe_num "$(param hide_ssid)")"; security="$(safe_word "$(param security)")"
     wifi_password="$(param wifi_password | cut -c1-64)"; device_password="$(param device_password | cut -c1-80)"
@@ -680,6 +681,10 @@ EOF
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
     [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
     [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+    # Bandwidth (HT/HE mode) is user-selectable per band — any channel + any rate. Mesh uses
+    # radio1's channel+htmode, so this also sets the mesh backhaul width (HE20..HE160).
+    case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) uci set wireless.radio0.htmode="$htmode24" ;; esac
+    case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) uci set wireless.radio1.htmode="$htmode5" ;; esac
     set_wifi_security "$ifc24" "$security" "$wifi_password"
     set_wifi_security "$ifc5" "$security" "$wifi_password"
     [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
@@ -1249,6 +1254,8 @@ EOF
     royal_ssid="$(saved ssid)"; [ -n "$royal_ssid" ] || royal_ssid="$(uci -q get wireless.wifinet0.ssid)"
     ch24="$(saved ch24)"; [ -n "$ch24" ] || ch24="$(uci -q get wireless.radio0.channel)"
     ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
+    ht24="$(saved htmode24)"; [ -n "$ht24" ] || ht24="$(uci -q get wireless.radio0.htmode)"
+    ht5="$(saved htmode5)"; [ -n "$ht5" ] || ht5="$(uci -q get wireless.radio1.htmode)"
     mesh_id="$(saved mesh_id)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.smartap_mesh.mesh_id 2>/dev/null)"
     mesh_role="$(saved mesh_role)"; [ -n "$mesh_role" ] || mesh_role="sender"
     wds_peer="$(saved wds_peer_ssid)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.smartap_wds.ssid 2>/dev/null)"
@@ -1268,8 +1275,10 @@ device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضا�
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
-ch5|قناة 5G|${ch5:-36}|القناة 36 (UNII-1، توافق أوسع مع كل الأجهزة)|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
-mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G|text|0|device|mesh,mesh_vlan|
+ch5|قناة 5G|${ch5:-36}|أي قناة 5G مسموحة (36/40/44/48/149/153/157/161…). 36 افتراضي للتوافق الأوسع، لكن اختر أي قناة تريد|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
+htmode24|عرض قناة 2.4G|${ht24:-HE20}|عرض النطاق/السرعة: HE20 أو HE40 (40 أسرع، 20 أثبت)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE20:HE20 (ثابت),HE40:HE40 (أسرع),HT20:HT20,HT40:HT40
+htmode5|عرض قناة 5G / السرعة|${ht5:-HE80}|أي معدل نقل: HE20/HE40/HE80/HE160. الميش يستخدم نفس العرض — اختر الأنسب لقناتك|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE80:HE80 (سريع),HE160:HE160 (الأسرع),HE40:HE40,HE20:HE20 (الأثبت),VHT80:VHT80,HT20:HT20
+mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G وعرضها|text|0|device|mesh,mesh_vlan|
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسل: يبث للجوالات على 2.4 و5G ويحمل رابط الميش. المستقبل: يستقبل عبر 5G ويبث للجوالات على 2.4 فقط|select|0|device|mesh,mesh_vlan|sender:مرسل (يبث 2.4+5G),receiver:مستقبل (يبث 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
 hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور|select|0|device|wds_sender,wds_sender_vlan|0:ظاهر,1:مخفي
