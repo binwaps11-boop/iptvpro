@@ -1,0 +1,11 @@
+#!/bin/sh
+# Hard-off DHCP: this unit is an Access Point behind the main router — it must NEVER hand
+# out IP addresses. Force ignore=1 on every dhcp pool at first boot. The upstream router
+# (Mikrotik) is the only DHCP server. (A laptop with no upstream reaches the dashboard by
+# setting a static IP such as 192.168.1.100 or 192.168.66.100.)
+for s in $(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dhcp$/\1/p"); do
+	uci -q set dhcp."$s".ignore='1'
+done
+uci -q commit dhcp
+/etc/init.d/dnsmasq reload >/dev/null 2>&1
+exit 0
