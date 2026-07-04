@@ -1,11 +1,31 @@
 #!/bin/sh
-# Hard-off DHCP: this unit is an Access Point behind the main router — it must NEVER hand
-# out IP addresses. Force ignore=1 on every dhcp pool at first boot. The upstream router
-# (Mikrotik) is the only DHCP server. (A laptop with no upstream reaches the dashboard by
-# setting a static IP such as 192.168.1.100 or 192.168.66.100.)
+# Hard-off ALL address handout on this Access Point — no IPv4 DHCP and no IPv6 whatsoever.
+# The upstream router (Mikrotik) is the only address server. Enforced at every boot so a
+# reset or a stray toggle can never turn address handout back on automatically.
+
+# --- IPv4 DHCP: every pool ignored, and no RA/DHCPv6/NDP on any pool ---
 for s in $(uci -q show dhcp | sed -n "s/^dhcp\.\([^.=]*\)=dhcp$/\1/p"); do
 	uci -q set dhcp."$s".ignore='1'
+	uci -q set dhcp."$s".ra='disabled'
+	uci -q set dhcp."$s".dhcpv6='disabled'
+	uci -q set dhcp."$s".ndp='disabled'
 done
+uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'   # never answer IPv6 (AAAA) DNS either
 uci -q commit dhcp
+
+# --- IPv6: disable on every network interface (the kernel here also has no IPv6 at all) ---
+for i in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=interface$/\1/p"); do
+	uci -q set network."$i".ipv6='0'
+	uci -q set network."$i".delegate='0'
+done
+uci -q commit network
+
+# --- belt-and-suspenders sysctl: refuse IPv6 addressing/RA if a module ever appeared ---
+{
+	echo 'net.ipv6.conf.all.disable_ipv6=1'
+	echo 'net.ipv6.conf.default.disable_ipv6=1'
+	echo 'net.ipv6.conf.all.accept_ra=0'
+} 2>/dev/null | while read l; do sysctl -w "$l" >/dev/null 2>&1; done
+
 /etc/init.d/dnsmasq reload >/dev/null 2>&1
 exit 0

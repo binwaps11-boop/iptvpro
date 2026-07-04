@@ -44,6 +44,7 @@ config interface 'mgmt'
 	option proto 'dhcp'
 	option hostname 'CR6608-Smart-AP'
 	option metric '10'
+	option ipv6 '0'
 
 config interface 'wan'
 	option device 'wan'
