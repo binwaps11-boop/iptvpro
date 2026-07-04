@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -681,21 +681,44 @@
     var t = d < 10 ? d.toFixed(1) : Math.round(d);
     return '<span class="prox" style="color:var(--accent)">≈ ' + t + ' ' + tr("meters") + '</span>';
   }
-  // Per-port throughput: live rx/tx rate on every physical wired port (lan1..lan3, wan)
-  // straight from /proc/net/dev deltas in dashapi2 — "how much each port is pulling".
+  // Unified throughput view: grand total (RX/TX), each Wi-Fi band, and each wired port —
+  // all from live /proc/net/dev deltas in dashapi2. One place answering "who pulls what".
+  function throughputRow(label, rx, tx, up, chip) {
+    var tot = (finite(rx) ? rx : 0) + (finite(tx) ? tx : 0);
+    var col = up === false ? "var(--muted)" : tot > 50e6 ? "var(--excellent)" : tot > 1e6 ? "var(--good)" : "var(--mid)";
+    return '<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><b class="latin">' + esc(label) +
+      '</b><span class="latin">' + (chip ? '<span class="chip ' + (up === false ? "bad" : "ok") + '" style="font-size:10px">' + esc(chip) + '</span>' : "") + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)"><span>↓ ' + (finite(rx) ? bps(rx) : "—") + '</span><span>↑ ' + (finite(tx) ? bps(tx) : "—") + '</span></div>' +
+      bar(Math.min(tot / 1e6, 100), 100, col) + '</div>';
+  }
   function renderPortThroughput(data) {
-    var ifs = (data.interfaces || []).filter(function (i) { return /^(lan[0-9]+|wan[0-9.]*)$/.test(i.name); });
-    if (!ifs.length) return "";
-    var rows = ifs.map(function (i) {
-      var rx = num(i.rx_bps), tx = num(i.tx_bps), up = i.connected;
-      var tot = (finite(rx) ? rx : 0) + (finite(tx) ? tx : 0);
-      var col = !up ? "var(--muted)" : tot > 50e6 ? "var(--excellent)" : tot > 1e6 ? "var(--good)" : "var(--mid)";
-      return '<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><b class="latin">' + esc(i.name) +
-        '</b><span class="latin"><span class="chip ' + (up ? "ok" : "bad") + '" style="font-size:10px">' + (up ? (i.speed_mbps ? i.speed_mbps + "M" : "up") : "down") + '</span></span></div>' +
-        '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)"><span>↓ ' + (finite(rx) ? bps(rx) : "—") + '</span><span>↑ ' + (finite(tx) ? bps(tx) : "—") + '</span></div>' +
-        bar(Math.min(tot / 1e6, 100), 100, col) + '</div>';
-    }).join("");
-    return card(tr("portThroughput"), '<p class="muted" style="margin:0 0 6px">' + esc(tr("perPortRate")) + '</p>' + rows, "per-port", "net");
+    var ifsAll = data.interfaces || [];
+    var ports = ifsAll.filter(function (i) { return /^(lan[0-9]+|wan[0-9.]*)$/.test(i.name); });
+    // Wi-Fi radios: phy0-ap* = 2.4G, phy1-ap* = 5G. Sum per band.
+    var wifiAgg = {};
+    ifsAll.forEach(function (i) {
+      var m = /^phy([0-9])-/.exec(i.name); if (!m) return;
+      var band = m[1] === "0" ? "2.4G" : "5G";
+      wifiAgg[band] = wifiAgg[band] || { rx: 0, tx: 0, up: false };
+      if (finite(num(i.rx_bps))) wifiAgg[band].rx += num(i.rx_bps);
+      if (finite(num(i.tx_bps))) wifiAgg[band].tx += num(i.tx_bps);
+      if (i.connected) wifiAgg[band].up = true;
+    });
+    // grand total from the traffic counters (all client-facing ports summed in dashapi2)
+    var t = data.traffic || {}, gRx = num(t.rx_bps), gTx = num(t.tx_bps);
+    if (!ports.length && !Object.keys(wifiAgg).length && !finite(gRx)) return "";
+    var body = '<p class="muted" style="margin:0 0 6px">' + esc(tr("perPortRate")) + '</p>';
+    // total
+    body += '<div style="text-align:center;margin-bottom:6px"><div class="latin" style="font-size:24px;font-weight:800;color:var(--accent)">' +
+      bps((finite(gRx) ? gRx : 0) + (finite(gTx) ? gTx : 0)) + '</div><div style="font-size:11px;color:var(--muted)">' + esc(tr("totalRate")) +
+      ' · ↓ ' + (finite(gRx) ? bps(gRx) : "—") + ' · ↑ ' + (finite(gTx) ? bps(gTx) : "—") + '</div></div>';
+    // Wi-Fi per band
+    var wifiRows = Object.keys(wifiAgg).map(function (b) { return throughputRow("WiFi " + b, wifiAgg[b].rx, wifiAgg[b].tx, wifiAgg[b].up, b); }).join("");
+    if (wifiRows) body += '<h4 style="margin:8px 0 2px">' + esc(tr("wifiRate")) + '</h4>' + wifiRows;
+    // wired ports
+    var portRows = ports.map(function (i) { return throughputRow(i.name, num(i.rx_bps), num(i.tx_bps), i.connected, i.connected ? (i.speed_mbps ? i.speed_mbps + "M" : "up") : "down"); }).join("");
+    if (portRows) body += '<h4 style="margin:8px 0 2px">' + esc(tr("portsRate")) + '</h4>' + portRows;
+    return card(tr("portThroughput"), body, "live", "net");
   }
   // Link efficiency = actual PHY rate vs the band's 2×2 HE ceiling (2.4G HE20≈287, 5G HE80≈1201).
   function linkEfficiency(band, txRate) {
