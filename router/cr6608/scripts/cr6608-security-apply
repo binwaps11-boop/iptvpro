@@ -68,8 +68,9 @@ apply_dhcp_guard() {
 	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
 	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
 	if [ "$enabled" = "1" ] && [ "$rogue" = "1" ]; then
-		# Never serve DHCP (would leak IPs onto the Mikrotik network).
-		uci set dhcp.lan.ignore='1'
+		# Never serve DHCP (would leak IPs onto the Mikrotik network). Delete any pool so
+		# nothing appears and nothing can hand out an address.
+		uci -q delete dhcp.lan 2>/dev/null || true
 		uci commit dhcp
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
 	fi

@@ -583,10 +583,9 @@ EOF
     [ -n "$limit" ] && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
     backup="$(backup_cfg lan-dhcp)"
     uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
-    uci set dhcp.lan.start="$start"; uci set dhcp.lan.limit="$limit"; uci set dhcp.lan.leasetime="${leasetime:-12h}"
     # DHCP is hard-off on this AP by owner policy: the LAN IP/netmask can be changed, but the
-    # server stays disabled no matter what the toggle says ($enabled is intentionally ignored).
-    uci set dhcp.lan.ignore='1'; uci set dhcp.lan.dhcpv4='disabled'
+    # DHCP pool is deleted so no server ever exists or appears (toggle intentionally ignored).
+    uci -q delete dhcp.lan 2>/dev/null || true
     uci commit network; uci commit dhcp
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
     emit true "LAN / DHCP" "Applied with backup" "[]" "Backup: $backup\nNetwork and dnsmasq reloaded. If access changes, restore the backup from SSH." "[]" "[]"; exit 0 ;;
@@ -616,7 +615,7 @@ EOF
     for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
     for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
     uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan'
-    uci set dhcp.lan.ignore='1'
+    uci -q delete dhcp.lan 2>/dev/null || true
     for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
     uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp; uci -q commit firewall
     arm_rollback "$backup"
@@ -806,9 +805,9 @@ EOF
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
     # DHCP is hard-off on this AP by owner policy. Regardless of the wizard's dhcp_server
-    # value, the LAN DHCP server stays disabled (ignore + dhcpv4 disabled) so the unit never
-    # hands out an address on any mode -- the upstream Mikrotik is the only DHCP server.
-    uci set dhcp.lan.ignore='1'; uci set dhcp.lan.dhcpv4='disabled'
+    # value, the LAN DHCP pool is deleted so no server ever exists or appears on any mode --
+    # the upstream Mikrotik is the only DHCP server.
+    uci -q delete dhcp.lan 2>/dev/null || true
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
     [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then

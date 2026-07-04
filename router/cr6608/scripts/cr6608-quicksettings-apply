@@ -273,11 +273,9 @@ apply_config() {
 			;;
 	esac
 
-	if bool_on "$dhcp_server"; then
-		uci set dhcp.lan.ignore='0'
-	else
-		uci set dhcp.lan.ignore='1'
-	fi
+	# DHCP is hard-off by owner policy: never enable a DHCP server, and remove any pool so
+	# nothing appears. The dhcp_server toggle is intentionally ignored.
+	uci -q delete dhcp.lan 2>/dev/null || true
 
 	if bool_on "$firewall_enabled"; then
 		/etc/init.d/firewall enable >/dev/null 2>&1 || true

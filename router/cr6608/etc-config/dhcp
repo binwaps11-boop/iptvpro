@@ -21,21 +21,11 @@ config dnsmasq
 	option filter_aaaa '1'
 	option filter_a '0'
 
-# DHCP is HARD-OFF on this Access Point. Every pool carries BOTH:
-#   ignore=1        -> dnsmasq starts with --no-dhcp-interface=<if> (won't serve DHCP there)
-#   dhcpv4=disabled -> the init emits NO --dhcp-range for the pool at all (nothing to hand out)
-# plus dhcpv6/ra/ndp disabled. So dnsmasq runs as a DNS-only resolver and can never lease an
-# address, even if a single flag were flipped. The upstream router (Mikrotik) is the only DHCP.
-config dhcp 'lan'
-	option interface 'lan'
-	option start '100'
-	option limit '150'
-	option leasetime '12h'
-	option ignore '1'
-	option dhcpv4 'disabled'
-	option dhcpv6 'disabled'
-	option ra 'disabled'
-	option ndp 'disabled'
+# DHCP is HARD-OFF on this Access Point: there is deliberately NO dhcp pool section here, so
+# nothing appears in LuCI's DHCP page and dnsmasq generates no --dhcp-range at all. dnsmasq
+# runs purely as a DNS resolver. The boot enforcer (95-cr6608-dhcp-off) deletes any pool that
+# a UI action might create, so a DHCP server can never come back. The upstream Mikrotik is
+# the only DHCP server on the network.
 
 # DHCPv6 / RA daemon is disabled here AND the odhcpd binary is not even shipped in this build.
 config odhcpd 'odhcpd'
