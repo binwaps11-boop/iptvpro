@@ -498,9 +498,6 @@
       ["system","system","cpu"],
       ["quick","quick","gear"],
       ["isolation","isolation","shield"],
-      ["netmgr","netmgr","net"],
-      ["wifimgr","wifimgr","wifi"],
-      ["sysmgr","sysmgr","cpu"],
       ["actions","actions","gear"]
     ];
     $("nav").innerHTML = nav.map(function (n, i) { return '<button data-section="' + n[0] + '" class="' + (i ? "" : "active") + '">' + icon(n[2]) + '<span>' + tr(n[1]) + '</span></button>'; }).join("");
@@ -511,7 +508,7 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","system","quick","isolation","netmgr","wifimgr","sysmgr","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","system","quick","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
