@@ -847,6 +847,26 @@ EOF
     uci set wireless.radio0.legacy_rates='0'; uci set wireless.radio1.legacy_rates='0'
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
     emit true "Auto optimize" "Safe Wi-Fi optimization applied" "[]" "Backup: $backup\n2.4G channel=${bestc:-1}, 5G channel=36, WMM/DTIM/802.11k/v enabled where supported. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  run_selftest)
+    # on-demand health snapshot (same collector as the 04:00 nightly cron); read-only
+    out="$(/usr/sbin/smartap-selftest 2>/dev/null)"
+    [ -n "$out" ] || out='{"ok":false}'
+    printf '%s\n' "$out"
+    exit 0 ;;
+  steer_client)
+    # 802.11v BSS Transition: politely ask a 2.4G client to move (5G-capable phones roam
+    # to the 5G SSID). One-click, non-destructive — the client may decline.
+    mac="$(safe_mac "$(param mac)")"
+    [ "${#mac}" = 17 ] || { emit false "Steer" "Invalid MAC" "[]" "Enter MAC as aa:bb:cc:dd:ee:ff." "[]" "[]"; exit 0; }
+    src_if="$(param iface | sed 's/[^A-Za-z0-9._-]//g' | cut -c1-24)"
+    [ -n "$src_if" ] || src_if="phy0-ap0"
+    r="$(ubus call "hostapd.$src_if" bss_transition_request "{\"addr\":\"$mac\",\"disassociation_imminent\":false,\"disassociation_timer\":0,\"validity_period\":30}" 2>&1)"
+    if [ $? -eq 0 ]; then
+      emit true "Steer to 5G" "تم إرسال طلب الانتقال" "[]" "أُرسل طلب 802.11v للجهاز $mac. الأجهزة الداعمة تنتقل خلال ثوانٍ؛ بعض الأجهزة القديمة تتجاهله." "[]" "[]"
+    else
+      emit false "Steer to 5G" "الجهاز أو الواجهة لا تدعم الطلب" "[]" "تعذر إرسال طلب الانتقال للجهاز $mac — قد لا يدعم الجهاز 802.11v." "[]" "[]"
+    fi
+    exit 0 ;;
   secscan_run)
     # On-demand neighbor scan: neighboring SSIDs, their channels/signal, rogue/evil-twin
     # detection (foreign BSSID broadcasting our SSID), and least-congested channel advice.

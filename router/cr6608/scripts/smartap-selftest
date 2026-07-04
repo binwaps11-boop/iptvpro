@@ -1,0 +1,55 @@
+#!/bin/sh
+# smartap-selftest — collects a health snapshot into /tmp/smartap-report.json.
+# Run nightly by cron (04:00) and on demand from the dashboard (dashctl run_selftest).
+# Pure read-only: changes nothing on the system.
+
+iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
+iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+
+ts="$(date '+%Y-%m-%d %H:%M' 2>/dev/null)"
+up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; up="${up:-0}"
+
+temp=""
+for t in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
+  [ -r "$t" ] || continue
+  v="$(cat "$t" 2>/dev/null)"
+  case "$v" in ''|*[!0-9-]*) continue ;; esac
+  temp="$(awk -v v="$v" 'BEGIN{if (v > 1000) printf "%.0f", v/1000; else printf "%.0f", v}')"
+  break
+done
+
+mt="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; mt="${mt:-1}"
+ma="$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; ma="${ma:-0}"
+mem_pct=$(( (mt - ma) * 100 / mt ))
+
+busy_max=0; clients=0; err_sum=0
+for IF in $(iw dev | awk '$1=="Interface"{print $2}'); do
+  c="$(iwinfo "$IF" assoclist | grep -Ec '^[0-9A-Fa-f]{2}:')"
+  clients=$((clients + ${c:-0}))
+  b="$(iw dev "$IF" survey dump | awk '
+    /\[in use\]/{inuse=1; next}
+    inuse && /channel active time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) a=$i }
+    inuse && /channel busy time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) b=$i }
+    inuse && /^[[:space:]]*$/{ inuse=0 }
+    END{ if (a>0) print int(b*100/a); else print 0 }')"
+  [ "${b:-0}" -gt "$busy_max" ] 2>/dev/null && busy_max="$b"
+  e="$(cat "/sys/class/net/$IF/statistics/tx_errors" 2>/dev/null)"
+  err_sum=$((err_sum + ${e:-0}))
+done
+
+ov="$(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%d", $3*100/$2}')"; ov="${ov:-0}"
+
+score=100; notes=""
+[ "$busy_max" -ge 70 ] 2>/dev/null && { score=$((score-25)); notes="$notes|القناة مزدحمة ($busy_max%)"; }
+[ "${temp:--1}" -ge 82 ] 2>/dev/null && { score=$((score-20)); notes="$notes|الحرارة مرتفعة (${temp}°)"; }
+[ "$mem_pct" -ge 90 ] 2>/dev/null && { score=$((score-15)); notes="$notes|الذاكرة مضغوطة ($mem_pct%)"; }
+[ "$ov" -ge 90 ] 2>/dev/null && { score=$((score-10)); notes="$notes|التخزين شبه ممتلئ ($ov%)"; }
+[ "$score" -lt 0 ] && score=0
+[ -n "$notes" ] || notes="|لا ملاحظات — كل شيء سليم"
+
+jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+printf '{"ok":true,"time":"%s","uptime_s":%s,"score":%s,"temp_c":%s,"mem_pct":%s,"busy_pct":%s,"clients":%s,"tx_errors":%s,"overlay_pct":%s,"notes":"%s"}\n' \
+  "$(jesc "$ts")" "$up" "$score" "${temp:-null}" "$mem_pct" "$busy_max" "$clients" "$err_sum" "$ov" "$(jesc "${notes#|}")" \
+  > /tmp/smartap-report.json 2>/dev/null
+cat /tmp/smartap-report.json
+exit 0

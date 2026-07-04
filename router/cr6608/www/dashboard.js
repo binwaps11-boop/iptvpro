@@ -47,6 +47,9 @@
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
+      newDevice: "جهاز جديد انضم", steer5g: "→ 5G", steerHint: "اطلب من الجهاز الانتقال إلى 5G",
+      selftest: "الفحص الذاتي", selftestRun: "تشغيل الفحص الآن", selftestHint: "يعمل تلقائياً كل ليلة 4:00 صباحاً، وتقدر تشغّله يدوياً.",
+      selftestNotes: "الملاحظات", lastReport: "آخر تقرير",
       netmgr: "الشبكة", wifimgr: "لاسلكي", sysmgr: "النظام",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -90,6 +93,9 @@
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
+      newDevice: "New device joined", steer5g: "→ 5G", steerHint: "Ask this client to move to 5G",
+      selftest: "Self-test", selftestRun: "Run self-test now", selftestHint: "Runs automatically every night at 4:00 AM; you can also run it manually.",
+      selftestNotes: "Notes", lastReport: "Last report",
       netmgr: "Network", wifimgr: "Wireless", sysmgr: "System",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -634,7 +640,9 @@
         if (finite(rrate)) meta.push("RX " + fmt(rrate, 0));
         if (finite(exp)) meta.push("~" + fmt(exp, 0));
         var metaStr = meta.length ? '<small class="muted latin">' + esc(meta.join(" · ") + " Mbps") + '</small>' : "";
-        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + metaStr + '</div>';
+        // 802.11v steer button — offered only for clients sitting on the 2.4G radio
+        var steer = (x.band === "2.4G" && s.mac) ? ' <button class="btn dev-action" title="' + esc(tr("steerHint")) + '" data-steer-mac="' + esc(s.mac) + '" data-steer-iface="' + esc(x.iface || "") + '">' + esc(tr("steer5g")) + '</button>' : "";
+        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + steer + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + metaStr + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>' + tr("channel") + '</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div>' + busyRow + '</div><h4>Clients · ' + tr("linkRate") + '</h4>' + sta, esc(x.hw_modes || ""), "wifi");
@@ -834,7 +842,22 @@
     }, 0);
     var trendCard = card(state.lang === "ar" ? "مسار الموارد" : "Resource trend",
       '<canvas id="sysTrendCanvas" style="width:100%;height:180px"></canvas>', "CPU / RAM / " + tr("temp"), "cpu");
-    return sectionHead(tr("systemTitle"), "loadavg / free / overlay / thermal", "thresholds") + card("Health", body, "live", "cpu") + trendCard + card("Availability 24h", availabilityHtml(), "local", "bolt");
+    // nightly self-test card (runs 04:00 by cron; button runs it now). Result is kept in
+    // state so the 5s poll re-render doesn't wipe it.
+    var st = state.selftest;
+    var stBody = '<p class="muted">' + esc(tr("selftestHint")) + '</p>' +
+      '<div class="branch-actions"><button class="btn primary" id="selftestBtn">' + esc(tr("selftestRun")) + '</button></div>';
+    if (st && st.ok) {
+      var sc = num(st.score), scCol = sc >= 85 ? "var(--excellent)" : sc >= 70 ? "var(--good)" : sc >= 50 ? "var(--mid)" : "var(--weak)";
+      stBody += '<div class="hs-wrap" style="margin-top:10px"><div class="hs-score" style="color:' + scCol + ';border-color:' + scCol + '"><b>' + esc(st.score) + '</b><small>/100</small></div>' +
+        '<div class="hs-reasons">' +
+        '<div class="hs-reason">' + esc(tr("lastReport")) + ': <b class="latin">' + esc(st.time || "") + '</b></div>' +
+        '<div class="hs-reason latin">' + tr("temp") + ' ' + esc(st.temp_c == null ? "—" : st.temp_c + "°") + ' · RAM ' + esc(st.mem_pct) + '% · ' + tr("airtime") + ' ' + esc(st.busy_pct) + '% · Clients ' + esc(st.clients) + '</div>' +
+        '<div class="hs-reason">' + esc(tr("selftestNotes")) + ': ' + esc(st.notes || "") + '</div>' +
+        '</div></div>';
+    }
+    var selftestCard = card(tr("selftest"), stBody, "04:00", "shield");
+    return sectionHead(tr("systemTitle"), "loadavg / free / overlay / thermal", "thresholds") + card("Health", body, "live", "cpu") + trendCard + selftestCard + card("Availability 24h", availabilityHtml(), "local", "bolt");
   }
   function renderNetwork(data, rates) {
     var interfaces = data.interfaces || [];
@@ -1071,9 +1094,30 @@
       '<div id="ctl_wizard" class="ctl-status">' + esc(tr("loading")) + '</div>' +
       '</div>';
   }
+  // New-device join alert: remembers every MAC ever seen (localStorage) and
+  // raises a toast + event the first time an unknown device appears. Fully offline.
+  function detectNewDevices(data) {
+    var known;
+    try { known = JSON.parse(localStorage.getItem(LS + "knownMacs") || "[]"); } catch (e) { known = []; }
+    var set = {}, changed = false;
+    known.forEach(function (m) { set[m] = 1; });
+    var first = !known.length; // first run: learn silently, don't spam alerts
+    mergeDevices(data).forEach(function (d) {
+      var m = (d.mac || "").toLowerCase();
+      if (!m || set[m]) return;
+      set[m] = 1; changed = true;
+      if (!first) {
+        var label = m.toUpperCase() + (d.vendor ? " · " + d.vendor : "");
+        toast(tr("newDevice") + ": " + label);
+        event(tr("newDevice") + ": " + label, "warn");
+      }
+    });
+    if (changed) localStorage.setItem(LS + "knownMacs", JSON.stringify(Object.keys(set).slice(-400)));
+  }
   function render(data) {
     state.latest = data;
     window.__lastApi = data;
+    detectNewDevices(data);
     var rates = trafficRates(data);
     updateAvailability(!!data.ok);
     pushHistory("latency", state.lastLatency || 0, 60);
@@ -1275,6 +1319,33 @@
     if (scanBtn) scanBtn.onclick = scanWifi;
     var applyChan = $("wifiApplyChanBtn");
     if (applyChan) applyChan.onclick = function () { applyBestChannels(applyChan.dataset.ch24, applyChan.dataset.ch5); };
+    var stBtn = $("selftestBtn");
+    if (stBtn) stBtn.onclick = async function () {
+      stBtn.disabled = true; var old = stBtn.textContent; stBtn.textContent = tr("loading") + "...";
+      try {
+        var r = await fetch(CTL, { method:"POST", cache:"no-store",
+          headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+          body:"section=selftest&action=run_selftest&" + sidQuery() + "&_=" + Date.now() });
+        if (r.status === 403) return requireLogin(tr("loginBad"));
+        state.selftest = await r.json();
+        if (state.latest) render(state.latest);
+        showSection("system");
+      } catch (e) { toast("selftest: " + e.message); stBtn.disabled = false; stBtn.textContent = old; }
+    };
+    Array.prototype.forEach.call(document.querySelectorAll("[data-steer-mac]"), function (b) {
+      b.onclick = async function () {
+        b.disabled = true;
+        try {
+          var r = await fetch(CTL, { method:"POST", cache:"no-store",
+            headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+            body:"section=wifi&action=steer_client&mac=" + encodeURIComponent(b.dataset.steerMac) + "&iface=" + encodeURIComponent(b.dataset.steerIface || "") + "&" + sidQuery() + "&_=" + Date.now() });
+          if (r.status === 403) return requireLogin(tr("loginBad"));
+          var j = await r.json();
+          toast(j.summary || tr("ok"));
+          event("Steer 5G: " + b.dataset.steerMac);
+        } catch (e) { toast(e.message); } finally { b.disabled = false; }
+      };
+    });
     var d = $("dailyBudget"), m = $("monthBudget");
     if (d) d.onchange = function () { localStorage.setItem(LS + "dailyBudgetGb", Math.max(1, Number(d.value)||5)); loadData(); };
     if (m) m.onchange = function () { localStorage.setItem(LS + "monthBudgetGb", Math.max(1, Number(m.value)||100)); loadData(); };
