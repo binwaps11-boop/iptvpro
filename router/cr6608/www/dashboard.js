@@ -1615,6 +1615,66 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       H.spark(hist,col)+"<div class='grid two' style='margin-top:8px'><div class='traffic-box'><span>"+(A?"متوسط":"avg")+"</span><b class='latin'>"+H.fmt(avg,1)+" ms</b></div><div class='traffic-box'><span>"+(A?"أقصى":"max")+"</span><b class='latin'>"+H.fmt(mx,1)+" ms</b></div></div>";
     return H.card(A?"مراقب زمن الاستجابة":"Latency Monitor",body,H.fmt(now,0)+"ms","net");
   }});
+  // #63 — Performance Pack: live checklist of every optimization actually active on the
+  // device (read from d.perf which dashapi2 builds from uci/sysfs — real state, not claims).
+  PRO_FEATURES.push({key:"perf_pack",ar:"حزمة الأداء الاحترافية",en:"Performance Pack",cat:"Automation & UX",fn:function(d,H){
+    var A=H.lang==="ar", p=(d&&d.perf)||null, t=A?"حزمة الأداء الاحترافية":"Performance Pack";
+    if(!p) return H.card(t,"<div class='empty'>"+(A?"لا بيانات":"No data")+"</div>",null,"bolt");
+    function row(ok,ar,en,hint){ var c=ok?"var(--excellent)":"var(--muted)";
+      return "<div style='display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px'>"+
+        "<span style='flex:0 0 18px;height:18px;border-radius:50%;border:1.5px solid "+c+";color:"+c+";font-weight:700;display:flex;align-items:center;justify-content:center;font-size:11px'>"+(ok?"✓":"—")+"</span>"+
+        "<span style='flex:1'>"+(A?ar:en)+(hint?" <small class='muted'>"+hint+"</small>":"")+"</span></div>"; }
+    function grp(title,rows){ return "<div style='margin:8px 0 2px;font-weight:700;font-size:12px;color:var(--accent)'>"+title+"</div>"+rows; }
+    var items=[
+      [!!p.mu_bf_he,1],[!!p.mu_bf_vht,1],[!!p.su_bf,1],[!!p.spatial_reuse,1],[!!p.bss_color,1],
+      [!!p.dynack,1],[!!p.ldpc,1],[!!p.stbc,1],[!!p.keep_weak,1],
+      [!!p.airtime,1],[!!p.m2u,1],[!!p.kv,1],[H.num(p.maxassoc)>=200,1],
+      [!!p.hw_offload,1],[!!p.sw_offload,1],[!!p.rps,1],[!!p.fastopen,1],[H.num(p.dns_cache)>=4000,1],[!!p.sgi,1]];
+    var on=items.filter(function(x){return x[0];}).length, tot=items.length;
+    var head="<div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px'><span>"+(A?"المُفعّل":"Active")+"</span><b class='latin' style='color:var(--excellent)'>"+on+"/"+tot+"</b></div>"+H.bar(on,tot,"var(--excellent)")+
+      "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin:6px 0'><span>"+(A?"قوة البث":"TX power")+"</span><b class='latin' style='color:var(--excellent)'>"+(H.finite(H.num(p.txpower))?p.txpower:35)+" dBm</b></div>";
+    var body=head+
+      grp(A?"MIMO / AX":"MIMO / AX",
+        row(p.mu_bf_he,"MU-MIMO (AX)","MU-MIMO (AX)",A?"إرسال لعدة أجهزة معاً":"serve many at once")+
+        row(p.mu_bf_vht,"MU-MIMO (AC)","MU-MIMO (AC)",A?"نفس الميزة لأجهزة AC":"same for AC clients")+
+        row(p.su_bf,"Beamforming",  "Beamforming",A?"تركيز الشعاع نحو كل جهاز":"focus beam per client")+
+        row(p.spatial_reuse,A?"إعادة استخدام مكاني":"Spatial Reuse",A?"إعادة استخدام مكاني":"Spatial Reuse",A?"أداء أعلى في الزحام":"better in congestion")+
+        row(p.bss_color,"BSS Color","BSS Color",""))+
+      grp(A?"تقوية العميل البعيد":"Far-client boost",
+        row(p.dynack,A?"مهلة ACK ديناميكية":"Dynamic ACK",A?"مهلة ACK ديناميكية":"Dynamic ACK",A?"نقل كامل للبعيد بلا ضرر للقريب":"full speed at distance")+
+        row(p.ldpc,"LDPC","LDPC",A?"فكّ الإشارة الضعيفة بنجاح":"decode weak signals")+
+        row(p.stbc,"STBC","STBC",A?"تنوّع هوائيات للموثوقية":"antenna diversity")+
+        row(p.keep_weak,A?"عدم فصل الضعيف أبداً":"Never drop weak",A?"عدم فصل الضعيف أبداً":"Never drop weak",""))+
+      grp(A?"السعة":"Capacity",
+        row(p.airtime,A?"عدالة وقت الهواء":"Airtime fairness",A?"عدالة وقت الهواء":"Airtime fairness",A?"جهاز واحد لا يخنق الباقي":"no client starves others")+
+        row(H.num(p.maxassoc)>=200,A?"سعة 200 جهاز/تردد":"200 clients/band",A?"سعة 200 جهاز/تردد":"200 clients/band","")+
+        row(p.m2u,"Multicast→Unicast","Multicast→Unicast",A?"بث فيديو أسرع":"faster video")+
+        row(p.kv,"802.11k/v roaming","802.11k/v roaming",""))+
+      grp(A?"مسار الحزم السريع":"Fast packet path",
+        row(p.hw_offload,A?"تفريغ عتادي":"HW offload",A?"تفريغ عتادي":"HW offload",A?"توجيه بالعتاد لا بالمعالج":"forwarding in hardware")+
+        row(p.sw_offload,A?"تفريغ برمجي":"SW offload",A?"تفريغ برمجي":"SW offload","")+
+        row(p.rps,A?"توزيع على النواتين":"RPS steering",A?"توزيع على النواتين":"RPS steering","")+
+        row(p.fastopen,"TCP FastOpen","TCP FastOpen","")+
+        row(H.num(p.dns_cache)>=4000,A?"كاش DNS كبير":"Big DNS cache",A?"كاش DNS كبير":"Big DNS cache","4000"));
+    return H.card(t,body,on+"/"+tot,"bolt");
+  }});
+  // #64 — MIMO/AX/AC/N matrix: which acceleration each Wi-Fi generation gets, as a grid.
+  PRO_FEATURES.push({key:"mimo_matrix",ar:"مصفوفة AX/AC/N",en:"AX/AC/N Matrix",cat:"Automation & UX",fn:function(d,H){
+    var A=H.lang==="ar", p=(d&&d.perf)||{}, t=A?"مصفوفة AX/AC/N":"AX/AC/N Matrix";
+    var cols=[["WiFi 6 (AX)"],["WiFi 5 (AC)"],["WiFi 4 (N)"]];
+    var rows=[
+      [A?"سرعة قصوى":"Top rate","HE80 1024-QAM","VHT80 256-QAM","HT40 MCS15"],
+      ["MU-MIMO",p.mu_bf_he?"✓":"—",p.mu_bf_vht?"✓":"—","—"],
+      ["Beamforming",p.su_bf?"✓":"—",p.mu_bf_vht||p.su_bf?"✓":"—","—"],
+      ["LDPC",p.ldpc?"✓":"—",p.ldpc?"✓":"—",p.ldpc?"✓":"—"],
+      ["STBC",p.stbc?"✓":"—",p.stbc?"✓":"—",p.stbc?"✓":"—"],
+      ["OFDMA","✓ fw","—","—"],
+      [A?"مدى بعيد":"Long range",p.dynack?"✓":"—",p.dynack?"✓":"—",p.dynack?"✓":"—"]];
+    var h="<div class='table-wrap'><table style='font-size:11px'><thead><tr><th></th><th>"+cols[0][0]+"</th><th>"+cols[1][0]+"</th><th>"+cols[2][0]+"</th></tr></thead><tbody>";
+    rows.forEach(function(r){ h+="<tr><td style='font-weight:700'>"+r[0]+"</td>"; for(var i=1;i<4;i++){ var v=r[i], ok=v.indexOf("✓")===0; h+="<td class='latin' style='color:"+(ok?"var(--excellent)":v==="—"?"var(--muted)":"var(--text)")+"'>"+v+"</td>"; } h+="</tr>"; });
+    h+="</tbody></table></div><p class='muted' style='margin-top:6px;font-size:11px'>"+(A?"كل جيل واي فاي يحصل على أقصى تسريع يدعمه — والقديم لا يبطّئ الحديث (عدالة وقت الهواء)":"Each Wi-Fi generation gets its maximum acceleration — old clients never slow new ones (airtime fairness)")+"</p>";
+    return H.card(t,h,"2×2","signal");
+  }});
   // Defensive: strip null/non-object elements from the live arrays so a stray null in
   // d.wifi / d.devices / d.interfaces / stations can never throw inside a card.
   function sanitizeData(data) {
