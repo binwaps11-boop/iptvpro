@@ -1,8 +1,0 @@
-#!/bin/sh
-# Reapply the Wi-Fi-only guard for 221.221.221.221 whenever the bridge / rescue interface
-# comes up, so it survives network reloads.
-[ "$ACTION" = "ifup" ] || exit 0
-case "$INTERFACE" in
-	lan|wlanrescue) [ -x /usr/sbin/cr6608-rescue-guard ] && /usr/sbin/cr6608-rescue-guard >/dev/null 2>&1 & ;;
-esac
-exit 0

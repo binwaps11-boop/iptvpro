@@ -4,7 +4,10 @@ config uhttpd 'main'
 	list listen_https '0.0.0.0:443'
 	option redirect_https '0'
 	option home '/www'
-	option rfc1918_filter '1'
+	# Must be 0: the Wi-Fi rescue address 221.221.221.221 is a PUBLIC-range IP, and the
+	# RFC1918 rebinding filter would abort every request to it (ERR_CONNECTION_ABORTED).
+	# Disabling it lets the dashboard answer on 221.221.221.221 (and 192.168.1.1 stays fine).
+	option rfc1918_filter '0'
 	option max_requests '16'
 	option max_connections '100'
 	option cert '/etc/uhttpd.crt'
