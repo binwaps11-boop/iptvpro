@@ -161,7 +161,9 @@ if [ "$(g smartap.management.recovery_wifi)" = "1" ] && uci -q get wireless.radi
     uci -q delete wireless.smartap_mgmt.key 2>/dev/null && mark_changed wireless
   fi
   setv wireless.smartap_mgmt.isolate 0 wireless
-  setv wireless.smartap_mgmt.hidden 0 wireless
+  # Recovery SSID is HIDDEN: it stays available for rescue but does not appear in the
+  # phone's Wi-Fi list. To use it, add the network manually by typing CR6608-Recovery.
+  setv wireless.smartap_mgmt.hidden 1 wireless
   setv wireless.smartap_mgmt.disabled 0 wireless
 fi
 
