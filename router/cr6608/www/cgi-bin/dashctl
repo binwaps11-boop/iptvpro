@@ -804,10 +804,17 @@ EOF
       done
       uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
     fi
-    # DHCP is hard-off on this AP by owner policy. Regardless of the wizard's dhcp_server
-    # value, the LAN DHCP pool is deleted so no server ever exists or appears on any mode --
-    # the upstream Mikrotik is the only DHCP server.
-    uci -q delete dhcp.lan 2>/dev/null || true
+    # DHCP policy by mode. In broadband/PPPoE the device IS the main router, so it MUST hand
+    # out addresses to its Wi-Fi/LAN clients (they get internet automatically, no manual IP).
+    # In every AP mode there is an upstream router, so DHCP stays fully off.
+    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; then
+      uci set dhcp.lan='dhcp'; uci set dhcp.lan.interface='lan'
+      uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'
+      uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
+      uci set dhcp.lan.dhcpv6='disabled'; uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'
+    else
+      uci -q delete dhcp.lan 2>/dev/null || true
+    fi
     if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
     [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then

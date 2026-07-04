@@ -67,9 +67,13 @@ apply_dhcp_guard() {
 	local enabled rogue
 	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
 	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+	# In broadband/PPPoE router mode the device MUST serve DHCP to its clients, so the rogue-
+	# DHCP guard does NOT apply there. It only enforces no-DHCP in AP modes (behind a router).
+	if [ "$(uci -q get network.wan.proto)" = "pppoe" ] && [ "$(uci -q get network.wan.disabled)" != "1" ]; then
+		return 0
+	fi
 	if [ "$enabled" = "1" ] && [ "$rogue" = "1" ]; then
-		# Never serve DHCP (would leak IPs onto the Mikrotik network). Delete any pool so
-		# nothing appears and nothing can hand out an address.
+		# AP mode: never serve DHCP (would leak IPs onto the upstream network). Delete any pool.
 		uci -q delete dhcp.lan 2>/dev/null || true
 		uci commit dhcp
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
