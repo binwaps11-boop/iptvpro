@@ -1,0 +1,9 @@
+#!/bin/sh
+# Whenever the WAN interface comes up or down (PPPoE connect/disconnect, or a proto change
+# applied from LuCI/Argon or Smart AP), re-sync the LAN DHCP policy to the WAN proto so DHCP
+# turns on for broadband/PPPoE and stays off in every AP mode — immediately, no reboot needed.
+[ "$INTERFACE" = "wan" ] || exit 0
+case "$ACTION" in
+	ifup|ifdown) [ -x /usr/sbin/cr6608-dhcp-mode ] && /usr/sbin/cr6608-dhcp-mode >/dev/null 2>&1 & ;;
+esac
+exit 0
