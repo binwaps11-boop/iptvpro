@@ -609,7 +609,7 @@ EOF
     uci -q delete network.@device[0].vlan_filtering
     uci set network.lan.device='br-lan'
     for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-    for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
+    for p in lan1 lan2 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
     uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
     uci set dhcp.lan.ignore='1'
     for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
@@ -684,7 +684,7 @@ EOF
       # bridge ports: cable ports untagged; RAW wan and any stale wan.<old-vid> OUT
       uci -q del_list network.@device[0].ports='wan'
       for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-      for p in lan1 lan2 lan3; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
+      for p in lan1 lan2; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
       # tagged uplink toward the Mikrotik joins the SAME bridge
       uci set network.smartap_wandev='device'; uci set network.smartap_wandev.type='8021q'; uci set network.smartap_wandev.ifname='wan'; uci set network.smartap_wandev.vid="$vlan_id"; uci set network.smartap_wandev.name="wan.$vlan_id"
       uci add_list network.@device[0].ports="wan.$vlan_id"
@@ -739,7 +739,7 @@ EOF
     elif [ "${mgmt_isolated:-0}" = "1" ]; then
       # VLAN mode: cable ports stay in the bridge; the RAW wan port stays OUT (only its
       # tagged sub-interface wan.<vid> is in the bridge, so the uplink carries the VLAN only).
-      for p in lan1 lan2 lan3; do
+      for p in lan1 lan2; do
         [ -d "/sys/class/net/$p" ] || continue
         uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
       done
@@ -748,7 +748,7 @@ EOF
     else
       # Plain AP (not PPPoE): make sure every port is back in the bridge and the wan interface
       # is parked, so AP modes always have all 4 ports working as LAN.
-      for p in lan1 lan2 lan3 wan; do
+      for p in lan1 lan2 wan; do
         [ -d "/sys/class/net/$p" ] || continue
         uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
       done
