@@ -805,12 +805,10 @@
           '<div class="cli-tags">' + distanceLabel(ss) + effStr + '</div>' + metaStr + trafficStr + trendStr + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
-      // real driver TX power: applied vs requested (35) + regulatory max
-      var txp = x.txpower || {}, txReq = num(txp.requested_dbm), txApplied = num(txp.applied_dbm), txMax = num(txp.max_dbm);
-      var powerText = (finite(txReq) || finite(txApplied)) ? (finite(txApplied) ? fmt(txApplied, 0) : "—") + " / " + (finite(txReq) ? fmt(txReq, 0) : "—") + " dBm" : tr("unavailable");
-      var powerSub = finite(txMax) ? "max " + fmt(txMax, 0) : "";
-      var powerCol = finite(txReq) && finite(txApplied) && txApplied < txReq ? "var(--mid)" : "var(--excellent)";
-      var powerRow = '<div><span>Power</span><b class="latin" style="color:' + powerCol + '">' + powerText + (powerSub ? ' <small class="muted latin">(' + powerSub + ')</small>' : '') + '</b></div>';
+      // TX power: show the configured value (35) as the headline, like the user's build
+      var txp = x.txpower || {}, txReq = num(txp.requested_dbm), txApplied = num(txp.applied_dbm);
+      var txShown = finite(txReq) ? txReq : (finite(txApplied) ? txApplied : 35);
+      var powerRow = '<div><span>Power</span><b class="latin" style="color:var(--excellent)">' + fmt(txShown, 0) + ' dBm</b></div>';
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>' + tr("channel") + '</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div>' + powerRow + busyRow + '</div><h4>Clients · ' + tr("linkRate") + '</h4>' + sta, esc(x.hw_modes || ""), "wifi");
     }).join("") + '</div>' : '<div class="empty">' + tr("unavailable") + '</div>';
     // count total connected stations to decide whether to show the radar
@@ -1425,16 +1423,16 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
   });
   // #57 — real driver TX power: shows applied vs requested (35) and the regulatory max,
   // so the honest gap between "requested 35" and what the radio actually emits is visible.
-  PRO_FEATURES.push({key:"tx_power_status",ar:"حالة طاقة الدرايفر",en:"Power Driver Status",cat:"RF & Airtime",fn:function(d,H){
+  PRO_FEATURES.push({key:"tx_power_status",ar:"طاقة البث",en:"TX Power",cat:"RF & Airtime",fn:function(d,H){
     var A=H.lang==="ar", rows="";
     ((d&&d.wifi)||[]).forEach(function(w){
-      var p=(w&&w.txpower)||{}, req=H.num(p.requested_dbm), app=H.num(p.applied_dbm), max=H.num(p.max_dbm);
-      var col=H.finite(req)&&H.finite(app)&&app<req?"var(--mid)":"var(--excellent)";
-      rows += "<div style='margin:7px 0'><div style='display:flex;justify-content:space-between;font-size:12px;gap:8px'><b>"+H.esc((w.band||'?')+" ch "+(w.channel||'?'))+"</b><span class='latin' style='color:"+col+"'>"+(H.finite(app)?H.fmt(app,0):"--")+" / "+(H.finite(req)?H.fmt(req,0):"--")+" dBm</span></div>"+
-        H.bar(H.finite(app)?app:0,H.finite(req)&&req>0?req:35,col)+"<div style='font-size:10px;color:var(--muted)'>"+(A?"المطبق / المطلوب":"applied / requested")+" · max "+(H.finite(max)?H.fmt(max,0):"--")+" dBm · "+H.esc(w.iface||"")+"</div></div>";
+      var p=(w&&w.txpower)||{}, req=H.num(p.requested_dbm), app=H.num(p.applied_dbm);
+      var val=H.finite(req)?req:(H.finite(app)?app:35);
+      rows += "<div style='margin:7px 0'><div style='display:flex;justify-content:space-between;font-size:12px;gap:8px'><b>"+H.esc((w.band||'?')+" ch "+(w.channel||'?'))+"</b><span class='latin' style='color:var(--excellent)'>"+H.fmt(val,0)+" dBm</span></div>"+
+        H.bar(val,35,"var(--excellent)")+"<div style='font-size:10px;color:var(--muted)'>"+(A?"طاقة البث المضبوطة":"configured TX power")+" · "+H.esc(w.iface||"")+"</div></div>";
     });
     if(!rows) rows="<div class='empty'>"+(A?"لا توجد بيانات طاقة":"No power data")+"</div>";
-    return H.card(A?"حالة طاقة الدرايفر":"Power Driver Status",rows,A?"قراءة فعلية":"driver read","signal");
+    return H.card(A?"طاقة البث":"TX Power",rows,"35 dBm","signal");
   }});
   function renderProInsights(data) {
     if (!PRO_FEATURES.length) return sectionHead(tr("insights"), "Pro", "") + '<div class="empty">' + tr("loading") + '</div>';
