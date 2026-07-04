@@ -50,6 +50,10 @@
       newDevice: "جهاز جديد انضم", steer5g: "→ 5G", steerHint: "اطلب من الجهاز الانتقال إلى 5G",
       selftest: "الفحص الذاتي", selftestRun: "تشغيل الفحص الآن", selftestHint: "يعمل تلقائياً كل ليلة 4:00 صباحاً، وتقدر تشغّله يدوياً.",
       selftestNotes: "الملاحظات", lastReport: "آخر تقرير",
+      distance: "المسافة التقديرية", secPosture: "حالة الحماية", efficiency: "كفاءة الوصلة",
+      protected: "محمي", open: "مفتوح", encrypted: "مشفّر", thermal: "الحارس الحراري",
+      thermalOk: "طبيعية", thermalWarm: "دافئة", thermalHot: "مرتفعة", meters: "م",
+      secGood: "كل الشبكات آمنة", secOpenWarn: "شبكات مفتوحة", trend: "اتجاه الإشارة",
       netmgr: "الشبكة", wifimgr: "لاسلكي", sysmgr: "النظام",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -96,6 +100,10 @@
       newDevice: "New device joined", steer5g: "→ 5G", steerHint: "Ask this client to move to 5G",
       selftest: "Self-test", selftestRun: "Run self-test now", selftestHint: "Runs automatically every night at 4:00 AM; you can also run it manually.",
       selftestNotes: "Notes", lastReport: "Last report",
+      distance: "Est. distance", secPosture: "Security posture", efficiency: "Link efficiency",
+      protected: "Protected", open: "Open", encrypted: "Encrypted", thermal: "Thermal guardian",
+      thermalOk: "Normal", thermalWarm: "Warm", thermalHot: "Hot", meters: "m",
+      secGood: "All networks secured", secOpenWarn: "Open networks", trend: "Signal trend",
       netmgr: "Network", wifimgr: "Wireless", sysmgr: "System",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -598,6 +606,48 @@
     var ico = v >= -60 ? "●●●" : v >= -75 ? "●●" : "●";
     return '<span class="prox" style="color:' + col + '">' + ico + ' ' + tr(lvl) + '</span>';
   }
+  // Estimate distance (m) from RSSI via the log-distance path-loss model:
+  // d = 10^((RSSI@1m - RSSI)/(10·n)); RSSI@1m≈-40 dBm, n≈2.7 (typical indoor).
+  function distanceM(dbm) {
+    var v = num(dbm);
+    if (v === null || !finite(v) || v >= 0) return null;
+    var d = Math.pow(10, (-40 - v) / (10 * 2.7));
+    return d;
+  }
+  function distanceLabel(dbm) {
+    var d = distanceM(dbm);
+    if (d === null) return "";
+    var t = d < 10 ? d.toFixed(1) : Math.round(d);
+    return '<span class="prox" style="color:var(--accent)">≈ ' + t + ' ' + tr("meters") + '</span>';
+  }
+  // Link efficiency = actual PHY rate vs the band's 2×2 HE ceiling (2.4G HE20≈287, 5G HE80≈1201).
+  function linkEfficiency(band, txRate) {
+    var r = num(txRate); if (!finite(r) || r <= 0) return null;
+    var ceil = band === "5G" ? 1201 : 287;
+    return clamp(Math.round(r / ceil * 100), 0, 100);
+  }
+  // WPA3/PMF security posture from the per-SSID encryption string.
+  function secLevel(enc) {
+    var e = String(enc || "").toLowerCase();
+    if (!e || /none|open/.test(e)) return { key: "open", col: "var(--mid)", txt: tr("open") };
+    if (/wpa3|sae/.test(e)) return { key: "wpa3", col: "var(--excellent)", txt: "WPA3" };
+    if (/wpa2|psk|ccmp/.test(e)) return { key: "wpa2", col: "var(--good)", txt: "WPA2" };
+    return { key: "enc", col: "var(--good)", txt: tr("encrypted") };
+  }
+  function renderSecPosture(data) {
+    var w = data.wifi || [];
+    if (!w.length) return "";
+    var open = 0;
+    var rows = w.map(function (x) {
+      var s = secLevel(x.encryption);
+      if (s.key === "open") open++;
+      return '<div class="kv"><div><span class="latin">' + esc(x.ssid || x.iface) + '</span>' +
+        '<b><span class="prox" style="color:' + s.col + '">' + s.txt + '</span></b></div>' +
+        bar(s.key === "wpa3" ? 100 : s.key === "wpa2" ? 72 : 30, 100, s.col) + '</div>';
+    }).join("");
+    var chip = open ? open + " " + tr("secOpenWarn") : tr("secGood");
+    return card(tr("secPosture"), rows, chip, "shield");
+  }
   function renderDevices(data) {
     var rows = mergeDevices(data);
     if (!rows.length) return sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
@@ -640,9 +690,15 @@
         if (finite(rrate)) meta.push("RX " + fmt(rrate, 0));
         if (finite(exp)) meta.push("~" + fmt(exp, 0));
         var metaStr = meta.length ? '<small class="muted latin">' + esc(meta.join(" · ") + " Mbps") + '</small>' : "";
+        // per-client signal trend (kept per MAC in localStorage histories)
+        if (s.mac && finite(ss)) pushHistory("sig_" + s.mac, ss, 40);
+        var eff = linkEfficiency(x.band, rate);
+        var effStr = eff !== null ? '<span class="prox" style="color:' + (eff >= 70 ? "var(--excellent)" : eff >= 40 ? "var(--good)" : "var(--mid)") + '">' + tr("efficiency") + " " + eff + '%</span>' : "";
+        var trendStr = (s.mac && (state.histories["sig_" + s.mac] || []).length > 2) ? spark(state.histories["sig_" + s.mac], qq.color) : "";
         // 802.11v steer button — offered only for clients sitting on the 2.4G radio
         var steer = (x.band === "2.4G" && s.mac) ? ' <button class="btn dev-action" title="' + esc(tr("steerHint")) + '" data-steer-mac="' + esc(s.mac) + '" data-steer-iface="' + esc(x.iface || "") + '">' + esc(tr("steer5g")) + '</button>' : "";
-        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + steer + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + metaStr + '</div>';
+        return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + steer + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) +
+          '<div class="cli-tags">' + distanceLabel(ss) + effStr + '</div>' + metaStr + trendStr + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>' + tr("channel") + '</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div>' + busyRow + '</div><h4>Clients · ' + tr("linkRate") + '</h4>' + sta, esc(x.hw_modes || ""), "wifi");
@@ -664,7 +720,7 @@
       '<div class="branch-actions"><button class="btn primary" id="wifiScanBtn">' + esc(tr("scanNeighbors")) + '</button></div>' +
       '<div id="wifiScanResult"></div>', "iw scan", "signal");
     return sectionHead("WiFi AX / AC / N", "Clients, RSSI, " + tr("linkRate"), "offline") +
-      healthCard(data) + chanCard + scanCard + radarCard + body;
+      healthCard(data) + '<div class="grid two">' + chanCard + renderSecPosture(data) + '</div>' + scanCard + radarCard + body;
   }
   // Client constellation radar: clients orbit the AP, radius = signal (strong→center),
   // colour = band, dot size = link rate. Pure offline canvas over live assoclist data.
@@ -679,11 +735,12 @@
     var cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 18;
     var grid = cssVar("--border", "rgba(148,163,184,.16)"), muted = cssVar("--muted", "#94A3B8");
     var accent = cssVar("--accent", "#06B6D4"), primary = cssVar("--primary", "#3B82F6");
-    // range rings (−45/−60/−75/−90 dBm)
+    // range rings labelled with both RSSI and the estimated distance (m)
     ctx.strokeStyle = grid; ctx.lineWidth = 1;
     [0.33, 0.66, 1].forEach(function (f) { ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); ctx.stroke(); });
     ctx.fillStyle = muted; ctx.font = "9px system-ui"; ctx.textAlign = "center";
-    ctx.fillText("-45", cx, cy - R * 0.33 + 3); ctx.fillText("-75", cx, cy - R * 0.66 + 3); ctx.fillText("-90", cx, cy - R + 3);
+    function ringLbl(dbm) { var d = distanceM(dbm); return dbm + (d !== null ? " · " + (d < 10 ? d.toFixed(1) : Math.round(d)) + tr("meters") : ""); }
+    ctx.fillText(ringLbl(-45), cx, cy - R * 0.33 + 3); ctx.fillText(ringLbl(-75), cx, cy - R * 0.66 + 3); ctx.fillText(ringLbl(-90), cx, cy - R + 3);
     // centre AP
     ctx.fillStyle = primary; ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, 12, 0, Math.PI * 2); ctx.stroke();
