@@ -478,6 +478,13 @@
     .login-form input:focus { outline:none; border-color:rgba(56,189,248,.6); box-shadow:0 0 0 3px rgba(37,99,235,.18), 0 0 24px rgba(6,182,212,.14); }
     html[data-theme="light"] .login-form input { background:rgba(4,8,18,.72); border-color:var(--login-border); color:var(--login-text); }
     .login-form button { min-height:50px; border-radius:14px; font-size:16px; letter-spacing:.02em; }
+    /* login button: force gradient + white text in EVERY theme/state (never white-on-white) */
+    #loginBtn, html[data-theme="light"] #loginBtn {
+      background:linear-gradient(135deg,#2563EB,#06B6D4) !important; color:#FFFFFF !important;
+      border:0 !important; font-weight:800 !important;
+      box-shadow:0 12px 32px rgba(37,99,235,.42), inset 0 1px 0 rgba(255,255,255,.28) !important;
+    }
+    #loginBtn:hover { filter:brightness(1.06); }
     .login-msg { min-height:22px; color:var(--login-muted); line-height:1.6; font-size:13px; }
     .login-msg.bad { color:#F87171; border:0; box-shadow:none; }
     .login-warning {

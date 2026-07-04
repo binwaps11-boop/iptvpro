@@ -1,8 +1,8 @@
 #!/bin/sh
 # --- safety: no system command may hang the API (busybox timeout) ---
-ubus() { timeout 5 /bin/ubus "$@" 2>/dev/null; }
-iwinfo() { timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
-iw() { timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
+ubus() { /bin/busybox timeout 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
 qparam() {
   printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 | sed 's/[^A-Fa-f0-9]//g'
 }
@@ -74,6 +74,12 @@ l15="$(gv "$info" '@.load[2]')"; l15="${l15:-0}"
 mt="$(gv "$info" '@.memory.total')"; mt="${mt:-0}"
 mf="$(gv "$info" '@.memory.free')"; mf="${mf:-0}"
 ma="$(gv "$info" '@.memory.available')"; ma="${ma:-0}"
+# bulletproof memory from /proc/meminfo (KB->bytes) when ubus info is empty
+if [ -z "$mt" ] || [ "$mt" = "0" ]; then
+  mt="$(awk '/^MemTotal:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"; mt="${mt:-0}"
+  mf="$(awk '/^MemFree:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"; mf="${mf:-0}"
+  ma="$(awk '/^MemAvailable:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"; ma="${ma:-$mf}"
+fi
 set -- $(awk '/^cpu /{total=0; for(i=2;i<=NF;i++) total+=$i; idle=$5+$6; busy=total-idle; printf "%s %s", total, busy}' /proc/stat 2>/dev/null)
 cpu_total="${1:-0}"
 cpu_busy="${2:-0}"
@@ -225,6 +231,22 @@ for IF in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
   first=0
 done
 wifi="$wifi]"
+# fallback: if iwinfo gave nothing, show configured SSIDs from uci so the
+# 2.4G/5G cards are never "unavailable"
+if [ "$wifi" = "[]" ]; then
+  wifi="["; wf=1
+  for r in radio0 radio1; do
+    [ "$(uci -q get wireless.$r.disabled)" = "1" ] && continue
+    ch="$(uci -q get wireless.$r.channel)"; ht="$(uci -q get wireless.$r.htmode)"; bnd="$(uci -q get wireless.$r.band)"
+    ifn="$(uci -q show wireless 2>/dev/null | awk -F'[.=]' -v r="$r" '/=wifi-iface/{s=$2} $0 ~ "\\."s"\\.device=.?"r".?"{print s; exit}')"
+    ss="$(uci -q get wireless.$ifn.ssid 2>/dev/null)"
+    case "$bnd" in 5g) band="5G" ;; 2g) band="2.4G" ;; *) band="WiFi" ;; esac
+    [ "$wf" = 1 ] || wifi="$wifi,"
+    wifi="$wifi{\"iface\":$(jstr "$r"),\"ssid\":$(jstr "$ss"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$ch"),\"htmode\":$(jstr "$ht"),\"signal_dbm\":0,\"noise_dbm\":0,\"bitrate_mbps\":0,\"hw_modes\":$(jstr ""),\"encryption\":$(jstr ""),\"clients\":0,\"up\":true,\"stations\":[]}"
+    wf=0
+  done
+  wifi="$wifi]"
+fi
 
 devices_body="$(
   dfirst=1

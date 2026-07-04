@@ -1,8 +1,8 @@
 #!/bin/sh
 # --- safety: no system command may hang the API (busybox timeout) ---
-ubus() { timeout 5 /bin/ubus "$@" 2>/dev/null; }
-iwinfo() { timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
-iw() { timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
+ubus() { /bin/busybox timeout 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
 param() {
   printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1
 }
