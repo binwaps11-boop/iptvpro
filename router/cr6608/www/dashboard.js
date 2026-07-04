@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", yearly: "السنوي", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", yearly: "Yearly", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -331,10 +331,12 @@
       if (!b || b.key !== key || cur < b.bytes) { b = { key:key, bytes:cur }; localStorage.setItem(LS + name, JSON.stringify(b)); }
       return Math.max(0, cur - b.bytes);
     }
+    var yearKey = dayKey.slice(0,4);
     var dayRx = base("dayBaseRx", dayKey, rx), dayTx = base("dayBaseTx", dayKey, tx);
     var monRx = base("monthBaseRx", monthKey, rx), monTx = base("monthBaseTx", monthKey, tx);
-    return { dayRx:dayRx, dayTx:dayTx, monRx:monRx, monTx:monTx,
-             day:dayRx + dayTx, month:monRx + monTx, total:rx + tx };
+    var yrRx = base("yearBaseRx", yearKey, rx), yrTx = base("yearBaseTx", yearKey, tx);
+    return { dayRx:dayRx, dayTx:dayTx, monRx:monRx, monTx:monTx, yrRx:yrRx, yrTx:yrTx,
+             day:dayRx + dayTx, month:monRx + monTx, year:yrRx + yrTx, total:rx + tx };
   }
   function trafficRates(data) {
     var now = Date.now(), rx = data.traffic ? Number(data.traffic.rx_bytes) || 0 : 0, tx = data.traffic ? Number(data.traffic.tx_bytes) || 0 : 0;
@@ -678,8 +680,9 @@
       gauge(tr("daily"), bytes(u.day), dailyBudget + " GB", tr("budget"), pct(u.day, dayTotal), pct(u.day, dayTotal) > 85 ? "#EF4444" : "#06B6D4", "kpiRx") +
       gauge(tr("monthly"), bytes(u.month), monthBudget + " GB", tr("budget"), pct(u.month, monthTotal), pct(u.month, monthTotal) > 85 ? "#EF4444" : "#8B5CF6", "kpiTx") +
       '</div>' +
-      // download / upload split for each period (separate, not combined)
+      // download / upload split for each period (daily, monthly, yearly — separate)
       '<div class="grid two" style="margin-top:8px">' + usageSplit(tr("daily"), u.dayRx, u.dayTx) + usageSplit(tr("monthly"), u.monRx, u.monTx) + '</div>' +
+      '<div style="margin-top:8px">' + usageSplit(tr("yearly"), u.yrRx, u.yrTx) + '</div>' +
       '<p class="muted">' + tr("noQuota") + '</p>' +
       '<div class="grid two"><label class="kv"><div><span>' + tr("daily") + ' GB</span><input id="dailyBudget" type="number" min="1" value="' + dailyBudget + '"></div></label><label class="kv"><div><span>' + tr("monthly") + ' GB</span><input id="monthBudget" type="number" min="1" value="' + monthBudget + '"></div></label></div>';
     return card(tr("budget"), body, "local", "bolt");
@@ -1507,6 +1510,43 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     });
     if(!rows) rows="<div class='empty'>"+(A?"لا توجد بيانات طاقة":"No power data")+"</div>";
     return H.card(A?"طاقة البث":"TX Power",rows,"35 dBm","signal");
+  }});
+  // #58 — signal heatmap: every Wi-Fi client as a colour cell (green=strong .. red=weak).
+  PRO_FEATURES.push({key:"signal_heatmap",ar:"خريطة حرارية للإشارة",en:"Signal Heatmap",cat:"Clients & Devices",fn:function(d,H){
+    var A=H.lang==="ar", cells=[];
+    ((d&&d.wifi)||[]).forEach(function(w){ ((w&&w.stations)||[]).forEach(function(s){ if(!s)return;
+      var sg=H.num(s.signal_dbm); if(!H.finite(sg))return;
+      cells.push({sg:sg,band:w.band||"",mac:String(s.mac||"")}); }); });
+    if(!cells.length) return H.card(A?"خريطة حرارية للإشارة":"Signal Heatmap","<div class='empty'>"+(A?"لا عملاء متصلين":"No clients")+"</div>",null,"signal");
+    cells.sort(function(a,b){return b.sg-a.sg;});
+    function col(sg){ return sg>=-55?"#22C55E":sg>=-65?"#84CC16":sg>=-72?"#EAB308":sg>=-80?"#F97316":"#EF4444"; }
+    var grid=cells.map(function(c){ var nm=c.mac.slice(-5);
+      return "<div title='"+H.esc(c.mac)+"' style='background:"+col(c.sg)+";border-radius:7px;padding:8px 4px;text-align:center;color:#0b1220'>"+
+        "<div style='font-weight:800;font-size:14px' class='latin'>"+H.fmt(c.sg,0)+"</div><div style='font-size:9px' class='latin'>"+H.esc(c.band)+"</div><div style='font-size:8px;opacity:.75' class='latin'>"+H.esc(nm)+"</div></div>"; }).join("");
+    var legend="<div style='display:flex;gap:8px;margin-top:8px;font-size:10px;color:var(--muted);flex-wrap:wrap'>"+
+      "<span style='color:#22C55E'>&#9632; "+(A?"ممتاز":"strong")+"</span><span style='color:#EAB308'>&#9632; "+(A?"متوسط":"fair")+"</span><span style='color:#EF4444'>&#9632; "+(A?"ضعيف":"weak")+"</span></div>";
+    return H.card(A?"خريطة حرارية للإشارة":"Signal Heatmap","<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(52px,1fr));gap:6px'>"+grid+"</div>"+legend,String(cells.length),"signal");
+  }});
+  // #59 — weekly report: rolls a daily snapshot (usage, peak clients, max temp) in
+  // localStorage and shows the last 7 days. Builds up over a week of uptime.
+  PRO_FEATURES.push({key:"weekly_report",ar:"التقرير الأسبوعي",en:"Weekly Report",cat:"Automation & UX",fn:function(d,H){
+    var A=H.lang==="ar";
+    var day=new Date().toISOString().slice(0,10);
+    var log; try{ log=JSON.parse(localStorage.getItem(LS+"weeklyLog")||"[]"); }catch(e){ log=[]; }
+    if(!Array.isArray(log)) log=[];
+    var u=dataUsage(d), cl=Math.max(Number(d.clients)||0, (H.mergeDevices(d)||[]).length), tc=H.num(d.temperature_c);
+    var cur=log[log.length-1];
+    if(!cur||cur.day!==day){ cur={day:day,rx:u.dayRx,tx:u.dayTx,peakCl:cl,maxTemp:H.finite(tc)?tc:0}; log.push(cur); }
+    else{ cur.rx=u.dayRx; cur.tx=u.dayTx; if(cl>cur.peakCl)cur.peakCl=cl; if(H.finite(tc)&&tc>cur.maxTemp)cur.maxTemp=tc; }
+    while(log.length>7) log.shift();
+    try{ localStorage.setItem(LS+"weeklyLog",JSON.stringify(log)); }catch(e){}
+    var mx=log.reduce(function(m,x){return Math.max(m,(x.rx||0)+(x.tx||0));},1);
+    var rows=log.slice().reverse().map(function(x){ var tot=(x.rx||0)+(x.tx||0);
+      return "<div style='margin:5px 0'><div style='display:flex;justify-content:space-between;font-size:11px'><b class='latin'>"+H.esc(x.day.slice(5))+"</b><span class='latin'>"+H.bytes(tot)+" · "+x.peakCl+(A?" جهاز":" cl")+(x.maxTemp?" · "+H.fmt(x.maxTemp,0)+"&deg;":"")+"</span></div>"+H.bar(tot,mx,"var(--accent)")+"</div>"; }).join("");
+    var days=log.length, avg=days?log.reduce(function(a,x){return a+(x.rx||0)+(x.tx||0);},0)/days:0;
+    var head="<div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px'><span>"+(A?"متوسط يومي":"daily avg")+"</span><b class='latin'>"+H.bytes(avg)+"</b></div>";
+    var note=days<7?"<div style='font-size:10px;color:var(--muted);margin-top:6px'>"+(A?"يتراكم على مدى الأسبوع ("+days+"/7 يوم)":"builds up over a week ("+days+"/7 days)")+"</div>":"";
+    return H.card(A?"التقرير الأسبوعي":"Weekly Report",head+rows+note,days+"/7","gear");
   }});
   // Defensive: strip null/non-object elements from the live arrays so a stray null in
   // d.wifi / d.devices / d.interfaces / stations can never throw inside a card.
