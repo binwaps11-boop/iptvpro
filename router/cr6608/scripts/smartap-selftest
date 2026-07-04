@@ -3,8 +3,19 @@
 # Run nightly by cron (04:00) and on demand from the dashboard (dashctl run_selftest).
 # Pure read-only: changes nothing on the system.
 
-iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
-iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+run_limit() {
+  sec="$1"; shift
+  "$@" &
+  pid=$!
+  ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  guard=$!
+  wait "$pid" 2>/dev/null
+  rc=$?
+  kill "$guard" 2>/dev/null
+  return "$rc"
+}
+iw() { run_limit 6 /usr/sbin/iw "$@" 2>/dev/null; }
+iwinfo() { run_limit 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
 
 ts="$(date '+%Y-%m-%d %H:%M' 2>/dev/null)"
 up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; up="${up:-0}"
@@ -24,7 +35,9 @@ mem_pct=$(( (mt - ma) * 100 / mt ))
 
 busy_max=0; clients=0; err_sum=0
 for IF in $(iw dev | awk '$1=="Interface"{print $2}'); do
-  c="$(iwinfo "$IF" assoclist | grep -Ec '^[0-9A-Fa-f]{2}:')"
+  case "$IF" in phy0-ap1) continue ;; esac
+  c="$(iw dev "$IF" station dump | grep -Ec '^Station ')"
+  [ "${c:-0}" -gt 0 ] 2>/dev/null || c="$(iwinfo "$IF" assoclist | grep -Ec '^[0-9A-Fa-f]{2}:')"
   clients=$((clients + ${c:-0}))
   b="$(iw dev "$IF" survey dump | awk '
     /\[in use\]/{inuse=1; next}
@@ -40,7 +53,7 @@ done
 ov="$(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%d", $3*100/$2}')"; ov="${ov:-0}"
 
 score=100; notes=""
-[ "$busy_max" -ge 70 ] 2>/dev/null && { score=$((score-25)); notes="$notes|القناة مزدحمة ($busy_max%)"; }
+[ "$busy_max" -ge 85 ] 2>/dev/null && { score=$((score-10)); notes="$notes|القناة مزدحمة جداً ($busy_max%)"; }
 [ "${temp:--1}" -ge 82 ] 2>/dev/null && { score=$((score-20)); notes="$notes|الحرارة مرتفعة (${temp}°)"; }
 [ "$mem_pct" -ge 90 ] 2>/dev/null && { score=$((score-15)); notes="$notes|الذاكرة مضغوطة ($mem_pct%)"; }
 [ "$ov" -ge 90 ] 2>/dev/null && { score=$((score-10)); notes="$notes|التخزين شبه ممتلئ ($ov%)"; }

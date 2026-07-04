@@ -1,0 +1,169 @@
+#!/bin/sh
+# Idempotent baseline for Smart AP installs on CR6608/OpenWrt.
+# Keeps dashboard access alive while enabling the UI-owned VLAN/mesh/port features.
+
+changed=0
+changed_network=0
+changed_firewall=0
+changed_wireless=0
+changed_smartap=0
+
+mark_changed() {
+  changed=1
+  case "$1" in
+    network) changed_network=1 ;;
+    firewall) changed_firewall=1 ;;
+    wireless) changed_wireless=1 ;;
+    smartap) changed_smartap=1 ;;
+  esac
+}
+
+g() { uci -q get "$1" 2>/dev/null; }
+
+ensure_section() {
+  key="$1"
+  type="$2"
+  cfg="$3"
+  uci -q get "$key" >/dev/null 2>&1 && return 0
+  uci set "$key=$type" 2>/dev/null && mark_changed "$cfg"
+}
+
+setv() {
+  key="$1"
+  val="$2"
+  cfg="$3"
+  [ "$(g "$key")" = "$val" ] && return 0
+  uci set "$key=$val" 2>/dev/null && mark_changed "$cfg"
+}
+
+add_list_once() {
+  sec="$1"
+  opt="$2"
+  val="$3"
+  cfg="$4"
+  uci -q get "$sec.$opt" 2>/dev/null | tr ' ' '\n' | grep -qx "$val" && return 0
+  uci add_list "$sec.$opt=$val" 2>/dev/null && mark_changed "$cfg"
+}
+
+find_lan_zone() {
+  uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^=]*\)\.name='lan'.*/\1/p" | head -n 1
+}
+
+find_radio0_ap() {
+  for s in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface/{print $2}'); do
+    [ "$s" = "smartap_mgmt" ] && continue
+    [ "$(g wireless.$s.device)" = "radio0" ] || continue
+    [ "$(g wireless.$s.mode)" = "ap" ] || continue
+    [ "$(g wireless.$s.disabled)" = "1" ] && continue
+    echo "$s"
+    return 0
+  done
+}
+
+host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+[ -n "$host" ] || host="CR6608-SmartAP"
+
+# Smart AP defaults consumed by dashctl and cr6608-security-apply.
+ensure_section smartap.security security smartap
+setv smartap.security.enabled 1 smartap
+setv smartap.security.flood_guard 1 smartap
+setv smartap.security.rogue_dhcp_guard 1 smartap
+setv smartap.security.loop_guard 1 smartap
+
+ensure_section smartap.management management smartap
+setv smartap.management.vlan 1 smartap
+setv smartap.management.ipaddr 192.168.66.1 smartap
+setv smartap.management.recovery_always 1 smartap
+setv smartap.management.recovery_wifi 1 smartap
+setv smartap.management.recovery_ssid CR6608-Recovery smartap
+
+for n in 1 2 3; do
+  ensure_section "smartap.lan$n" port smartap
+  setv "smartap.lan$n.enabled" 1 smartap
+  setv "smartap.lan$n.isolate" 0 smartap
+  setv "smartap.lan$n.vlan" 1 smartap
+done
+
+# Always-on local recovery address. Users can open the dashboard by assigning
+# a client IP in 192.168.66.0/24 and browsing http://192.168.66.1/.
+ensure_section network.recovery interface network
+setv network.recovery.proto static network
+setv network.recovery.device br-lan network
+setv network.recovery.ipaddr 192.168.66.1 network
+setv network.recovery.netmask 255.255.255.0 network
+setv network.recovery.ipv6 0 network
+setv network.recovery.auto 1 network
+
+# DHCP management alias used on upstream/Mikrotik networks. smartap-mgmt-sync
+# reflects this lease into the kernel route table when netifd misses it.
+ensure_section network.mgmt interface network
+setv network.mgmt.proto dhcp network
+setv network.mgmt.device br-lan network
+setv network.mgmt.metric 10 network
+setv network.mgmt.ipv6 0 network
+setv network.mgmt.hostname "$host" network
+
+# Keep the recovery and DHCP management interfaces inside the trusted LAN zone.
+zone="$(find_lan_zone)"
+if [ -n "$zone" ]; then
+  setv "firewall.$zone.input" ACCEPT firewall
+  add_list_once "firewall.$zone" network lan firewall
+  add_list_once "firewall.$zone" network recovery firewall
+  add_list_once "firewall.$zone" network mgmt firewall
+fi
+
+# Configure requested Tx power in UCI, while the driver/regulatory layer still
+# enforces the real maximum power supported by the country/radio.
+uci -q get wireless.radio0 >/dev/null 2>&1 && setv wireless.radio0.txpower 35 wireless
+uci -q get wireless.radio1 >/dev/null 2>&1 && setv wireless.radio1.txpower 35 wireless
+
+# Optional recovery SSID: reuse the existing 2.4G AP key. Never create an open
+# management AP from an unattended installer.
+if [ "$(g smartap.management.recovery_wifi)" = "1" ] && uci -q get wireless.radio0 >/dev/null 2>&1; then
+  main_ap="$(find_radio0_ap)"
+  main_key=""
+  main_enc=""
+  if [ -n "$main_ap" ]; then
+    main_key="$(g wireless.$main_ap.key)"
+    main_enc="$(g wireless.$main_ap.encryption)"
+  fi
+  rec_ssid="$(g smartap.management.recovery_ssid)"
+  [ -n "$rec_ssid" ] || rec_ssid="CR6608-Recovery"
+  ensure_section wireless.smartap_mgmt wifi-iface wireless
+  setv wireless.smartap_mgmt.device radio0 wireless
+  setv wireless.smartap_mgmt.mode ap wireless
+  setv wireless.smartap_mgmt.network recovery wireless
+  setv wireless.smartap_mgmt.ssid "$rec_ssid" wireless
+  if [ -n "$main_key" ] && [ "${#main_key}" -ge 8 ] && [ "$main_enc" != "none" ] && [ "$main_enc" != "open" ]; then
+    # main Wi-Fi is protected: recovery SSID reuses the same key
+    setv wireless.smartap_mgmt.encryption psk2 wireless
+    setv wireless.smartap_mgmt.key "$main_key" wireless
+  else
+    # main Wi-Fi is open (this deployment's choice): keep the recovery SSID open too,
+    # so 192.168.66.1 stays reachable over Wi-Fi — the dashboard login still applies.
+    setv wireless.smartap_mgmt.encryption none wireless
+    uci -q delete wireless.smartap_mgmt.key 2>/dev/null && mark_changed wireless
+  fi
+  setv wireless.smartap_mgmt.isolate 0 wireless
+  setv wireless.smartap_mgmt.hidden 0 wireless
+  setv wireless.smartap_mgmt.disabled 0 wireless
+fi
+
+[ "$changed_smartap" = 1 ] && uci commit smartap 2>/dev/null
+[ "$changed_network" = 1 ] && uci commit network 2>/dev/null
+[ "$changed_firewall" = 1 ] && uci commit firewall 2>/dev/null
+[ "$changed_wireless" = 1 ] && uci commit wireless 2>/dev/null
+
+[ "$changed_network" = 1 ] && /etc/init.d/network reload >/dev/null 2>&1
+[ "$changed_firewall" = 1 ] && /etc/init.d/firewall reload >/dev/null 2>&1
+[ "$changed_wireless" = 1 ] && wifi reload >/dev/null 2>&1
+
+if [ "${1:-}" != "quiet" ]; then
+  if [ "$changed" = 1 ]; then
+    echo "Smart AP baseline applied."
+  else
+    echo "Smart AP baseline already OK."
+  fi
+fi
+
+exit 0

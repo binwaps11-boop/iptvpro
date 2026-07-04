@@ -1,0 +1,53 @@
+#!/bin/sh
+# Keep the Smart AP management DHCP lease reflected in the kernel route table.
+# Some alias-on-bridge reload paths report mgmt up in ubus while the address/route
+# are missing from `ip`; this reconciles them without touching LAN/recovery IPs.
+
+read_status() {
+  ubus call network.interface.mgmt status 2>/dev/null
+}
+
+field_ipv4_addr() {
+  awk -F'"' '
+    /"ipv4-address"/ { in_addr=1; next }
+    in_addr && /"address"/ { print $4; exit }
+  '
+}
+
+field_ipv4_mask() {
+  awk '
+    /"ipv4-address"/ { in_addr=1; next }
+    in_addr && /"mask"/ { gsub(/[^0-9]/, "", $0); print $0; exit }
+  '
+}
+
+field_gateway() {
+  awk -F'"' '/"nexthop"/ { print $4; exit }'
+}
+
+status="$(read_status)"
+lease_ip="$(printf '%s\n' "$status" | field_ipv4_addr)"
+lease_mask="$(printf '%s\n' "$status" | field_ipv4_mask)"
+gateway="$(printf '%s\n' "$status" | field_gateway)"
+
+if [ -z "$lease_ip" ] || [ -z "$gateway" ]; then
+  ifup mgmt >/dev/null 2>&1 || true
+  sleep 4
+  status="$(read_status)"
+  lease_ip="$(printf '%s\n' "$status" | field_ipv4_addr)"
+  lease_mask="$(printf '%s\n' "$status" | field_ipv4_mask)"
+  gateway="$(printf '%s\n' "$status" | field_gateway)"
+fi
+
+[ -n "$lease_mask" ] || lease_mask=16
+
+case "$lease_ip:$gateway" in
+  *[!0-9.:]*|:*) exit 0 ;;
+esac
+
+ip -4 addr show dev br-lan 2>/dev/null | grep -q " $lease_ip/" ||
+  ip addr add "$lease_ip/$lease_mask" dev br-lan 2>/dev/null || true
+
+ip route replace default via "$gateway" dev br-lan src "$lease_ip" metric 10 2>/dev/null || true
+
+exit 0

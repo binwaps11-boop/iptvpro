@@ -1,8 +1,9 @@
 #!/bin/sh
-# --- safety: no system command may hang the API (busybox timeout) ---
-ubus() { /bin/busybox timeout 5 /bin/ubus "$@" 2>/dev/null; }
-iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
-iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
+# --- safety: no system command may hang the API ---
+run_limit() { sec="$1"; shift; "$@" & pid=$!; ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!; wait "$pid" 2>/dev/null; rc=$?; kill "$guard" 2>/dev/null; return "$rc"; }
+ubus() { run_limit 3 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { run_limit 4 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 4 /usr/sbin/iw "$@" 2>/dev/null; }
 POST_DATA=""
 if [ "$REQUEST_METHOD" = "POST" ] && [ "${CONTENT_LENGTH:-0}" -gt 0 ] 2>/dev/null; then
   POST_DATA="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
@@ -414,7 +415,7 @@ case "$action" in
   opkg_update|opkg_install|opkg_remove)
     confirm_required "Software"
     pkg="$(safe_word "$(param package_name)")"
-    case "$action" in opkg_update) /bin/busybox timeout 30 opkg update >/tmp/dashctl.action 2>&1 ;; opkg_install) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg install "$pkg" >/tmp/dashctl.action 2>&1 ;; opkg_remove) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg remove "$pkg" >/tmp/dashctl.action 2>&1 ;; esac
+    case "$action" in opkg_update) run_limit 30 opkg update >/tmp/dashctl.action 2>&1 ;; opkg_install) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; run_limit 45 opkg install "$pkg" >/tmp/dashctl.action 2>&1 ;; opkg_remove) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; run_limit 30 opkg remove "$pkg" >/tmp/dashctl.action 2>&1 ;; esac
     emit true "Software" "Package command finished" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   create_config_backup)
     confirm_required "Backup"
@@ -571,7 +572,7 @@ EOF
     emit true "Traceroute" "Route diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
   nslookup)
     host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="openwrt.org"
-    out="$(/bin/busybox timeout 8 nslookup "$host" 2>&1 | redact)"
+    out="$(run_limit 8 nslookup "$host" 2>&1 | redact)"
     emit true "DNS lookup" "DNS diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
   save_dhcp)
     confirm_required "LAN / DHCP"
@@ -710,8 +711,22 @@ EOF
     fi
     case "$program_mode" in
       mesh|mesh_vlan)
+        # 802.11s mesh — the settings the reference build proved on-device:
+        #   * mesh_fwding=1 so units FORWARD each other's traffic (a mesh that joins but
+        #     forwards nothing looks exactly like "mesh refuses the 2nd unit"),
+        #   * matching encryption on BOTH units: SAE when a Wi-Fi password is set
+        #     (wpad-openssl supports it), plain open mesh when the network is open,
+        #   * mesh peers MUST share mesh_id AND the SAME 5G channel (set ch5 identically
+        #     on every unit), and no leftover ssid/isolate options on the mesh iface.
         uci -q get wireless.smartap_mesh >/dev/null || uci set wireless.smartap_mesh='wifi-iface'
         uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network="${client_net:-lan}"; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
+        uci set wireless.smartap_mesh.mesh_fwding='1'; uci set wireless.smartap_mesh.mesh_rssi_threshold='0'
+        if [ "$security" != "none" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -ge 8 ]; then
+          uci set wireless.smartap_mesh.encryption='sae'; uci set wireless.smartap_mesh.key="$wifi_password"
+        else
+          uci set wireless.smartap_mesh.encryption='none'; uci -q delete wireless.smartap_mesh.key
+        fi
+        uci -q delete wireless.smartap_mesh.ssid; uci -q delete wireless.smartap_mesh.isolate
         ;;
       wds_sender|wds_sender_vlan)
         uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
@@ -881,7 +896,7 @@ EOF
       while [ "$i" -le 254 ]; do
         j=0
         while [ "$j" -lt 48 ] && [ "$i" -le 254 ]; do
-          /bin/busybox timeout 1 ping -c 1 -W 1 "$pfx.$i" >/dev/null 2>&1 &
+          run_limit 1 ping -c 1 -W 1 "$pfx.$i" >/dev/null 2>&1 &
           i=$((i+1)); j=$((j+1))
         done
         wait
@@ -908,7 +923,7 @@ EOF
       [ -n "$rip" ] || continue
       [ "$kc" -ge 60 ] && break
       kc=$((kc+1))
-      { nm="$(/bin/busybox timeout 1 nslookup "$rip" 2>/dev/null | sed -n 's/.*name = \([^ ]*\)\.$/\1/p;s/.*name = \([^ ]*\)$/\1/p' | grep -vi in-addr | head -1)"; [ -n "$nm" ] && printf '%s|%s\n' "$rip" "$nm" >> "$st/rdns"; } 2>/dev/null &
+      { nm="$(run_limit 1 nslookup "$rip" 2>/dev/null | sed -n 's/.*name = \([^ ]*\)\.$/\1/p;s/.*name = \([^ ]*\)$/\1/p' | grep -vi in-addr | head -1)"; [ -n "$nm" ] && printf '%s|%s\n' "$rip" "$nm" >> "$st/rdns"; } 2>/dev/null &
       [ $((kc % 20)) -eq 0 ] && wait
     done < "$st/merged"
     wait
@@ -1342,7 +1357,7 @@ EOF
     emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
   analyzer|channel_analysis)
     nearby="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
-      if command -v timeout >/dev/null 2>&1; then timeout 6 iwinfo "$i" scan 2>/dev/null; fi
+      run_limit 6 /usr/bin/iwinfo "$i" scan 2>/dev/null
     done; } | grep -c 'ESSID:' 2>/dev/null)"; nearby="${nearby:-0}"
     text="تم مسح المحيط: عدد الشبكات المجاورة $nearby. القنوات المزدحمة تُتجنّب تلقائياً لأفضل أداء."
     emit true "Wi-Fi Analyzer" "Bounded scan; no long blocking requests" "[]" "$text" '[{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' '[]' ;;
@@ -1497,7 +1512,7 @@ EOF
 package_name|Package name||Example: luci-app-sqm
 EOF
 )"
-        actions='[{"id":"opkg_update","label":"/bin/busybox timeout 30 opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
+        actions='[{"id":"opkg_update","label":"opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
         ;;
       startup)
         text="الخدمات تُدار من إعدادات النظام."

@@ -168,9 +168,8 @@ apply_vlan() {
 
 # management always reachable: keep recovery interface + lan input open
 ensure_management() {
-	# recovery static 192.168.66.1 on br-lan is defined in /etc/config/network; nothing to
-	# rewrite here, but make sure the lan firewall zone accepts input (dashboard/ssh).
-	:
+	# Keep the static recovery IP, DHCP management alias and firewall zone in sync.
+	[ -x /usr/sbin/smartap-bootstrap ] && /usr/sbin/smartap-bootstrap quiet >/dev/null 2>&1 || true
 }
 
 case "$1" in

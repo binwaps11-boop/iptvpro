@@ -7,13 +7,14 @@
   var AUTH = "/ubus";
   var ANON = "00000000000000000000000000000000";
   var LS = "smartap.";
-  var UI_VERSION = "cr6608-smartap-clean-dashboard-v4";
+  var UI_VERSION = "cr6608-smartap-live-sync-v7";
   if (localStorage.getItem(LS + "uiVersion") !== UI_VERSION) {
     localStorage.setItem(LS + "theme", "dark");
     localStorage.setItem(LS + "interval", "5");
     localStorage.removeItem(LS + "events");
     localStorage.removeItem(LS + "availability");
     localStorage.removeItem(LS + "histories");
+    localStorage.removeItem(LS + "knownMacs");
     localStorage.setItem(LS + "uiVersion", UI_VERSION);
   }
   var state = {
@@ -329,6 +330,49 @@
     state.previousTraffic = { rx:rx, tx:tx }; state.previousAt = now;
     return { rx:rxBps, tx:txBps, totalRx:rx, totalTx:tx };
   }
+  function stationTraffic(sta) {
+    sta = sta || {};
+    var up = num(sta.upload_bps), down = num(sta.download_bps);
+    var upBytes = num(sta.upload_bytes), downBytes = num(sta.download_bytes);
+    var hasCounters = finite(upBytes) || finite(downBytes);
+    return {
+      up: finite(up) ? up : 0,
+      down: finite(down) ? down : 0,
+      upBytes: finite(upBytes) ? upBytes : 0,
+      downBytes: finite(downBytes) ? downBytes : 0,
+      hasCounters: hasCounters
+    };
+  }
+  function stationTrafficRows(data) {
+    var rows = [];
+    ((data && data.wifi) || []).forEach(function (w) {
+      (w.stations || []).forEach(function (s) {
+        var t = stationTraffic(s);
+        if (!t.hasCounters) return;
+        rows.push({
+          label: s.ip || s.mac || "?",
+          mac: s.mac || "",
+          band: w.band || "",
+          up: t.up,
+          down: t.down,
+          totalRate: t.up + t.down,
+          upBytes: t.upBytes,
+          downBytes: t.downBytes,
+          totalBytes: t.upBytes + t.downBytes
+        });
+      });
+    });
+    return rows;
+  }
+  function stationTrafficHtml(sta) {
+    var t = stationTraffic(sta);
+    if (!t.hasCounters) return "";
+    var downLabel = state.lang === "ar" ? "تنزيل" : "Download";
+    var upLabel = state.lang === "ar" ? "رفع" : "Upload";
+    return '<div class="grid two" style="margin-top:8px">' +
+      '<div class="traffic-box"><span>' + downLabel + '</span><b class="latin">' + bps(t.down) + '</b><small class="muted">' + bytes(t.downBytes) + '</small></div>' +
+      '<div class="traffic-box"><span>' + upLabel + '</span><b class="latin">' + bps(t.up) + '</b><small class="muted">' + bytes(t.upBytes) + '</small></div></div>';
+  }
   // Offline MAC vendor (OUI) table — first 3 octets -> manufacturer. Covers the most
   // common consumer/IoT vendors; fully local, no lookups. "LAA" = locally-administered
   // (randomized private) MAC used by modern phones for privacy.
@@ -593,9 +637,11 @@
     // (double/triple push corrupts the traffic chart timescale)
     var samples = (state.histories.rx || []).map(function (rx, i) { return { rx:rx, tx:(state.histories.tx || [])[i] || 0 }; });
     var canvasId = prefix + "TrafficCanvas";
+    var rxLabel = state.lang === "ar" ? "RX وارد" : "RX In";
+    var txLabel = state.lang === "ar" ? "TX صادر" : "TX Out";
     var body = '<canvas id="' + canvasId + '"></canvas><div class="grid two" style="margin-top:12px">' +
-      '<div class="traffic-box"><span>RX</span><b class="latin">' + bps(rates.rx) + '</b><small class="muted">' + bytes(rates.totalRx) + '</small></div>' +
-      '<div class="traffic-box"><span>TX</span><b class="latin">' + bps(rates.tx) + '</b><small class="muted">' + bytes(rates.totalTx) + '</small></div></div>';
+      '<div class="traffic-box"><span>' + rxLabel + '</span><b class="latin">' + bps(rates.rx) + '</b><small class="muted">' + bytes(rates.totalRx) + '</small></div>' +
+      '<div class="traffic-box"><span>' + txLabel + '</span><b class="latin">' + bps(rates.tx) + '</b><small class="muted">' + bytes(rates.totalTx) + '</small></div></div>';
     setTimeout(function () { drawChart($(canvasId), samples, { keys:["rx","tx"] }); }, 0);
     return card(tr("networkTitle"), body, "60s peaks", "net");
   }
@@ -752,10 +798,11 @@
         var eff = linkEfficiency(x.band, rate);
         var effStr = eff !== null ? '<span class="prox" style="color:' + (eff >= 70 ? "var(--excellent)" : eff >= 40 ? "var(--good)" : "var(--mid)") + '">' + tr("efficiency") + " " + eff + '%</span>' : "";
         var trendStr = (s.mac && (state.histories["sig_" + s.mac] || []).length > 2) ? spark(state.histories["sig_" + s.mac], qq.color) : "";
+        var trafficStr = stationTrafficHtml(s);
         // 802.11v steer button — offered only for clients sitting on the 2.4G radio
         var steer = (x.band === "2.4G" && s.mac) ? ' <button class="btn dev-action" title="' + esc(tr("steerHint")) + '" data-steer-mac="' + esc(s.mac) + '" data-steer-iface="' + esc(x.iface || "") + '">' + esc(tr("steer5g")) + '</button>' : "";
         return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + steer + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) +
-          '<div class="cli-tags">' + distanceLabel(ss) + effStr + '</div>' + metaStr + trendStr + '</div>';
+          '<div class="cli-tags">' + distanceLabel(ss) + effStr + '</div>' + metaStr + trafficStr + trendStr + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
       return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>' + tr("channel") + '</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div>' + busyRow + '</div><h4>Clients · ' + tr("linkRate") + '</h4>' + sta, esc(x.hw_modes || ""), "wifi");
@@ -976,8 +1023,11 @@
   }
   function renderNetwork(data, rates) {
     var interfaces = data.interfaces || [];
-    var table = '<div class="table-wrap"><table><thead><tr><th>Interface</th><th>Status</th><th>Speed</th><th>RX/TX</th><th>Total</th><th>Errors/Drops</th></tr></thead><tbody>' +
-      interfaces.map(function (i) { return '<tr><td class="latin">' + esc(i.name) + '</td><td><span class="chip ' + (i.connected ? "ok" : "bad") + '">' + (i.connected ? "up" : "down") + '</span></td><td class="latin">' + (i.speed_mbps ? i.speed_mbps + " Mbps" : tr("unavailable")) + '</td><td class="latin">' + bps(i.name === "br-lan" ? rates.rx : 0) + " / " + bps(i.name === "br-lan" ? rates.tx : 0) + '</td><td class="latin">' + bytes(i.rx_bytes) + " / " + bytes(i.tx_bytes) + '</td><td class="latin">' + (i.rx_errors||0) + "/" + (i.tx_errors||0) + " · " + (i.rx_dropped||0) + "/" + (i.tx_dropped||0) + '</td></tr>'; }).join("") +
+    var table = '<div class="table-wrap"><table><thead><tr><th>Interface</th><th>Status</th><th>Speed</th><th>RX Rate</th><th>TX Rate</th><th>RX Total</th><th>TX Total</th><th>Errors/Drops</th></tr></thead><tbody>' +
+      interfaces.map(function (i) {
+        var irx = num(i.rx_bps), itx = num(i.tx_bps);
+        return '<tr><td class="latin">' + esc(i.name) + '</td><td><span class="chip ' + (i.connected ? "ok" : "bad") + '">' + (i.connected ? "up" : "down") + '</span></td><td class="latin">' + (i.speed_mbps ? i.speed_mbps + " Mbps" : tr("unavailable")) + '</td><td class="latin">' + bps(finite(irx) ? irx : (i.name === "br-lan" ? rates.rx : 0)) + '</td><td class="latin">' + bps(finite(itx) ? itx : (i.name === "br-lan" ? rates.tx : 0)) + '</td><td class="latin">' + bytes(i.rx_bytes) + '</td><td class="latin">' + bytes(i.tx_bytes) + '</td><td class="latin">' + (i.rx_errors||0) + "/" + (i.tx_errors||0) + " · " + (i.rx_dropped||0) + "/" + (i.tx_dropped||0) + '</td></tr>';
+      }).join("") +
       '</tbody></table></div>';
     var ping = card("Latency / Jitter", '<canvas id="latencyCanvas"></canvas><p class="muted" id="latencyText"></p>', "fetch", "net");
     setTimeout(function () { drawChart($("latencyCanvas"), (state.histories.latency || []).map(function (v) { return { rx:v }; }), { keys:["rx"] }); }, 0);
@@ -1238,7 +1288,8 @@
     quality: quality, distanceM: distanceM, proximity: proximity, tr: tr,
     cssVar: cssVar, hexA: hexA, wifiBand: wifiBand, mergeDevices: mergeDevices,
     secLevel: secLevel, linkEfficiency: linkEfficiency, levelColor: levelColor,
-    signalPct: signalPct, uptime: uptime, icon: icon
+    signalPct: signalPct, uptime: uptime, icon: icon,
+    stationTraffic: stationTraffic, stationTrafficRows: stationTrafficRows
   };
   // Registry of professional feature cards (populated from the multi-agent design pass).
   // Each entry: { key, ar, en, cat, fn:function(d,H)->html }. Rendered with per-feature
@@ -1310,6 +1361,62 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
    {key:"setup_checklist",ar:"قائمة فحص الإعداد",en:"Setup Checklist",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'قائمة فحص الإعداد':'Setup Checklist';d=d||{};var hs=H.num((d.health||{}).score),tc=H.num(d.temperature_c),lt=H.num(d.latency_ms),cl=H.num(d.clients),bo=(d.backhaul||{}).online;var L=[[A?'الوصلة الرئيسية متصلة':'Upstream online',bo===true,bo==null],[A?'يوجد أجهزة متصلة':'Clients connected',cl>0,!H.finite(cl)],[(A?'الصحة':'Health')+' &gt; 70',hs>70,!H.finite(hs)],[(A?'الحرارة':'Temp')+' &lt; 70°C',tc<70,!H.finite(tc)],[(A?'الاستجابة':'Latency')+' &lt; 20ms',lt<20,!H.finite(lt)]];var ok=0,tot=0,r='';for(var i=0;i<5;i++){var u=L[i][2],p=L[i][1];if(!u){tot++;if(p)ok++}var c=u?'var(--muted)':p?'var(--excellent)':'var(--weak)';r+='<div style="display:flex;align-items:center;gap:9px;margin:7px 0;font-size:12px"><span style="flex:0 0 20px;height:20px;border-radius:50%;border:1.5px solid '+c+';color:'+c+';font-weight:700;display:flex;align-items:center;justify-content:center">'+(u?'—':p?'✓':'✕')+'</span><span style="flex:1">'+L[i][0]+'</span></div>'}var pc=tot?ok/tot*100:0,col=pc>=100?'var(--excellent)':pc>=60?'var(--good)':pc>=40?'var(--mid)':'var(--weak)';return H.card(t,'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>'+(A?'اكتمال الإعداد':'Setup complete')+'</span><b style="color:'+col+'">'+ok+'/'+tot+'</b></div>'+H.bar(pc,100,col)+'<div style="height:6px"></div>'+r,ok+'/'+tot,'gear')}},
    {key:"uptime_milestones",ar:"إنجازات التشغيل",en:"Uptime Milestones",cat:"Automation & UX",fn:function(d,H){var A=H.lang==='ar',t=A?'إنجازات التشغيل':'Uptime Milestones';var up=H.num((d||{}).uptime);if(!H.finite(up)||up<0)return H.card(t,"<div class='empty'>—</div>",null,'bolt');var M=[[3600,'1h'],[86400,'1d'],[604800,'1w'],[2592e3,'30d'],[864e4,'100d'],[31536e3,'1y']],g=0,nx=null,pl='';for(var i=0;i<6;i++){var a=up>=M[i][0];if(a)g++;else if(!nx)nx=M[i];var c=a?'var(--excellent)':'var(--muted)';pl+='<div style="flex:1;margin:3px;padding:6px 0;text-align:center;border-radius:8px;font-size:14px;border:1px solid '+(a?c:'var(--border)')+';color:'+c+'">'+(a?'★':'☆')+'<div style="font-size:10px">'+M[i][1]+'</div></div>'}var hd='<div style="text-align:center;margin-bottom:8px;font-size:22px;font-weight:700;color:var(--primary)">'+H.esc(H.uptime(up))+'<div style="font-size:11px;font-weight:400;color:var(--muted)">'+(A?'تشغيل متواصل':'uptime streak')+'</div></div>',ft;if(nx){var p=H.clamp(up/nx[0]*100,0,100);ft='<div style="font-size:11px;margin:8px 0 3px;color:var(--muted)">'+(A?'التالي: ':'Next: ')+nx[1]+' · <b style="color:var(--accent)">'+H.fmt(p,0)+'%</b> · '+H.esc(H.uptime(nx[0]-up))+(A?' متبقية':' left')+'</div>'+H.bar(p,100,'var(--accent)')}else ft='<div style="margin-top:8px;text-align:center;color:var(--excellent);font-size:12px">'+(A?'اكتمل الكل!':'All achieved!')+'</div>';return H.card(t,hd+'<div style="display:flex;flex-wrap:wrap">'+pl+'</div>'+ft,g+'/6','bolt')}},
 ];
+  PRO_FEATURES.forEach(function (f) {
+    if (f.key === "client_bw_share") {
+      f.fn = function (d, H) {
+        var a = H.lang === "ar";
+        var title = a ? "استهلاك العملاء الفعلي" : "Real Client Traffic";
+        var rows = H.stationTrafficRows(d);
+        if (!rows.length) {
+          return H.card(title, '<div class="empty">' + (a ? "لا توجد عدادات فعلية من الدرايفر" : "No driver counters") + '</div>', null, 'device');
+        }
+        var live = rows.filter(function (r) { return r.totalRate > 0; });
+        if (!live.length) {
+          rows.sort(function (x, y) { return y.totalBytes - x.totalBytes; });
+          var totals = rows.slice(0, 6).map(function (r) {
+            return '<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px;gap:8px"><span class="latin">' + H.esc(r.label) + '</span><span class="latin">' + H.bytes(r.totalBytes) + '</span></div>' +
+              '<div class="grid two"><div class="traffic-box"><span>DL</span><b class="latin">' + H.bytes(r.downBytes) + '</b></div><div class="traffic-box"><span>UL</span><b class="latin">' + H.bytes(r.upBytes) + '</b></div></div></div>';
+          }).join("");
+          return H.card(title, totals || '<div class="empty">' + (a ? "لا توجد حركة حالية" : "No live traffic") + '</div>', a ? "عدادات فعلية" : "real counters", 'device');
+        }
+        live.sort(function (x, y) { return y.totalRate - x.totalRate; });
+        var total = live.reduce(function (s, r) { return s + r.totalRate; }, 0);
+        var top = live.slice(0, 5);
+        var rest = live.slice(5).reduce(function (s, r) { return s + r.totalRate; }, 0);
+        if (rest > 0) top.push({ label:a ? "أخرى" : "Other", totalRate:rest, down:0, up:0 });
+        var colors = ["primary","accent","excellent","good","mid","muted"], acc = 0, seg = "", leg = "";
+        top.forEach(function (r, i) {
+          var frac = total ? r.totalRate / total : 0;
+          var c = "var(--" + colors[i % colors.length] + ")";
+          seg += '<circle cx="60" cy="60" r="46" fill="none" stroke="' + c + '" stroke-width="14" stroke-dasharray="' + (frac * 289).toFixed(1) + ' 289" stroke-dashoffset="' + (-acc * 289).toFixed(1) + '" transform="rotate(-90 60 60)"/>';
+          acc += frac;
+          leg += '<div style="margin:5px 0"><div style="display:flex;justify-content:space-between;font-size:11px;gap:8px"><span class="latin" style="color:' + c + '">' + H.esc(r.label) + '</span><b class="latin">' + H.fmt(frac * 100, 0) + '%</b></div>' +
+            '<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)"><span>DL ' + H.bps(r.down || 0) + '</span><span>UL ' + H.bps(r.up || 0) + '</span></div></div>';
+        });
+        var svg = '<svg width="120" height="120" viewBox="0 0 120 120" style="display:block;margin:0 auto">' + seg + '<text x="60" y="62" text-anchor="middle" font-size="14" fill="var(--text)">' + live.length + '</text><text x="60" y="78" text-anchor="middle" font-size="10" fill="var(--muted)">clients</text></svg>';
+        return H.card(title, svg + '<div style="margin-top:8px">' + leg + '</div>', H.bps(total), 'device');
+      };
+    } else if (f.key === "uptime_milestones") {
+      f.fn = function (d, H) {
+        var A = H.lang === "ar";
+        var title = A ? "إنجازات التشغيل" : "Uptime Milestones";
+        var up = H.num((d || {}).uptime);
+        if (!H.finite(up) || up < 0) return H.card(title, "<div class='empty'>—</div>", null, 'bolt');
+        var marks = [[3600,'1h'],[86400,'1d'],[604800,'1w'],[2592e3,'30d'],[864e4,'100d'],[31536e3,'1y']];
+        var done = 0, next = null, pills = "";
+        marks.forEach(function (m) {
+          var ok = up >= m[0];
+          if (ok) done++;
+          else if (!next) next = m;
+          var c = ok ? 'var(--excellent)' : 'var(--muted)';
+          pills += '<div style="flex:1;margin:3px;padding:6px 0;text-align:center;border-radius:8px;font-size:14px;border:1px solid ' + (ok ? c : 'var(--border)') + ';color:' + c + '">' + (ok ? '&#9733;' : '&#9734;') + '<div style="font-size:10px">' + m[1] + '</div></div>';
+        });
+        var head = '<div style="text-align:center;margin-bottom:8px;font-size:22px;font-weight:700;color:var(--primary)">' + H.esc(H.uptime(up)) + '<div style="font-size:11px;font-weight:400;color:var(--muted)">' + (A ? 'تشغيل فعلي من /proc/uptime' : 'real /proc/uptime') + '</div></div>';
+        var foot = next ? '<div style="font-size:11px;margin:8px 0 3px;color:var(--muted);text-align:center">' + (A ? 'التالي: ' : 'Next: ') + '<b style="color:var(--accent)">' + next[1] + '</b> · ' + H.esc(H.uptime(Math.max(0, next[0] - up))) + (A ? ' متبقية' : ' left') + '</div>' : '<div style="margin-top:8px;text-align:center;color:var(--excellent);font-size:12px">' + (A ? 'اكتمل الكل!' : 'All achieved!') + '</div>';
+        return H.card(title, head + '<div style="display:flex;flex-wrap:wrap">' + pills + '</div>' + foot, done + '/6', 'bolt');
+      };
+    }
+  });
   function renderProInsights(data) {
     if (!PRO_FEATURES.length) return sectionHead(tr("insights"), "Pro", "") + '<div class="empty">' + tr("loading") + '</div>';
     var cats = {};
