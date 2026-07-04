@@ -1235,7 +1235,7 @@ device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضا�
 vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
-ch5|قناة 5G|${ch5:-36}|يفضل قناة غير DFS مثل 36/40/44/48|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
+ch5|قناة 5G|${ch5:-149}|الأفضل للطاقة والسرعة: 149 أو 157 (UNII-3، طاقة أعلى وبلا DFS)|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G|text|0|device|mesh,mesh_vlan|
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسل: يبث للجوالات على 2.4 و5G ويحمل رابط الميش. المستقبل: يستقبل عبر 5G ويبث للجوالات على 2.4 فقط|select|0|device|mesh,mesh_vlan|sender:مرسل (يبث 2.4+5G),receiver:مستقبل (يبث 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
