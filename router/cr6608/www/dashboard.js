@@ -52,7 +52,7 @@
       noLanDevices: "لم يُعثر على أجهزة. تأكد من توصيل السويتش/الأجهزة ثم أعد الفحص.",
       port: "المنفذ", host: "الاسم", deviceName: "اسم الجهاز", scanAgain: "إعادة الفحص",
       lldpNeighbors: "أجهزة مُدارة (LLDP/CDP)", platform: "النظام/الطراز", localPort: "منفذنا", remotePort: "منفذهم",
-      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
+      portThroughput: "سحب المنافذ (لكل منفذ)", perPortRate: "معدل النقل لكل منفذ سلكي", totalRate: "السحب الإجمالي", download: "تحميل", upload: "رفع", wifiRate: "سحب الواي فاي (لكل تردد)", portsRate: "سحب المنافذ السلكية",
       recommended: "المقترح", current: "الحالي", channel: "القناة", rogueAlert: "تحذير: توأم شرير", rogueDesc: "شبكة تبث نفس اسمك من جهاز غريب",
       healthScore: "درجة صحة الشبكة", airtime: "إشغال الهواء", latency: "زمن الاستجابة", noise: "أرضية الضوضاء",
       clientRadar: "رادار الأجهزة", linkRate: "سرعة الوصلة", constellation: "كوكبة العملاء (المدى=الإشارة)",
@@ -108,7 +108,7 @@
       noLanDevices: "No devices found. Check the switch/devices are connected, then scan again.",
       port: "Port", host: "Name", deviceName: "Device name", scanAgain: "Scan again",
       lldpNeighbors: "Managed devices (LLDP/CDP)", platform: "Platform", localPort: "Our port", remotePort: "Their port",
-      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
+      portThroughput: "Port throughput (per port)", perPortRate: "Rate per wired port", totalRate: "Total throughput", download: "Download", upload: "Upload", wifiRate: "WiFi throughput (per band)", portsRate: "Wired ports",
       recommended: "Recommended", current: "Current", channel: "Channel", rogueAlert: "Warning: evil twin", rogueDesc: "A foreign AP broadcasting your SSID",
       healthScore: "Network health score", airtime: "Airtime busy", latency: "Latency", noise: "Noise floor",
       clientRadar: "Client radar", linkRate: "Link rate", constellation: "Client constellation (radius = signal)",
@@ -313,14 +313,28 @@
     if (data.traffic) return (Number(data.traffic.rx_bytes) || 0) + (Number(data.traffic.tx_bytes) || 0);
     return (data.interfaces || []).reduce(function (a, i) { return a + (Number(i.rx_bytes) || 0) + (Number(i.tx_bytes) || 0); }, 0);
   }
+  function trafficRxBytes(data) {
+    if (data.traffic) return Number(data.traffic.rx_bytes) || 0;
+    return (data.interfaces || []).reduce(function (a, i) { return a + (Number(i.rx_bytes) || 0); }, 0);
+  }
+  function trafficTxBytes(data) {
+    if (data.traffic) return Number(data.traffic.tx_bytes) || 0;
+    return (data.interfaces || []).reduce(function (a, i) { return a + (Number(i.tx_bytes) || 0); }, 0);
+  }
   function dataUsage(data) {
-    var total = totalTraffic(data), dayKey = new Date().toISOString().slice(0,10), monthKey = dayKey.slice(0,7);
-    function base(name, key) {
+    // track download (RX) and upload (TX) SEPARATELY so the daily/monthly usage can be
+    // shown split instead of one combined number.
+    var rx = trafficRxBytes(data), tx = trafficTxBytes(data);
+    var dayKey = new Date().toISOString().slice(0,10), monthKey = dayKey.slice(0,7);
+    function base(name, key, cur) {
       var b = JSON.parse(localStorage.getItem(LS + name) || "null");
-      if (!b || b.key !== key || total < b.bytes) { b = { key:key, bytes:total }; localStorage.setItem(LS + name, JSON.stringify(b)); }
-      return Math.max(0, total - b.bytes);
+      if (!b || b.key !== key || cur < b.bytes) { b = { key:key, bytes:cur }; localStorage.setItem(LS + name, JSON.stringify(b)); }
+      return Math.max(0, cur - b.bytes);
     }
-    return { day:base("dayBase", dayKey), month:base("monthBase", monthKey), total:total };
+    var dayRx = base("dayBaseRx", dayKey, rx), dayTx = base("dayBaseTx", dayKey, tx);
+    var monRx = base("monthBaseRx", monthKey, rx), monTx = base("monthBaseTx", monthKey, tx);
+    return { dayRx:dayRx, dayTx:dayTx, monRx:monRx, monTx:monTx,
+             day:dayRx + dayTx, month:monRx + monTx, total:rx + tx };
   }
   function trafficRates(data) {
     var now = Date.now(), rx = data.traffic ? Number(data.traffic.rx_bytes) || 0 : 0, tx = data.traffic ? Number(data.traffic.tx_bytes) || 0 : 0;
@@ -649,13 +663,24 @@
     setTimeout(function () { drawChart($(canvasId), samples, { keys:["rx","tx"] }); }, 0);
     return card(tr("networkTitle"), body, "60s peaks", "net");
   }
+  // download (RX) / upload (TX) split box for a period
+  function usageSplit(label, rx, tx) {
+    return '<div class="traffic-box" style="text-align:start"><span>' + esc(label) + '</span>' +
+      '<div style="display:flex;justify-content:space-between;gap:10px;margin-top:4px">' +
+      '<div><small class="muted">↓ ' + esc(tr("download")) + '</small><br><b class="latin" style="color:var(--accent)">' + bytes(rx) + '</b></div>' +
+      '<div><small class="muted">↑ ' + esc(tr("upload")) + '</small><br><b class="latin" style="color:var(--primary)">' + bytes(tx) + '</b></div>' +
+      '<div><small class="muted">Σ</small><br><b class="latin">' + bytes(rx + tx) + '</b></div></div></div>';
+  }
   function renderData(data) {
     var u = dataUsage(data), dailyBudget = Number(localStorage.getItem(LS + "dailyBudgetGb") || 5), monthBudget = Number(localStorage.getItem(LS + "monthBudgetGb") || 100);
     var dayTotal = dailyBudget * 1024 * 1024 * 1024, monthTotal = monthBudget * 1024 * 1024 * 1024;
     var body = '<div class="gauge-grid">' +
       gauge(tr("daily"), bytes(u.day), dailyBudget + " GB", tr("budget"), pct(u.day, dayTotal), pct(u.day, dayTotal) > 85 ? "#EF4444" : "#06B6D4", "kpiRx") +
       gauge(tr("monthly"), bytes(u.month), monthBudget + " GB", tr("budget"), pct(u.month, monthTotal), pct(u.month, monthTotal) > 85 ? "#EF4444" : "#8B5CF6", "kpiTx") +
-      '</div><p class="muted">' + tr("noQuota") + '</p>' +
+      '</div>' +
+      // download / upload split for each period (separate, not combined)
+      '<div class="grid two" style="margin-top:8px">' + usageSplit(tr("daily"), u.dayRx, u.dayTx) + usageSplit(tr("monthly"), u.monRx, u.monTx) + '</div>' +
+      '<p class="muted">' + tr("noQuota") + '</p>' +
       '<div class="grid two"><label class="kv"><div><span>' + tr("daily") + ' GB</span><input id="dailyBudget" type="number" min="1" value="' + dailyBudget + '"></div></label><label class="kv"><div><span>' + tr("monthly") + ' GB</span><input id="monthBudget" type="number" min="1" value="' + monthBudget + '"></div></label></div>';
     return card(tr("budget"), body, "local", "bolt");
   }
@@ -750,12 +775,8 @@
   }
   function renderDevices(data) {
     var rows = mergeDevices(data);
-    // Active neighbor discovery: reveals devices behind an external switch on any port
-    // (name / IP / MAC / port), like Mikrotik or NanoStation "Neighbors".
-    var scanCard = card(tr("lanNeighbors"),
-      '<p class="muted" style="margin:0 0 8px">' + esc(tr("lanScanHint")) + '</p>' +
-      '<div class="branch-actions"><button class="btn primary" id="lanScanBtn">' + esc(tr("scanLan")) + '</button></div>' +
-      '<div id="lanScanResult">' + (state.lanScan ? renderLanScan(state.lanScan) : "") + '</div>', "ARP · FDB · DNS", "net");
+    // (Neighbor discovery list removed by user request — it surfaced too many
+    // switch/multicast MACs with no names to be useful.)
     var live = rows.length ? sectionHead(tr("devices"), "IP / MAC / " + tr("vendor") + " / RSSI", rows.length + "") +
       '<div class="table-wrap"><table><thead><tr><th>' + tr("type") + '</th><th>IP</th><th>MAC</th><th>' + tr("vendor") + '</th><th>' + tr("link") + '</th><th>RSSI</th><th>' + tr("action") + '</th></tr></thead><tbody>' +
       rows.map(function (d) {
@@ -767,7 +788,7 @@
       }).join("") +
       '</tbody></table></div>' :
       sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
-    return live + renderPortThroughput(data) + scanCard;
+    return live + renderPortThroughput(data);
   }
   // Render the on-demand LAN neighbor-scan result: one row per discovered device with
   // its resolved name, IP, MAC and the bridge port (so devices behind a switch are visible).
