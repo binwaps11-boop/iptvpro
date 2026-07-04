@@ -4,7 +4,7 @@
 # IP itself is set per-unit by the operator via Quick Settings; this only fixes the name.
 mac="$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null)"
 if [ -n "$mac" ]; then
-	suf="$(printf '%s' "$mac" | tr -d ':' | tr 'a-z' 'A-Z' | tail -c 7)"
+	suf="$(printf '%s' "$mac" | tr -d ':' | tr 'a-z' 'A-Z' | tail -c 6)"
 	host="CR6608-$suf"
 	uci -q set system.@system[0].hostname="$host"
 	uci -q commit system

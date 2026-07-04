@@ -41,7 +41,7 @@
       overview: "نظرة",
       signal: "الإشارة", network: "الترافيك", devices: "الأجهزة", wifi: "WiFi",
       system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
-      vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف",
+      vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف", near: "قريب", mid: "متوسط", far: "بعيد",
       netmgr: "الشبكة", wifimgr: "لاسلكي", sysmgr: "النظام",
       quick: "الإعدادات السريعة", quickHint: "برمجة الجهاز بخطوات: الوضع، الشبكة، الحماية، المتقدم — تطبيق واحد.",
       quickTitle: "برمجة سريعة (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -79,7 +79,7 @@
       overview: "Overview",
       signal: "Signal", network: "Traffic", devices: "Devices", wifi: "WiFi",
       system: "System Health", actions: "Actions", isolation: "Isolation",
-      vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown",
+      vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown", near: "Near", mid: "Medium", far: "Far",
       netmgr: "Network", wifimgr: "Wireless", sysmgr: "System",
       quick: "Quick Setup", quickHint: "Program the device step by step: mode, network, protection, advanced — one apply.",
       quickTitle: "Quick programming (AP / VLAN / Mesh / WDS / PPPoE)",
@@ -455,7 +455,7 @@
   async function validateSession() {
     if (!state.session) return false;
     try {
-      var res = await fetch(authUrl("/cgi-bin/dashapi"), { cache: "no-store" });
+      var res = await fetch(authUrl(API), { cache: "no-store" });
       if (res.status !== 200) throw new Error("invalid");
       return true;
     } catch (e) {
@@ -554,7 +554,8 @@
   }
   function renderTraffic(data, rates, prefix) {
     prefix = prefix || "main";
-    pushHistory("rx", rates.rx, 60); pushHistory("tx", rates.tx, 60);
+    // history is pushed once per refresh in render(); do NOT push again here
+    // (double/triple push corrupts the traffic chart timescale)
     var samples = (state.histories.rx || []).map(function (rx, i) { return { rx:rx, tx:(state.histories.tx || [])[i] || 0 }; });
     var canvasId = prefix + "TrafficCanvas";
     var body = '<canvas id="' + canvasId + '"></canvas><div class="grid two" style="margin-top:12px">' +
@@ -573,6 +574,14 @@
       '<div class="grid two"><label class="kv"><div><span>' + tr("daily") + ' GB</span><input id="dailyBudget" type="number" min="1" value="' + dailyBudget + '"></div></label><label class="kv"><div><span>' + tr("monthly") + ' GB</span><input id="monthBudget" type="number" min="1" value="' + monthBudget + '"></div></label></div>';
     return card(tr("budget"), body, "local", "bolt");
   }
+  function proximity(dbm) {
+    var v = num(dbm);
+    if (v === null || !finite(v)) return "";
+    var lvl = v >= -60 ? "near" : v >= -75 ? "mid" : "far";
+    var col = v >= -60 ? "var(--excellent)" : v >= -75 ? "var(--good)" : "var(--weak)";
+    var ico = v >= -60 ? "●●●" : v >= -75 ? "●●" : "●";
+    return '<span class="prox" style="color:' + col + '">' + ico + ' ' + tr(lvl) + '</span>';
+  }
   function renderDevices(data) {
     var rows = mergeDevices(data);
     if (!rows.length) return sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
@@ -582,7 +591,7 @@
         var vn = d.vendor || tr("unknownVendor");
         var m = esc(d.mac || "");
         var acts = m ? '<button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="block_mac">' + tr("block") + '</button> <button class="btn dev-action" data-dev-mac="' + m + '" data-dev-act="unblock_mac">' + tr("allow") + '</button>' : "";
-        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + " dBm" : tr("unavailable")) + '</td><td>' + acts + '</td></tr>';
+        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + esc(d.ip || tr("unavailable")) + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + acts + '</td></tr>';
       }).join("") +
       '</tbody></table></div>';
   }
@@ -594,7 +603,7 @@
         var ss = num(s.signal_dbm), qq = quality("rssi", ss);
         return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + '</span><b class="latin">' + (finite(ss) ? ss + " dBm" : tr("unavailable")) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
-      return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>Channel</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div></div><h4>Clients</h4>' + sta, x.hw_modes || "", "wifi");
+      return card(esc(x.ssid || x.iface), '<div class="kv"><div><span>Band</span><b>' + esc(x.band || "") + '</b></div><div><span>Channel</span><b>' + esc(x.channel || "") + '</b></div><div><span>Mode</span><b class="latin">' + esc(x.htmode || "") + '</b></div><div><span>Clients</span><b>' + (x.clients || 0) + '</b></div><div><span>RSSI</span><b class="latin" style="color:' + q.color + '">' + (finite(sig) ? sig + " dBm" : tr("unavailable")) + '</b></div></div><h4>Clients</h4>' + sta, esc(x.hw_modes || ""), "wifi");
     }).join("") + '</div>' : '<div class="empty">' + tr("unavailable") + '</div>';
     if (w.length) {
       // draw now, then once more after the section finishes expanding (canvas measured
@@ -836,7 +845,7 @@
       '<button class="wizard-tab" data-wizard-tab="security">2. إعدادات الحماية</button>' +
       '<button class="wizard-tab" data-wizard-tab="advanced">3. إعدادات متقدمة</button>' +
       '</div>' +
-      '<p class="mode-hint">كل تطبيق يُحفظ فوراً (Apply & Keep) مع نسخة احتياطية وتأكيد قبل التنفيذ، ولا يخفض قيمة TX Power أبداً.</p>' +
+      '<p class="mode-hint">كل تطبيق يُحفظ فوراً (Apply & Keep) مع نسخة احتياطية وتأكيد قبل التنفيذ، طاقة البث حتى 35 (تختارها من التبويب المتقدم).</p>' +
       '<section class="royal-pane" data-wizard-pane="device"><div class="royal-grid wizard-fields">' + group("device") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="security" hidden><div class="royal-grid wizard-fields">' + group("security") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="advanced" hidden><div class="royal-grid wizard-fields">' + group("advanced") + '</div></section>' +
@@ -853,7 +862,7 @@
       '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
       '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
       '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
-      '<div class="kv"><span>TX Power</span><b class="latin">30 locked</b></div>';
+      '<div class="kv"><span>TX Power</span><b class="latin">35 (اختياري)</b></div>';
   }
   function syncWizardMode() {
     var panel = document.querySelector('[data-control-section="wizard"]');

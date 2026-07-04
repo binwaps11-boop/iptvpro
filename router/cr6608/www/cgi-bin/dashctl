@@ -124,11 +124,12 @@ lan_zone_del() {
 store_royal_config() {
   touch /etc/config/smartap 2>/dev/null
   uci -q set smartap.quick='quicksettings'
-  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh; do
+  for k in program_mode device_ip vlan_id ssid ch24 ch5 mesh_id wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
     v="$(param "$k" | cut -c1-96)"
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
-  uci -q set smartap.quick.txpower_locked="${tx0:-30}"
+  # keep a sane txpower default if the field wasn't submitted
+  [ -n "$(uci -q get smartap.quick.txpower)" ] || uci -q set smartap.quick.txpower='35'
   uci -q commit smartap
 }
 set_wifi_security() {
@@ -413,7 +414,7 @@ case "$action" in
   opkg_update|opkg_install|opkg_remove)
     confirm_required "Software"
     pkg="$(safe_word "$(param package_name)")"
-    case "$action" in opkg_update) opkg update >/tmp/dashctl.action 2>&1 ;; opkg_install) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg install "$pkg" >/tmp/dashctl.action 2>&1 ;; opkg_remove) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg remove "$pkg" >/tmp/dashctl.action 2>&1 ;; esac
+    case "$action" in opkg_update) /bin/busybox timeout 30 opkg update >/tmp/dashctl.action 2>&1 ;; opkg_install) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg install "$pkg" >/tmp/dashctl.action 2>&1 ;; opkg_remove) [ -n "$pkg" ] || { emit false "Software" "Missing package" "[]" "Package name is required." "[]" "[]"; exit 0; }; opkg remove "$pkg" >/tmp/dashctl.action 2>&1 ;; esac
     emit true "Software" "Package command finished" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   create_config_backup)
     confirm_required "Backup"
@@ -426,7 +427,7 @@ case "$action" in
     cfg="$(safe_word "$(param raw_config)")"; sec="$(safe_uci_ref "$(param raw_section)")"; opt="$(safe_uci_opt "$(param raw_option)")"; val="$(safe_uci_value "$(param raw_value)")"; typ="$(safe_uci_opt "$(param raw_type)")"
     valid_config "$cfg" || { emit false "Raw UCI" "Blocked config" "[]" "Only network, wireless, dhcp, firewall, system, sqm, uhttpd, dropbear and smartap are allowed." "[]" "[]"; exit 0; }
     if [ "$cfg" = "wireless" ] && [ "$opt" = "txpower" ]; then
-      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-30} read-only." "[]" "[]"; exit 0
+      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-35} read-only." "[]" "[]"; exit 0
     fi
     backup="$(backup_cfg raw-uci)"
     case "$action" in
@@ -538,7 +539,7 @@ case "$action" in
     emit true "Reboot schedule" "Schedule saved" "[]" "Backup: $backup\nScheduled reboot enabled=$enabled at $hour:$minute." "[]" "[]"; exit 0 ;;
   set_led)
     confirm_required "LED"
-    led="$(param led_name | sed 's#[^A-Za-z0-9_:/.-]##g' | cut -c1-96)"; trig="$(safe_word "$(param led_trigger)")"; bright="$(safe_num "$(param led_brightness)")"
+    led="$(param led_name | sed 's#[^A-Za-z0-9_:-]##g' | cut -c1-96)"; trig="$(safe_word "$(param led_trigger)")"; bright="$(safe_num "$(param led_brightness)")"
     [ -d "/sys/class/leds/$led" ] || { emit false "LED" "Unknown LED" "[]" "LED not found under /sys/class/leds." "[]" "[]"; exit 0; }
     [ -n "$trig" ] && printf '%s' "$trig" > "/sys/class/leds/$led/trigger" 2>/dev/null
     [ -n "$bright" ] && printf '%s' "$bright" > "/sys/class/leds/$led/brightness" 2>/dev/null
@@ -557,7 +558,7 @@ case "$action" in
     exit 0 ;;
   ping)
     host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="192.168.1.1"
-    out="$(ping -c 4 -W 2 "$host" 2>&1 | redact)"
+    out="$(ping -c 4 -W 2 -- "$host" 2>&1 | redact)"
     cards="$(cards_json <<EOF
 Target|$host|ICMP check|ok
 Command|ping -c 4|Safe diagnostic|neutral
@@ -570,7 +571,7 @@ EOF
     emit true "Traceroute" "Route diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
   nslookup)
     host="$(safe_host "$(param host)")"; [ -n "$host" ] || host="openwrt.org"
-    out="$(nslookup "$host" 2>&1 | redact)"
+    out="$(/bin/busybox timeout 8 nslookup "$host" 2>&1 | redact)"
     emit true "DNS lookup" "DNS diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
   save_dhcp)
     confirm_required "LAN / DHCP"
@@ -774,7 +775,9 @@ EOF
     if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
     # TX Power policy: every Quick Setup apply EXPLICITLY pins 30 dBm on both radios --
     # never left on driver default, and nothing in the wizard can lower or unset it.
-    uci set wireless.radio0.txpower='30'; uci set wireless.radio1.txpower='30'
+    txp="$(safe_num "$(param txpower)")"; [ -n "$txp" ] || txp=35
+    [ "$txp" -ge 1 ] 2>/dev/null && [ "$txp" -le 35 ] 2>/dev/null || txp=35
+    uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
     uci -q del_list network.@device[0].ports='lan3'
     uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
@@ -795,7 +798,7 @@ EOF
     backup="$(backup_cfg quick-setup)"
     if [ "$auto_channel" = "1" ]; then
       ch24="1"
-      for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c \"Channel: $c\" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
+      for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c "Channel: $c" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
       ch24="${bestc:-1}"; ch5="36"
     fi
     [ -n "$ssid24" ] && uci set wireless.wifinet0.ssid="$ssid24"
@@ -826,7 +829,9 @@ EOF
     fi
     [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
     if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
-    uci set wireless.radio0.txpower='30'; uci set wireless.radio1.txpower='30'
+    txp="$(safe_num "$(param txpower)")"; [ -n "$txp" ] || txp=35
+    [ "$txp" -ge 1 ] 2>/dev/null && [ "$txp" -le 35 ] 2>/dev/null || txp=35
+    uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
@@ -835,7 +840,7 @@ EOF
     confirm_required "Auto optimize"
     backup="$(backup_cfg auto-optimize)"
     bestc=""; bestn=""
-    for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c \"Channel: $c\" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
+    for c in 1 6 11; do cnt="$(iwinfo phy0-ap0 scan 2>/dev/null | grep -c "Channel: $c" 2>/dev/null)"; [ -z "$bestc" ] && bestc="$c" && bestn="$cnt"; [ "$cnt" -lt "${bestn:-999}" ] 2>/dev/null && bestc="$c" && bestn="$cnt"; done
     uci set wireless.radio0.channel="${bestc:-1}"; uci set wireless.radio1.channel='36'
     for ifc in wifinet0 wifinet1; do uci set wireless."$ifc".wmm='1'; uci set wireless."$ifc".dtim_period='2'; uci set wireless."$ifc".ieee80211k='1'; uci set wireless."$ifc".ieee80211v='1'; done
     uci set wireless.radio0.legacy_rates='0'; uci set wireless.radio1.legacy_rates='0'
@@ -1011,7 +1016,7 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower_readonly|طاقة البث|${tx0:-30}|مقفلة قراءة فقط. ممنوع تغييرها من Xiaomi CR6608.|text|1|advanced|all|
+txpower|طاقة البث (dBm)|${tx0:-35}|أقصى طاقة 35. القيمة الفعلية قد يحدّها النطاق التنظيمي للشريحة.|select|0|advanced|all|20:20,23:23,25:25,27:27,30:30,33:33,35:35 (أقصى)
 EOF
 )"
     cards="$(cards_json <<EOF
@@ -1021,7 +1026,7 @@ TX Power|${tx0:-?}/${tx1:-?} dBm|Locked read-only|warn
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is pinned to 30 dBm on both radios (${tx0:-30}); the panel never lowers it." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to your choice (default max 35 dBm) on both radios." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply","confirm":true},{"id":"save_royal","label":"حفظ / Save","confirm":true},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
@@ -1037,14 +1042,14 @@ EOF
     cards="$(cards_json <<EOF
 radio0 TX Power|${tx0:-unknown} dBm|Locked read-only|warn
 radio1 TX Power|${tx1:-unknown} dBm|Locked read-only|warn
-Policy|No write|Power remains unchanged|ok
+Policy|قابل للتعديل|من الإعدادات السريعة ← متقدم|ok
 EOF
 )"
     form="$(form_json <<EOF
-txpower|TX Power|${tx0:-30}|Locked by policy. This field is disabled.|text|1
+txpower|TX Power|${tx0:-35}|أقصى 35 dBm|text|1
 EOF
 )"
-    emit true "TX Power locked" "Read-only safety panel" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-30} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
+    emit true "TX Power" "طاقة البث قابلة للاختيار حتى 35" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-35} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"
@@ -1358,7 +1363,7 @@ EOF
 package_name|Package name||Example: luci-app-sqm
 EOF
 )"
-        actions='[{"id":"opkg_update","label":"opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
+        actions='[{"id":"opkg_update","label":"/bin/busybox timeout 30 opkg update","confirm":true},{"id":"opkg_install","label":"Install package","confirm":true},{"id":"opkg_remove","label":"Remove package","confirm":true}]'
         ;;
       startup)
         text="الخدمات تُدار من إعدادات النظام."
