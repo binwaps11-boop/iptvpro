@@ -72,10 +72,9 @@ setv smartap.security.loop_guard 1 smartap
 
 ensure_section smartap.management management smartap
 setv smartap.management.vlan 1 smartap
-setv smartap.management.ipaddr 192.168.66.1 smartap
-setv smartap.management.recovery_always 1 smartap
-setv smartap.management.recovery_wifi 1 smartap
-setv smartap.management.recovery_ssid CR6608-Recovery smartap
+setv smartap.management.ipaddr 192.168.1.1 smartap
+setv smartap.management.recovery_always 0 smartap
+setv smartap.management.recovery_wifi 0 smartap
 
 for n in 1 2 3; do
   ensure_section "smartap.lan$n" port smartap
@@ -89,15 +88,12 @@ ensure_section network.lan interface network
 setv network.lan.ipaddr 192.168.1.1 network
 setv network.lan.netmask 255.255.255.0 network
 
-# Always-on local recovery address. Users can open the dashboard by assigning
-# a client IP in 192.168.66.0/24 and browsing http://192.168.66.1/.
-ensure_section network.recovery interface network
-setv network.recovery.proto static network
-setv network.recovery.device br-lan network
-setv network.recovery.ipaddr 192.168.66.1 network
-setv network.recovery.netmask 255.255.255.0 network
-setv network.recovery.ipv6 0 network
-setv network.recovery.auto 1 network
+# Recovery IP (192.168.66.1) removed by owner request. Any leftover recovery interface,
+# its DHCP pool, and its Wi-Fi SSID from an older build are deleted so they cannot reappear.
+# Access stays: 192.168.1.1 over any cable, and 221.221.221.221 over any Wi-Fi network.
+uci -q delete network.recovery 2>/dev/null || true
+uci -q delete dhcp.recovery 2>/dev/null || true
+uci -q delete wireless.smartap_mgmt 2>/dev/null || true
 
 # No DHCP client here. The device must never request an address from upstream nor hand
 # one out. Any leftover 'mgmt' DHCP-client interface from an older build is removed so it
@@ -105,12 +101,12 @@ setv network.recovery.auto 1 network
 uci -q delete network.mgmt 2>/dev/null || true
 uci -q delete network.wan 2>/dev/null || true
 
-# Keep the recovery interface inside the trusted LAN zone.
+# Trusted LAN zone: lan (192.168.1.1) and the Wi-Fi rescue address only.
 zone="$(find_lan_zone)"
 if [ -n "$zone" ]; then
   setv "firewall.$zone.input" ACCEPT firewall
   add_list_once "firewall.$zone" network lan firewall
-  add_list_once "firewall.$zone" network recovery firewall
+  uci -q del_list "firewall.$zone.network=recovery" 2>/dev/null || true
 fi
 
 
@@ -133,39 +129,8 @@ fi
 uci -q get wireless.radio0 >/dev/null 2>&1 && setv wireless.radio0.txpower 35 wireless
 uci -q get wireless.radio1 >/dev/null 2>&1 && setv wireless.radio1.txpower 35 wireless
 
-# Optional recovery SSID: reuse the existing 2.4G AP key. Never create an open
-# management AP from an unattended installer.
-if [ "$(g smartap.management.recovery_wifi)" = "1" ] && uci -q get wireless.radio0 >/dev/null 2>&1; then
-  main_ap="$(find_radio0_ap)"
-  main_key=""
-  main_enc=""
-  if [ -n "$main_ap" ]; then
-    main_key="$(g wireless.$main_ap.key)"
-    main_enc="$(g wireless.$main_ap.encryption)"
-  fi
-  rec_ssid="$(g smartap.management.recovery_ssid)"
-  [ -n "$rec_ssid" ] || rec_ssid="CR6608-Recovery"
-  ensure_section wireless.smartap_mgmt wifi-iface wireless
-  setv wireless.smartap_mgmt.device radio0 wireless
-  setv wireless.smartap_mgmt.mode ap wireless
-  setv wireless.smartap_mgmt.network recovery wireless
-  setv wireless.smartap_mgmt.ssid "$rec_ssid" wireless
-  if [ -n "$main_key" ] && [ "${#main_key}" -ge 8 ] && [ "$main_enc" != "none" ] && [ "$main_enc" != "open" ]; then
-    # main Wi-Fi is protected: recovery SSID reuses the same key
-    setv wireless.smartap_mgmt.encryption psk2 wireless
-    setv wireless.smartap_mgmt.key "$main_key" wireless
-  else
-    # main Wi-Fi is open (this deployment's choice): keep the recovery SSID open too,
-    # so 192.168.66.1 stays reachable over Wi-Fi — the dashboard login still applies.
-    setv wireless.smartap_mgmt.encryption none wireless
-    uci -q delete wireless.smartap_mgmt.key 2>/dev/null && mark_changed wireless
-  fi
-  setv wireless.smartap_mgmt.isolate 0 wireless
-  # Recovery SSID is HIDDEN: it stays available for rescue but does not appear in the
-  # phone's Wi-Fi list. To use it, add the network manually by typing CR6608-Recovery.
-  setv wireless.smartap_mgmt.hidden 1 wireless
-  setv wireless.smartap_mgmt.disabled 0 wireless
-fi
+# Recovery Wi-Fi SSID removed by owner request (no CR6608-Recovery network). Rescue over
+# Wi-Fi is still available via 221.221.221.221 on any of the device's Wi-Fi networks.
 
 [ "$changed_smartap" = 1 ] && uci commit smartap 2>/dev/null
 [ "$changed_network" = 1 ] && uci commit network 2>/dev/null

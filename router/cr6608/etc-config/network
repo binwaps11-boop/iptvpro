@@ -26,16 +26,6 @@ config interface 'lan'
 	option delegate '0'
 	option ipv6 '0'
 
-# Recovery / management IP reachable from EVERY wired port (lan1/lan2/lan3/wan) and the
-# recovery Wi-Fi — a second static address on the same bridge, so it works no matter which
-# port the uplink or a laptop is plugged into.
-config interface 'recovery'
-	option device 'br-lan'
-	option proto 'static'
-	option ipaddr '192.168.66.1'
-	option netmask '255.255.255.0'
-	option ipv6 '0'
-
 # NOTE: there is deliberately NO DHCP client interface here. The device never requests
 # an address from anywhere and never hands one out. The 'wan' physical port stays a plain
 # member of br-lan (a 4th LAN port). Access is always the static addresses below.

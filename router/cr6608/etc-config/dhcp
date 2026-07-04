@@ -37,17 +37,6 @@ config dhcp 'lan'
 	option ra 'disabled'
 	option ndp 'disabled'
 
-config dhcp 'recovery'
-	option interface 'recovery'
-	option start '100'
-	option limit '150'
-	option leasetime '12h'
-	option ignore '1'
-	option dhcpv4 'disabled'
-	option dhcpv6 'disabled'
-	option ra 'disabled'
-	option ndp 'disabled'
-
 # DHCPv6 / RA daemon is disabled here AND the odhcpd binary is not even shipped in this build.
 config odhcpd 'odhcpd'
 	option disabled '1'
