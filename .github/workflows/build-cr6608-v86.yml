@@ -52,29 +52,6 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: DIAGNOSTIC — dump the real mt76 source so the patch can be rebased
-        run: |
-          cd ow
-          make package/kernel/mt76/prepare V=s QUILT=1 2>/dev/null || \
-            make package/kernel/mt76/prepare V=s 2>/dev/null || true
-          MT76DIR="$(find build_dir -maxdepth 4 -type d -name 'mt76-*' 2>/dev/null | head -1)"
-          echo "===MT76DIR=== ${MT76DIR:-NONE}"
-          [ -n "$MT76DIR" ] || { echo "no mt76 dir"; exit 1; }
-          echo "===LS mt7915==="; ls -la "$MT76DIR/mt7915/" 2>/dev/null
-          echo "===mcu.c set_txpower_sku==="
-          grep -n "set_txpower_sku\|mt76_get_rate_power_limits\|mt76_power_limits\|->cck\|->ofdm\|->mcs\|->ru" "$MT76DIR/mt7915/mcu.c" | head -60
-          echo "===mcu.c function body (set_txpower_sku, 80 lines)==="
-          awk '/mt7915_mcu_set_txpower_sku/{f=1} f{print NR": "$0} f&&/^}/{c++; if(c>=1)exit}' "$MT76DIR/mt7915/mcu.c" | head -90
-          echo "===init.c init_txpower==="
-          awk '/mt7915_init_txpower/{f=1} f{print NR": "$0} f&&/^}/{c++; if(c>=1)exit}' "$MT76DIR/mt7915/init.c" | head -70
-          echo "===eeprom.c target_power / power_delta==="
-          grep -n "get_target_power\|get_power_delta\|target_power\|MT_EE_TX" "$MT76DIR/mt7915/eeprom.c" | head -40
-          echo "===mt76_power_limits struct==="
-          grep -rn "struct mt76_power_limits" "$MT76DIR/mt76.h" "$MT76DIR"/*.h 2>/dev/null | head
-          awk '/struct mt76_power_limits/{f=1} f{print} f&&/};/{exit}' "$MT76DIR/mt76.h" 2>/dev/null | head -30
-          echo "===DIAGNOSTIC COMPLETE — stopping before full build==="
-          exit 1
-
       - name: Bake in the v92 overlay
         run: |
           cd ow
@@ -96,6 +73,27 @@ jobs:
 
       - name: Download sources
         run: cd ow && make download -j8 V=s
+
+      - name: DIAGNOSTIC — extract mt76 (after defconfig) and dump the real source
+        run: |
+          cd ow
+          make package/kernel/mt76/prepare V=s QUILT=1 2>&1 | tail -5 || \
+            make package/kernel/mt76/prepare V=s 2>&1 | tail -5 || true
+          MT76DIR="$(find build_dir -maxdepth 5 -type d -name 'mt76-*' 2>/dev/null | head -1)"
+          echo "===MT76DIR=== ${MT76DIR:-NONE}"
+          [ -n "$MT76DIR" ] || { find build_dir -maxdepth 5 -type d -iname '*mt76*' 2>/dev/null | head; echo "no mt76 dir"; exit 1; }
+          echo "===LS mt7915==="; ls "$MT76DIR/mt7915/" 2>/dev/null
+          echo "===mcu.c set_txpower_sku + power limits==="
+          grep -n "set_txpower_sku\|mt76_get_rate_power_limits\|mt76_power_limits\|txpower_sku\|\.cck\|\.ofdm\|\.mcs\|\.ru\|->cck\|->ofdm" "$MT76DIR/mt7915/mcu.c" | head -50
+          echo "===mcu.c set_txpower_sku BODY==="
+          awk '/mt7915_mcu_set_txpower_sku/{f=1;b=0} f{print NR": "$0} f&&/\{/{b++} f&&/\}/{b--; if(b<=0){exit}}' "$MT76DIR/mt7915/mcu.c" | head -110
+          echo "===init.c init_txpower BODY==="
+          awk '/mt7915_init_txpower/{f=1;b=0} f{print NR": "$0} f&&/\{/{b++} f&&/\}/{b--; if(b<=0){exit}}' "$MT76DIR/mt7915/init.c" | head -80
+          echo "===mt76_power_limits struct (search headers)==="
+          grep -rn "struct mt76_power_limits {" "$MT76DIR"/*.h 2>/dev/null | head
+          for h in "$MT76DIR/mt76.h"; do awk '/struct mt76_power_limits \{/{f=1} f{print} f&&/\};/{exit}' "$h" 2>/dev/null; done | head -30
+          echo "===DIAGNOSTIC COMPLETE==="
+          exit 1
 
       - name: Build firmware
         run: |
