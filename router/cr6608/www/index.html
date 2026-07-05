@@ -211,6 +211,8 @@
     .grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid.three { grid-template-columns:repeat(3,minmax(0,1fr)); }
     .grid.four { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    /* Insights: responsive auto-fill so cards keep a sane width on wide laptops (was 2 stretched cols) */
+    .pro-grid { grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }
     /* ---------- cards: floating obsidian layers ---------- */
     .card {
       min-width:0; position:relative; border:1px solid var(--border); border-radius:20px;

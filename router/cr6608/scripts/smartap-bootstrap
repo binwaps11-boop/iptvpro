@@ -85,8 +85,10 @@ done
 
 # Fixed ethernet access address: 192.168.1.1 always answers over any LAN cable.
 ensure_section network.lan interface network
-setv network.lan.ipaddr 192.168.1.1 network
-setv network.lan.netmask 255.255.255.0 network
+# seed-only: set the 192.168.1.1 cable IP ONLY if no LAN IP exists yet — never overwrite
+# an operator-chosen IP (that clobber caused: apply reverts + reboot resets to default).
+[ -n "$(g network.lan.ipaddr)" ] || setv network.lan.ipaddr 192.168.1.1 network
+[ -n "$(g network.lan.netmask)" ] || setv network.lan.netmask 255.255.255.0 network
 
 # Recovery IP (192.168.66.1) removed by owner request. Any leftover recovery interface,
 # its DHCP pool, and its Wi-Fi SSID from an older build are deleted so they cannot reappear.
