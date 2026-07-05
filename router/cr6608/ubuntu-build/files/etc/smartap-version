@@ -1,1 +1,1 @@
-SmartAP CR6608 v86 (from-source, mt7915 SKU->35 dBm both bands)
+SmartAP CR6608 (from-source, mt76 driver CR6608-RF-38DBM-LINEAR; request 38 dBm both bands; real emitted power PA-limited)

@@ -131,10 +131,11 @@ fi
 
 
 
-# Configure requested Tx power in UCI, while the driver/regulatory layer still
-# enforces the real maximum power supported by the country/radio.
-uci -q get wireless.radio0 >/dev/null 2>&1 && setv wireless.radio0.txpower 35 wireless
-uci -q get wireless.radio1 >/dev/null 2>&1 && setv wireless.radio1.txpower 35 wireless
+# TX power is NOT touched here. It is owned by the first-boot script
+# etc/uci-defaults/94-cr6608-txpower (sets 38 on both radios) and by the dashboard
+# (set_txpower / Quick Settings). This script runs on EVERY boot via ensure_management, so
+# writing txpower here used to (a) override 94's 38 back to 35 and (b) silently revert any
+# operator change on the next reboot. Leaving it alone keeps 38 (or the operator's value).
 
 # Recovery Wi-Fi SSID removed by owner request (no CR6608-Recovery network). Rescue over
 # Wi-Fi is still available via 221.221.221.221 on any of the device's Wi-Fi networks.

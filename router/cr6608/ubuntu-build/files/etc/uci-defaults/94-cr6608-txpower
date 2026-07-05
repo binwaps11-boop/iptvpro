@@ -1,7 +1,7 @@
 #!/bin/sh
 # Max-RF baseline on first boot (real performance, within what the MT7915 can legally emit):
 #  * txpower = 38 -> the driver applies its true maximum (the chip radiates as much as its
-#    regulatory table allows; the 35 is the requested ceiling, not a fake radiated value).
+#    regulatory table allows; the 38 is the requested ceiling, not a fake radiated value).
 #  * 5G on channel 149 (UNII-3): the US regulatory table permits HIGHER AP transmit power
 #    here than on channel 36 (UNII-1), and it is non-DFS (no radar wait) -> stronger, more
 #    stable 5G signal and instant availability.
