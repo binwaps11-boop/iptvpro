@@ -109,18 +109,18 @@ jobs:
           [ -n "$KO" ] || { echo "mt7915e.ko not found"; exit 1; }
           echo "===1) mt7915e.ko paths after build==="
           find build_dir staging_dir -name "*mt7915*.ko" 2>/dev/null
-          echo "===2) strings on build_dir .ko==="
-          strings "$KO" | grep -Ei "CR6608|35DBM|38DBM" || true
-          echo "===3) .ko baked into the target rootfs staging (this is what enters the image)==="
-          find build_dir/target-* -path "*root*/lib/modules/*/mt7915e.ko" 2>/dev/null
-          ROOTKO="$(find build_dir/target-* -path "*root*/lib/modules/*/mt7915e.ko" 2>/dev/null | head -1)"
-          echo "rootfs-staged .ko: ${ROOTKO:-NONE}"
-          [ -n "$ROOTKO" ] && strings "$ROOTKO" | grep -Ei "CR6608|38DBM|35DBM" || true
-          # gate on the build_dir/compiled ko banner
-          if ! strings "$KO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
+          echo "===2) DIAGNOSTIC on build_dir .ko==="
+          file "$KO"; ls -la "$KO"
+          echo "-- strings -a total lines --"; strings -a "$KO" | wc -l
+          echo "-- sample module strings --"; strings -a "$KO" | grep -iE "mt7915|vermagic|license|txpower" | head -6
+          echo "-- .modinfo (modinfo tool) --"; modinfo "$KO" 2>/dev/null | grep -iE "cr6608|38dbm" || true
+          echo "-- CR6608 via strings -a --"; strings -a "$KO" | grep -Ei "CR6608|35DBM|38DBM" || true
+          echo "-- CR6608 via raw grep -a --"; grep -a -oE "CR6608[A-Za-z0-9-]*" "$KO" | sort -u | head || true
+          # gate: use strings -a (scan the WHOLE file, not just loaded sections)
+          if ! strings -a "$KO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
             echo "::error::38 banner NOT in compiled .ko — refusing"; exit 1
           fi
-          if strings "$KO" | grep -qiE "CR6608-RF-35DBM"; then
+          if strings -a "$KO" | grep -qiE "CR6608-RF-35DBM"; then
             echo "::error::stale 35 banner still present"; exit 1
           fi
           echo "===4) FINAL .bin list + sha256==="
@@ -136,9 +136,9 @@ jobs:
             unsquashfs -q -d /tmp/imgchk/sq "$ROOT" >/dev/null 2>&1 || true
             IMGKO="$(find /tmp/imgchk/sq -name 'mt7915e.ko' 2>/dev/null | head -1)"
             echo "mt7915e.ko INSIDE final image: ${IMGKO:-NONE}"
-            if [ -n "$IMGKO" ] && strings "$IMGKO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
+            if [ -n "$IMGKO" ] && strings -a "$IMGKO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
               echo "::notice::CONFIRMED — CR6608-RF-38DBM-LINEAR is inside the FINAL firmware .ko"
-              strings "$IMGKO" | grep -Ei "CR6608|38DBM|35DBM"
+              strings -a "$IMGKO" | grep -Ei "CR6608|38DBM|35DBM"
             else
               echo "::error::patched banner NOT found inside the final image .ko — image is NOT 38-build"; exit 1
             fi
