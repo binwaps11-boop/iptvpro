@@ -347,6 +347,9 @@ case "$action" in
     backup="$(backup_cfg wifi-save)"
     uci -q get wireless."$wifi_if" >/dev/null || uci set wireless."$wifi_if"='wifi-iface'
     uci set wireless."$wifi_if".device="$radio"; uci set wireless."$wifi_if".mode="$mode"; uci set wireless."$wifi_if".network="${network_name:-lan}"
+    # switching to AP clears station-only leftovers (bssid) so the SSID broadcasts again;
+    # re-enable the radio in case a previous Client-mode edit disabled it.
+    [ "$mode" = "ap" ] && { uci -q delete wireless."$wifi_if".bssid; uci set wireless."$radio".disabled='0'; }
     [ -n "$ssid" ] && uci set wireless."$wifi_if".ssid="$ssid"
     [ "$disabled" = "1" ] && uci set wireless."$wifi_if".disabled='1' || uci set wireless."$wifi_if".disabled='0'
     [ "$hidden" = "1" ] && uci set wireless."$wifi_if".hidden='1' || uci delete wireless."$wifi_if".hidden 2>/dev/null
@@ -719,6 +722,17 @@ EOF
     # default both client APs ON; a mesh "receiver" below turns the 5G client AP off,
     # and any previous receiver programming is cleared here so re-programming AP re-enables 5G.
     uci set wireless."$ifc24".disabled='0'; uci set wireless."$ifc5".disabled='0'
+    # FORCE both client-radio interfaces back to AP mode and clear any station/WDS leftovers,
+    # and re-enable the radios themselves. This is why the SSID vanished before: if a radio
+    # was previously switched to Client (sta) / mesh / WDS (via the Wi-Fi editor or native
+    # LuCI), the wizard used to leave mode=sta, so "switch back to Access Point" never
+    # rebroadcast. Now every AP re-program deterministically restores the broadcast.
+    for _ci in "$ifc24" "$ifc5"; do
+      uci set wireless."$_ci".mode='ap'
+      uci -q delete wireless."$_ci".bssid
+      uci -q delete wireless."$_ci".wds
+    done
+    uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'
     # remove any mesh iface from prior programming unless this run is a mesh mode
     case "$program_mode" in mesh|mesh_vlan) : ;; *) uci -q delete wireless.smartap_mesh ;; esac
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
