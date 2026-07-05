@@ -134,6 +134,10 @@ apply_vlan() {
 	if [ "$need" = "0" ]; then
 		# no segmentation requested -> plain bridge, management everywhere
 		uci -q delete network.@device[0].vlan_filtering 2>/dev/null
+		# put the management L3 back on the plain bridge (undo any br-lan.<vid> from a
+		# previous VLAN apply) so 192.168.1.1 stays reachable.
+		uci set network.lan.device='br-lan'
+		uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
 		uci commit network
 		/etc/init.d/network reload >/dev/null 2>&1 || true
 		return 0
@@ -147,6 +151,10 @@ apply_vlan() {
 	uci set "network.$s.device=br-lan"
 	uci set "network.$s.vlan=$mgmt"
 	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$s.ports=$p:u*"; done
+	# move the management L3 onto the native VLAN device so 192.168.1.1 is never stranded
+	# when the management VLAN id is not the bridge's default PVID 1.
+	uci set network.lan.device="br-lan.$mgmt"
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device="br-lan.$mgmt"
 
 	# each non-management client VLAN, tagged on its port(s)
 	for p in $PORTS; do
