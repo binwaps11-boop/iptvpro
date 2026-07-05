@@ -1,0 +1,47 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option packet_steering '1'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+	list ports 'lan2'
+	list ports 'lan3'
+	list ports 'wan'
+	option stp '1'
+	option igmp_snooping '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.1'
+	option netmask '255.255.255.0'
+	option delegate '0'
+	option ipv6 '0'
+
+# NOTE: there is deliberately NO DHCP client interface here. The device never requests
+# an address from anywhere and never hands one out. The 'wan' physical port stays a plain
+# member of br-lan (a 4th LAN port). Access is always the static addresses below.
+
+# Wi-Fi rescue IP (mirrors the reference source): 221.221.221.221 always answers on the
+# bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like
+# 221.221.221.100/24 on your phone/laptop, and open http://221.221.221.221/ to reach the
+# programming page — no matter how the unit is programmed (VLAN/mesh/AP).
+config interface 'wlanrescue'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '221.221.221.221'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
+
+# Cable access is the fixed LAN address 192.168.1.1 (the 'lan' interface above). It stays
+# put no matter how the unit is programmed (VLAN/mesh) because Quick Settings never
+# overwrites it — the IP you type when programming is added as an extra alias instead. So
+# over any LAN cable the dashboard always answers at http://192.168.1.1/.

@@ -1,0 +1,109 @@
+# CR6608 mt7915 TX-power ceiling lift to 35 dBm (both bands), gated on the
+# xiaomi,mi-router-cr6608 machine AND the module param cr6608_rf_35dbm.
+#
+# Extends the vendor's existing cr6608_rf_30dbm_test lever from 30 -> 35 dBm.
+# The mt7915 SKU / mt76_power_limits arrays are in 0.5 dBm units:
+#   35.0 dBm -> 70   (cck/ofdm/robust rows)
+#   33.0 dBm -> 66   (dense MCS rows)
+#   31.0 dBm -> 62   (RU / HE dense-QAM rows)
+# mac80211 chan->max_power / power_level are whole dBm -> 35.
+#
+# HONEST NOTE: this raises the software REQUEST/ceiling only. The MT7915 2x2 PA
+# physically caps output at ~20-22 dBm conducted / ~30 dBm EIRP; requesting 35
+# saturates the amplifier (EVM/throughput loss, spectral regrowth) — it does NOT
+# radiate 35 dBm. Runtime override: writes no flash, reversible via the param.
+#
+# Lines marked TODO(cr6608) are the only spots the builder confirms against the
+# exact mt76 revision pinned by OpenWrt 24.10.6 (patch applies with quilt fuzz).
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@
+ /* TODO(cr6608): anchor near the other mt7915_mcu_* / mt7915_eeprom_* prototypes. */
++bool mt7915_cr6608_rf_35dbm_enabled(void);
++
++#define MT7915_CR6608_MAX_HALF_DBM	70	/* 35.0 dBm ceiling (0.5 dBm units) */
++#define MT7915_CR6608_CAP_MCS_HALF	66	/* 33.0 dBm data cap   */
++#define MT7915_CR6608_CAP_RU_HALF	62	/* 31.0 dBm HE data cap */
++#define MT7915_CR6608_MAX_DBM		35	/* whole-dBm ceiling for mac80211 */
++#define MT7915_CR6608_EXTRA_DELTA_HALF	12	/* +6.0 dB optional headroom */
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@
+ /* TODO(cr6608): place next to the existing cr6608_rf_30dbm_test module_param. */
++static bool cr6608_rf_35dbm;
++module_param(cr6608_rf_35dbm, bool, 0444);
++MODULE_PARM_DESC(cr6608_rf_35dbm,
++		 "CR6608: raise mt7915 SKU/target power ceiling to 35 dBm (request/ceiling only)");
++
++bool mt7915_cr6608_rf_35dbm_enabled(void)
++{
++	return cr6608_rf_35dbm &&
++	       of_machine_is_compatible("xiaomi,mi-router-cr6608");
++}
++EXPORT_SYMBOL_GPL(mt7915_cr6608_rf_35dbm_enabled);
++
+@@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ 	mt76_get_rate_power_limits(mphy, mphy->chandef.chan,
+ 				   &limits_array, tx_power);
++
++	/* CR6608: raise every SKU row toward the 35 dBm ceiling before the
++	 * struct is copied into the TX_POWER_LIMIT_TABLE MCU command. Only ever
++	 * raises (max_t), never lowers an already-higher regulatory value.
++	 * TODO(cr6608): confirm the local struct name is `limits_array`. */
++	if (mt7915_cr6608_rf_35dbm_enabled()) {
++		struct mt76_power_limits *lp = &limits_array;
++		int r, c;
++
++		for (r = 0; r < ARRAY_SIZE(lp->cck); r++)
++			lp->cck[r]  = max_t(s8, lp->cck[r],  MT7915_CR6608_MAX_HALF_DBM);
++		for (r = 0; r < ARRAY_SIZE(lp->ofdm); r++)
++			lp->ofdm[r] = max_t(s8, lp->ofdm[r], MT7915_CR6608_MAX_HALF_DBM);
++		for (r = 0; r < ARRAY_SIZE(lp->mcs); r++)
++			for (c = 0; c < ARRAY_SIZE(lp->mcs[r]); c++)
++				lp->mcs[r][c] = max_t(s8, lp->mcs[r][c],
++						      MT7915_CR6608_CAP_MCS_HALF);
++		for (r = 0; r < ARRAY_SIZE(lp->ru); r++)
++			for (c = 0; c < ARRAY_SIZE(lp->ru[r]); c++)
++				lp->ru[r][c] = max_t(s8, lp->ru[r][c],
++						     MT7915_CR6608_CAP_RU_HALF);
++		/* TODO(cr6608): if struct mt76_power_limits has an eht[]/path[]
++		 * member in your tree, raise it the same way. */
++	}
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ void mt7915_init_txpower
+ 		target_power = DIV_ROUND_UP(target_power, 2);
+ 		chan->max_power = min_t(int, chan->max_reg_power, target_power);
+ 		chan->orig_mpwr = target_power;
++
++		/* CR6608: lift the per-channel ceiling so mac80211 (and the
++		 * mt7915_config -> set_txpower_sku path) requests up to 35 dBm
++		 * on BOTH bands. This is the clamp that binds everything above. */
++		if (mt7915_cr6608_rf_35dbm_enabled()) {
++			chan->max_reg_power =
++				max_t(int, chan->max_reg_power, MT7915_CR6608_MAX_DBM);
++			chan->max_power  = MT7915_CR6608_MAX_DBM;
++			chan->orig_mpwr  = MT7915_CR6608_MAX_DBM;
++		}
+ 	}
++	/* TODO(cr6608): older trees pass (dev, sband); newer (phy, sband). */
++	if (mt7915_cr6608_rf_35dbm_enabled())
++		dev_info(dev->mt76.dev,
++			 "CR6608-RF-35DBM-LINEAR max=35, data caps=33/31 dBm, Factory delta preserved\n");
+--- a/mt7915/eeprom.c
++++ b/mt7915/eeprom.c
+@@ s8 mt7915_eeprom_get_target_power
++	/* TODO(cr6608): anchor is the final `return target_power;`. 0.5 dBm units. */
++	if (mt7915_cr6608_rf_35dbm_enabled() &&
++	    target_power < MT7915_CR6608_MAX_HALF_DBM)
++		target_power = MT7915_CR6608_MAX_HALF_DBM;	/* floor to 35.0 dBm */
++
+ 	return target_power;
+@@ s8 mt7915_eeprom_get_power_delta
++	/* CR6608: ADD headroom on top of the factory delta (factory byte kept).
++	 * Comment out to keep the factory rate-delta byte-exact. 0.5 dBm units.
++	 * TODO(cr6608): match the local that holds the signed factory delta. */
++	if (mt7915_cr6608_rf_35dbm_enabled())
++		delta += MT7915_CR6608_EXTRA_DELTA_HALF;	/* +6.0 dB */
++
+ 	return delta;
