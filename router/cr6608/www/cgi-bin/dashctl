@@ -866,7 +866,7 @@ EOF
     # TX Power: PINNED at 35 dBm on both radios — owner rule, never reduced. Any submitted
     # value is ignored; the request is always the maximum ceiling (driver still clamps to the
     # radio's real hardware/EEPROM limit). This is the "35 stays 35" guarantee.
-    txp=35
+    txp=30
     uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
     uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
@@ -919,7 +919,7 @@ EOF
     [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
     if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
     # TX Power PINNED at 35 (owner rule, never reduced). Submitted value ignored.
-    txp=35
+    txp=30
     uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
@@ -1316,7 +1316,7 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower|طاقة البث (dBm)|35|مثبّتة على 35 (أقصى) دائمًا ولا تُخفّض. القيمة الفعلية المنبعثة يحدّها سقف عتاد الشريحة (EEPROM).|select|0|advanced|all|35:35 (أقصى — مثبّتة)
+txpower|طاقة البث (dBm)|30|مثبّتة على 30 (الحد الفعلي الأقصى للعتاد) — أعلى قيمة يبثّها المضخّم فعليًا. الأرقام الأعلى وهمية لا تُشعّ.|select|0|advanced|all|30:30 (أقصى فعلي — مثبّت)
 EOF
 )"
     cards="$(cards_json <<EOF

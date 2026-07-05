@@ -1,5 +1,5 @@
 
-# Performance pack (owner rules: txpower stays 35, NEVER drop far clients, no reboots,
+# Performance pack (owner rules: txpower 30 (real hardware ceiling), NEVER drop far clients, no reboots,
 # no power reduction). Additions:
 #   ldpc / tx_stbc / rx_stbc  -> stronger error-correction + antenna diversity: far clients
 #                                decode weak signals reliably (n/ac/ax all benefit)
@@ -29,7 +29,7 @@ config wifi-device 'radio0'
 	option short_gi_20 '1'
 	option short_gi_40 '1'
 	option disabled '0'
-	option txpower '35'
+	option txpower '30'
 	option legacy_rates '0'
 
 config wifi-device 'radio1'
@@ -55,7 +55,7 @@ config wifi-device 'radio1'
 	option short_gi_80 '1'
 	option airtime_mode '1'
 	option disabled '0'
-	option txpower '35'
+	option txpower '30'
 	option legacy_rates '0'
 
 config wifi-iface 'wifinet0'
