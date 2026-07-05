@@ -130,7 +130,7 @@ store_royal_config() {
     [ -n "$v" ] && uci -q set smartap.quick."$k"="$v"
   done
   # keep a sane txpower default if the field wasn't submitted
-  [ -n "$(uci -q get smartap.quick.txpower)" ] || uci -q set smartap.quick.txpower='35'
+  [ -n "$(uci -q get smartap.quick.txpower)" ] || uci -q set smartap.quick.txpower='38'
   uci -q commit smartap
 }
 set_wifi_security() {
@@ -228,8 +228,8 @@ case "$action" in
   clear_api_cache) rm -f /tmp/dashapi2.cache /tmp/dashapi2.cache.ts; emit true "Cache" "Cache cleared" "[]" "Live API cache was cleared." "[]" "[]"; exit 0 ;;
   eeprom_status)
     out="$(/usr/sbin/cr6608-eeprom-power status 2>&1)"
-    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_30dbm_test 2>/dev/null)"
-    emit true "EEPROM / RF Power" "Status" "[]" "Driver 30dBm override (cr6608_rf_30dbm_test)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
+    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_35dbm 2>/dev/null)"
+    emit true "EEPROM / RF Power" "Status" "[]" "Driver RF override (cr6608_rf_35dbm)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
   eeprom_backup)
     out="$(/usr/sbin/cr6608-eeprom-power backup 2>&1)"
     emit true "EEPROM Backup" "Factory backed up" "[]" "$out\nنسخة المعايرة الاحتياطية جاهزة للتنزيل: http://<router>/factory.orig" "[]" "[]"; exit 0 ;;
@@ -237,7 +237,7 @@ case "$action" in
     confirm_required "EEPROM power boost (writes calibration flash)"
     out="$(/usr/sbin/cr6608-eeprom-power apply 2>&1)"
     case "$out" in
-      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة. الطاقة الفعلية تبقى محدودة بسقف العتاد/الـPA." "[]" "[]" ;;
+      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة. الخرج الفعلي يُقص حسب regulatory + caldata + الدرايفر + قدرة PA (والـEIRP = خرج الراديو + ربح الأنتينا - الفقد)." "[]" "[]" ;;
       ALREADY-APPLIED*) emit true "EEPROM Boost" "Already applied" "[]" "$out" "[]" "[]" ;;
       *) emit false "EEPROM Boost" "Failed / rolled back" "[]" "$out\nتمت استعادة المعايرة الأصلية تلقائيًا." "[]" "[]" ;;
     esac
@@ -507,7 +507,30 @@ case "$action" in
     [ -n "$su_bfee" ] && uci set wireless."$radio".he_su_beamformee="$su_bfee"
     [ -n "$mu_bfer" ] && uci set wireless."$radio".he_mu_beamformer="$mu_bfer"
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
-    emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. TX Power unchanged and not part of this form." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. Use the TX Power field to request 1..38 dBm (written to all radios; driver clamps to the real ceiling)." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  set_txpower)
+    confirm_required "TX Power"
+    req="$(safe_num "$(param txpower)")"; case "$req" in ''|*[!0-9]*) req=38 ;; esac
+    [ "$req" -lt 1 ] 2>/dev/null && req=1; [ "$req" -gt 38 ] 2>/dev/null && req=38
+    backup="$(backup_cfg txpower)"
+    for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$req"; done
+    uci -q set smartap.quick.txpower="$req"; uci -q commit smartap
+    uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    applied=""
+    for IF in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+      a="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"
+      [ -n "$a" ] && applied="$applied$IF=${a}  "
+    done
+    reg="$(iw reg get 2>/dev/null | awk '/country/{print $2" "$3; exit}')"
+    ureq="$(uci -q get wireless.radio0.txpower)/$(uci -q get wireless.radio1.txpower)"
+    cards="$(cards_json <<EOF
+Requested TX Power|${req} dBm|الرقم المطلوب والمحفوظ لكل الراديوهات|ok
+Applied TX Power|${applied:-—}|ما قبله الدرايفر فعلاً (iw dev info) — ليس قياس RF|$([ -n "$applied" ] && echo ok || echo warn)
+Regulatory|${reg:-unknown}|iw reg get — السقف التنظيمي|neutral
+UCI saved|${ureq}|wireless.radio*.txpower|ok
+EOF
+)"
+    emit true "TX Power" "طُلب ${req} dBm — وطُبّق حسب الدرايفر" "$cards" "طلبنا ${req} dBm وكتبناه لكل الراديوهات. Applied = ما أعلنه الدرايفر عبر iw، وهو ليس قياس قدرة حقيقي. الخرج يُقص عند min(regulatory, EEPROM/caldata, PA). الإثبات الحقيقي = جهاز قياس RF/سبكترم." '[{"id":"keep_changes","label":"احتفظ بالتغيير"},{"id":"rollback_last","label":"تراجع الآن","confirm":true}]' "[]"; exit 0 ;;
   save_dnsmasq)
     confirm_required "DHCP / DNS"
     backup="$(backup_cfg dnsmasq)"
@@ -863,11 +886,12 @@ EOF
       chmod +x /etc/rc.button/reset
     fi
     if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
-    # TX Power: PINNED at 35 dBm on both radios — owner rule, never reduced. Any submitted
-    # value is ignored; the request is always the maximum ceiling (driver still clamps to the
-    # radio's real hardware/EEPROM limit). This is the "35 stays 35" guarantee.
-    txp=30
-    uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
+    # TX Power: honor the REQUEST (1..38 dBm) and write it to ALL radios. This is a saved
+    # request, NOT a guarantee of radiated power — mac80211/mt76 still clamp to the real
+    # min(regulatory, EEPROM/caldata target, PA) ceiling. Applied value is proven by iw/iwinfo.
+    txp="$(uci -q get smartap.quick.txpower)"; case "$txp" in ''|*[!0-9]*) txp=38 ;; esac
+    [ "$txp" -lt 1 ] 2>/dev/null && txp=1; [ "$txp" -gt 38 ] 2>/dev/null && txp=38
+    for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$txp"; done
     uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
@@ -918,13 +942,16 @@ EOF
     fi
     [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
     if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
-    # TX Power PINNED at 35 (owner rule, never reduced). Submitted value ignored.
-    txp=30
-    uci set wireless.radio0.txpower="$txp"; uci set wireless.radio1.txpower="$txp"
+    # TX Power: honor the REQUEST (1..38 dBm) and write it to ALL radios. This is a saved
+    # request, NOT a guarantee of radiated power — mac80211/mt76 still clamp to the real
+    # min(regulatory, EEPROM/caldata target, PA) ceiling. Applied value is proven by iw/iwinfo.
+    txp="$(uci -q get smartap.quick.txpower)"; case "$txp" in ''|*[!0-9]*) txp=38 ;; esac
+    [ "$txp" -lt 1 ] 2>/dev/null && txp=1; [ "$txp" -gt 38 ] 2>/dev/null && txp=38
+    for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$txp"; done
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately. Use Rollback now only if you want to restore the previous state. TX Power was not changed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately (Apply & Keep). TX Power request written to all radios; the driver clamps to the real ceiling. Use Rollback now to restore." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   auto_optimize)
     # instant one-click apply — no confirmation
     backup="$(backup_cfg auto-optimize)"
@@ -1316,7 +1343,7 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower|طاقة البث (dBm)|30|مثبّتة على 30 (الحد الفعلي الأقصى للعتاد) — أعلى قيمة يبثّها المضخّم فعليًا. الأرقام الأعلى وهمية لا تُشعّ.|select|0|advanced|all|30:30 (أقصى فعلي — مثبّت)
+txpower|طاقة البث (dBm) 1–38|38|اكتب من 1 إلى 38. يُحفظ لكل الراديوهات. رقم مطلوب؛ الخرج الفعلي يُقص حسب regulatory+caldata+PA (إثبات = قياس RF).|number|0|advanced|all|1:38:1
 EOF
 )"
     cards="$(cards_json <<EOF
@@ -1339,17 +1366,21 @@ EOF
     text="معلومات الجهاز والذاكرة والتخزين معروضة في البطاقات أعلاه."
     emit true "Device Info" "Live OpenWrt system data" "$cards" "$text" '[{"id":"clear_api_cache","label":"Clear API cache"}]' '[]' ;;
   power)
+    tx_applied=""
+    for IF in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do a="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"; [ -n "$a" ] && tx_applied="$tx_applied$IF=${a}  "; done
+    reg="$(iw reg get 2>/dev/null | awk '/country/{print $2" "$3; exit}')"
     cards="$(cards_json <<EOF
-radio0 TX Power|${tx0:-35} dBm|Selectable up to 35|ok
-radio1 TX Power|${tx1:-35} dBm|Selectable up to 35|ok
-Policy|قابل للتعديل|من الإعدادات السريعة ← متقدم|ok
+Requested radio0|${tx0:-38} dBm|wireless.radio0.txpower (محفوظ)|ok
+Requested radio1|${tx1:-38} dBm|wireless.radio1.txpower (محفوظ)|ok
+Applied driver|${tx_applied:-—}|iw dev info — ما قبله الدرايفر فعلاً|$([ -n "$tx_applied" ] && echo ok || echo warn)
+Regulatory|${reg:-unknown}|iw reg get|neutral
 EOF
 )"
     form="$(form_json <<EOF
-txpower|TX Power|${tx0:-35}|أقصى 35 dBm|text|1
+txpower|طاقة البث المطلوبة (dBm) 1–38|${tx0:-38}|اكتب من 1 إلى 38. يُكتب لكل الراديوهات في /etc/config/wireless. Applied يُقرأ من الدرايفر بعد wifi reload.|number|0|||1:38:1
 EOF
 )"
-    emit true "TX Power" "طاقة البث قابلة للاختيار حتى 35" "$cards" "This dashboard never writes wireless.radio*.txpower. Configured value: ${tx0:-35} dBm (radio uses the max the chip and region allow)." '[]' "$form" ;;
+    emit true "TX Power" "طلب/تطبيق طاقة البث (Requested vs Applied)" "$cards" "Requested = رقمك المحفوظ. Applied = ما أعلنه الدرايفر عبر iw. الخرج الفعلي يُقص حسب min(regulatory, EEPROM/caldata, PA) وليس مضموناً 38. الإثبات الحقيقي يحتاج جهاز قياس RF." '[{"id":"set_txpower","label":"طبّق الطاقة المطلوبة"}]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"
