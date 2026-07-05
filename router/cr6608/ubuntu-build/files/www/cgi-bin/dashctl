@@ -38,6 +38,14 @@ safe_num() { printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-4; }
 # silently truncated (a truncated SSH/HTTP port would lock the admin out).
 safe_bignum() { printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-9; }
 safe_port() { p="$(printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-5)"; [ -n "$p" ] && [ "$p" -ge 1 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null && printf '%s' "$p"; }
+# Accept an htmode only if it's valid for the radio's band: 2.4G cannot do 80/160 MHz, and
+# writing HE80/VHT80 to radio0 makes hostapd reject the config so the 2.4G radio never starts.
+htmode_ok() { _b="$(uci -q get wireless."$1".band)"; case "$1" in *0) _b="${_b:-2g}" ;; *1) _b="${_b:-5g}" ;; esac
+  case "$_b" in
+    2g) case "$2" in HT20|HT40|HE20|HE40|VHT20|VHT40) return 0 ;; esac ;;
+    *)  case "$2" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) return 0 ;; esac ;;
+  esac
+  return 1; }
 safe_word() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_.:-]//g' | cut -c1-48; }
 safe_uci_ref() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_@.:\[\]-]//g' | cut -c1-64; }
 safe_uci_opt() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_:-]//g' | cut -c1-64; }
@@ -316,6 +324,10 @@ case "$action" in
     ipaddr="$(param if_ipaddr | cut -c1-32)"; netmask="$(param if_netmask | cut -c1-32)"; gateway="$(param if_gateway | cut -c1-32)"; dns="$(param if_dns | cut -c1-120)"
     username="$(param if_username | cut -c1-64)"; password="$(param if_password | cut -c1-64)"; auto="$(safe_num "$(param if_auto)")"
     [ -n "$ifname" ] || { emit false "Interfaces" "Missing interface" "[]" "Interface name is required." "[]" "[]"; exit 0; }
+    # Protect the management interfaces: editing lan/wan/loopback/wlanrescue here could strand
+    # the dashboard (e.g. move lan off 192.168.1.1 or flip it to dhcp). Use Quick Settings to
+    # change the device IP safely.
+    case "$ifname" in lan|wan|loopback|wlanrescue) emit false "Interfaces" "Protected interface" "[]" "lan/wan/loopback/wlanrescue محمية. غيّر IP الجهاز من الإعدادات السريعة، لا من هنا." "[]" "[]"; exit 0 ;; esac
     case "$proto" in static|dhcp|none|pppoe) : ;; *) emit false "Interfaces" "Invalid protocol" "[]" "Use static, dhcp, none, or pppoe." "[]" "[]"; exit 0 ;; esac
     backup="$(backup_cfg interface-save)"
     uci -q get network."$ifname" >/dev/null || uci set network."$ifname"='interface'
@@ -335,7 +347,7 @@ case "$action" in
   delete_interface)
     confirm_required "Interfaces"
     ifname="$(safe_word "$(param if_name)")"
-    case "$ifname" in ''|lan|wan|loopback) emit false "Interfaces" "Protected interface" "[]" "lan, wan and loopback are protected from deletion here. Disable/edit instead." "[]" "[]"; exit 0 ;; esac
+    case "$ifname" in ''|lan|wan|loopback|wlanrescue) emit false "Interfaces" "Protected interface" "[]" "lan, wan, loopback and wlanrescue (Wi-Fi rescue) are protected from deletion. Disable/edit instead." "[]" "[]"; exit 0 ;; esac
     backup="$(backup_cfg interface-delete)"
     uci -q delete network."$ifname"; uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
     emit true "Interfaces" "Interface deleted with rollback" "[]" "Backup: $backup\nDeleted interface $ifname. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
@@ -363,7 +375,7 @@ case "$action" in
     [ -n "$dtim" ] && uci set wireless."$wifi_if".dtim_period="$dtim"
     if [ "$enc" = "none" ]; then uci set wireless."$wifi_if".encryption='none'; uci delete wireless."$wifi_if".key 2>/dev/null; else uci set wireless."$wifi_if".encryption="$enc"; [ -n "$key" ] && uci set wireless."$wifi_if".key="$key"; fi
     [ -n "$channel" ] && uci set wireless."$radio".channel="$channel"
-    [ -n "$htmode" ] && uci set wireless."$radio".htmode="$htmode"
+    [ -n "$htmode" ] && htmode_ok "$radio" "$htmode" && uci set wireless."$radio".htmode="$htmode"
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
     emit true "Wireless" "Wi-Fi saved with rollback" "[]" "Backup: $backup\nWi-Fi section $wifi_if saved and wireless reloaded. TX Power unchanged." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   delete_wifi)
@@ -391,6 +403,9 @@ case "$action" in
     if [ "$action" = "save_firewall_zone" ]; then
       zname="$(safe_word "$(param zone_name)")"; znet="$(param zone_networks | cut -c1-120)"; zin="$(safe_word "$(param zone_input)")"; zout="$(safe_word "$(param zone_output)")"; zfwd="$(safe_word "$(param zone_forward)")"; zmasq="$(safe_num "$(param zone_masq)")"
       [ -n "$zname" ] || { emit false "Firewall" "Missing zone" "[]" "Zone name is required." "[]" "[]"; exit 0; }
+      # the 'lan' zone carries the management networks (input ACCEPT). Editing it here could
+      # flip input to REJECT or drop lan/wlanrescue from its network list -> dashboard unreachable.
+      case "$zname" in lan) emit false "Firewall" "Protected zone" "[]" "منطقة lan (الإدارة) محمية — تعديلها قد يقطع الوصول للوحة. استخدم العزل/الإعدادات السريعة." "[]" "[]"; exit 0 ;; esac
       zsec="$(uci show firewall | awk -F'[.=]' -v n="$zname" '$0 ~ "\\.name=.?"n".?" {print $2; exit}')"; [ -n "$zsec" ] || zsec="$(uci add firewall zone)"
       uci set firewall."$zsec".name="$zname"; uci set firewall."$zsec".network="$znet"; uci set firewall."$zsec".input="${zin:-REJECT}"; uci set firewall."$zsec".output="${zout:-ACCEPT}"; uci set firewall."$zsec".forward="${zfwd:-REJECT}"
       [ "$zmasq" = "1" ] && uci set firewall."$zsec".masq='1' || uci delete firewall."$zsec".masq 2>/dev/null
@@ -399,7 +414,12 @@ case "$action" in
       fs="$(uci add firewall forwarding)"; uci set firewall."$fs".src="$fsrc"; uci set firewall."$fs".dest="$fdst"
     else
       rname="$(param rule_name | cut -c1-64)"; [ -n "$rname" ] || { emit false "Firewall" "Missing rule name" "[]" "Rule name is required." "[]" "[]"; exit 0; }
-      for s in $(uci show firewall | awk -F'[.=]' -v n="$rname" '$0 ~ "\\.name=.?"n".?" {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
+      case "$rname" in lan|wan|loopback) emit false "Firewall" "Protected name" "[]" "لا يمكن حذف lan/wan/loopback من هنا." "[]" "[]"; exit 0 ;; esac
+      # delete ONLY rule sections (not zones/forwardings) that carry this name, so a rule
+      # named like a zone can't nuke the management zone.
+      for s in $(uci show firewall | awk -F'[.=]' -v n="$rname" '$0 ~ "\\.name=.?"n".?" {print $2}'); do
+        [ "$(uci -q get firewall."$s" 2>/dev/null)" = "rule" ] && uci delete firewall."$s" 2>/dev/null
+      done
     fi
     uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
     emit true "Firewall" "Firewall updated" "[]" "Backup: $backup\nFirewall was updated and reloaded." "[]" "[]"; exit 0 ;;
@@ -411,10 +431,16 @@ case "$action" in
       uci set network.@device[0].stp="${stp:-0}"
       if [ "$igmp" = "1" ]; then uci set network.@device[0].igmp_snooping='1'; else uci -q delete network.@device[0].igmp_snooping; fi
       if [ -n "$bports" ]; then
-        uci -q delete network.@device[0].ports
-        for p in $bports; do
-          case "$p" in wan|lan1|lan2|lan3) uci add_list network.@device[0].ports="$p" ;; esac
-        done
+        # collect only valid physical ports FIRST; never rewrite the bridge to zero members
+        # (that would remove every wired path to the dashboard).
+        _valid=""
+        for p in $bports; do case "$p" in wan|lan1|lan2|lan3) _valid="$_valid $p" ;; esac; done
+        if [ -n "$_valid" ]; then
+          uci -q delete network.@device[0].ports
+          for p in $_valid; do uci add_list network.@device[0].ports="$p"; done
+        else
+          emit false "Switch / Ports" "No valid ports" "[]" "لم يُحدَّد منفذ صالح (lan1/lan2/lan3/wan) — لم تُغيَّر منافذ الجسر لتفادي عزل الجهاز." "[]" "[]"; exit 0
+        fi
       fi
       uci commit network; /etc/init.d/network reload >/dev/null 2>&1
       emit true "Switch / Ports" "Bridge options saved" "[]" "Backup: $backup\nBridge ports/STP/IGMP options saved." "[]" "[]"; exit 0
@@ -493,6 +519,36 @@ case "$action" in
         base="${p%%:*}"
         case "$base" in wan|lan1|lan2|lan3|br-lan|phy0-ap0|phy1-ap0) uci add_list network."$s".ports="$p" ;; esac
       done
+      # Make the VLAN ACTUALLY take effect (a bridge-vlan alone does nothing without filtering)
+      # AND keep management reachable — mirror the proven quick-settings apply_vlan: enable
+      # vlan_filtering, guarantee a native management VLAN 1 untagged on every wired port, and
+      # move the management L3 onto br-lan.1 so 192.168.1.1 never strands.
+      if [ "$vdev" = "br-lan" ] && [ "$vid" != "1" ]; then
+        uci set network.@device[0].vlan_filtering='1'
+        _have1=0
+        for z in $(uci show network 2>/dev/null | awk -F'[.=]' '/=bridge-vlan/{print $2}'); do
+          [ "$(uci -q get network.$z.device)" = "br-lan" ] && [ "$(uci -q get network.$z.vlan)" = "1" ] && _have1=1
+        done
+        if [ "$_have1" = "0" ]; then
+          m="$(uci add network bridge-vlan)"; uci set network."$m".device='br-lan'; uci set network."$m".vlan='1'
+          for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list network."$m".ports="$p:u*"; done
+        fi
+        uci set network.lan.device='br-lan.1'
+        uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
+      fi
+    else
+      # delete path: once no client VLAN (vlan != 1) remains, fully tear filtering down and put
+      # the management L3 back on the plain br-lan, so nothing is left half-VLANed.
+      _client=0
+      for z in $(uci show network 2>/dev/null | awk -F'[.=]' '/=bridge-vlan/{print $2}'); do
+        v="$(uci -q get network.$z.vlan)"; [ -n "$v" ] && [ "$v" != "1" ] && _client=1
+      done
+      if [ "$_client" = "0" ]; then
+        for z in $(uci show network 2>/dev/null | awk -F'[.=]' '/=bridge-vlan/{print $2}'); do uci -q delete network."$z"; done
+        uci -q delete network.@device[0].vlan_filtering
+        uci set network.lan.device='br-lan'
+        uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+      fi
     fi
     uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
     emit true "DSA VLAN" "Applied with rollback" "[]" "Backup: $backup\nDevice=$vdev VLAN=$vid Ports=$vports\nKeep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
@@ -505,7 +561,7 @@ case "$action" in
     su_bfer="$(safe_num "$(param radio_he_su_beamformer)")"; su_bfee="$(safe_num "$(param radio_he_su_beamformee)")"; mu_bfer="$(safe_num "$(param radio_he_mu_beamformer)")"
     backup="$(backup_cfg wifi-radio)"
     [ -n "$channel" ] && uci set wireless."$radio".channel="$channel"
-    [ -n "$htmode" ] && uci set wireless."$radio".htmode="$htmode"
+    [ -n "$htmode" ] && htmode_ok "$radio" "$htmode" && uci set wireless."$radio".htmode="$htmode"
     [ -n "$country" ] && uci set wireless."$radio".country="$country"
     [ "$disabled" = "1" ] && uci set wireless."$radio".disabled='1' || uci set wireless."$radio".disabled='0'
     [ -n "$legacy" ] && uci set wireless."$radio".legacy_rates="$legacy"
@@ -1416,7 +1472,7 @@ EOF
 txpower|طاقة البث المطلوبة (dBm) 1–38|${tx0:-38}|اكتب من 1 إلى 38. يُكتب لكل الراديوهات في /etc/config/wireless. Applied يُقرأ من الدرايفر بعد wifi reload.|number|0|||1:38:1
 EOF
 )"
-    emit true "TX Power" "طلب/تطبيق طاقة البث (Requested vs Applied)" "$cards" "Requested = رقمك المحفوظ. Applied = ما أعلنه الدرايفر عبر iw. الخرج الفعلي يُقص حسب min(regulatory, EEPROM/caldata, PA) وليس مضموناً 38. الإثبات الحقيقي يحتاج جهاز قياس RF." '[{"id":"set_txpower","label":"طبّق الطاقة المطلوبة"}]' "$form" ;;
+    emit true "TX Power" "طلب/تطبيق طاقة البث (Requested vs Applied)" "$cards" "Requested = رقمك المحفوظ. Applied = ما أعلنه الدرايفر عبر iw. الخرج الفعلي يُقص حسب min(regulatory, EEPROM/caldata, PA) وليس مضموناً 38. الإثبات الحقيقي يحتاج جهاز قياس RF." '[{"id":"set_txpower","label":"طبّق الطاقة المطلوبة","confirm":true}]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"
