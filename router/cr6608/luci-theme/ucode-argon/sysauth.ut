@@ -22,6 +22,11 @@
 -#}
 
 {% include("themes/" + theme + "/out_header_login") %}
+<!-- CR6608: send LuCI logout / login straight to the Smart AP dashboard (the main UI).
+     Logging in on the Smart AP dashboard also primes the LuCI session, so LuCI stays
+     reachable via the dashboard's "OpenWrt" button. Escape hatch: open with ?stay=1
+     to keep the native LuCI login (e.g. if the dashboard is ever unavailable). -->
+<script>if (location.search.indexOf('stay=1') < 0) { location.replace('/'); }</script>
 {%
 	import * as fs from 'fs';
 	import { cursor } from 'uci';
