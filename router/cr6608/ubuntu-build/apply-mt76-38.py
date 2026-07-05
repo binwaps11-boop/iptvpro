@@ -52,12 +52,33 @@ apply("mt7915/mcu.c", MCU_ANCHOR, MCU_INSERT, "SKU-power-raise-76/72/68")
 
 # --- mt7915/init.c : (a) driver banner printed once (2.4G pass), (b) force per-channel
 #     max_power/max_reg_power to at least 38 dBm so iw/iwinfo report the 38 request. ---
+# (a) file-scope banner string forced into the .ko with __attribute__((used)) so it can
+#     NEVER be optimized/section-GC'd out — this is what `strings mt7915e.ko` must find.
+GLOBAL_ANCHOR = "static void __mt7915_init_txpower(struct mt7915_phy *phy,\n"
+GLOBAL_INSERT = (
+"const char cr6608_rf_38dbm_banner[] __attribute__((used)) =\n"
+"\t\"CR6608-RF-38DBM-LINEAR enabled\";\n\n"
+)
+# insert the global BEFORE the function (prepend: put global then the original anchor)
+def prepend(relpath, anchor, insert, tag):
+    import os as _os
+    p = _os.path.join(MT76, relpath)
+    s = open(p).read()
+    if s.count(anchor) != 1:
+        sys.stderr.write("FATAL: prepend anchor %r count %d in %s\n" % (tag, s.count(anchor), relpath)); sys.exit(3)
+    s = s.replace(anchor, insert + anchor, 1)
+    open(p, "w").write(s)
+    print("OK: prepended %s in %s" % (tag, relpath))
+prepend("mt7915/init.c", GLOBAL_ANCHOR, GLOBAL_INSERT, "banner-global-__used")
+
+# (b) runtime dmesg print that references the retained global (so dmesg shows the banner
+#     AND the reference keeps the global alive on every toolchain).
 INIT_BANNER_ANCHOR = "\tphy->sku_path_en = true;\n"
 INIT_BANNER_INSERT = (
 "\tif (sband->band == NL80211_BAND_2GHZ)\n"
-"\t\tdev_info(dev->mt76.dev,\n"
-"\t\t\t \"CR6608-RF-38DBM-LINEAR enabled (SKU cck/ofdm=76 mcs=72 ru=68 half-dBm; \"\n"
-"\t\t\t \"request ceiling only, actual RF hardware/PA limited)\\n\");\n"
+"\t\tdev_info(dev->mt76.dev, \"%s (SKU cck/ofdm=76 mcs=72 ru=68 half-dBm; \"\n"
+"\t\t\t \"request ceiling only, actual RF hardware/PA limited)\\n\",\n"
+"\t\t\t cr6608_rf_38dbm_banner);\n"
 )
 apply("mt7915/init.c", INIT_BANNER_ANCHOR, INIT_BANNER_INSERT, "driver-banner")
 
