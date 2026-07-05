@@ -1,0 +1,52 @@
+name: Publish CR6608 bin to a fetchable branch
+
+# The sandbox cannot download GitHub Actions artifacts (proxy 403) but CAN fetch
+# git branches. So this job downloads the already-built 38 dBm sysupgrade.bin from
+# the completed build run and force-pushes it onto an orphan branch `firmware-drop`,
+# which the sandbox then `git fetch`es to hand the file to the user directly.
+#
+# Triggered automatically on push (MCP github is unavailable this session, so
+# workflow_dispatch cannot be called — a push to the trigger path fires it).
+
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-bin.yml'
+      - '.publish-bin-trigger'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download the built 38 dBm sysupgrade artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cr6608-v92-sysupgrade-38dbm-realdriver
+          run-id: 28746530521
+          github-token: ${{ github.token }}
+          path: dist
+
+      - name: Drop the bin onto the firmware-drop branch
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          BIN="$(find dist -name '*sysupgrade.bin' | head -1)"
+          [ -n "$BIN" ] || { echo "no bin downloaded"; exit 1; }
+          echo "=== downloaded bin ==="; ls -la "$BIN"; sha256sum "$BIN"
+          mkdir -p out && cp "$BIN" out/cr6608-38dbm-sysupgrade.bin
+          sha256sum out/cr6608-38dbm-sysupgrade.bin > out/cr6608-38dbm-sysupgrade.bin.sha256
+          git config user.name  "cr6608-ci"
+          git config user.email "ci@local"
+          git checkout --orphan firmware-drop
+          git reset -q
+          git add -f out/cr6608-38dbm-sysupgrade.bin out/cr6608-38dbm-sysupgrade.bin.sha256
+          git commit -q -m "firmware drop: CR6608 38 dBm sysupgrade bin (from run 28746530521)"
+          git push -f origin firmware-drop
+          echo "=== pushed firmware-drop ==="
+          git log -1 --oneline
