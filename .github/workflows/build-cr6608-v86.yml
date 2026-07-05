@@ -74,27 +74,45 @@ jobs:
       - name: Download sources
         run: cd ow && make download -j8 V=s
 
-      - name: Apply CR6608 38 dBm mt76 driver patch (targeted, with before/after proof)
+      - name: Install CR6608 38 dBm mt76 patch into the package patch pipeline
         run: |
           cd ow
+          # 1) prepare ONCE to get pristine mt76 source we can diff against.
           make package/kernel/mt76/prepare V=s QUILT=1 2>&1 | tail -3 || \
             make package/kernel/mt76/prepare V=s 2>&1 | tail -3 || true
           MT76DIR="$(find build_dir -maxdepth 5 -type d -name 'mt76-*' 2>/dev/null | head -1)"
           echo "===MT76DIR=== ${MT76DIR:-NONE}"
           [ -n "$MT76DIR" ] || { echo "no mt76 dir"; exit 1; }
           export MT76DIR
-          cp "$MT76DIR/mt7915/mcu.c"  "$MT76DIR/mt7915/mcu.c.orig"
-          cp "$MT76DIR/mt7915/init.c" "$MT76DIR/mt7915/init.c.orig"
+          cp "$MT76DIR/mt7915/mcu.c"  /tmp/mcu.c.orig
+          cp "$MT76DIR/mt7915/init.c" /tmp/init.c.orig
           echo "===BEFORE: power-related lines in mt7915==="
           grep -RIn "CR6608-RF\|38DBM\|la.cck\|la.ofdm\|la.mcs\|la.ru\|max_power\|max_reg_power\|orig_mpwr\|sku_path_en" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
           python3 "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/apply-mt76-38.py"
           echo "===AFTER: 76/72/68 + banner in mt7915==="
           grep -RIn "CR6608-RF-38DBM-LINEAR\|= 76\|= 72\|= 68\|max_power < 38\|max_reg_power < 38" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
-          echo "===DIFF mt7915/mcu.c==="
-          diff -u "$MT76DIR/mt7915/mcu.c.orig"  "$MT76DIR/mt7915/mcu.c"  || true
-          echo "===DIFF mt7915/init.c==="
-          diff -u "$MT76DIR/mt7915/init.c.orig" "$MT76DIR/mt7915/init.c" || true
-          rm -f "$MT76DIR/mt7915/mcu.c.orig" "$MT76DIR/mt7915/init.c.orig"
+          # 2) Turn the applied edit into a REAL OpenWrt package patch (a/ b/ = source
+          #    root relative). Placed in package/kernel/mt76/patches/, OpenWrt re-applies
+          #    it automatically on EVERY extraction -> survives any re-prepare. This is the
+          #    fix for the earlier bug where the full build re-extracted a pristine tree and
+          #    discarded a build_dir edit, so the compiled .ko had none of our changes.
+          mkdir -p package/kernel/mt76/patches
+          {
+            diff -u --label a/mt7915/mcu.c  --label b/mt7915/mcu.c  /tmp/mcu.c.orig  "$MT76DIR/mt7915/mcu.c"  || true
+            diff -u --label a/mt7915/init.c --label b/mt7915/init.c /tmp/init.c.orig "$MT76DIR/mt7915/init.c" || true
+          } > package/kernel/mt76/patches/999-cr6608-38dbm.patch
+          echo "===GENERATED PATCH (package/kernel/mt76/patches/999-cr6608-38dbm.patch)==="
+          cat package/kernel/mt76/patches/999-cr6608-38dbm.patch
+          test -s package/kernel/mt76/patches/999-cr6608-38dbm.patch || { echo "::error::generated patch is empty"; exit 1; }
+          # 3) clean the extracted tree, then re-prepare so the patch is applied THROUGH the
+          #    pipeline (proving it applies cleanly the same way the full build will).
+          make package/kernel/mt76/clean V=s 2>&1 | tail -3 || true
+          make package/kernel/mt76/prepare V=s 2>&1 | tail -6
+          MT76DIR2="$(find build_dir -maxdepth 5 -type d -name 'mt76-*' 2>/dev/null | head -1)"
+          echo "===VERIFY: banner present in re-extracted+re-patched source==="
+          grep -RIn "CR6608-RF-38DBM-LINEAR" "$MT76DIR2/mt7915/init.c" \
+            || { echo "::error::patch did NOT re-apply through the package pipeline"; exit 1; }
+          echo "OK: CR6608 38 dBm patch is in the mt76 package pipeline and re-applies on every extract"
 
       - name: Build firmware
         run: |
