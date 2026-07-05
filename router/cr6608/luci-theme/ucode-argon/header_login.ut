@@ -20,7 +20,6 @@
 	import { readfile, access } from 'fs';
 	import { cursor } from 'uci';
 	import { srand } from 'math';
-	import { getuid, getspnam } from 'luci.core';
 
 	const boardinfo = ubus.call("system", "board");
 	const hostname = striptags(boardinfo?.hostname ?? '?');
@@ -62,7 +61,7 @@
 
 	<!-- Security -->
 	<meta http-equiv="X-Content-Type-Options" content="nosniff">
-	<!-- <meta http-equiv="X-Frame-Options" content="SAMEORIGIN"> -->
+	<meta http-equiv="X-Frame-Options" content="SAMEORIGIN">
 	<meta http-equiv="X-XSS-Protection" content="1; mode=block">
 	<meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
 
@@ -111,7 +110,7 @@
 		}
 		{% endif -%}
 	</style>
-	<!-- Stylesheets -->
+	<link rel="shortcut icon" href="{{ media }}/favicon.ico">
 	{% if (node?.css): %}
 	<link rel="stylesheet" href="{{ resource }}/{{ node.css}}">
 	{% endif -%}
@@ -120,62 +119,7 @@
 		{{ css }}
 	</style>
 	{% endif -%}
-	<script src="{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}"></script>
-	<script src="{{ resource }}/cbi.js?v={{ version.luciversion }}"></script>
-	<script src="{{ resource }}/luci.js?v={{ version.luciversion }}"></script>
+
 </head>
 
-<body
-	class="lang_{{ dispatcher.lang }} {{ node?.title ? ` - ${striptags(node.title)}` : '' }} {% if (ctx.authsession): %}logged-in{% endif %}"
-	data-page="{{ entityencode(join('-', ctx.request_path), true) }}">
-
-	<div class="main">
-		<div class="main-left" id="mainmenu" style="display:none">
-			<div class="sidenav-header d-flex align-items-center">
-				<a class="brand" href="#">{{ hostname }}</a>
-				<div class="ml-auto">
-					<!-- Sidenav toggler -->
-					<div class="sidenav-toggler d-none d-xl-block active" data-action="sidenav-unpin"
-						data-target="#sidenav-main">
-						<div class="sidenav-toggler-inner">
-							<i class="sidenav-toggler-line"></i>
-							<i class="sidenav-toggler-line"></i>
-							<i class="sidenav-toggler-line"></i>
-						</div>
-					</div>
-				</div>
-			</div>
-		</div>
-		<div class="main-right">
-			<header class="bg-primary">
-				<div class="fill">
-					<div class="container">
-						<div class="flex1">
-							<a class="showSide"></a>
-							<a class="brand" href="#">{{ hostname }}</a>
-						</div>
-						<div class="status" id="indicators"></div>
-					</div>
-				</div>
-			</header>
-			<div class="darkMask"></div>
-			<div id="maincontent">
-				<div class="container">
-					{% if (getuid() == 0 && getspnam('root')?.pwdp === ''): %}
-					<div class="alert-message error">
-						<h4>{{ _('No password set!') }}</h4>
-						<p>{{ _('There is no password set on this router. Please configure a root password to protect the web interface.') }}</p>
-						{% if (dispatcher.lookup("admin/system/admin")): %}
-						<div class="right"><a class="btn" href="{{ dispatcher.build_url("admin/system/admin") }}">{{ _('Go to password configuration...') }}</a></div>
-						{% endif %}
-					</div>
-					{% endif %}
-
-				<noscript>
-					<div class="alert-message error">
-						<h4>{{ _('JavaScript required!') }}</h4>
-						<p>{{ _('You must enable JavaScript in your browser or LuCI will not work properly.') }}</p>
-					</div>
-				</noscript>
-
-					<div id="tabmenu" style="display:none"></div>
+<body>
