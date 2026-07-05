@@ -1,0 +1,131 @@
+#!/bin/sh
+# cr6608-eeprom-power — UNIVERSITY EXPERIMENT: permanently raise the MT7915 per-rate
+# power delta in the Factory calibration (target the ~30 dBm driver ceiling), with
+# full brick-safety. This WRITES the Factory MTD partition, so it is deliberately
+# NOT run automatically at boot — it is triggered on demand from the dashboard.
+#
+# Safety model (see also POWER-CHAIN.md):
+#   * Full Factory backup is taken FIRST (to /overlay + /www/factory.orig download)
+#     and the write is refused if the backup did not persist or magic != 0x7915.
+#   * ONLY the two rate-delta bytes (2G @0x252, 5G @0x29D) are changed. Every other
+#     byte MUST be byte-identical to the backup (cp + notrunc pokes + NDIFF<=8).
+#   * After write + `wifi reload`, both phy0 AND phy1 must return within 40 s or the
+#     Factory backup is auto-restored (self-heal).
+#   * An inflight flag makes a mid-write reboot restore-once, never a patch/crash loop.
+# Classic MT7915 (ramips/mt7621), V1 EEPROM (0xE00). Requested delta: +6 dB (0xCC).
+. /lib/functions.sh 2>/dev/null
+set -u
+ACTION="${1:-apply}"
+STATE=/overlay/cr6608-eeprom-power
+DONE="$STATE/applied.flag"; TRY="$STATE/inflight.flag"
+ORIG="$STATE/factory.orig"; NEW="$STATE/factory.new"; CHK="$STATE/factory.check"
+LOG="$STATE/guard.log"
+DELTA_BYTE=0xCC            # EN(0x80)|SIGN(0x40)|magnitude 12 => +6.0 dB, hard-capped
+OFF_2G=0x252; OFF_5G=0x29D
+MAGIC_EXPECT="1579"       # MT_EE_CHIP_ID 0x7915, little-endian bytes 15 79
+MAX_PATCH_BYTES=8
+mkdir -p "$STATE" 2>/dev/null
+log(){ echo "$(date) $*" >>"$LOG" 2>/dev/null; logger -t cr6608eeprom "$*" 2>/dev/null; }
+die(){ log "ABORT: $*"; echo "ABORT: $*"; exit 1; }
+
+find_factory(){
+	FACT_PART=""
+	for n in factory Factory; do grep -q "\"$n\"" /proc/mtd 2>/dev/null && { FACT_PART="$n"; break; }; done
+	[ -n "$FACT_PART" ] || die "no factory partition in /proc/mtd"
+	IDX="$(sed -n "s/^mtd\([0-9]\+\):.*\"$FACT_PART\".*/\1/p" /proc/mtd)"
+	MTD="/dev/mtd$IDX"
+	PSIZE=$(( 0x$(sed -n "s/^mtd$IDX: *\([0-9a-fA-F]*\).*/\1/p" /proc/mtd) ))
+	[ "$PSIZE" -ge $((0xE00)) ] || die "factory partition too small ($PSIZE)"
+}
+
+do_backup(){
+	find_factory
+	if [ ! -s "$ORIG" ]; then
+		dd if="$MTD" of="$ORIG" bs="$PSIZE" count=1 2>/dev/null || die "backup dd failed"
+		[ "$(stat -c%s "$ORIG" 2>/dev/null)" = "$PSIZE" ] || die "backup short"
+		md5sum "$ORIG" >"$ORIG.md5" 2>/dev/null
+		cp "$ORIG" /www/factory.orig 2>/dev/null && log "backup downloadable: http://<router>/factory.orig"
+		cp "$ORIG" /root/factory.orig 2>/dev/null
+		log "factory backup created ($PSIZE bytes)"
+	fi
+	MAGIC="$(hexdump -v -n2 -e '1/1 "%02x"' "$ORIG" 2>/dev/null)"
+	[ "$MAGIC" = "$MAGIC_EXPECT" ] || die "backup magic $MAGIC != $MAGIC_EXPECT (wrong/blank partition)"
+}
+
+do_restore(){
+	find_factory
+	[ -s "$ORIG" ] || die "no factory.orig backup to restore"
+	mtd write "$ORIG" "$FACT_PART" && sync || die "restore write failed"
+	rm -f "$DONE" "$TRY"
+	log "factory calibration RESTORED from backup"
+	echo "RESTORED"; wifi reload >/dev/null 2>&1; exit 0
+}
+
+case "$ACTION" in
+	backup)  do_backup; echo "BACKUP OK ($PSIZE bytes) -> /www/factory.orig"; exit 0 ;;
+	restore) do_restore ;;
+	status)
+		find_factory
+		echo "partition=$FACT_PART mtd=$MTD size=$PSIZE"
+		[ -s "$ORIG" ] && echo "backup=present" || echo "backup=none"
+		[ -f "$DONE" ] && echo "eeprom_boost=applied" || echo "eeprom_boost=not-applied"
+		exit 0 ;;
+	apply) : ;;
+	*) die "unknown action '$ACTION'" ;;
+esac
+
+# ---- APPLY ----
+[ -f "$DONE" ] && { log "already applied+verified, no-op"; echo "ALREADY-APPLIED"; exit 0; }
+find_factory
+
+# crash-mid-write guard: inflight present at start => prior attempt unclean => restore once
+if [ -f "$TRY" ]; then
+	log "inflight present -> unclean prior attempt, restoring once"
+	[ -s "$ORIG" ] && mtd write "$ORIG" "$FACT_PART" && sync
+	rm -f "$TRY"; wifi reload >/dev/null 2>&1; die "restored after unclean attempt"
+fi
+
+do_backup
+
+# Build patched image = byte-identical copy + only the 2 rate-delta bytes
+cp "$ORIG" "$NEW" || die "cp new failed"
+b2g="$(hexdump -v -s $((OFF_2G)) -n1 -e '1/1 "%02x"' "$ORIG" 2>/dev/null)"
+b5g="$(hexdump -v -s $((OFF_5G)) -n1 -e '1/1 "%02x"' "$ORIG" 2>/dev/null)"
+log "orig rate-delta bytes: 2G@0x252=$b2g 5G@0x29D=$b5g"
+[ "$b2g" = "ff" ] && die "2G delta cell blank(0xff) - offset unsafe for this build, refusing"
+[ "$b5g" = "ff" ] && die "5G delta cell blank(0xff) - offset unsafe for this build, refusing"
+printf "$(printf '\\x%02x' $((DELTA_BYTE)))" | dd of="$NEW" bs=1 seek=$((OFF_2G)) count=1 conv=notrunc 2>/dev/null
+printf "$(printf '\\x%02x' $((DELTA_BYTE)))" | dd of="$NEW" bs=1 seek=$((OFF_5G)) count=1 conv=notrunc 2>/dev/null
+[ "$(stat -c%s "$NEW" 2>/dev/null)" = "$PSIZE" ] || die "patched image size drift"
+NDIFF="$(cmp -l "$ORIG" "$NEW" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$NDIFF" -le "$MAX_PATCH_BYTES" ] 2>/dev/null || die "too many bytes differ ($NDIFF > $MAX_PATCH_BYTES)"
+log "patched image ready, NDIFF=$NDIFF (<= $MAX_PATCH_BYTES)"
+
+# Commit: full-partition erase+write, verify readback
+touch "$TRY"; sync
+mtd write "$NEW" "$FACT_PART" || { log "mtd write failed, restoring"; mtd write "$ORIG" "$FACT_PART"; sync; rm -f "$TRY"; die "write failed"; }
+sync
+dd if="$MTD" of="$CHK" bs="$PSIZE" count=1 2>/dev/null
+if [ "$(md5sum <"$NEW" 2>/dev/null)" != "$(md5sum <"$CHK" 2>/dev/null)" ]; then
+	log "readback mismatch, restoring"; mtd write "$ORIG" "$FACT_PART"; sync; rm -f "$TRY"; die "readback mismatch"
+fi
+
+# Reload radios and verify BOTH DBDC phys return
+wifi reload >/dev/null 2>&1
+ok=0; i=0
+while [ $i -lt 40 ]; do
+	sleep 1; i=$((i+1))
+	if [ -d /sys/class/ieee80211/phy0 ] && [ -d /sys/class/ieee80211/phy1 ] \
+	   && iw dev 2>/dev/null | grep -q Interface; then ok=1; break; fi
+done
+[ $ok = 1 ] && { sleep 4; iw phy phy1 info >/dev/null 2>&1 || ok=0; }
+
+if [ $ok = 1 ]; then
+	touch "$DONE"; rm -f "$TRY"; log "SUCCESS: rate-delta +6dB applied, phy0+phy1 up"
+	echo "APPLIED-OK (+6 dB rate delta; phy0+phy1 verified)"; exit 0
+else
+	log "FAIL: radios did not return -> auto-restoring factory backup"
+	mtd write "$ORIG" "$FACT_PART" && sync; rm -f "$TRY"; touch "$STATE/rolledback.flag"
+	wifi reload >/dev/null 2>&1
+	echo "FAILED-ROLLED-BACK (radios did not return; factory restored)"; exit 1
+fi

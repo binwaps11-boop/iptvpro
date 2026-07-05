@@ -226,6 +226,26 @@ case "$action" in
     fi
     exit 0 ;;
   clear_api_cache) rm -f /tmp/dashapi2.cache /tmp/dashapi2.cache.ts; emit true "Cache" "Cache cleared" "[]" "Live API cache was cleared." "[]" "[]"; exit 0 ;;
+  eeprom_status)
+    out="$(/usr/sbin/cr6608-eeprom-power status 2>&1)"
+    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_30dbm_test 2>/dev/null)"
+    emit true "EEPROM / RF Power" "Status" "[]" "Driver 30dBm override (cr6608_rf_30dbm_test)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
+  eeprom_backup)
+    out="$(/usr/sbin/cr6608-eeprom-power backup 2>&1)"
+    emit true "EEPROM Backup" "Factory backed up" "[]" "$out\nنسخة المعايرة الاحتياطية جاهزة للتنزيل: http://<router>/factory.orig" "[]" "[]"; exit 0 ;;
+  eeprom_boost)
+    confirm_required "EEPROM power boost (writes calibration flash)"
+    out="$(/usr/sbin/cr6608-eeprom-power apply 2>&1)"
+    case "$out" in
+      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة. الطاقة الفعلية تبقى محدودة بسقف العتاد/الـPA." "[]" "[]" ;;
+      ALREADY-APPLIED*) emit true "EEPROM Boost" "Already applied" "[]" "$out" "[]" "[]" ;;
+      *) emit false "EEPROM Boost" "Failed / rolled back" "[]" "$out\nتمت استعادة المعايرة الأصلية تلقائيًا." "[]" "[]" ;;
+    esac
+    exit 0 ;;
+  eeprom_restore)
+    confirm_required "Restore original Factory calibration"
+    out="$(/usr/sbin/cr6608-eeprom-power restore 2>&1)"
+    emit true "EEPROM Restore" "Factory calibration restored" "[]" "$out" "[]" "[]"; exit 0 ;;
   add_interface)
     confirm_required "Add interface"
     ifname="$(safe_word "$(param if_name)")"; proto="$(safe_word "$(param if_proto)")"; dev="$(safe_word "$(param if_device)")"
