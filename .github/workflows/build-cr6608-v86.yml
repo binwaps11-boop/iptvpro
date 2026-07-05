@@ -84,13 +84,14 @@ jobs:
           echo "===MT76DIR=== ${MT76DIR:-NONE}"
           [ -n "$MT76DIR" ] || { echo "no mt76 dir"; exit 1; }
           export MT76DIR
-          cp "$MT76DIR/mt7915/mcu.c"  /tmp/mcu.c.orig
-          cp "$MT76DIR/mt7915/init.c" /tmp/init.c.orig
+          cp "$MT76DIR/mt7915/mcu.c"    /tmp/mcu.c.orig
+          cp "$MT76DIR/mt7915/init.c"   /tmp/init.c.orig
+          cp "$MT76DIR/mt7915/eeprom.c" /tmp/eeprom.c.orig
           echo "===BEFORE: power-related lines in mt7915==="
-          grep -RIn "CR6608-RF\|38DBM\|la.cck\|la.ofdm\|la.mcs\|la.ru\|max_power\|max_reg_power\|orig_mpwr\|sku_path_en" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
+          grep -RIn "CR6608-RF\|38DBM\|la.cck\|la.ofdm\|la.mcs\|la.ru\|max_power\|max_reg_power\|orig_mpwr\|sku_path_en\|return target_power" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" "$MT76DIR/mt7915/eeprom.c" | head -50
           python3 "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/apply-mt76-38.py"
-          echo "===AFTER: 76/72/68 + banner in mt7915==="
-          grep -RIn "CR6608-RF-38DBM-LINEAR\|= 76\|= 72\|= 68\|max_power < 38\|max_reg_power < 38" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
+          echo "===AFTER: 76/72/68 + banner + eeprom target floor in mt7915==="
+          grep -RIn "CR6608-RF-38DBM-LINEAR\|= 76\|= 72\|= 68\|max_power < 38\|max_reg_power < 38\|target_power = 76" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" "$MT76DIR/mt7915/eeprom.c" | head -50
           # 2) Turn the applied edit into a REAL OpenWrt package patch (a/ b/ = source
           #    root relative). Placed in package/kernel/mt76/patches/, OpenWrt re-applies
           #    it automatically on EVERY extraction -> survives any re-prepare. This is the
@@ -98,8 +99,9 @@ jobs:
           #    discarded a build_dir edit, so the compiled .ko had none of our changes.
           mkdir -p package/kernel/mt76/patches
           {
-            diff -u --label a/mt7915/mcu.c  --label b/mt7915/mcu.c  /tmp/mcu.c.orig  "$MT76DIR/mt7915/mcu.c"  || true
-            diff -u --label a/mt7915/init.c --label b/mt7915/init.c /tmp/init.c.orig "$MT76DIR/mt7915/init.c" || true
+            diff -u --label a/mt7915/mcu.c    --label b/mt7915/mcu.c    /tmp/mcu.c.orig    "$MT76DIR/mt7915/mcu.c"    || true
+            diff -u --label a/mt7915/init.c   --label b/mt7915/init.c   /tmp/init.c.orig   "$MT76DIR/mt7915/init.c"   || true
+            diff -u --label a/mt7915/eeprom.c --label b/mt7915/eeprom.c /tmp/eeprom.c.orig "$MT76DIR/mt7915/eeprom.c" || true
           } > package/kernel/mt76/patches/999-cr6608-38dbm.patch
           echo "===GENERATED PATCH (package/kernel/mt76/patches/999-cr6608-38dbm.patch)==="
           cat package/kernel/mt76/patches/999-cr6608-38dbm.patch

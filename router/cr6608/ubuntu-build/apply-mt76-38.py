@@ -92,4 +92,30 @@ INIT_MAXPWR_INSERT = (
 )
 apply("mt7915/init.c", INIT_MAXPWR_ANCHOR, INIT_MAXPWR_INSERT, "chan-max_power->38")
 
+# --- mt7915/eeprom.c : floor the EEPROM target power to 38.0 dBm (76 in 0.5 dBm units) so the
+#     driver REPORTS/applies the 38 request -> iw/iwinfo "Current power" reads 38 (this is what
+#     the user's earlier Ubuntu build did). This overrides factory calibration in RAM ONLY (no
+#     flash write, fully reversible); the REAL radiated output stays PA-limited (~20-22 dBm
+#     conducted). Anchor: the single final `return target_power;` in
+#     mt7915_eeprom_get_target_power(). ---
+EEPROM_ANCHOR = "\treturn target_power;\n"
+EEPROM_INSERT = (
+"\t/* CR6608-RF-38DBM-LINEAR: floor the target power to 38.0 dBm (76 half-dBm) so the\n"
+"\t * driver applies/reports the 38 request. RAM-only override of factory caldata; real\n"
+"\t * radiated power stays PA/hardware limited. */\n"
+"\tif (target_power >= 0 && target_power < 76)\n"
+"\t\ttarget_power = 76;\n"
+)
+def prepend_before(relpath, anchor, insert, tag):
+    import os as _os
+    p = _os.path.join(MT76, relpath)
+    s = open(p).read()
+    n = s.count(anchor)
+    if n != 1:
+        sys.stderr.write("FATAL: eeprom anchor %r count %d in %s (need 1)\n" % (tag, n, relpath)); sys.exit(3)
+    s = s.replace(anchor, insert + anchor, 1)
+    open(p, "w").write(s)
+    print("OK: prepended %s in %s" % (tag, relpath))
+prepend_before("mt7915/eeprom.c", EEPROM_ANCHOR, EEPROM_INSERT, "eeprom-target-floor->76")
+
 print("CR6608 mt76 38dBm patch applied successfully.")
