@@ -33,6 +33,11 @@ redact() { sed 's/[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][^ ]*/[redacted]/g; s/[Tt][Oo]
 safe_host() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._:-]//g' | cut -c1-80; }
 safe_mac() { printf '%s' "$1" | tr A-F a-f | sed 's/[^0-9a-f:]//g' | cut -c1-17; }
 safe_num() { printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-4; }
+# safe_num caps at 4 digits (fine for vlan/hour/limit); use safe_bignum for values that can
+# legitimately exceed 9999 (TCP ports up to 65535, SQM kbit/s, DNS cache) so they are NOT
+# silently truncated (a truncated SSH/HTTP port would lock the admin out).
+safe_bignum() { printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-9; }
+safe_port() { p="$(printf '%s' "$1" | sed 's/[^0-9]//g' | cut -c1-5)"; [ -n "$p" ] && [ "$p" -ge 1 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null && printf '%s' "$p"; }
 safe_word() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_.:-]//g' | cut -c1-48; }
 safe_uci_ref() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_@.:\[\]-]//g' | cut -c1-64; }
 safe_uci_opt() { printf '%s' "$1" | sed 's/[^A-Za-z0-9_:-]//g' | cut -c1-64; }
@@ -427,7 +432,7 @@ case "$action" in
     emit true "Administration" "Password updated" "[]" "Backup: $backup\nRoot password command completed. Password is not printed." "[]" "[]"; exit 0 ;;
   save_admin_access)
     confirm_required "Administration"
-    ssh_port="$(safe_num "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_num "$(param http_port)")"
+    ssh_port="$(safe_port "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_port "$(param http_port)")"
     backup="$(backup_cfg admin-access)"
     [ -n "$ssh_port" ] && uci set dropbear.@dropbear[0].Port="$ssh_port"
     if [ "$ssh_enabled" = "0" ]; then /etc/init.d/dropbear disable >/dev/null 2>&1; else /etc/init.d/dropbear enable >/dev/null 2>&1; fi
@@ -540,7 +545,7 @@ EOF
     for pair in domainneeded boguspriv rebind_protection localservice filter_aaaa filter_a authoritative readethers; do
       v="$(safe_num "$(param "dns_$pair")")"; [ -n "$v" ] && uci set dhcp.@dnsmasq[0]."$pair"="$v"
     done
-    cache="$(safe_num "$(param dns_cachesize)")"; domain="$(safe_uci_value "$(param dns_domain)")"; localdom="$(safe_uci_value "$(param dns_local)")"
+    cache="$(safe_bignum "$(param dns_cachesize)")"; domain="$(safe_uci_value "$(param dns_domain)")"; localdom="$(safe_uci_value "$(param dns_local)")"
     [ -n "$cache" ] && uci set dhcp.@dnsmasq[0].cachesize="$cache"
     [ -n "$domain" ] && uci set dhcp.@dnsmasq[0].domain="$domain"
     [ -n "$localdom" ] && uci set dhcp.@dnsmasq[0].local="$localdom"
@@ -561,7 +566,7 @@ EOF
   save_sqm)
     confirm_required "SQM"
     backup="$(backup_cfg sqm)"
-    sqm_enabled="$(safe_num "$(param sqm_enabled)")"; sqm_iface="$(safe_word "$(param sqm_interface)")"; down="$(safe_num "$(param sqm_download)")"; up="$(safe_num "$(param sqm_upload)")"; qdisc="$(safe_word "$(param sqm_qdisc)")"; script="$(safe_word "$(param sqm_script)")"
+    sqm_enabled="$(safe_num "$(param sqm_enabled)")"; sqm_iface="$(safe_word "$(param sqm_interface)")"; down="$(safe_bignum "$(param sqm_download)")"; up="$(safe_bignum "$(param sqm_upload)")"; qdisc="$(safe_word "$(param sqm_qdisc)")"; script="$(safe_word "$(param sqm_script)")"
     uci -q get sqm.smartap >/dev/null || uci set sqm.smartap='queue'
     [ "$sqm_enabled" = "1" ] && uci set sqm.smartap.enabled='1' || uci set sqm.smartap.enabled='0'
     [ -n "$sqm_iface" ] && uci set sqm.smartap.interface="$sqm_iface"
