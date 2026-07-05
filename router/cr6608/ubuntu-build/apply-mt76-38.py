@@ -57,7 +57,8 @@ apply("mt7915/mcu.c", MCU_ANCHOR, MCU_INSERT, "SKU-power-raise-76/72/68")
 GLOBAL_ANCHOR = "static void __mt7915_init_txpower(struct mt7915_phy *phy,\n"
 GLOBAL_INSERT = (
 "const char cr6608_rf_38dbm_banner[] __attribute__((used)) =\n"
-"\t\"CR6608-RF-38DBM-LINEAR enabled\";\n\n"
+"\t\"CR6608-RF-38DBM-LINEAR enabled\";\n"
+"MODULE_INFO(cr6608_rf, \"CR6608-RF-38DBM-LINEAR\");\n\n"
 )
 # insert the global BEFORE the function (prepend: put global then the original anchor)
 def prepend(relpath, anchor, insert, tag):
