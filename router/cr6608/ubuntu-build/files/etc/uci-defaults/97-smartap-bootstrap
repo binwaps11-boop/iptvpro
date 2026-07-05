@@ -1,0 +1,4 @@
+#!/bin/sh
+# First-boot baseline: recovery IP/SSID, smartap defaults, txpower (no DHCP client).
+[ -x /usr/sbin/smartap-bootstrap ] && /usr/sbin/smartap-bootstrap quiet
+exit 0

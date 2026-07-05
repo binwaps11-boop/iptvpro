@@ -1,0 +1,15 @@
+config lldpd 'config'
+	option enable_cdp '1'
+	option enable_fdp '1'
+	option enable_sonmp '1'
+	option enable_edp '1'
+	option lldp_class '4'
+	option lldp_description 'Smart AP CR6608'
+	option lldp_hostname 'CR6608-Smart-AP'
+	# Advertise the normal management IP (the LAN address, e.g. 192.168.1.1 — or whatever it
+	# is changed to) so the AP shows up in the Mikrotik neighbour list by name AND address.
+	# BUT never advertise the Wi-Fi rescue IP 221.221.221.221 (and skip loopback). The '!'
+	# prefix excludes a pattern; '*' includes everything else.
+	option lldp_mgmt_addr_advertisements '1'
+	option lldp_mgmt_ip '!221.221.221.221,!127.0.0.1,*'
+	list interface 'br-lan'

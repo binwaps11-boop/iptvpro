@@ -1,0 +1,325 @@
+#!/bin/sh
+
+CFG="cr6608quick.default"
+BACKUP_DIR="/root/cr6608-quicksettings-backups"
+
+qget() {
+	uci -q get "$1" 2>/dev/null || true
+}
+
+log() {
+	logger -t cr6608-quicksettings "$*"
+}
+
+valid_ip() {
+	echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+}
+
+bool_on() {
+	case "$1" in
+		1|on|true|yes|enabled) return 0 ;;
+	esac
+	return 1
+}
+
+backup_configs() {
+	mkdir -p "$BACKUP_DIR"
+	tar -czf "$BACKUP_DIR/config-before-$(date +%Y%m%d-%H%M%S).tgz" \
+		/etc/config/network /etc/config/wireless /etc/config/dhcp \
+		/etc/config/firewall /etc/config/system 2>/dev/null || true
+}
+
+ensure_wifi_iface() {
+	local sid="$1" radio="$2" ssid="$3"
+	uci -q get wireless."$sid" >/dev/null 2>&1 || uci set wireless."$sid"='wifi-iface'
+	uci set wireless."$sid".device="$radio"
+	uci set wireless."$sid".mode='ap'
+	uci set wireless."$sid".network='lan'
+	uci set wireless."$sid".ssid="$ssid"
+	uci set wireless."$sid".disabled='0'
+	uci set wireless."$sid".wmm='1'
+	uci set wireless."$sid".isolate='0'
+	uci set wireless."$sid".disassoc_low_ack='0'
+	uci set wireless."$sid".multicast_to_unicast='1'
+	uci set wireless."$sid".dtim_period='2'
+	uci set wireless."$sid".ieee80211k='1'
+	uci set wireless."$sid".ieee80211v='1'
+}
+
+set_security() {
+	local sid="$1" security="$2" key="$3"
+	case "$security" in
+		wpa2)
+			uci set wireless."$sid".encryption='psk2'
+			uci set wireless."$sid".key="$key"
+			;;
+		wpa3)
+			uci set wireless."$sid".encryption='sae'
+			uci set wireless."$sid".key="$key"
+			;;
+		mixed)
+			uci set wireless."$sid".encryption='sae-mixed'
+			uci set wireless."$sid".key="$key"
+			;;
+		*)
+			uci set wireless."$sid".encryption='none'
+			uci -q delete wireless."$sid".key
+			;;
+	esac
+}
+
+has_lan_port() {
+	uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$1"
+}
+
+cleanup_previous() {
+	uci -q delete wireless.cr6608_mesh
+	uci -q delete wireless.cr6608_wds
+	clear_vlan
+}
+
+# clear_vlan — revert to a plain (non-filtering) bridge with management on br-lan.
+# Removes every SmartAP quick-VLAN artifact so a non-VLAN mode connects normally.
+clear_vlan() {
+	uci -q delete network.cr6608_vlan
+	uci -q delete network.cr6608_vlan_dev
+	uci -q delete network.@device[0].vlan_filtering
+	# management interface back on the plain bridge
+	uci set network.lan.device='br-lan'
+	# recovery interface back on the plain bridge if it was moved
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+	# Wi-Fi rescue 221.221.221.221 back on the plain bridge (it follows the Wi-Fi clients)
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
+	# drop any SmartAP quick bridge-vlan sections
+	while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+		local idx
+		idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+		[ -n "$idx" ] || break
+		uci -q delete "network.$idx" || break
+	done
+}
+
+set_ap_ports() {
+	has_lan_port lan1 || uci add_list network.@device[0].ports='lan1'
+	has_lan_port lan2 || uci add_list network.@device[0].ports='lan2'
+	has_lan_port lan3 || uci add_list network.@device[0].ports='lan3'
+	has_lan_port wan || uci add_list network.@device[0].ports='wan'
+	# fully remove any PPPoE client when leaving broadband mode
+	[ "$(uci -q get network.wan.proto)" = "pppoe" ] && { uci set network.wan.proto='none'; uci -q delete network.wan.username; uci -q delete network.wan.password; }
+	uci set network.wan.disabled='1'
+	uci set network.wan.auto='0'
+}
+
+set_pppoe_wan() {
+	local user="$1" pass="$2" port="$3"
+	[ -n "$port" ] || port='wan'
+	uci del_list network.@device[0].ports="$port" 2>/dev/null || true
+	uci set network.wan='interface'
+	uci set network.wan.device="$port"
+	uci set network.wan.proto='pppoe'
+	uci set network.wan.username="$user"
+	uci set network.wan.password="$pass"
+	uci set network.wan.ipv6='0'
+	uci set network.wan.disabled='0'
+	uci set network.wan.auto='1'
+}
+
+# set_vlan_target — correct DSA (MT7621) VLAN for "AP on a VLAN".
+#   * Management VLAN 1 stays UNTAGGED (native/pvid) on every wired port, so the
+#     dashboard IP the user set is reachable over any LAN cable.
+#   * The client VLAN <vid> is TAGGED on every wired port (trunk toward the Mikrotik).
+#   * Both Wi-Fi radios join the client VLAN (their network is set to cr6608_vlan by
+#     the caller), so 2.4G and 5G clients live inside <vid> and get their IPs from the
+#     upstream Mikrotik DHCP on that VLAN.
+# Uses bridge-VLAN filtering (the DSA way) — NOT an 8021q device stacked on the bridge.
+set_vlan_target() {
+	local vid="$1" p m c
+	[ -n "$vid" ] || return 1
+	echo "$vid" | grep -Eq '^[0-9]+$' || return 1
+	[ "$vid" -ge 2 ] && [ "$vid" -le 4094 ] || return 1   # 1 is reserved for management
+
+	# start from a clean slate (removes any stale 8021q or prior quick-VLAN artifacts)
+	clear_vlan
+
+	# enable VLAN filtering on the br-lan bridge
+	uci set network.@device[0].vlan_filtering='1'
+
+	# VLAN 1 = management, untagged/native (pvid) on all wired ports
+	m="$(uci add network bridge-vlan)"
+	uci set "network.$m.name=SmartAP-qvlan-mgmt"
+	uci set "network.$m.device=br-lan"
+	uci set "network.$m.vlan=1"
+	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$m.ports=$p:u*"; done
+
+	# client VLAN = tagged on all wired ports (whichever port faces the Mikrotik carries it)
+	c="$(uci add network bridge-vlan)"
+	uci set "network.$c.name=SmartAP-qvlan-client"
+	uci set "network.$c.device=br-lan"
+	uci set "network.$c.vlan=$vid"
+	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$c.ports=$p:t"; done
+
+	# management L3 interface moves onto the native VLAN device (keeps its IP)
+	uci set network.lan.device='br-lan.1'
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
+
+	# client L3 interface Wi-Fi bridges into; no IP (clients use the upstream DHCP)
+	uci set network.cr6608_vlan='interface'
+	uci set network.cr6608_vlan.device="br-lan.$vid"
+	uci set network.cr6608_vlan.proto='none'
+	# The Wi-Fi rescue IP 221.221.221.221 must FOLLOW the Wi-Fi clients into the client
+	# VLAN — phones live inside <vid>, so if 221 stayed on the management side they could
+	# never open the programming page while the unit is programmed AP+VLAN.
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vid"
+	return 0
+}
+
+set_reset_button() {
+	local lock="$1" custom="$2" seconds="$3"
+	if bool_on "$lock"; then
+		[ -f /etc/rc.button/reset.smartap-orig ] || cp -f /etc/rc.button/reset /etc/rc.button/reset.smartap-orig 2>/dev/null || true
+		cat > /etc/rc.button/reset <<'EOS'
+#!/bin/sh
+logger -t cr6608-reset "Reset button is locked by quick settings"
+exit 0
+EOS
+		chmod 0755 /etc/rc.button/reset
+		return
+	fi
+	if [ -f /etc/rc.button/reset.smartap-orig ]; then
+		cp -f /etc/rc.button/reset.smartap-orig /etc/rc.button/reset
+		chmod 0755 /etc/rc.button/reset
+	fi
+	if bool_on "$custom"; then
+		log "custom reset timer requested: ${seconds:-15}s"
+	fi
+}
+
+apply_config() {
+	local mode ip netmask ssid ssid5 ch24 ch5 vlan mesh_id wds_ssid hide security key
+	local pppoe_user pppoe_pass pppoe_port dhcp_server firewall_enabled reset_lock reset_custom reset_seconds
+	local admin_password change_password clear_previous target_network
+
+	mode="$(qget "$CFG.mode")"; [ -n "$mode" ] || mode='ap'
+	ip="$(qget "$CFG.lan_ipaddr")"; netmask="$(qget "$CFG.lan_netmask")"
+	ssid="$(qget "$CFG.ssid")"; ssid5="$(qget "$CFG.ssid5")"
+	ch24="$(qget "$CFG.channel24")"; ch5="$(qget "$CFG.channel5")"
+	vlan="$(qget "$CFG.vlan_id")"; mesh_id="$(qget "$CFG.mesh_id")"; wds_ssid="$(qget "$CFG.wds_ssid")"
+	hide="$(qget "$CFG.hide_ssid")"; security="$(qget "$CFG.security")"; key="$(qget "$CFG.wifi_key")"
+	pppoe_user="$(qget "$CFG.pppoe_user")"; pppoe_pass="$(qget "$CFG.pppoe_pass")"; pppoe_port="$(qget "$CFG.pppoe_port")"
+	dhcp_server="$(qget "$CFG.dhcp_server")"; firewall_enabled="$(qget "$CFG.firewall_enabled")"
+	reset_lock="$(qget "$CFG.reset_lock")"; reset_custom="$(qget "$CFG.reset_custom")"; reset_seconds="$(qget "$CFG.reset_seconds")"
+	admin_password="$(qget "$CFG.admin_password")"; change_password="$(qget "$CFG.change_password")"
+	clear_previous="$(qget "$CFG.clear_previous")"
+	target_network='lan'
+
+	backup_configs
+	bool_on "$clear_previous" && cleanup_previous
+
+	valid_ip "$ip" && uci set network.lan.ipaddr="$ip"
+	valid_ip "$netmask" && uci set network.lan.netmask="$netmask"
+	uci set network.lan.delegate='0'
+
+	case "$mode" in
+		pppoe) set_pppoe_wan "$pppoe_user" "$pppoe_pass" "$pppoe_port" ;;
+		*) set_ap_ports ;;
+	esac
+
+	case "$mode" in
+		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
+			if set_vlan_target "$vlan"; then
+				target_network='cr6608_vlan'
+			else
+				clear_vlan
+				log "VLAN mode requested but VLAN ID '$vlan' is invalid (must be 2-4094); staying on management LAN"
+			fi
+			;;
+		*)
+			clear_vlan
+			;;
+	esac
+
+	[ -n "$ssid" ] || ssid='Smart-AP'
+	[ -n "$ssid5" ] || ssid5="${ssid}-5G"
+	ensure_wifi_iface wifinet0 radio0 "$ssid"
+	ensure_wifi_iface wifinet1 radio1 "$ssid5"
+	uci set wireless.wifinet0.network="$target_network"
+	uci set wireless.wifinet1.network="$target_network"
+	set_security wifinet0 "$security" "$key"
+	set_security wifinet1 "$security" "$key"
+
+	[ -n "$ch24" ] && [ "$ch24" != "auto" ] && uci set wireless.radio0.channel="$ch24"
+	[ -n "$ch5" ] && [ "$ch5" != "auto" ] && uci set wireless.radio1.channel="$ch5"
+	uci set wireless.radio0.htmode='HE20'
+	uci set wireless.radio1.htmode='HE80'
+	uci set wireless.radio0.legacy_rates='0'
+	uci set wireless.radio1.legacy_rates='0'
+	uci set wireless.radio0.airtime_mode='1'
+	uci set wireless.radio1.airtime_mode='1'
+
+	case "$mode" in
+		mesh|mesh_vlan)
+			[ -n "$mesh_id" ] || mesh_id='CR6608-Mesh'
+			uci set wireless.cr6608_mesh='wifi-iface'
+			uci set wireless.cr6608_mesh.device='radio1'
+			uci set wireless.cr6608_mesh.mode='mesh'
+			uci set wireless.cr6608_mesh.network="$target_network"
+			uci set wireless.cr6608_mesh.mesh_id="$mesh_id"
+			uci set wireless.cr6608_mesh.mesh_fwding='1'
+			set_security cr6608_mesh "$security" "$key"
+			;;
+		wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan)
+			[ -n "$wds_ssid" ] || wds_ssid='CR6608-WDS'
+			uci set wireless.cr6608_wds='wifi-iface'
+			uci set wireless.cr6608_wds.device='radio1'
+			uci set wireless.cr6608_wds.mode='ap'
+			case "$mode" in wds_receiver|wds_receiver_vlan) uci set wireless.cr6608_wds.mode='sta' ;; esac
+			uci set wireless.cr6608_wds.wds='1'
+			uci set wireless.cr6608_wds.network="$target_network"
+			uci set wireless.cr6608_wds.ssid="$wds_ssid"
+			uci set wireless.cr6608_wds.hidden="$hide"
+			set_security cr6608_wds "$security" "$key"
+			;;
+	esac
+
+	# DHCP is tied to the saved mode: only PPPoE-client mode serves DHCP; every AP mode keeps it
+	# off. This is the save action itself (no automatic/background enabling).
+	if [ "$mode" = "pppoe" ]; then
+		uci -q get dhcp.lan >/dev/null 2>&1 || { uci set dhcp.lan=dhcp; uci set dhcp.lan.interface='lan'; uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'; }
+		uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
+		uci -q set dhcp.lan.dhcpv6='disabled'; uci -q set dhcp.lan.ra='disabled'; uci -q set dhcp.lan.ndp='disabled'
+	else
+		uci -q delete dhcp.lan 2>/dev/null || true
+	fi
+
+	if bool_on "$firewall_enabled"; then
+		/etc/init.d/firewall enable >/dev/null 2>&1 || true
+	else
+		/etc/init.d/firewall disable >/dev/null 2>&1 || true
+	fi
+
+	set_reset_button "$reset_lock" "$reset_custom" "$reset_seconds"
+
+	if bool_on "$change_password" && [ -n "$admin_password" ]; then
+		printf '%s\n%s\n' "$admin_password" "$admin_password" | passwd root >/dev/null 2>&1 || log "root password update failed"
+		uci -q delete "$CFG.admin_password"
+		uci -q delete "$CFG.change_password"
+	fi
+
+	uci commit network
+	uci commit wireless
+	uci commit dhcp
+	uci commit firewall
+	uci commit cr6608quick
+
+	log "applied mode=$mode target=$target_network txpower untouched: radio0=$(qget wireless.radio0.txpower) radio1=$(qget wireless.radio1.txpower)"
+
+	/etc/init.d/network reload >/dev/null 2>&1 || true
+	wifi reload >/dev/null 2>&1 || true
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+}
+
+case "$1" in
+	apply|'') apply_config ;;
+	*) echo "usage: $0 apply" >&2; exit 1 ;;
+esac

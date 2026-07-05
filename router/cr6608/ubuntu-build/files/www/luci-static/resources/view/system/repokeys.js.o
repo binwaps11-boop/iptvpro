@@ -1,0 +1,18 @@
+'use strict';'require baseclass';'require fs';'require form';'require ui';'require view';const APK_DIR='/etc/apk/keys/';const OPKG_DIR='/etc/opkg/keys/';const isReadonlyView=!L.hasViewPermission()||null;let KEYDIR=null;let KEYEXT=null;const safeList=['d310c6f2833e97f7','openwrt-snapshots.pem',];function isFileInSafeList(file){for(let name of safeList){if(file===name)
+return true;if(file.toLocaleLowerCase().replace(/^openwrt-[0-9]+\.[0-9]+/i,'')!==file)
+return true;if(file.toLocaleLowerCase().replace(/^openwrt-snapshots/i,'')!==file)
+return true;}
+return false;}
+function normalizeKey(s){return s?.replace(/\s+/g,' ')?.trim();}
+function determineKeyEnv(){return fs.stat(APK_DIR).then(()=>{KEYDIR=APK_DIR;KEYEXT='.pem';}).catch(()=>{KEYDIR=OPKG_DIR;KEYEXT=null;});}
+function listKeyFiles(){return fs.list(KEYDIR).then(entries=>Promise.all(entries.map(entry=>fs.read(KEYDIR+entry.name).then(content=>({filename:entry.name,key:content})))));}
+function safeText(str){return String(str).replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
+function saveKeyFile(keyContent,file,fileContent){const ts=Date.now();const filename=file?file?.name?.split('.')?.[0]+(KEYEXT||''):null;const noname='key_'+ts+(KEYEXT||'');return fs.write(KEYDIR+(filename??noname),fileContent??keyContent,384);}
+function removeKey(ev,key){L.showModal(_('Delete key'),[E('div',_('Really delete the following software repository public key?')),E('pre',[key.filename]),E('div',{class:'right'},[E('div',{class:'btn',click:L.hideModal},_('Cancel')),' ',E('div',{class:'btn danger',click:function(){fs.remove(KEYDIR+key.filename).then(()=>window.location.reload()).catch(e=>ui.addNotification(null,E('p',e.message))).finally(()=>ui.hideModal());}},_('Delete key'))])]);}
+function isPemFormat(content){return/-BEGIN([A-Z]+)?PUBLIC KEY-/.test(content);
+}
+
+function keyEnvironmentCheck(key) {
+ const isPem = isPemFormat(key);
+
+ 

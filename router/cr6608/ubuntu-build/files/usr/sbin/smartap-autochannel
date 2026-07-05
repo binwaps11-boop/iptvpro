@@ -1,0 +1,27 @@
+#!/bin/sh
+# Auto best-channel: scan neighbours, pick the least-congested channel per radio, apply.
+# Runs from cron (nightly) only when smartap.autochannel.enabled=1. Read-mostly; a wifi
+# reload is the only disruptive step and it is brief. 2.4G stays 1/6/11; 5G non-DFS only.
+[ "$(uci -q get smartap.autochannel.enabled)" = "1" ] || exit 0
+log() { logger -t smartap-autochannel "$1"; }
+scan="$(for IF in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do /usr/sbin/iw dev "$IF" scan 2>/dev/null; done)"
+parsed="$(printf '%s\n' "$scan" | awk '
+  function ch(f){ if(f==2484)return 14; if(f>=2412&&f<=2472)return int((f-2407)/5); if(f>=5000&&f<=5900)return int((f-5000)/5); return 0 }
+  /^BSS /{ if(fr)print ch(fr); fr=0 }
+  /^[ \t]*freq:/{ fr=$2 }
+  END{ if(fr)print ch(fr) }')"
+best24="$(printf '%s\n' "$parsed" | awk '$1>0&&$1<=14{c[$1]++} END{ b=1;bw=1e9; split("1 6 11",k," "); for(i in k){ch=k[i];w=0; for(x in c) if((x-ch)<=2&&(ch-x)<=2) w+=c[x]; if(w<bw){bw=w;b=ch}} print b }')"
+best5="$(printf '%s\n' "$parsed" | awk '$1>=36{c[$1]++} END{ b=36;bw=1e9; split("36 40 44 48 149 153 157 161",k," "); for(i in k){ch=k[i];w=c[ch]+0; if(w<bw){bw=w;b=ch}} print b }')"
+[ -n "$best24" ] || best24=1; [ -n "$best5" ] || best5=36
+cur24="$(uci -q get wireless.radio0.channel)"; cur5="$(uci -q get wireless.radio1.channel)"
+ch=0
+[ -n "$best24" ] && [ "$best24" != "$cur24" ] && { uci set wireless.radio0.channel="$best24"; ch=1; }
+[ -n "$best5" ] && [ "$best5" != "$cur5" ] && { uci set wireless.radio1.channel="$best5"; ch=1; }
+if [ "$ch" = 1 ]; then
+  uci commit wireless; wifi reload >/dev/null 2>&1
+  log "applied 2.4G=$best24 (was $cur24) 5G=$best5 (was $cur5)"
+  printf '{"ts":"%s","ch24":%s,"ch5":%s}\n' "$(date +%s 2>/dev/null)" "$best24" "$best5" > /tmp/smartap-autochannel.json
+else
+  log "already optimal 2.4G=$cur24 5G=$cur5"
+fi
+exit 0

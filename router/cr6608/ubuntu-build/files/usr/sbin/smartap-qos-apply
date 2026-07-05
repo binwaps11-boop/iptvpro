@@ -1,0 +1,43 @@
+#!/bin/sh
+# Apply per-client speed limits (uci smartap ...=qos entries: mac, down, up) with tc HTB.
+#   download: shaped where traffic EXITS toward the client (wifi APs + LAN ports),
+#             matched on destination MAC;
+#   upload:   shaped where traffic EXITS toward the uplink (wan / wan.VID / mesh),
+#             matched on source MAC.
+# u32 negative offsets reach the ethernet header: dst mac @ -14/-12, src mac @ -8/-6.
+CLIENT_DEVS=""
+for d in phy0-ap0 phy1-ap0 lan1 lan2 lan3; do [ -d "/sys/class/net/$d" ] && CLIENT_DEVS="$CLIENT_DEVS $d"; done
+UPLINK_DEVS=""
+for d in /sys/class/net/wan /sys/class/net/wan.* /sys/class/net/phy1-mesh0 /sys/class/net/phy0-mesh0; do
+  [ -d "$d" ] && UPLINK_DEVS="$UPLINK_DEVS $(basename "$d")"
+done
+# reset our qdiscs everywhere first (idempotent)
+for d in $CLIENT_DEVS $UPLINK_DEVS; do tc qdisc del dev "$d" root 2>/dev/null; done
+entries="$(uci -q show smartap 2>/dev/null | awk -F'[.=]' '/=qos$/{print $2}')"
+[ -n "$entries" ] || exit 0
+idx=10
+for sec in $entries; do
+  mac="$(uci -q get smartap."$sec".mac | tr A-F a-f)"
+  dn="$(uci -q get smartap."$sec".down)"; up="$(uci -q get smartap."$sec".up)"
+  case "$mac" in ??:??:??:??:??:??) : ;; *) continue ;; esac
+  m1="0x$(printf '%s' "$mac" | awk -F: '{print $1$2}')"
+  m2="0x$(printf '%s' "$mac" | awk -F: '{print $3$4$5$6}')"
+  if [ -n "$dn" ] && [ "$dn" -ge 1 ] 2>/dev/null; then
+    for d in $CLIENT_DEVS; do
+      tc qdisc add dev "$d" root handle 1: htb 2>/dev/null
+      tc class replace dev "$d" parent 1: classid 1:$idx htb rate "${dn}mbit" ceil "${dn}mbit" 2>/dev/null
+      tc filter add dev "$d" parent 1: protocol all prio 1 u32 \
+        match u16 "$m1" 0xffff at -14 match u32 "$m2" 0xffffffff at -12 flowid 1:$idx 2>/dev/null
+    done
+  fi
+  if [ -n "$up" ] && [ "$up" -ge 1 ] 2>/dev/null; then
+    for d in $UPLINK_DEVS; do
+      tc qdisc add dev "$d" root handle 1: htb 2>/dev/null
+      tc class replace dev "$d" parent 1: classid 1:$idx htb rate "${up}mbit" ceil "${up}mbit" 2>/dev/null
+      tc filter add dev "$d" parent 1: protocol all prio 1 u32 \
+        match u16 "$m1" 0xffff at -8 match u32 "$m2" 0xffffffff at -6 flowid 1:$idx 2>/dev/null
+    done
+  fi
+  idx=$((idx+10))
+done
+exit 0

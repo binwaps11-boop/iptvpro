@@ -1,0 +1,77 @@
+#!/bin/sh
+# --- safety: no system command may hang the API (busybox timeout) ---
+ubus() { /bin/busybox timeout 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { /bin/busybox timeout 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { /bin/busybox timeout 6 /usr/sbin/iw "$@" 2>/dev/null; }
+param() {
+  printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+json_msg() {
+  msg="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' ')"
+  printf '{"ok":%s,"message":"%s"}\n' "$1" "$msg"
+}
+
+sid="$(param sid | sed 's/[^A-Fa-f0-9]//g')"
+case "$sid" in
+  00000000000000000000000000000000|'') deny_auth ;;
+esac
+[ "${#sid}" = 32 ] 2>/dev/null || deny_auth
+[ -f "/tmp/dashsess/$sid" ] || deny_auth
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf '\r\n'
+
+action="$(param action)"
+confirm="$(param confirm)"
+
+case "$action" in
+  refresh)
+    json_msg true "تم تحديث البيانات من الواجهة."
+    ;;
+  speedtest)
+    json_msg true "اختبار السرعة الخارجي غير مفعل لأن اللوحة تعمل offline؛ استخدم الاختبار المحلي داخل الواجهة."
+    ;;
+  reconnect)
+    if [ "$confirm" = "1" ]; then
+      # real reconnect: renew wan (if any) and reload network + wifi
+      ( ifup wan >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1 ) &
+      json_msg true "تم تنفيذ إعادة الاتصال: أعيد تحميل الشبكة والواي فاي وتجديد WAN إن وجد."
+    else
+      json_msg false "إعادة الاتصال تحتاج تأكيداً (اضغط الزر مرة أخرى)."
+    fi
+    ;;
+  wifi_toggle)
+    if [ "$confirm" = "1" ]; then
+      d0="$(uci -q get wireless.radio0.disabled)"; d0="${d0:-0}"
+      if [ "$d0" = "0" ]; then
+        uci set wireless.radio0.disabled='1'; uci set wireless.radio1.disabled='1'; state="أُطفئ"
+      else
+        uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'; state="شُغّل"
+      fi
+      uci commit wireless; (wifi reload >/dev/null 2>&1) &
+      json_msg true "تم: $state الواي فاي على الحزمتين. إذا كنت متصلاً عبر الواي فاي وأطفأته، ادخل عبر الكيبل لإعادته."
+    else
+      json_msg false "تبديل WiFi يحتاج تأكيداً (اضغط الزر مرة أخرى خلال 6 ثوانٍ)."
+    fi
+    ;;
+  reboot)
+    if [ "$confirm" = "1" ]; then
+      (sleep 2; reboot) >/dev/null 2>&1 &
+      json_msg true "تم إرسال أمر إعادة التشغيل. سيعود الراوتر بعد قليل."
+    else
+      json_msg false "إعادة التشغيل تحتاج تأكيداً."
+    fi
+    ;;
+  *)
+    json_msg false "إجراء غير معروف."
+    ;;
+esac

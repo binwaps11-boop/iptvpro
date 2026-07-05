@@ -6,18 +6,29 @@ Builds a custom OpenWrt **24.10.6** firmware for the **Xiaomi CR6608**
 
 It bakes in:
 
-- a custom **`files/`** overlay (`/etc/config/*`, `/lib/firmware/regulatory.db`,
-  `/usr/sbin/set-txpower`, `/etc/modprobe.d/mt7915e.conf`, `/www/cr6608.html`), and
-- an **mt76 driver patch** that lifts the driver-side TX power ceiling.
+- the **complete v85 Smart AP overlay** (`files/`, ~293 files): the full dashboard
+  (`/www/dashboard.js`, `/www/index.html`, all `/www/cgi-bin/*` CGIs), the patched LuCI
+  assets (`ui.js`/`luci.js` single "final apply" button, `controller/admin/uci.uc`
+  server-side final-apply, argon theme, `version.lua` cache-bust), the Quick Settings
+  view, every `/etc/config/*`, the performance-pack sysctl, all `cr6608-*`/`smartap-*`
+  services + scripts + uci-defaults + hotplug, the patched `regulatory.db` (36 dBm,
+  no DFS), `/etc/modprobe.d/mt7915e.conf`, and the `cr6608-eeprom-power` tool. The
+  built image is therefore **identical in design and features to v85**.
+- an **mt76 driver patch** (`999-mt7915-cr6608-rf-35dbm.patch`) that lifts the
+  driver-side TX-power SKU/target ceiling to **35 dBm on both bands**.
+
+Because `build.sh` pins the **same** OpenWrt tag (`v24.10.6`) that v85 was built from,
+the overlaid LuCI/`ui.js`/`luci.js`/`uci.uc` files match the freshly built LuCI version
+exactly — no version mismatch.
 
 ```
-cr6608-kit/
+ubuntu-build/
 ├── build.sh                # the one script you run
 ├── cr6608.seed.config      # diffconfig seed fed into .config
 ├── README.md               # this file
 ├── patches/
-│   └── 999-mt7915-raise-txpower-ceiling.patch
-└── files/                  # baked verbatim into the image rootfs
+│   └── 999-mt7915-cr6608-rf-35dbm.patch
+└── files/                  # the full v85 overlay, baked verbatim into the rootfs
     ├── etc/config/{network,system,wireless}
     ├── etc/modprobe.d/mt7915e.conf
     ├── lib/firmware/        # put your binary regulatory.db here (see below)

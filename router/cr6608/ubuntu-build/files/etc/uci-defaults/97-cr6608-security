@@ -1,0 +1,4 @@
+#!/bin/sh
+# enable the Smart AP security applier so saved policy is reapplied on every boot
+[ -x /etc/init.d/cr6608-security ] && /etc/init.d/cr6608-security enable
+exit 0

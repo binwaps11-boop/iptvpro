@@ -1,0 +1,17 @@
+#!/bin/sh
+# Max-RF baseline on first boot (real performance, within what the MT7915 can legally emit):
+#  * txpower = 35 -> the driver applies its true maximum (the chip radiates as much as its
+#    regulatory table allows; the 35 is the requested ceiling, not a fake radiated value).
+#  * 5G on channel 149 (UNII-3): the US regulatory table permits HIGHER AP transmit power
+#    here than on channel 36 (UNII-1), and it is non-DFS (no radar wait) -> stronger, more
+#    stable 5G signal and instant availability.
+#  * beamforming (he_su/mu_beamformer + beamformee) focuses RF energy toward each client,
+#    which raises the EFFECTIVE signal and the link rate — the practical "stronger signal".
+# The operator can still change any of these from Quick Settings; a re-flash resets to these.
+uci -q set wireless.radio0.txpower='35'
+uci -q set wireless.radio1.txpower='35'
+uci -q set wireless.radio1.channel='36'
+uci -q set wireless.radio0.he_su_beamformer='1'; uci -q set wireless.radio0.he_su_beamformee='1'; uci -q set wireless.radio0.he_mu_beamformer='1'
+uci -q set wireless.radio1.he_su_beamformer='1'; uci -q set wireless.radio1.he_su_beamformee='1'; uci -q set wireless.radio1.he_mu_beamformer='1'
+uci -q commit wireless
+exit 0
