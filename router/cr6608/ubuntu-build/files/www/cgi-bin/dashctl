@@ -135,7 +135,21 @@ lan_zone_del() {
   [ -n "$zsec" ] || return 0
   uci -q del_list firewall."$zsec".network="$net" 2>/dev/null
 }
+# Self-heal a corrupt /etc/config/smartap. Older builds shipped a JSON config-export
+# snapshot at this path; libuci can't parse it, so EVERY `uci smartap.*` read/write fails
+# and Quick Settings / Security / auto-channel / per-client QoS silently stop persisting.
+# If uci can't load the package, restore the pristine rootfs copy (/rom) or start clean.
+smartap_heal() {
+  uci -q show smartap >/dev/null 2>&1 && return 0
+  if [ -f /rom/etc/config/smartap ] && head -c1 /rom/etc/config/smartap 2>/dev/null | grep -q '[a-z]'; then
+    cp /rom/etc/config/smartap /etc/config/smartap 2>/dev/null
+  else
+    : > /etc/config/smartap
+  fi
+  logger -t cr6608 "healed unreadable /etc/config/smartap" 2>/dev/null || true
+}
 store_royal_config() {
+  smartap_heal
   touch /etc/config/smartap 2>/dev/null
   uci -q set smartap.quick='quicksettings'
   for k in program_mode device_ip vlan_id ssid ch24 ch5 htmode24 htmode5 mesh_id mesh_role wds_peer_ssid hide_ssid security delete_previous broadband_port reset_button_enabled reset_mode nat_enabled dhcp_server firewall_enabled watchcat_enabled broadband_enabled fake_mesh txpower; do
@@ -201,6 +215,7 @@ case "$action" in
   apply_isolation)
     # instant one-click apply (Apply & Keep) — no confirmation, no auto-revert
     backup="$(backup_cfg security)"
+    smartap_heal
     [ -f /etc/config/smartap ] || : > /etc/config/smartap
     uci -q get smartap.security >/dev/null 2>&1 || { uci set smartap.security='security'; }
     uci -q get smartap.management >/dev/null 2>&1 || { uci set smartap.management='management'; uci set smartap.management.vlan='1'; uci set smartap.management.ipaddr='192.168.1.1'; uci set smartap.management.recovery_always='1'; }
@@ -621,6 +636,9 @@ EOF
     emit true "Firewall defaults" "Defaults saved" "[]" "Backup: $backup\nFirewall defaults/offloading saved." "[]" "[]"; exit 0 ;;
   save_sqm)
     confirm_required "SQM"
+    # SQM shaping needs the sqm-scripts package (init + shapers). If it's not installed in
+    # this image, don't pretend it applied.
+    [ -x /etc/init.d/sqm ] || { emit false "SQM" "SQM غير مثبّت" "[]" "حزمة sqm-scripts غير موجودة في هذه النسخة، فتحديد سرعة الإنترنت (SQM) غير مدعوم. ثبّت sqm-scripts لتفعيلها." "[]" "[]"; exit 0; }
     backup="$(backup_cfg sqm)"
     sqm_enabled="$(safe_num "$(param sqm_enabled)")"; sqm_iface="$(safe_word "$(param sqm_interface)")"; down="$(safe_bignum "$(param sqm_download)")"; up="$(safe_bignum "$(param sqm_upload)")"; qdisc="$(safe_word "$(param sqm_qdisc)")"; script="$(safe_word "$(param sqm_script)")"
     uci -q get sqm.smartap >/dev/null || uci set sqm.smartap='queue'
@@ -1206,6 +1224,7 @@ EOF
   save_autochannel)
     # enable/disable the nightly auto best-channel (cron runs smartap-autochannel at 3:30am)
     en="$(safe_num "$(param autochannel_enabled)")"
+    smartap_heal
     uci -q get smartap.autochannel >/dev/null 2>&1 || uci set smartap.autochannel='autochannel'
     uci set smartap.autochannel.enabled="${en:-0}"; uci commit smartap
     if [ "$en" = "1" ]; then
@@ -1246,6 +1265,10 @@ EOF
     # Per-client speed limit (simple QoS): tc HTB per MAC — download shaped on the
     # client-facing ports, upload shaped on the uplink. Persisted in uci smartap and
     # re-applied at boot by /etc/init.d/smartap-qos.
+    # per-client shaping needs the tc binary (iproute2-tc). If it's not in this image, say so
+    # honestly instead of reporting a fake success that never shapes.
+    command -v tc >/dev/null 2>&1 || { emit false "Speed limit" "QoS غير متاح" "[]" "أداة tc غير مثبّتة في هذه النسخة، فحدود السرعة لكل جهاز غير مدعومة. لتفعيلها ثبّت الحزمة tc (iproute2-tc)." "[]" "[]"; exit 0; }
+    smartap_heal
     mac="$(safe_mac "$(param mac)")"
     [ "${#mac}" = 17 ] || { emit false "Speed limit" "Invalid MAC" "[]" "Enter MAC as aa:bb:cc:dd:ee:ff." "[]" "[]"; exit 0; }
     dn="$(safe_num "$(param limit_down)")"; up="$(safe_num "$(param limit_up)")"
