@@ -347,6 +347,9 @@ case "$action" in
     backup="$(backup_cfg wifi-save)"
     uci -q get wireless."$wifi_if" >/dev/null || uci set wireless."$wifi_if"='wifi-iface'
     uci set wireless."$wifi_if".device="$radio"; uci set wireless."$wifi_if".mode="$mode"; uci set wireless."$wifi_if".network="${network_name:-lan}"
+    # switching to AP clears station-only leftovers (bssid) so the SSID broadcasts again;
+    # re-enable the radio in case a previous Client-mode edit disabled it.
+    [ "$mode" = "ap" ] && { uci -q delete wireless."$wifi_if".bssid; uci set wireless."$radio".disabled='0'; }
     [ -n "$ssid" ] && uci set wireless."$wifi_if".ssid="$ssid"
     [ "$disabled" = "1" ] && uci set wireless."$wifi_if".disabled='1' || uci set wireless."$wifi_if".disabled='0'
     [ "$hidden" = "1" ] && uci set wireless."$wifi_if".hidden='1' || uci delete wireless."$wifi_if".hidden 2>/dev/null
@@ -719,8 +722,23 @@ EOF
     # default both client APs ON; a mesh "receiver" below turns the 5G client AP off,
     # and any previous receiver programming is cleared here so re-programming AP re-enables 5G.
     uci set wireless."$ifc24".disabled='0'; uci set wireless."$ifc5".disabled='0'
+    # FORCE both client-radio interfaces back to AP mode and clear any station/WDS leftovers,
+    # and re-enable the radios themselves. This is why the SSID vanished before: if a radio
+    # was previously switched to Client (sta) / mesh / WDS (via the Wi-Fi editor or native
+    # LuCI), the wizard used to leave mode=sta, so "switch back to Access Point" never
+    # rebroadcast. Now every AP re-program deterministically restores the broadcast.
+    for _ci in "$ifc24" "$ifc5"; do
+      uci set wireless."$_ci".mode='ap'
+      uci -q delete wireless."$_ci".bssid
+      uci -q delete wireless."$_ci".wds
+    done
+    uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'
     # remove any mesh iface from prior programming unless this run is a mesh mode
     case "$program_mode" in mesh|mesh_vlan) : ;; *) uci -q delete wireless.smartap_mesh ;; esac
+    # same for the WDS-receiver station: remove it unless THIS run is a WDS-receiver, else a
+    # leftover sta on radio1 keeps trying to associate to the old peer and bridges back into
+    # LAN (breaks 5G / causes a loop) after switching to plain AP.
+    case "$program_mode" in wds_receiver|wds_receiver_vlan) : ;; *) uci -q delete wireless.smartap_wds ;; esac
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
     [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
     [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
@@ -730,7 +748,12 @@ EOF
     case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) uci set wireless.radio1.htmode="$htmode5" ;; esac
     set_wifi_security "$ifc24" "$security" "$wifi_password"
     set_wifi_security "$ifc5" "$security" "$wifi_password"
-    [ "$hide_ssid" = "1" ] && uci set wireless."$ifc24".hidden='1' || uci delete wireless."$ifc24".hidden 2>/dev/null
+    # hide SSID applies to BOTH bands (was 2.4G only).
+    if [ "$hide_ssid" = "1" ]; then
+      uci set wireless."$ifc24".hidden='1'; uci set wireless."$ifc5".hidden='1'
+    else
+      uci -q delete wireless."$ifc24".hidden; uci -q delete wireless."$ifc5".hidden
+    fi
     if mode_has_vlan "$program_mode"; then
       # ===================================================================================
       # ONE-IP VLAN model: the WHOLE AP lives INSIDE the client VLAN, ONE address only.
@@ -814,6 +837,11 @@ EOF
         uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
         ;;
       wds_receiver|wds_receiver_vlan)
+        # dedicate radio1 to the WDS backhaul: turn the 5G client AP OFF so the station can
+        # FOLLOW the upstream peer's channel (like the mesh receiver does). Otherwise a
+        # co-located 5G AP pins radio1 to channel 36 and the uplink only works if the peer
+        # happens to be on 36.
+        uci set wireless."$ifc5".disabled='1'
         uci -q get wireless.smartap_wds >/dev/null || uci set wireless.smartap_wds='wifi-iface'
         uci set wireless.smartap_wds.device='radio1'; uci set wireless.smartap_wds.mode='sta'; uci set wireless.smartap_wds.network="${client_net:-lan}"; uci set wireless.smartap_wds.ssid="${wds_peer_ssid:-$ssid}"; uci set wireless.smartap_wds.wds='1'; uci set wireless.smartap_wds.disabled='0'
         set_wifi_security smartap_wds "$security" "$wifi_password"
@@ -863,7 +891,10 @@ EOF
     # DHCP policy by mode. In broadband/PPPoE the device IS the main router, so it MUST hand
     # out addresses to its Wi-Fi/LAN clients (they get internet automatically, no manual IP).
     # In every AP mode there is an upstream router, so DHCP stays fully off.
-    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; then
+    # PPPoE/broadband => device is the main router (must serve DHCP). In AP modes DHCP is off
+    # by default (an upstream router serves it), BUT the "DHCP Server" toggle now works: set it
+    # to 1 to make the CR6608 hand out addresses even in AP mode (was previously ignored).
+    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ] || [ "$dhcp_server" = "1" ]; then
       uci set dhcp.lan='dhcp'; uci set dhcp.lan.interface='lan'
       uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'
       uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
@@ -1327,7 +1358,7 @@ htmode5|عرض قناة 5G / السرعة|${ht5:-HE80}|أي معدل نقل: HE2
 mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G وعرضها|text|0|device|mesh,mesh_vlan|
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسِل (الموصول بالميكروتك): يبثّ للجوالات على 2.4G و5G ويحمل رابط الميش. المستقبِل: يبثّ للجوالات على 2.4G فقط، و5G مخصّص لاستقبال الميش|select|0|device|mesh,mesh_vlan|sender:مرسِل (يبثّ 2.4+5G),receiver:مستقبِل (يبثّ 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
-hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور|select|0|device|wds_sender,wds_sender_vlan|0:ظاهر,1:مخفي
+hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور (يطبّق على 2.4G و5G)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|0:ظاهر,1:مخفي
 security|نوع الحماية|${royal_security:-wpa2}|Open / WPA2 / WPA3 mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3 mixed
 wifi_password|كلمة مرور Wi-Fi||اتركها فارغة للاحتفاظ بالمفتاح الحالي|password|0|device|all|
 device_password|تغيير كلمة مرور الجهاز||اختياري، لا تظهر في السجلات ولا الروابط|password|0|device|all|
