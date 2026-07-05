@@ -454,7 +454,7 @@
   function mergeDevices(data) {
     var map = {};
     (data.devices || []).forEach(function (d) { var k = String(d.mac || d.ip || Math.random()).toLowerCase(); map[k] = { ip:d.ip, mac:d.mac, iface:d.iface, type:d.type || "Ethernet", host:d.host }; });
-    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); var t = stationTraffic(s); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate, down:t.down, up:t.up, downBytes:t.downBytes, upBytes:t.upBytes, hasTraffic:t.hasCounters }); }); });
+    (data.wifi || []).forEach(function (w) { (w.stations || []).forEach(function (s) { var k = String(s.mac || Math.random()).toLowerCase(); var t = stationTraffic(s); map[k] = Object.assign(map[k] || {}, { mac:s.mac, ip:s.ip || (map[k]||{}).ip, iface:w.iface, type:"WiFi", signal:s.signal_dbm, rate:s.tx_rate, txRate:s.tx_rate, rxRate:s.rx_rate, down:t.down, up:t.up, downBytes:t.downBytes, upBytes:t.upBytes, hasTraffic:t.hasCounters }); }); });
     // Owner rule: the devices list shows Wi-Fi clients ONLY (2.4G + 5G). Wired/managed
     // gear on lan1..wan already appears in the LLDP/CDP neighbours section — no repeats.
     return Object.keys(map).map(function (k) { map[k].vendor = ouiVendor(map[k].mac); return map[k]; }).filter(function (e) { return e.type === "WiFi"; });
@@ -817,7 +817,14 @@
         var traf = d.hasTraffic
           ? '<span class="latin" style="color:var(--accent);white-space:nowrap">↓ ' + bps(d.down || 0) + '</span><br><span class="latin" style="color:var(--primary);white-space:nowrap">↑ ' + bps(d.up || 0) + '</span>'
           : '<span class="muted">—</span>';
-        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + esc(d.iface || "") + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + traf + '</td><td>' + acts + '</td></tr>';
+        // link column: interface + negotiated PHY link rate RX/TX (Mbps) so both show
+        // together during use — TX = AP→client (download), RX = client→AP (upload).
+        var txr = num(d.txRate), rxr = num(d.rxRate);
+        var linkCell = esc(d.iface || "");
+        if (finite(txr) || finite(rxr)) {
+          linkCell += '<br><small class="latin" style="white-space:nowrap"><span style="color:var(--accent)">↓ ' + (finite(txr) ? fmt(txr, 0) : "—") + '</span> <span style="color:var(--primary)">↑ ' + (finite(rxr) ? fmt(rxr, 0) : "—") + '</span> <span class="muted">Mbps</span></small>';
+        }
+        return '<tr><td>' + icon(d.type === "WiFi" ? "wifi" : "device") + " " + esc(d.type || "") + '</td><td class="latin">' + ipHost + '</td><td class="latin">' + esc((d.mac || tr("unavailable")).toUpperCase()) + '</td><td>' + esc(vn) + '</td><td>' + linkCell + '</td><td class="latin">' + (num(d.signal) !== null ? d.signal + ' dBm ' + proximity(d.signal) : tr('unavailable')) + '</td><td>' + traf + '</td><td>' + acts + '</td></tr>';
       }).join("") +
       '</tbody></table></div>' :
       sectionHead(tr("devices"), "IP / MAC / traffic", "") + '<div class="empty">' + tr("unavailable") + '</div>';
