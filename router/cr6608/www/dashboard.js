@@ -600,13 +600,16 @@
     $("brandMark").innerHTML = icon("wifi");
     var nav = [
       ["overview","overview","bolt"],
+      ["quick","quick","gear"],
+      ["netmgr","netmgr","net"],
+      ["wifimgr","wifimgr","wifi"],
+      ["sysmgr","sysmgr","cpu"],
+      ["isolation","isolation","shield"],
       ["network","network","net"],
       ["devices","devices","device"],
       ["wifi","wifi","wifi"],
       ["insights","insights","signal"],
       ["system","system","cpu"],
-      ["quick","quick","gear"],
-      ["isolation","isolation","shield"],
       ["actions","actions","gear"]
     ];
     $("nav").innerHTML = nav.map(function (n, i) { return '<button data-section="' + n[0] + '" class="' + (i ? "" : "active") + '">' + icon(n[2]) + '<span>' + tr(n[1]) + '</span></button>'; }).join("");
@@ -617,7 +620,7 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","insights","system","quick","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","insights","system","quick","isolation","actions","netmgr","wifimgr","sysmgr"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
@@ -1307,7 +1310,7 @@
       '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
       '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
       '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
-      '<div class="kv"><span>TX Power</span><b class="latin">35 (اختياري)</b></div>';
+      '<div class="kv"><span>TX Power</span><b class="latin">' + esc(fv("txpower") || "38") + ' dBm</b></div>';
   }
   function syncWizardMode() {
     var panel = document.querySelector('[data-control-section="wizard"]');
