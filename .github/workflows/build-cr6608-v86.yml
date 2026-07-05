@@ -52,24 +52,28 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Prepare mt76 and apply the 38 dBm driver patch (best effort)
+      - name: DIAGNOSTIC — dump the real mt76 source so the patch can be rebased
         run: |
           cd ow
-          set -e
-          # Extract mt76 source so we can validate the patch against the pinned rev.
           make package/kernel/mt76/prepare V=s QUILT=1 2>/dev/null || \
             make package/kernel/mt76/prepare V=s 2>/dev/null || true
-          PATCH="$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/patches/999-mt7915-cr6608-rf-35dbm.patch"
           MT76DIR="$(find build_dir -maxdepth 4 -type d -name 'mt76-*' 2>/dev/null | head -1)"
-          echo "mt76 source: ${MT76DIR:-NONE}"
-          if [ -n "$MT76DIR" ] && patch -p1 --dry-run -d "$MT76DIR" < "$PATCH" >/dev/null 2>&1; then
-            patch -p1 -d "$MT76DIR" < "$PATCH"
-            echo "DRIVER35=applied" >> "$GITHUB_ENV"
-            echo "::notice::mt76 38 dBm patch applied cleanly."
-          else
-            echo "DRIVER35=skipped" >> "$GITHUB_ENV"
-            echo "::warning::mt76 35 dBm patch did NOT apply against this pinned mt76 revision. Building with the stock driver — the software layers (txpower/regdb/etc.) are still 35, but the driver banner/param stays stock. Paste the build log to the assistant to refresh the patch."
-          fi
+          echo "===MT76DIR=== ${MT76DIR:-NONE}"
+          [ -n "$MT76DIR" ] || { echo "no mt76 dir"; exit 1; }
+          echo "===LS mt7915==="; ls -la "$MT76DIR/mt7915/" 2>/dev/null
+          echo "===mcu.c set_txpower_sku==="
+          grep -n "set_txpower_sku\|mt76_get_rate_power_limits\|mt76_power_limits\|->cck\|->ofdm\|->mcs\|->ru" "$MT76DIR/mt7915/mcu.c" | head -60
+          echo "===mcu.c function body (set_txpower_sku, 80 lines)==="
+          awk '/mt7915_mcu_set_txpower_sku/{f=1} f{print NR": "$0} f&&/^}/{c++; if(c>=1)exit}' "$MT76DIR/mt7915/mcu.c" | head -90
+          echo "===init.c init_txpower==="
+          awk '/mt7915_init_txpower/{f=1} f{print NR": "$0} f&&/^}/{c++; if(c>=1)exit}' "$MT76DIR/mt7915/init.c" | head -70
+          echo "===eeprom.c target_power / power_delta==="
+          grep -n "get_target_power\|get_power_delta\|target_power\|MT_EE_TX" "$MT76DIR/mt7915/eeprom.c" | head -40
+          echo "===mt76_power_limits struct==="
+          grep -rn "struct mt76_power_limits" "$MT76DIR/mt76.h" "$MT76DIR"/*.h 2>/dev/null | head
+          awk '/struct mt76_power_limits/{f=1} f{print} f&&/};/{exit}' "$MT76DIR/mt76.h" 2>/dev/null | head -30
+          echo "===DIAGNOSTIC COMPLETE — stopping before full build==="
+          exit 1
 
       - name: Bake in the v92 overlay
         run: |
