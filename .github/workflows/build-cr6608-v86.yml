@@ -1,11 +1,11 @@
-name: Build CR6608 v86 (35 dBm from source)
+name: Build CR6608 v92 (38 dBm from source, real mt76 driver)
 
 # Builds a from-source OpenWrt 24.10.6 image for the Xiaomi CR6608 on GitHub's
 # Ubuntu runners (they have the open internet + toolchain this needs). Bakes in
-# the full v85 Smart AP overlay and the mt76 SKU->35 dBm driver patch, then
+# the full v92 Smart AP overlay (71 cards, argon Obsidian, 1-38 dBm Req/Applied) and the mt76 SKU->38 dBm driver patch (999-mt7915-cr6608-rf-35dbm.patch, 38 content), then
 # uploads the flashable sysupgrade .bin as a downloadable artifact.
 #
-# Run it: GitHub -> Actions -> "Build CR6608 v86 (35 dBm from source)" ->
+# Run it: GitHub -> Actions -> "Build CR6608 v92 (38 dBm from source, real mt76 driver)" ->
 # "Run workflow" (pick this branch). ~1-2 hours. Download the artifact when done.
 
 on:
@@ -52,7 +52,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Prepare mt76 and apply the 35 dBm driver patch (best effort)
+      - name: Prepare mt76 and apply the 38 dBm driver patch (best effort)
         run: |
           cd ow
           set -e
@@ -65,13 +65,13 @@ jobs:
           if [ -n "$MT76DIR" ] && patch -p1 --dry-run -d "$MT76DIR" < "$PATCH" >/dev/null 2>&1; then
             patch -p1 -d "$MT76DIR" < "$PATCH"
             echo "DRIVER35=applied" >> "$GITHUB_ENV"
-            echo "::notice::mt76 35 dBm patch applied cleanly."
+            echo "::notice::mt76 38 dBm patch applied cleanly."
           else
             echo "DRIVER35=skipped" >> "$GITHUB_ENV"
             echo "::warning::mt76 35 dBm patch did NOT apply against this pinned mt76 revision. Building with the stock driver — the software layers (txpower/regdb/etc.) are still 35, but the driver banner/param stays stock. Paste the build log to the assistant to refresh the patch."
           fi
 
-      - name: Bake in the v85 overlay
+      - name: Bake in the v92 overlay
         run: |
           cd ow
           mkdir -p files
@@ -98,16 +98,27 @@ jobs:
           cd ow
           make -j$(nproc) || make -j1 V=s
 
+      - name: Prove the compiled driver is 38 (strings check)
+        run: |
+          cd ow
+          KO="$(find build_dir bin -name 'mt7915e.ko' 2>/dev/null | head -1)"
+          echo "mt7915e.ko: ${KO:-NONE}"
+          if [ -n "$KO" ]; then
+            echo "== CR6608-RF banner in compiled driver =="
+            strings "$KO" | grep -i "CR6608-RF" || echo "NO CR6608 banner (patch may not have applied)"
+            strings "$KO" | grep -iE "38DBM|38dbm" && echo "::notice::REAL 38 driver compiled" || echo "::warning::38 banner NOT found in compiled .ko"
+          fi
+
       - name: List output
         run: |
           cd ow
-          echo "driver 35dBm patch: ${DRIVER35}"
+          echo "driver 38dBm patch: ${DRIVER35}"
           ls -la bin/targets/ramips/mt7621/ || true
 
       - name: Upload sysupgrade image
         uses: actions/upload-artifact@v4
         with:
-          name: cr6608-v86-sysupgrade-35dbm
+          name: cr6608-v92-sysupgrade-38dbm-realdriver
           path: ow/bin/targets/ramips/mt7621/*sysupgrade.bin
           if-no-files-found: error
           retention-days: 14
