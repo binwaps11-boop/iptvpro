@@ -1,13 +1,22 @@
 #!/bin/sh /etc/rc.common
 
 START=99
+USE_PROCD=1
 
-start() {
-	return 0
+# When LuCI (or anything) commits the cr6608quick UCI config via "Save & Apply",
+# procd fires this reload trigger, which runs the translator that turns the quick
+# settings into real wireless/network config. Without this trigger the LuCI Quick
+# Settings form would save cr6608quick but never actually apply it.
+service_triggers() {
+	procd_add_reload_trigger "cr6608quick"
 }
 
 reload_service() {
 	/usr/sbin/cr6608-quicksettings-apply apply
+}
+
+start_service() {
+	return 0
 }
 
 restart() {

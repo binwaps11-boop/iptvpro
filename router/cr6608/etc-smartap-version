@@ -1,1 +1,1 @@
-SmartAP CR6608 v88 (perf pack: HE40 2.4G, spatial-reuse, VHT/HE beamforming, TWT, MBO, proxy-ARP, sysctl RX/TX tuning; power 30 real)
+SmartAP CR6608 v89 (v88 perf + FIX: LuCI Quick Settings reload-trigger so Save&Apply actually applies; cache-bust)

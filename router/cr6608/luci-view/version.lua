@@ -17,4 +17,4 @@ else
 end
 
 luciname    = "LuCI (HEAD detached at edc45474) branch"
-luciversion = "26.075.78949~edc4547-sav83"
+luciversion = "26.075.78949~edc4547-sav88"
