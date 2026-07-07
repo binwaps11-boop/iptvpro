@@ -256,8 +256,8 @@ case "$action" in
   clear_api_cache) rm -f /tmp/dashapi2.cache /tmp/dashapi2.cache.ts; emit true "Cache" "Cache cleared" "[]" "Live API cache was cleared." "[]" "[]"; exit 0 ;;
   eeprom_status)
     out="$(/usr/sbin/cr6608-eeprom-power status 2>&1)"
-    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_35dbm 2>/dev/null)"
-    emit true "EEPROM / RF Power" "Status" "[]" "Driver RF override (cr6608_rf_35dbm)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
+    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm 2>/dev/null)"
+    emit true "EEPROM / RF Power" "Status" "[]" "Driver RF override (cr6608_rf_38dbm)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
   eeprom_backup)
     out="$(/usr/sbin/cr6608-eeprom-power backup 2>&1)"
     emit true "EEPROM Backup" "Factory backed up" "[]" "$out\nنسخة المعايرة الاحتياطية جاهزة للتنزيل: http://<router>/factory.orig" "[]" "[]"; exit 0 ;;
