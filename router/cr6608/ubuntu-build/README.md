@@ -14,7 +14,7 @@ It bakes in:
   services + scripts + uci-defaults + hotplug, the patched `regulatory.db` (36 dBm,
   no DFS), `/etc/modprobe.d/mt7915e.conf`, and the `cr6608-eeprom-power` tool. The
   built image is therefore **identical in design and features to v85**.
-- an **mt76 driver patch** (`999-mt7915-cr6608-rf-35dbm.patch`) that lifts the
+- an **mt76 driver patch** (`999-mt7915-cr6608-rf-38dbm.patch`) that lifts the
   driver-side TX-power SKU/target ceiling to **35 dBm on both bands**.
 
 Because `build.sh` pins the **same** OpenWrt tag (`v24.10.6`) that v85 was built from,
@@ -27,7 +27,7 @@ ubuntu-build/
 ├── cr6608.seed.config      # diffconfig seed fed into .config
 ├── README.md               # this file
 ├── patches/
-│   └── 999-mt7915-cr6608-rf-35dbm.patch
+│   └── 999-mt7915-cr6608-rf-38dbm.patch
 └── files/                  # the full v85 overlay, baked verbatim into the rootfs
     ├── etc/config/{network,system,wireless}
     ├── etc/modprobe.d/mt7915e.conf

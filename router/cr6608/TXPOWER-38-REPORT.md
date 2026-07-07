@@ -28,7 +28,7 @@
 **PA ≠ EIRP:** الـPA خرج المكبّر الموصّل؛ EIRP = خرج الراديو + ربح الهوائي − الفقد.
 
 ## 3) أين تعديل الدرايفر بالضبط (mt76 / mt7915)
-الباتش `ubuntu-build/patches/999-mt7915-cr6608-rf-35dbm.patch` (محتواه 38، الاسم قديم لتوافق modprobe):
+الباتش `ubuntu-build/patches/999-mt7915-cr6608-rf-38dbm.patch` (المعامل `cr6608_rf_38dbm`):
 - `mt7915/mt7915.h` — الثوابت: `MAX_HALF_DBM 76 (38.0)`, `CAP_MCS_HALF 72 (36.0)`, `CAP_RU_HALF 68 (34.0)`, `MAX_DBM 38`.
 - `mt7915/mcu.c` → **`mt7915_mcu_set_txpower_sku()`** — يرفع صفوف `cck/ofdm/mcs/ru` في `struct mt76_power_limits`
   (بعد `mt76_get_rate_power_limits()` وقبل إرسالها للفيرموير عبر أمر `TX_POWER_LIMIT_TABLE`) بـ`max_t` (رفع فقط).
@@ -36,11 +36,13 @@
 - `mt7915/eeprom.c` → **`mt7915_eeprom_get_target_power()` / `_get_power_delta()`** — يفرض target=76 ويضيف +6dB.
 - البانر المتوقّع في dmesg بعد بناء صحيح: `CR6608-RF-38DBM-LINEAR max=38, data caps=36/34 dBm`.
 
-## 4) قيد صريح — السائق المشحون هنا لا يزال 35
-النسخة v91 تحفظ **سائقك المبني (v90) بايت-ببايت** (لا نلمس نواتك). بصمة strings تؤكّد أنه ما زال
-`CR6608-RF-35DBM` (ليس 38). **للحصول على درايفر 38 حقيقي:** استبدل الباتش في عدة بناء Ubuntu
-(هو أصلاً 38) وأعد بناء mt76/mt7915e، ثم تأكّد: `strings mt7915e.ko | grep -i 38dbm`.
-الصندوق لا يترجم من المصدر (egress مقفول) — موثّق في CLAUDE.md.
+## 4) الحالة الآن — السائق المشحون درايفر 38 حقيقي
+البناء النهائي (`cr6608-final-clean-openwrt-dsa-38-sysupgrade.bin`) يحمل **سائق mt7915e مبنيًّا من المصدر
+مع المعامل `cr6608_rf_38dbm` والبانر `CR6608-RF-38DBM-LINEAR`** — لا يوجد أي `cr6608_rf_35dbm` ولا
+`CR6608-RF-35DBM`. التأكيد: `strings mt7915e.ko | grep -i 38dbm` يُظهر `cr6608_rf_38dbm` +
+`CR6608-RF-38DBM-LINEAR`، و`grep -i 35dbm` فارغ. `/etc/modules.d/mt7915e` = `mt7915e cr6608_rf_38dbm=1`.
+تذكرة الحقيقة الهندسية: هذا **طلب/سقف** برمجي — الخرج الفعلي يبقى محدودًا بالـPA (~30 dBm EIRP)؛
+لا فيرموير يشعّ 38 dBm فعليًّا. الصندوق لا يترجم من المصدر (egress مقفول) — البناء تمّ على جهاز المالك.
 
 ## 5) الفحص على الجهاز (شغّله بنفسك — لا SSH من الصندوق)
 ```

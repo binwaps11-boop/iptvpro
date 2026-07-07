@@ -23,7 +23,7 @@ REGDB_URL="https://git.kernel.org/pub/scm/linux/kernel/git/sforshee/wireless-reg
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_FILES="${SCRIPT_DIR}/files"
-SRC_PATCH="${SCRIPT_DIR}/patches/999-mt7915-cr6608-rf-35dbm.patch"
+SRC_PATCH="${SCRIPT_DIR}/patches/999-mt7915-cr6608-rf-38dbm.patch"
 SRC_SEED="${SCRIPT_DIR}/cr6608.seed.config"
 OPENWRT_DIR="${SCRIPT_DIR}/openwrt"
 

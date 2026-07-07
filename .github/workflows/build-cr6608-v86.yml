@@ -2,7 +2,7 @@ name: Build CR6608 v92 (38 dBm from source, real mt76 driver)
 
 # Builds a from-source OpenWrt 24.10.6 image for the Xiaomi CR6608 on GitHub's
 # Ubuntu runners (they have the open internet + toolchain this needs). Bakes in
-# the full v92 Smart AP overlay (71 cards, argon Obsidian, 1-38 dBm Req/Applied) and the mt76 SKU->38 dBm driver patch (999-mt7915-cr6608-rf-35dbm.patch, 38 content), then
+# the full v92 Smart AP overlay (71 cards, argon Obsidian, 1-38 dBm Req/Applied) and the mt76 SKU->38 dBm driver patch (999-mt7915-cr6608-rf-38dbm.patch / apply-mt76-38.py, cr6608_rf_38dbm param), then
 # uploads the flashable sysupgrade .bin as a downloadable artifact.
 #
 # Run it: GitHub -> Actions -> "Build CR6608 v92 (38 dBm from source, real mt76 driver)" ->
