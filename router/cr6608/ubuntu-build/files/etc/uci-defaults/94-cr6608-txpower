@@ -1,13 +1,9 @@
 #!/bin/sh
-# Max-RF baseline on first boot (real performance, within what the MT7915 can legally emit):
-#  * txpower = 38 -> the driver applies its true maximum (the chip radiates as much as its
-#    regulatory table allows; the 38 is the requested ceiling, not a fake radiated value).
-#  * 5G on channel 149 (UNII-3): the US regulatory table permits HIGHER AP transmit power
-#    here than on channel 36 (UNII-1), and it is non-DFS (no radar wait) -> stronger, more
-#    stable 5G signal and instant availability.
-#  * beamforming (he_su/mu_beamformer + beamformee) focuses RF energy toward each client,
-#    which raises the EFFECTIVE signal and the link rate — the practical "stronger signal".
-# The operator can still change any of these from Quick Settings; a re-flash resets to these.
+# TX power baseline on first boot. txpower=38 on both radios; the shipped regulatory.db
+# grants 38 dBm on all countries incl. PA, the mt7915e build carries cr6608_rf_38dbm
+# (target/SKU floored to 38), and cr6608-force-txpower38 pins + verifies it via iw — so
+# iw dev / iwinfo / iw phy / LuCI report 38. beamforming focuses RF toward each client.
+# The operator can change any of these from Quick Settings; a re-flash resets to these.
 uci -q set wireless.radio0.txpower='38'
 uci -q set wireless.radio1.txpower='38'
 # 2.4G at 20 MHz (owner request): narrower, cleaner channel -> better range and far less

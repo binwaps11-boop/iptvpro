@@ -165,6 +165,38 @@ jobs:
           else
             echo "::warning::could not unpack image to verify in-image .ko (bin still uploaded)"
           fi
+          echo "===6) POWER-PATH GATE: no 35/30 cap, regdb PA=38, enforcement present==="
+          if [ -n "$IMGKO" ]; then
+            SQ="/tmp/imgchk/sq"
+            # a) driver param must be 38, never 35
+            strings -a "$IMGKO" | grep -qi "cr6608_rf_38dbm" || { echo "::error::driver param cr6608_rf_38dbm missing"; exit 1; }
+            if strings -a "$IMGKO" | grep -qiE "cr6608_rf_35dbm|35DBM"; then echo "::error::stale 35 in driver"; exit 1; fi
+            # b) modules.d passes the 38 param
+            grep -q "cr6608_rf_38dbm=1" "$SQ/etc/modules.d/mt7915e" || { echo "::error::modules.d not 38"; exit 1; }
+            # c) uci baseline txpower 38 on both radios, no '30'/'35' txpower cap in configs/scripts
+            if grep -RIn -E "txpower[^0-9]{0,3}(30|35)\b|Selectable up to 35|Maximum TX power[^0-9]{0,6}30" "$SQ/etc" "$SQ/usr/sbin" "$SQ/usr/libexec" 2>/dev/null | grep -viE "1:38|1-38|:38:|txpower-verify"; then
+              echo "::error::a 30/35 TX-power cap remains in the rootfs"; exit 1
+            fi
+            # d) enforcement script present and wired
+            test -x "$SQ/usr/sbin/cr6608-force-txpower38" || { echo "::error::force-txpower38 missing"; exit 1; }
+            grep -q "cr6608-force-txpower38" "$SQ/etc/hotplug.d/ieee80211/99-cr6608-txpower" || { echo "::error::hotplug not wired to force script"; exit 1; }
+            # e) regulatory.db PA must allow 38.0 dBm (max_eirp 3800 mBm) on 2.4G
+            python3 - "$SQ/lib/firmware/regulatory.db" <<'PYV'
+import struct,sys
+d=open(sys.argv[1],'rb').read();off=8
+while True:
+    a=d[off:off+2];p=struct.unpack_from('>H',d,off+2)[0]
+    if a==b'\x00\x00' and p==0: print("::error::PA not in regdb");sys.exit(1)
+    if a==b'PA':
+        c=p*4;q=c+3+(c+3)%2;r=struct.unpack_from('>H',d,q)[0]*4
+        e=struct.unpack_from('>H',d,r+2)[0]
+        print("PA 2.4G max_eirp mBm=",e)
+        sys.exit(0 if e>=3800 else 1)
+    off+=4
+PYV
+            [ $? -eq 0 ] || { echo "::error::regdb PA < 38 dBm"; exit 1; }
+            echo "::notice::POWER-PATH GATE PASSED — 38 everywhere, no 30/35 cap, regdb PA=38, enforcement wired"
+          fi
 
       - name: List output
         run: |

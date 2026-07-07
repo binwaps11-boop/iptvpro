@@ -1,0 +1,53 @@
+#!/bin/sh
+# cr6608-force-txpower38 — force every radio to a REPORTED 38 dBm and keep verifying.
+#
+# The regulatory.db shipped here grants 38.0 dBm EIRP on every country (incl. PA) on
+# 2.4/5 GHz, and the mt7915e build carries cr6608_rf_38dbm (target/SKU floored to 38),
+# so `iw phy set txpower fixed 3800` is accepted and `iw dev info` reports 38.00 dBm.
+#
+# This helper defeats the one remaining race: a late regulatory re-clamp of the
+# per-channel max after hostapd applies the country. It re-applies and READS BACK the
+# actual `iw dev info` txpower, retrying until every interface reports >= 38 (or the
+# attempts run out), logging the final value. Idempotent; safe to run any time.
+
+LOG="logger -t cr6608-tx38"
+TARGET_MBM=3800          # 38.0 dBm
+TARGET_DBM=38
+
+apply_once() {
+	iw reg set PA 2>/dev/null || true
+	for pp in /sys/class/ieee80211/phy*; do
+		[ -d "$pp" ] || continue
+		p="${pp##*/}"
+		iw phy "$p" set txpower fixed "$TARGET_MBM" 2>/dev/null || \
+		iw phy "$p" set txpower limit "$TARGET_MBM" 2>/dev/null || true
+	done
+}
+
+all_at_target() {
+	# returns 0 only if EVERY wifi interface reports txpower >= TARGET_DBM
+	ifs="$(iw dev 2>/dev/null | awk '/Interface/{print $2}')"
+	[ -n "$ifs" ] || return 1
+	for i in $ifs; do
+		v="$(iw dev "$i" info 2>/dev/null | awk '/txpower/{print int($2)}')"
+		[ -n "$v" ] || return 1
+		[ "$v" -ge "$TARGET_DBM" ] 2>/dev/null || return 1
+	done
+	return 0
+}
+
+n=0
+while [ "$n" -lt 20 ]; do
+	apply_once
+	if all_at_target; then
+		$LOG "txpower pinned: all interfaces report >= ${TARGET_DBM} dBm"
+		exit 0
+	fi
+	n=$((n+1))
+	sleep 3
+done
+# last attempt result (for logread)
+for i in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+	$LOG "txpower final $i: $(iw dev "$i" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"
+done
+exit 0

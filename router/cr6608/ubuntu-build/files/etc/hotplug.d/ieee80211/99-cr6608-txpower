@@ -1,14 +1,4 @@
 #!/bin/sh
-# Pin every radio to 38 dBm (3800 mBm) after the phy appears. regdb allows 38 dBm
-# on all countries incl. PA, so `fixed 3800` succeeds and iw/iwinfo/LuCI then
-# report 38. Runs on every ieee80211 hotplug (boot + wifi reload re-creates phy).
-(
-	sleep 6
-	iw reg set PA 2>/dev/null || true
-	for phy_path in /sys/class/ieee80211/phy*; do
-		[ -d "$phy_path" ] || continue
-		phy="${phy_path##*/}"
-		iw phy "$phy" set txpower fixed 3800 2>/dev/null || \
-		iw phy "$phy" set txpower limit 3800 2>/dev/null || true
-	done
-) &
+# On every ieee80211 hotplug (boot + wifi reload re-creates the phy), pin all radios
+# to a REPORTED 38 dBm with read-back verification. regdb allows 38 on all countries.
+[ -x /usr/sbin/cr6608-force-txpower38 ] && ( sleep 6; /usr/sbin/cr6608-force-txpower38 ) &
