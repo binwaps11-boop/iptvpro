@@ -2,8 +2,25 @@
 'require view';
 'require uci';
 'require form';
+'require fs';
+'require ui';
 
 return view.extend({
+	// Save & Apply must really apply: after the UCI save, run the executor that
+	// programs wireless/network/dhcp from cr6608quick (ACL grants exec on it).
+	handleSaveApply: function(ev, mode) {
+		return this.handleSave(ev).then(function() {
+			return fs.exec('/usr/sbin/cr6608-quicksettings-apply').then(function(res) {
+				if (res && res.code === 0)
+					ui.addNotification(null, E('p', _('تم الحفظ والتطبيق الفعلي على الشبكة والواي فاي.')), 'info');
+				else
+					ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((res && (res.stderr || res.stdout)) || (res && res.code) || '?')), 'error');
+			}).catch(function(e) {
+				ui.addNotification(null, E('p', _('حُفظ الإعداد لكن تعذر تشغيل المنفّذ: ') + e), 'error');
+			});
+		});
+	},
+
 	load: function() {
 		return Promise.all([
 			uci.load('cr6608quick'),

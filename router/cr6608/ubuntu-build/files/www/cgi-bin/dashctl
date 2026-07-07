@@ -607,7 +607,7 @@ case "$action" in
     # (wifi reload otherwise re-derives it from the reg default). regdb allows 38.
     ( sleep 3; for _p in /sys/class/ieee80211/phy*; do [ -d "$_p" ] || continue
         iw phy "${_p##*/}" set txpower fixed "${req}00" 2>/dev/null || \
-        iw phy "${_p##*/}" set txpower limit "${req}00" 2>/dev/null || true; done ) &
+        iw phy "${_p##*/}" set txpower limit "${req}00" 2>/dev/null || true; done ) >/dev/null 2>&1 &
     applied=""
     for IF in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
       a="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"
@@ -1156,7 +1156,7 @@ EOF
       [ -n "$rip" ] || continue
       [ "$kc" -ge 60 ] && break
       kc=$((kc+1))
-      { nm="$(run_limit 1 nslookup "$rip" 2>/dev/null | sed -n 's/.*name = \([^ ]*\)\.$/\1/p;s/.*name = \([^ ]*\)$/\1/p' | grep -vi in-addr | head -1)"; [ -n "$nm" ] && printf '%s|%s\n' "$rip" "$nm" >> "$st/rdns"; } 2>/dev/null &
+      { nm="$(run_limit 1 nslookup "$rip" 2>/dev/null | sed -n 's/.*name = \([^ ]*\)\.$/\1/p;s/.*name = \([^ ]*\)$/\1/p' | grep -vi in-addr | head -1)"; [ -n "$nm" ] && printf '%s|%s\n' "$rip" "$nm" >> "$st/rdns"; } >/dev/null 2>&1 &
       [ $((kc % 20)) -eq 0 ] && wait
     done < "$st/merged"
     wait

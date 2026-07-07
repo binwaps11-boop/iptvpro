@@ -86,11 +86,18 @@ apply("mt7915/init.c", INIT_BANNER_ANCHOR, INIT_BANNER_INSERT, "driver-banner")
 
 INIT_MAXPWR_ANCHOR = "\t\tchan->orig_mpwr = target_power;\n"
 INIT_MAXPWR_INSERT = (
-"\t\t/* CR6608: request up to 38 dBm at the per-channel ceiling (whole dBm). */\n"
-"\t\tif (chan->max_reg_power < 38) chan->max_reg_power = 38;\n"
-"\t\tif (chan->max_power < 38) chan->max_power = 38;\n"
+"\t\t/* CR6608: force the per-channel ceiling to 38 dBm (whole dBm). orig_mpwr MUST\n"
+"\t\t * be raised too -- cfg80211 handle_channel() recomputes, on every country/reg\n"
+"\t\t * (re)apply,  chan->max_power = min(chan->orig_mpwr, chan->max_reg_power).\n"
+"\t\t * Leaving orig_mpwr at the EEPROM target (e.g. 26/24) pulls max_power back down\n"
+"\t\t * after 'iw reg set PA', which is exactly why iw phy showed 26/24. Setting all\n"
+"\t\t * three to 38 makes iw phy / iw dev / iwinfo report 38 and survive the reg\n"
+"\t\t * re-clamp. Request ceiling only; real radiated RF stays PA/hardware limited. */\n"
+"\t\tchan->orig_mpwr = 38;\n"
+"\t\tchan->max_reg_power = 38;\n"
+"\t\tchan->max_power = 38;\n"
 )
-apply("mt7915/init.c", INIT_MAXPWR_ANCHOR, INIT_MAXPWR_INSERT, "chan-max_power->38")
+apply("mt7915/init.c", INIT_MAXPWR_ANCHOR, INIT_MAXPWR_INSERT, "chan-max_power+orig_mpwr->38")
 
 # --- mt7915/eeprom.c : floor the EEPROM target power to 38.0 dBm (76 in 0.5 dBm units) so the
 #     driver REPORTS/applies the 38 request -> iw/iwinfo "Current power" reads 38 (this is what

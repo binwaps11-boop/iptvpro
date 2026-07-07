@@ -10,6 +10,12 @@ name: Build CR6608 v92 (38 dBm from source, real mt76 driver)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - claude/smart-dashboard-login-build-ice1r6
+    paths:
+      - 'router/cr6608/ubuntu-build/**'
+      - '.github/workflows/build-cr6608-v86.yml'
 
 permissions:
   contents: read
