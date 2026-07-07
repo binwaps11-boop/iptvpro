@@ -59,7 +59,14 @@ GLOBAL_INSERT = (
 "/* CR6608: file-scope banner forced into the .ko (__used => never GC'd). This is\n"
 " * what `strings -a mt7915e.ko` must find to prove the 38 dBm driver is compiled in. */\n"
 "const char cr6608_rf_38dbm_banner[] __attribute__((used)) =\n"
-"\t\"CR6608-RF-38DBM-LINEAR enabled\";\n\n"
+"\t\"CR6608-RF-38DBM-LINEAR enabled\";\n"
+"/* Visible module param so `cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm` = Y and\n"
+" * `mt7915e cr6608_rf_38dbm=1` in modules.d is accepted by insmod. Defaults on: the\n"
+" * per-channel 38 dBm override below is gated on it, so the build is 38 out of the box. */\n"
+"bool cr6608_rf_38dbm = true;\n"
+"module_param(cr6608_rf_38dbm, bool, 0444);\n"
+"MODULE_PARM_DESC(cr6608_rf_38dbm,\n"
+"\t\t \"CR6608: force the 38 dBm per-channel ceiling on both bands (default on)\");\n\n"
 )
 # insert the global BEFORE the function (prepend: put global then the original anchor)
 def prepend(relpath, anchor, insert, tag):
@@ -93,9 +100,11 @@ INIT_MAXPWR_INSERT = (
 "\t\t * after 'iw reg set PA', which is exactly why iw phy showed 26/24. Setting all\n"
 "\t\t * three to 38 makes iw phy / iw dev / iwinfo report 38 and survive the reg\n"
 "\t\t * re-clamp. Request ceiling only; real radiated RF stays PA/hardware limited. */\n"
-"\t\tchan->orig_mpwr = 38;\n"
-"\t\tchan->max_reg_power = 38;\n"
-"\t\tchan->max_power = 38;\n"
+"\t\tif (cr6608_rf_38dbm) {\n"
+"\t\t\tchan->orig_mpwr = 38;\n"
+"\t\t\tchan->max_reg_power = 38;\n"
+"\t\t\tchan->max_power = 38;\n"
+"\t\t}\n"
 )
 apply("mt7915/init.c", INIT_MAXPWR_ANCHOR, INIT_MAXPWR_INSERT, "chan-max_power+orig_mpwr->38")
 
