@@ -313,7 +313,9 @@ case "$action" in
     uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
     emit true "Firewall" "Rule added" "[]" "Backup: $backup\nFirewall rule $fname was added and firewall reloaded. TX Power unchanged." "[]" "[]"; exit 0 ;;
   save_system)
-    confirm_required "System"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     newhost="$(safe_word "$(param hostname)")"; newtz="$(param timezone | cut -c1-64)"
     backup="$(backup_cfg system)"
     [ -n "$newhost" ] && uci set system.@system[0].hostname="$newhost"
@@ -367,7 +369,9 @@ case "$action" in
     uci -q delete network."$ifname"; uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
     emit true "Interfaces" "Interface deleted with rollback" "[]" "Backup: $backup\nDeleted interface $ifname. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_wifi)
-    confirm_required "Wireless"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     wifi_if="$(safe_word "$(param wifi_if)")"; radio="$(safe_word "$(param wifi_radio)")"; ssid="$(param wifi_ssid | cut -c1-32)"
     network_name="$(safe_word "$(param wifi_network)")"; mode="$(safe_word "$(param wifi_mode)")"; channel="$(safe_num "$(param wifi_channel)")"; htmode="$(safe_word "$(param wifi_htmode)")"
     disabled="$(safe_num "$(param wifi_disabled)")"; hidden="$(safe_num "$(param wifi_hidden)")"; isolate="$(safe_num "$(param wifi_isolate)")"; wmm="$(safe_num "$(param wifi_wmm)")"; dtim="$(safe_num "$(param wifi_dtim)")"
@@ -568,7 +572,9 @@ case "$action" in
     uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
     emit true "DSA VLAN" "Applied with rollback" "[]" "Backup: $backup\nDevice=$vdev VLAN=$vid Ports=$vports\nKeep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_wifi_radio)
-    confirm_required "Wi-Fi radio"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     radio="$(safe_word "$(param wifi_radio)")"; [ -n "$radio" ] || radio="radio0"
     case "$radio" in radio0|radio1) : ;; *) emit false "Wi-Fi radio" "Invalid radio" "[]" "Use radio0 or radio1." "[]" "[]"; exit 0 ;; esac
     channel="$(safe_num "$(param radio_channel)")"; htmode="$(safe_word "$(param radio_htmode)")"; country="$(safe_word "$(param radio_country)")"
@@ -588,7 +594,9 @@ case "$action" in
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
     emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. Use the TX Power field to request 1..38 dBm (written to all radios; driver clamps to the real ceiling)." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   set_txpower)
-    confirm_required "TX Power"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     req="$(safe_num "$(param txpower)")"; case "$req" in ''|*[!0-9]*) req=38 ;; esac
     [ "$req" -lt 1 ] 2>/dev/null && req=1; [ "$req" -gt 38 ] 2>/dev/null && req=38
     backup="$(backup_cfg txpower)"
@@ -611,7 +619,9 @@ EOF
 )"
     emit true "TX Power" "طُلب ${req} dBm — وطُبّق حسب الدرايفر" "$cards" "طلبنا ${req} dBm وكتبناه لكل الراديوهات. Applied = ما أعلنه الدرايفر عبر iw، وهو ليس قياس قدرة حقيقي. الخرج يُقص عند min(regulatory, EEPROM/caldata, PA). الإثبات الحقيقي = جهاز قياس RF/سبكترم." '[{"id":"keep_changes","label":"احتفظ بالتغيير"},{"id":"rollback_last","label":"تراجع الآن","confirm":true}]' "[]"; exit 0 ;;
   save_dnsmasq)
-    confirm_required "DHCP / DNS"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     backup="$(backup_cfg dnsmasq)"
     for pair in domainneeded boguspriv rebind_protection localservice filter_aaaa filter_a authoritative readethers; do
       v="$(safe_num "$(param "dns_$pair")")"; [ -n "$v" ] && uci set dhcp.@dnsmasq[0]."$pair"="$v"
@@ -651,7 +661,9 @@ EOF
     uci commit sqm; /etc/init.d/sqm restart >/dev/null 2>&1
     emit true "SQM" "SQM saved" "[]" "Backup: $backup\nSQM CR6608 queue saved." "[]" "[]"; exit 0 ;;
   save_reboot_schedule)
-    confirm_required "Reboot schedule"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     enabled="$(safe_num "$(param reboot_sched_enabled)")"; hour="$(safe_num "$(param reboot_hour)")"; minute="$(safe_num "$(param reboot_minute)")"
     [ -n "$hour" ] && [ "$hour" -le 23 ] 2>/dev/null || hour=4
     [ -n "$minute" ] && [ "$minute" -le 59 ] 2>/dev/null || minute=0
@@ -664,7 +676,9 @@ EOF
     /etc/init.d/cron reload >/dev/null 2>&1
     emit true "Reboot schedule" "Schedule saved" "[]" "Backup: $backup\nScheduled reboot enabled=$enabled at $hour:$minute." "[]" "[]"; exit 0 ;;
   set_led)
-    confirm_required "LED"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     led="$(param led_name | sed 's#[^A-Za-z0-9_:-]##g' | cut -c1-96)"; trig="$(safe_word "$(param led_trigger)")"; bright="$(safe_num "$(param led_brightness)")"
     [ -d "/sys/class/leds/$led" ] || { emit false "LED" "Unknown LED" "[]" "LED not found under /sys/class/leds." "[]" "[]"; exit 0; }
     [ -n "$trig" ] && printf '%s' "$trig" > "/sys/class/leds/$led/trigger" 2>/dev/null
@@ -700,7 +714,9 @@ EOF
     out="$(run_limit 8 nslookup "$host" 2>&1 | redact)"
     emit true "DNS lookup" "DNS diagnostic from the router" "[]" "$out" '[{"id":"ping","label":"Ping","input":"host"},{"id":"traceroute","label":"Traceroute","input":"host"},{"id":"nslookup","label":"DNS lookup","input":"host"}]' '[]'; exit 0 ;;
   save_dhcp)
-    confirm_required "LAN / DHCP"
+    # one-click save (owner request): everyday saves apply immediately; a backup is
+    # still recorded for the manual "Rollback now" button. Confirm stays only on
+    # destructive actions (delete/reboot/reset/raw-uci/ports).
     ipaddr="$(param lan_ipaddr)"; netmask="$(param netmask)"; start="$(safe_num "$(param start)")"; limit="$(safe_num "$(param limit)")"; leasetime="$(param leasetime)"; enabled="$(safe_num "$(param dhcp_enabled)")"
     case "$ipaddr" in ''|*[!0-9.]*) emit false "LAN / DHCP" "Invalid LAN IP" "[]" "Use an IPv4 address." "[]" "[]"; exit 0 ;; esac
     case "$netmask" in ''|*[!0-9.]*) emit false "LAN / DHCP" "Invalid netmask" "[]" "Use an IPv4 netmask." "[]" "[]"; exit 0 ;; esac
@@ -1314,7 +1330,7 @@ EOF
   wifi_reload) confirm_required "Wi-Fi reload"; wifi reload >/tmp/dashctl.action 2>&1; emit true "Wi-Fi reload" "Wi-Fi reload sent" "[]" "TX Power was not modified.\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   restart_dnsmasq) confirm_required "DHCP service"; /etc/init.d/dnsmasq restart >/tmp/dashctl.action 2>&1; emit true "DHCP service" "dnsmasq restarted" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   save_guest)
-    confirm_required "Guest Wi-Fi"
+    # one-click save (owner request)
     enabled="$(safe_num "$(param guest_enabled)")"; gssid="$(param guest_ssid | cut -c1-32)"; gpass="$(param guest_pass | cut -c1-64)"
     backup="$(backup_cfg guest)"
     if [ "$enabled" = "1" ]; then
@@ -1333,7 +1349,7 @@ EOF
     /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
     emit true "Guest Wi-Fi" "Guest settings applied" "[]" "Backup: $backup\nGuest network updated. TX Power was not changed." "[]" "[]"; exit 0 ;;
   save_iptv)
-    confirm_required "IPTV"
+    # one-click save (owner request)
     igmp="$(safe_num "$(param igmp_snooping)")"; backup="$(backup_cfg iptv)"
     if [ "$igmp" = "1" ]; then uci set network.@device[0].igmp_snooping='1'; else uci -q delete network.@device[0].igmp_snooping; fi
     uci commit network; /etc/init.d/network reload >/dev/null 2>&1
