@@ -30,27 +30,56 @@ if [ "$ok_auth" != "1" ]; then
 fi
 echo ""
 
-# ---- parse + validate ----
-ip="$(jget ipaddr    | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
-nm="$(jget netmask   | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
-s24="$(jget ssid24   | cut -c1-32)"
-s5="$(jget ssid5     | cut -c1-32)"
-c24="$(jget channel24| grep -oE '^([1-9]|1[0-3])$')"
-c5="$(jget channel5  | grep -oE '^[0-9]{1,3}$')"
-tx="$(jget txpower   | grep -oE '^[0-9]{1,2}$')"
-cc="$(jget country   | grep -oE '^[A-Z][A-Z0-9]$')"
+# ---- parse + validate (accepts BOTH the Argon field names and the legacy short ones) ----
+u()  { [ -n "$2" ] && uci -q set "cr6608quick.default.$1=$2"; }        # set if non-empty
+uw() { uci -q set "cr6608quick.default.$1=$2"; }                        # always set (checkboxes)
+pick() { v=""; for k in "$@"; do v="$(jget "$k")"; [ -n "$v" ] && break; done; printf '%s' "$v"; }
 
-u() { [ -n "$2" ] && uci -q set "cr6608quick.default.$1=$2"; }
+mode="$(pick mode program_mode | grep -oE '^(ap|ap_vlan|mesh|mesh_vlan|wds|pppoe|pppoe_ap)$')"
+ip="$(pick lan_ipaddr ipaddr device_ip | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
+nm="$(pick lan_netmask netmask | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
+vlan="$(pick vlan_id | grep -oE '^[0-9]{1,4}$')"
+s24="$(pick ssid ssid24 | cut -c1-32)"
+s5="$(pick ssid5 | cut -c1-32)"
+c24="$(pick channel24 | grep -oE '^([1-9]|1[0-3])$')"
+c5="$(pick channel5 | grep -oE '^[0-9]{1,3}$')"
+tx="$(pick txpower | grep -oE '^[0-9]{1,2}$')"
+cc="$(pick country | grep -oE '^[A-Za-z][A-Za-z0-9]$')"
+sec="$(pick security | grep -oE '^(open|wpa2|wpa3|psk2|sae|sae-mixed)$')"
+key="$(pick wifi_key key)"
+hide="$(pick hide_ssid | grep -oE '^[01]$')"
+meshid="$(pick mesh_id | cut -c1-32)"
+wds="$(pick wds_ssid | cut -c1-32)"
+pu="$(pick pppoe_user | cut -c1-64)"
+pp="$(pick pppoe_pass | cut -c1-64)"
+pport="$(pick pppoe_port | grep -oE '^[a-z0-9]+$')"
+natf="$(pick nat_enabled | grep -oE '^[01]$')"
+dhcps="$(pick dhcp_server | grep -oE '^[01]$')"
+fw="$(pick firewall_enabled | grep -oE '^[01]$')"
+
+u mode        "$mode"
 u lan_ipaddr  "$ip"
 u lan_netmask "$nm"
+u vlan_id     "$vlan"
 u ssid        "$s24"
 u ssid5       "$s5"
 u channel24   "$c24"
 u channel5    "$c5"
-u country24   "$cc"
-u country5    "$cc"
-u txpower_radio0 "${tx:-38}"
-u txpower_radio1 "${tx:-38}"
+[ -n "$cc" ] && { uw country24 "$cc"; uw country5 "$cc"; }
+u security    "$sec"
+[ -n "$key" ] && uw wifi_key "$key"
+[ -n "$hide" ] && uw hide_ssid "$hide"
+u mesh_id     "$meshid"
+u wds_ssid    "$wds"
+u pppoe_user  "$pu"
+u pppoe_pass  "$pp"
+u pppoe_port  "$pport"
+[ -n "$natf" ]  && uw nat_enabled "$natf"
+[ -n "$dhcps" ] && uw dhcp_server "$dhcps"
+[ -n "$fw" ]    && uw firewall_enabled "$fw"
+# txpower stays owner-fixed at 38 on both radios
+uw txpower_radio0 "${tx:-38}"
+uw txpower_radio1 "${tx:-38}"
 uci -q commit cr6608quick
 
 # ---- real apply (output kept off stdout so the HTTP response closes promptly) ----

@@ -6,18 +6,49 @@
 'require ui';
 
 return view.extend({
-	// Save & Apply must really apply: after the UCI save, run the executor that
-	// programs wireless/network/dhcp from cr6608quick (ACL grants exec on it).
+	// Save & Apply must REALLY apply. LuCI's handleSave only STAGES cr6608quick in the
+	// rpcd session (that is the "UNSAVED CHANGES: 6" the user saw) — the CLI executor
+	// then reads stale on-disk values. So instead: read the form values the user just
+	// entered and POST them to /cgi-bin/cr6608-quick-apply, which writes cr6608quick to
+	// disk and runs the executor (real uci set -> commit -> network/wifi reload),
+	// returning a real ok/fail. Then drop LuCI's stale change cache so no ghost
+	// "unsaved changes" remains.
+	FIELDS: ['mode','lan_ipaddr','lan_netmask','vlan_id','ssid','ssid5','channel24',
+		'channel5','mesh_id','wds_ssid','hide_ssid','security','wifi_key','change_password',
+		'admin_password','clear_previous','pppoe_user','pppoe_pass','pppoe_port','reset_lock',
+		'reset_custom','reset_seconds','nat_enabled','dhcp_server','firewall_enabled',
+		'watchcat_enabled','broadband_enabled','fake_mesh'],
 	handleSaveApply: function(ev, mode) {
+		var self = this;
+		// this.handleSave flushes the form widgets into the in-memory uci session, so
+		// uci.get returns exactly what the user typed (no disk round-trip needed).
 		return this.handleSave(ev).then(function() {
-			return fs.exec('/usr/sbin/cr6608-quicksettings-apply').then(function(res) {
-				if (res && res.code === 0)
+			var payload = {};
+			self.FIELDS.forEach(function(k) {
+				var v = uci.get('cr6608quick', 'default', k);
+				if (v !== null && v !== undefined) payload[k] = String(v);
+			});
+			return fetch('/cgi-bin/cr6608-quick-apply', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload),
+				credentials: 'same-origin',
+				cache: 'no-store'
+			}).then(function(r) { return r.json().catch(function(){ return { ok:false }; }); });
+		}).then(function(j) {
+			// the executor committed network/wireless/dhcp via CLI; drop LuCI's cached
+			// deltas so the "unsaved changes" banner clears and the reload shows truth.
+			return Promise.all(['cr6608quick','network','wireless','dhcp','firewall'].map(function(c){
+				return uci.unload(c);
+			})).then(function() {
+				try { L.ui.changes.renderChangeIndicator(); } catch (e) {}
+				if (j && j.ok)
 					ui.addNotification(null, E('p', _('تم الحفظ والتطبيق الفعلي على الشبكة والواي فاي.')), 'info');
 				else
-					ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((res && (res.stderr || res.stdout)) || (res && res.code) || '?')), 'error');
-			}).catch(function(e) {
-				ui.addNotification(null, E('p', _('حُفظ الإعداد لكن تعذر تشغيل المنفّذ: ') + e), 'error');
+					ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ. راجع سجل النظام.')), 'warning');
 			});
+		}).catch(function(e) {
+			ui.addNotification(null, E('p', _('تعذّر إرسال التطبيق: ') + e), 'error');
 		});
 	},
 
