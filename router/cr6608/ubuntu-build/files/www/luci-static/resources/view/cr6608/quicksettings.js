@@ -4,6 +4,7 @@
 'require form';
 'require fs';
 'require ui';
+'require rpc';
 
 return view.extend({
 	// Save & Apply must REALLY apply. LuCI's handleSave only STAGES cr6608quick in the
@@ -28,6 +29,9 @@ return view.extend({
 				var v = uci.get('cr6608quick', 'default', k);
 				if (v !== null && v !== undefined) payload[k] = String(v);
 			});
+			// pass the live LuCI ubus session id explicitly so the CGI can authenticate
+			// even if cookie parsing is unreliable behind the browser.
+			try { payload.luci_sid = rpc.getSessionID(); } catch (e) {}
 			return fetch('/cgi-bin/cr6608-quick-apply', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -45,7 +49,7 @@ return view.extend({
 				if (j && j.ok)
 					ui.addNotification(null, E('p', _('تم الحفظ والتطبيق الفعلي على الشبكة والواي فاي.')), 'info');
 				else
-					ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ. راجع سجل النظام.')), 'warning');
+					ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((j && (j.detail || j.code)) || '?')), 'warning');
 			});
 		}).catch(function(e) {
 			ui.addNotification(null, E('p', _('تعذّر إرسال التطبيق: ') + e), 'error');

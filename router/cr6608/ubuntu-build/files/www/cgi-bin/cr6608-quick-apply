@@ -13,19 +13,32 @@ BODY=""
 
 jget() { jsonfilter -s "$BODY" -e "@.$1" 2>/dev/null | head -1; }
 
-# ---- auth ----
+# ---- auth (any ONE of these proves the caller is the logged-in operator) ----
 ok_auth=0
+valid_ubus() { [ -n "$1" ] && ubus call session get "{\"ubus_rpc_session\":\"$1\"}" 2>/dev/null | grep -q '"values"'; }
+
+# 1) Smart AP dashboard session token (?sid= or JSON .sid)
 sid="$(printf '%s' "${QUERY_STRING:-}" | sed -n 's/.*sid=\([0-9a-f]\{32\}\).*/\1/p')"
 [ -z "$sid" ] && sid="$(jget sid | grep -oE '^[0-9a-f]{32}$')"
 [ -n "$sid" ] && [ -f "/tmp/dashsess/$sid" ] && ok_auth=1
+
+# 2) explicit LuCI ubus session id passed in the JSON body (rpc.getSessionID())
 if [ "$ok_auth" != "1" ]; then
-	lsid="$(printf '%s' "${HTTP_COOKIE:-}" | sed -n 's/.*sysauth[^=]*=\([0-9a-fA-F]\{32\}\).*/\1/p' | head -1)"
-	[ -n "$lsid" ] && ubus call session get "{\"ubus_rpc_session\":\"$lsid\"}" >/dev/null 2>&1 && ok_auth=1
+	ls2="$(jget luci_sid | grep -oE '^[0-9a-fA-F]{32}$')"
+	valid_ubus "$ls2" && ok_auth=1
 fi
+
+# 3) LuCI sysauth cookie (any sysauth* name), validated via ubus
+if [ "$ok_auth" != "1" ]; then
+	for lsid in $(printf '%s' "${HTTP_COOKIE:-}" | grep -oE '[0-9a-fA-F]{32}'); do
+		valid_ubus "$lsid" && { ok_auth=1; break; }
+	done
+fi
+
 if [ "$ok_auth" != "1" ]; then
 	echo "Status: 403"
 	echo ""
-	echo '{"ok":false,"error":"auth"}'
+	echo '{"ok":false,"error":"auth","hint":"no valid dashsess token or LuCI ubus session"}'
 	exit 0
 fi
 echo ""
@@ -83,10 +96,13 @@ uw txpower_radio1 "${tx:-38}"
 uci -q commit cr6608quick
 
 # ---- real apply (output kept off stdout so the HTTP response closes promptly) ----
-if /usr/sbin/cr6608-quicksettings-apply >/tmp/cr6608-quick-apply.log 2>&1; then
-	echo '{"ok":true,"applied":true}'
+/usr/sbin/cr6608-quicksettings-apply >/tmp/cr6608-quick-apply.log 2>&1
+rc=$?
+# last log line, JSON-escaped, so the UI can show the real cause if rc!=0
+tail="$(tail -n 3 /tmp/cr6608-quick-apply.log 2>/dev/null | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-300)"
+if [ "$rc" = "0" ]; then
+	echo "{\"ok\":true,\"applied\":true}"
 else
-	rc=$?
-	echo "{\"ok\":false,\"applied\":false,\"code\":$rc}"
+	echo "{\"ok\":false,\"applied\":false,\"code\":$rc,\"detail\":\"$tail\"}"
 fi
 exit 0
