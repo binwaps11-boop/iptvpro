@@ -18,7 +18,11 @@ on:
       - '.github/workflows/build-cr6608-v86.yml'
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: cr6608-build
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -204,3 +208,26 @@ jobs:
           path: ow/bin/targets/ramips/mt7621/*sysupgrade.bin
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish bin + proofs to fetchable branch (cr6608-bin)
+        if: success()
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          BIN="$(ls ow/bin/targets/ramips/mt7621/*sysupgrade.bin | head -1)"
+          IMGKO="$(find /tmp/imgchk/sq -name mt7915e.ko 2>/dev/null | head -1)"
+          rm -rf /tmp/pub && mkdir -p /tmp/pub
+          cp "$BIN" /tmp/pub/cr6608-final-real38-origmpwr-ui-fixed-verified-sysupgrade.bin
+          # proofs the owner asked for (2,4,5): sha256, strings of the compiled .ko, patch
+          ( cd /tmp/pub && sha256sum *.bin > SHA256SUMS )
+          if [ -n "$IMGKO" ]; then strings -a "$IMGKO" | grep -Ei "CR6608|38DBM|35DBM|rf_3[58]|orig_mpwr" > /tmp/pub/mt7915e-strings.txt || true; fi
+          cp ow/package/kernel/mt76/patches/999-cr6608-38dbm.patch /tmp/pub/999-cr6608-38dbm.patch 2>/dev/null || true
+          cp router/cr6608/ubuntu-build/apply-mt76-38.py /tmp/pub/apply-mt76-38.py
+          cd /tmp/pub
+          git init -q
+          git checkout -q -b cr6608-bin
+          git config user.email "ci@local"; git config user.name "cr6608-ci"
+          git add -A
+          git commit -q -m "CR6608 real38 origmpwr from-source build (run ${GITHUB_RUN_NUMBER})"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" cr6608-bin
+          echo "::notice::published bin + proofs to branch cr6608-bin"
