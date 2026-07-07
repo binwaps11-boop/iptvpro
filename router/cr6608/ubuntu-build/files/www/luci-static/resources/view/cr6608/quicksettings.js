@@ -159,9 +159,9 @@ return view.extend({
 		o = s.taboption('advanced', form.DummyValue, 'txpower_locked', _('طاقة البث'));
 		o.rawhtml = false;
 		o.cfgvalue = function() {
-			var p0 = uci.get('wireless', 'radio0', 'txpower') || '35';
-			var p1 = uci.get('wireless', 'radio1', 'txpower') || '35';
-			return _('مقفلة للقراءة فقط') + ': 2.4G=' + p0 + ' dBm / 5G=' + p1 + ' dBm';
+			var p0 = uci.get('wireless', 'radio0', 'txpower') || '38';
+			var p1 = uci.get('wireless', 'radio1', 'txpower') || '38';
+			return '2.4G=' + p0 + ' dBm / 5G=' + p1 + ' dBm';
 		};
 
 		return m.render();

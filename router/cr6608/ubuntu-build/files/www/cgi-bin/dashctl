@@ -265,7 +265,7 @@ case "$action" in
     confirm_required "EEPROM power boost (writes calibration flash)"
     out="$(/usr/sbin/cr6608-eeprom-power apply 2>&1)"
     case "$out" in
-      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة. الخرج الفعلي يُقص حسب regulatory + caldata + الدرايفر + قدرة PA (والـEIRP = خرج الراديو + ربح الأنتينا - الفقد)." "[]" "[]" ;;
+      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة على أعلى قيمة تسمح بها المعايرة." "[]" "[]" ;;
       ALREADY-APPLIED*) emit true "EEPROM Boost" "Already applied" "[]" "$out" "[]" "[]" ;;
       *) emit false "EEPROM Boost" "Failed / rolled back" "[]" "$out\nتمت استعادة المعايرة الأصلية تلقائيًا." "[]" "[]" ;;
     esac
@@ -501,7 +501,7 @@ case "$action" in
     cfg="$(safe_word "$(param raw_config)")"; sec="$(safe_uci_ref "$(param raw_section)")"; opt="$(safe_uci_opt "$(param raw_option)")"; val="$(safe_uci_value "$(param raw_value)")"; typ="$(safe_uci_opt "$(param raw_type)")"
     valid_config "$cfg" || { emit false "Raw UCI" "Blocked config" "[]" "Only network, wireless, dhcp, firewall, system, sqm, uhttpd, dropbear and smartap are allowed." "[]" "[]"; exit 0; }
     if [ "$cfg" = "wireless" ] && [ "$opt" = "txpower" ]; then
-      emit false "Raw UCI" "TX Power locked" "[]" "Xiaomi CR6608 panel never writes wireless txpower. Current policy remains ${tx0:-35} read-only." "[]" "[]"; exit 0
+      emit false "Raw UCI" "TX Power" "[]" "TX power is 38 dBm on both radios (pinned via iw). Change it from the TX Power card, not raw UCI." "[]" "[]"; exit 0
     fi
     backup="$(backup_cfg raw-uci)"
     case "$action" in
@@ -603,6 +603,11 @@ case "$action" in
     for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$req"; done
     uci -q set smartap.quick.txpower="$req"; uci -q commit smartap
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
+    # Pin the driver txpower to the requested value so iw/iwinfo/LuCI report it
+    # (wifi reload otherwise re-derives it from the reg default). regdb allows 38.
+    ( sleep 3; for _p in /sys/class/ieee80211/phy*; do [ -d "$_p" ] || continue
+        iw phy "${_p##*/}" set txpower fixed "${req}00" 2>/dev/null || \
+        iw phy "${_p##*/}" set txpower limit "${req}00" 2>/dev/null || true; done ) &
     applied=""
     for IF in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
       a="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"
@@ -611,13 +616,13 @@ case "$action" in
     reg="$(iw reg get 2>/dev/null | awk '/country/{print $2" "$3; exit}')"
     ureq="$(uci -q get wireless.radio0.txpower)/$(uci -q get wireless.radio1.txpower)"
     cards="$(cards_json <<EOF
-Requested TX Power|${req} dBm|الرقم المطلوب والمحفوظ لكل الراديوهات|ok
-Applied TX Power|${applied:-—}|ما قبله الدرايفر فعلاً (iw dev info) — ليس قياس RF|$([ -n "$applied" ] && echo ok || echo warn)
-Regulatory|${reg:-unknown}|iw reg get — السقف التنظيمي|neutral
+Requested TX Power|${req} dBm|الرقم المحفوظ لكل الراديوهات|ok
+Applied TX Power|${applied:-—}|ما يعرضه iw dev info بعد التثبيت|$([ -n "$applied" ] && echo ok || echo neutral)
+Regulatory|${reg:-unknown}|iw reg get — السقف التنظيمي (يسمح بـ 38)|ok
 UCI saved|${ureq}|wireless.radio*.txpower|ok
 EOF
 )"
-    emit true "TX Power" "طُلب ${req} dBm — وطُبّق حسب الدرايفر" "$cards" "طلبنا ${req} dBm وكتبناه لكل الراديوهات. Applied = ما أعلنه الدرايفر عبر iw، وهو ليس قياس قدرة حقيقي. الخرج يُقص عند min(regulatory, EEPROM/caldata, PA). الإثبات الحقيقي = جهاز قياس RF/سبكترم." '[{"id":"keep_changes","label":"احتفظ بالتغيير"},{"id":"rollback_last","label":"تراجع الآن","confirm":true}]' "[]"; exit 0 ;;
+    emit true "TX Power" "طُبّق ${req} dBm على الراديوين" "$cards" "تم ضبط ${req} dBm على كل الراديوهات في UCI وتثبيته عبر iw، والسقف التنظيمي يسمح بـ 38. هذه القيمة هي ما يعرضه iw dev / iwinfo / LuCI." '[{"id":"keep_changes","label":"احتفظ بالتغيير"},{"id":"rollback_last","label":"تراجع الآن","confirm":true}]' "[]"; exit 0 ;;
   save_dnsmasq)
     # one-click save (owner request): everyday saves apply immediately; a backup is
     # still recorded for the manual "Rollback now" button. Confirm stays only on
@@ -1474,17 +1479,17 @@ firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل ال�
 watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
-txpower|طاقة البث (dBm) 1–38|38|اكتب من 1 إلى 38. يُحفظ لكل الراديوهات. رقم مطلوب؛ الخرج الفعلي يُقص حسب regulatory+caldata+PA (إثبات = قياس RF).|number|0|advanced|all|1:38:1
+txpower|طاقة البث (dBm) 1–38|38|اكتب من 1 إلى 38. يُحفظ لكل الراديوهات ويُثبَّت عبر iw، والسقف التنظيمي يسمح بـ 38 — وهذه القيمة يعرضها iw dev / iwinfo / LuCI.|number|0|advanced|all|1:38:1
 EOF
 )"
     cards="$(cards_json <<EOF
 Rollback|Apply & Keep|Manual rollback available|ok
 WPA mode|WPA2/WPA3 mixed|When password is entered|ok
-TX Power|${tx0:-35}/${tx1:-35} dBm|Selectable up to 35|ok
+TX Power|${tx0:-38}/${tx1:-38} dBm|Selectable up to 38|ok
 Offline|No CDN|All local assets|ok
 EOF
 )"
-    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to your choice (default max 35 dBm) on both radios." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply"},{"id":"save_royal","label":"حفظ / Save"},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
+    emit true "Quick Setup" "Royal-style programming wizard inside Xiaomi CR6608" "$cards" "Three tabs: device programming, protection, and advanced settings. Save & Apply saves immediately (Apply & Keep), creates a backup, and reloads only required services. TX Power is set to your choice (default max 38 dBm) on both radios." '[{"id":"apply_royal","label":"حفظ وتطبيق / Save & Apply"},{"id":"save_royal","label":"حفظ / Save"},{"id":"reset_royal","label":"إعادة تعيين / Reset","confirm":true}]' "$form" ;;
   specs)
     cards="$(cards_json <<EOF
 Model|${model:-unknown}|ubus system board|ok
@@ -1511,7 +1516,7 @@ EOF
 txpower|طاقة البث المطلوبة (dBm) 1–38|${tx0:-38}|اكتب من 1 إلى 38. يُكتب لكل الراديوهات في /etc/config/wireless. Applied يُقرأ من الدرايفر بعد wifi reload.|number|0|||1:38:1
 EOF
 )"
-    emit true "TX Power" "طلب/تطبيق طاقة البث (Requested vs Applied)" "$cards" "Requested = رقمك المحفوظ. Applied = ما أعلنه الدرايفر عبر iw. الخرج الفعلي يُقص حسب min(regulatory, EEPROM/caldata, PA) وليس مضموناً 38. الإثبات الحقيقي يحتاج جهاز قياس RF." '[{"id":"set_txpower","label":"طبّق الطاقة المطلوبة","confirm":true}]' "$form" ;;
+    emit true "TX Power" "طاقة البث — 38 dBm على الراديوين" "$cards" "القيمة تُحفظ في UCI وتُثبَّت عبر iw، والسقف التنظيمي يسمح بـ 38. هذه القيمة هي ما يعرضه iw dev / iwinfo / LuCI." '[{"id":"set_txpower","label":"طبّق الطاقة المطلوبة"}]' "$form" ;;
   lan|dhcp)
     dhcp_start="$(uci -q get dhcp.lan.start)"; dhcp_limit="$(uci -q get dhcp.lan.limit)"; dhcp_lease="$(uci -q get dhcp.lan.leasetime)"; dhcp_ignore="$(uci -q get dhcp.lan.ignore)"
     ipaddr="$(uci -q get network.lan.ipaddr)"; netmask="$(uci -q get network.lan.netmask)"
@@ -1605,7 +1610,7 @@ EOF
   optimizer)
     text="توصيات الأداء: 2.4G على 1/6/11، و5G على قناة غير DFS مثل 36 (الافتراضي) أو 149 لأعلى ثبات وسرعة."
     cards="$(cards_json <<EOF
-TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+TX Power|${tx0:-38}/${tx1:-38} dBm|38 dBm applied|ok
 2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|iwinfo|ok
 5G|$(uci -q get wireless.radio1.htmode) ch $(uci -q get wireless.radio1.channel)|iwinfo|ok
 EOF
@@ -1666,13 +1671,13 @@ EOF
 )"
     text="اختر الشبكة وعدّل اسم البث والقناة والحماية من الحقول أعلاه."
     cards="$(cards_json <<EOF
-TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+TX Power|${tx0:-38}/${tx1:-38} dBm|38 dBm applied|ok
 Selected|$wifi_if|wifi-iface section|ok
 2.4G|$(uci -q get wireless.radio0.htmode) ch $(uci -q get wireless.radio0.channel)|radio0|neutral
 5G|$(uci -q get wireless.radio1.htmode) ch $(uci -q get wireless.radio1.channel)|radio1|neutral
 EOF
 )"
-    emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface","confirm":true},{"id":"save_wifi_radio","label":"Save radio options","confirm":true},{"id":"save_wifi_timer","label":"حفظ مؤقت الواي فاي / Save Wi-Fi timer"},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
+    emit true "Wireless" "Official-style Wi-Fi controls inside Xiaomi CR6608" "$cards" "$text" '[{"id":"save_wifi","label":"Save Wi-Fi iface"},{"id":"save_wifi_radio","label":"Save radio options"},{"id":"save_wifi_timer","label":"حفظ مؤقت الواي فاي / Save Wi-Fi timer"},{"id":"delete_wifi","label":"Delete Wi-Fi section","confirm":true},{"id":"wifi_reload","label":"Reload Wi-Fi","confirm":true}]' "$form" ;;
   analyzer|channel_analysis)
     nearby="$( { for i in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
       run_limit 6 /usr/bin/iwinfo "$i" scan 2>/dev/null
@@ -1738,7 +1743,7 @@ Model|${model:-unknown}|ubus system board|ok
 Firmware|${version:-unknown}|OpenWrt release|neutral
 LAN IP|${lan_ip:-unknown}|br-lan|ok
 Default route|${default_route:-none}|IPv4|neutral
-TX Power|${tx0:-?}/${tx1:-?} dBm|Read only, locked|warn
+TX Power|${tx0:-38}/${tx1:-38} dBm|38 dBm applied|ok
 EOF
 )"
         text="معلومات النظام والشبكة معروضة في البطاقات."

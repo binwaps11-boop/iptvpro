@@ -1293,7 +1293,7 @@
       '<button class="wizard-tab" data-wizard-tab="security">2. إعدادات الحماية</button>' +
       '<button class="wizard-tab" data-wizard-tab="advanced">3. إعدادات متقدمة</button>' +
       '</div>' +
-      '<p class="mode-hint">كل تطبيق يُحفظ فوراً (Apply & Keep) مع نسخة احتياطية وتأكيد قبل التنفيذ، طاقة البث من 1 إلى 38 (تختارها من التبويب المتقدم).</p>' +
+      '<p class="mode-hint">كل تطبيق يُحفظ ويُطبَّق فوراً بضغطة واحدة (Apply & Keep) مع نسخة احتياطية، طاقة البث 38 dBm (تعدّلها من 1 إلى 38 في التبويب المتقدم).</p>' +
       '<section class="royal-pane" data-wizard-pane="device"><div class="royal-grid wizard-fields">' + group("device") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="security" hidden><div class="royal-grid wizard-fields">' + group("security") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="advanced" hidden><div class="royal-grid wizard-fields">' + group("advanced") + '</div></section>' +
@@ -1640,7 +1640,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       [!!p.hw_offload,1],[!!p.sw_offload,1],[!!p.rps,1],[!!p.fastopen,1],[H.num(p.dns_cache)>=4000,1],[!!p.sgi,1]];
     var on=items.filter(function(x){return x[0];}).length, tot=items.length;
     var head="<div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px'><span>"+(A?"المُفعّل":"Active")+"</span><b class='latin' style='color:var(--excellent)'>"+on+"/"+tot+"</b></div>"+H.bar(on,tot,"var(--excellent)")+
-      "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin:6px 0'><span>"+(A?"قوة البث":"TX power")+"</span><b class='latin' style='color:var(--excellent)'>"+(H.finite(H.num(p.txpower))?p.txpower:35)+" dBm</b></div>";
+      "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin:6px 0'><span>"+(A?"قوة البث":"TX power")+"</span><b class='latin' style='color:var(--excellent)'>"+(H.finite(H.num(p.txpower))?p.txpower:38)+" dBm</b></div>";
     var body=head+
       grp(A?"MIMO / AX":"MIMO / AX",
         row(p.mu_bf_he,"MU-MIMO (AX)","MU-MIMO (AX)",A?"إرسال لعدة أجهزة معاً":"serve many at once")+
