@@ -187,20 +187,7 @@ jobs:
             test -x "$SQ/usr/sbin/cr6608-force-txpower38" || { echo "::error::force-txpower38 missing"; exit 1; }
             grep -q "cr6608-force-txpower38" "$SQ/etc/hotplug.d/ieee80211/99-cr6608-txpower" || { echo "::error::hotplug not wired to force script"; exit 1; }
             # e) regulatory.db PA must allow 38.0 dBm (max_eirp 3800 mBm) on 2.4G
-            python3 - "$SQ/lib/firmware/regulatory.db" <<'PYV'
-import struct,sys
-d=open(sys.argv[1],'rb').read();off=8
-while True:
-    a=d[off:off+2];p=struct.unpack_from('>H',d,off+2)[0]
-    if a==b'\x00\x00' and p==0: print("::error::PA not in regdb");sys.exit(1)
-    if a==b'PA':
-        c=p*4;q=c+3+(c+3)%2;r=struct.unpack_from('>H',d,q)[0]*4
-        e=struct.unpack_from('>H',d,r+2)[0]
-        print("PA 2.4G max_eirp mBm=",e)
-        sys.exit(0 if e>=3800 else 1)
-    off+=4
-PYV
-            [ $? -eq 0 ] || { echo "::error::regdb PA < 38 dBm"; exit 1; }
+            python3 "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/check-regdb-pa.py" "$SQ/lib/firmware/regulatory.db" || { echo "::error::regdb PA < 38 dBm"; exit 1; }
             echo "::notice::POWER-PATH GATE PASSED — 38 everywhere, no 30/35 cap, regdb PA=38, enforcement wired"
           fi
 
