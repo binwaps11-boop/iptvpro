@@ -12,7 +12,10 @@ REQ="$QUERY_STRING"
 [ -n "$POST_DATA" ] && REQ="${REQ:+$REQ&}$POST_DATA"
 qparam() { printf '%s' "$REQ" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1; }
 param() {
-  qparam "$1" | sed 's/+/ /g; s/%3A/:/g; s/%3a/:/g; s/%2E/./g; s/%2e/./g; s/%2D/-/g; s/%2d/-/g; s/%5F/_/g; s/%5f/_/g; s/%2F/\//g; s/%2f/\//g; s/%20/ /g; s/%40/@/g; s/%23/#/g; s/%2B/+/g; s/%2b/+/g; s/%26/\&/g; s/%3D/=/g; s/%3d/=/g'
+  # complete URL decoding (any %XX byte, UTF-8 safe) — the old whitelist corrupted
+  # SSIDs/passwords containing characters outside it
+  qparam "$1" | awk 'BEGIN{for(i=0;i<256;i++){x=sprintf("%02X",i);h[x]=h[tolower(x)]=sprintf("%c",i)}}
+  {gsub(/\+/," ");n=split($0,a,"%");o=a[1];for(i=2;i<=n;i++){c=substr(a[i],1,2);if(c in h)o=o h[c] substr(a[i],3);else o=o "%" a[i]}printf "%s",o}'
 }
 deny_auth() {
   printf 'Status: 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n\r\n'
@@ -161,13 +164,36 @@ store_royal_config() {
   # keep a sane txpower default if the field wasn't submitted
   [ -n "$(uci -q get smartap.quick.txpower)" ] || uci -q set smartap.quick.txpower='38'
   uci -q commit smartap
+  # UNIFIED STORE: mirror everything into cr6608quick.default — the single store the
+  # LuCI page and /usr/sbin/cr6608-quicksettings-apply read — using the executor's names.
+  _rmap() { local _v; _v="$(param "$1" | cut -c1-96)"; [ -n "$_v" ] && uci -q set cr6608quick.default."$2"="$_v"; }
+  local _m _rb _tp _dp
+  _m="$(safe_word "$(param program_mode)")"; case "$_m" in pppoe_ap) _m="pppoe" ;; esac
+  [ -n "$_m" ] && uci -q set cr6608quick.default.mode="$_m"
+  _rmap device_ip access_ipaddr;  _rmap vlan_id vlan_id;        _rmap ssid ssid
+  _rmap ch24 channel24;           _rmap ch5 channel5
+  _rmap htmode24 htmode24;        _rmap htmode5 htmode5
+  _rmap mesh_id mesh_id;          _rmap mesh_role mesh_role;    _rmap wds_peer_ssid wds_ssid
+  _rmap hide_ssid hide_ssid;      _rmap security security;      _rmap wifi_password wifi_key
+  _rmap delete_previous clear_previous
+  _rmap pppoe_user pppoe_user;    _rmap pppoe_pass pppoe_pass;  _rmap broadband_port pppoe_port
+  _rmap nat_enabled nat_enabled;  _rmap dhcp_server dhcp_server; _rmap firewall_enabled firewall_enabled
+  _rmap broadband_enabled broadband_enabled; _rmap fake_mesh fake_mesh
+  _rb="$(safe_num "$(param reset_button_enabled)")"
+  [ -n "$_rb" ] && { [ "$_rb" = "0" ] && uci -q set cr6608quick.default.reset_lock='1' || uci -q set cr6608quick.default.reset_lock='0'; }
+  _tp="$(safe_num "$(param txpower)")"
+  [ -n "$_tp" ] && { uci -q set cr6608quick.default.txpower_radio0="$_tp"; uci -q set cr6608quick.default.txpower_radio1="$_tp"; }
+  _dp="$(param device_password | cut -c1-80)"
+  [ -n "$_dp" ] && { uci -q set cr6608quick.default.admin_password="$_dp"; uci -q set cr6608quick.default.change_password='1'; }
+  uci -q commit cr6608quick
 }
 set_wifi_security() {
   ifc="$1"; sec="$2"; key="$3"
   [ -n "$ifc" ] || return 0
   case "$sec" in
     open) uci set wireless."$ifc".encryption='none'; uci delete wireless."$ifc".key 2>/dev/null ;;
-    wpa3) uci set wireless."$ifc".encryption='sae-mixed'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
+    wpa3) uci set wireless."$ifc".encryption='sae'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
+    mixed) uci set wireless."$ifc".encryption='sae-mixed'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
     *) uci set wireless."$ifc".encryption='psk2'; [ -n "$key" ] && uci set wireless."$ifc".key="$key" ;;
   esac
 }
@@ -232,11 +258,13 @@ case "$action" in
     uci set smartap.security.wifi_isolate="$w24"
     for n in 1 2 3; do
       pen="$(safe_num "$(param lan${n}_enabled)")"; pil="$(safe_num "$(param lan${n}_isolate)")"; pvl="$(safe_num "$(param lan${n}_vlan)")"
+      pvm="$(param lan${n}_vlan_mode)"; case "$pvm" in trunk) ;; *) pvm="access" ;; esac
       [ -n "$pvl" ] || pvl="1"; [ "$pvl" -ge 1 ] 2>/dev/null && [ "$pvl" -le 4094 ] 2>/dev/null || pvl="1"
       uci -q get smartap.lan$n >/dev/null 2>&1 || uci set smartap.lan$n='port'
       uci set smartap.lan$n.enabled="${pen:-1}"
       uci set smartap.lan$n.isolate="${pil:-0}"
       uci set smartap.lan$n.vlan="$pvl"
+      uci set smartap.lan$n.vlan_mode="$pvm"
     done
     uci commit wireless; uci commit smartap
     wifi reload >/dev/null 2>&1
@@ -794,7 +822,7 @@ EOF
     if mode_has_vlan "$program_mode"; then
       [ -n "$vlan_id" ] && [ "$vlan_id" -ge 2 ] 2>/dev/null && [ "$vlan_id" -le 4094 ] 2>/dev/null || { emit false "Quick Setup" "Invalid VLAN" "[]" "رقم VLAN يجب أن يكون بين 2 و 4094 (1 محجوز لشبكة الإدارة). / VLAN ID must be 2-4094 (1 is reserved for management)." "[]" "[]"; exit 0; }
     fi
-    case "$security" in open|wpa2|wpa3) : ;; *) security="wpa2" ;; esac
+    case "$security" in open|wpa2|wpa3|mixed) : ;; *) security="wpa2" ;; esac
     if [ "$security" != "open" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -lt 8 ]; then emit false "Quick Setup" "Weak Wi-Fi password" "[]" "Wi-Fi password must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
     if [ -n "$device_password" ] && [ "${#device_password}" -lt 8 ]; then emit false "Quick Setup" "Weak admin password" "[]" "Device password must be 8+ characters, or leave blank to keep current password." "[]" "[]"; exit 0; fi
     backup="$(backup_cfg royal-apply)"
@@ -848,6 +876,9 @@ EOF
     # radio1's channel+htmode, so this also sets the mesh backhaul width (HE20..HE160).
     case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) uci set wireless.radio0.htmode="$htmode24" ;; esac
     case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) uci set wireless.radio1.htmode="$htmode5" ;; esac
+    if [ "$security" != "open" ] && [ -z "$wifi_password" ] && [ -z "$(uci -q get wireless."$ifc24".key 2>/dev/null)" ]; then
+      security="open"   # a keyless WPA config would silence both bands — refuse it
+    fi
     set_wifi_security "$ifc24" "$security" "$wifi_password"
     set_wifi_security "$ifc5" "$security" "$wifi_password"
     # hide SSID applies to BOTH bands (was 2.4G only).
@@ -857,38 +888,32 @@ EOF
       uci -q delete wireless."$ifc24".hidden; uci -q delete wireless."$ifc5".hidden
     fi
     if mode_has_vlan "$program_mode"; then
-      # ===================================================================================
-      # ONE-IP VLAN model: the WHOLE AP lives INSIDE the client VLAN, ONE address only.
-      #   * br-lan stays a PLAIN bridge (NO VLAN filtering, no DSA bridge-vlan risk):
-      #     lan1/2/3 (untagged access ports) + both Wi-Fi radios + the TAGGED uplink
-      #     wan.<vid> (802.1q) toward the Mikrotik.
-      #   * The device IP the user typed sits on br-lan -> the dashboard opens at the
-      #     SAME IP over Wi-Fi AND over any LAN cable while in the VLAN (set a static IP
-      #     on the phone/PC in the device subnet, or use the Mikrotik's DHCP of that VLAN).
-      #   * Only the uplink is tagged: a wrong VLAN id can only break the Mikrotik link,
-      #     it can NEVER break the local Wi-Fi/cable path to the dashboard.
-      #   * recovery 192.168.66.1 also stays on the plain bridge -> always reachable.
-      # ===================================================================================
-      mgmt_isolated=1; client_net='lan'
-      # tear down artifacts from all previous VLAN models
+      mgmt_isolated=1
+      # teardown of EVERY previous model: bridge-vlan sections, the old 8021q uplink,
+      # stale interfaces — then the shared lib rebuilds the wired layout per-port.
       while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
         vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
         [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
       done
-      uci -q delete network.@device[0].vlan_filtering
       uci -q delete network.smartap_vlan; uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
       uci -q delete dhcp.smartap_vlan
       lan_zone_del smartap_vlan
-      # bridge ports: cable ports untagged; RAW wan and any stale wan.<old-vid> OUT
-      uci -q del_list network.@device[0].ports='wan'
       for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-      for p in lan1 lan2; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
-      # tagged uplink toward the Mikrotik joins the SAME bridge
-      uci set network.smartap_wandev='device'; uci set network.smartap_wandev.type='8021q'; uci set network.smartap_wandev.ifname='wan'; uci set network.smartap_wandev.vid="$vlan_id"; uci set network.smartap_wandev.name="wan.$vlan_id"
-      uci add_list network.@device[0].ports="wan.$vlan_id"
-      # everything (device IP, recovery, Wi-Fi) on the plain bridge = ONE address
-      uci set network.lan.device='br-lan'
-      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
+      # SINGLE VLAN OWNER: the same lib the LuCI executor and security page use.
+      [ -r /usr/libexec/cr6608-vlan-lib ] && . /usr/libexec/cr6608-vlan-lib
+      type cr6608_apply_port_vlans >/dev/null 2>&1 && cr6608_apply_port_vlans "$vlan_id"
+      # Wi-Fi (both bands) lives INSIDE the VLAN; the device answers on the extra IP there
+      uci set network.cr6608_vlan='interface'
+      uci set network.cr6608_vlan.device="br-lan.$vlan_id"
+      uci set network.cr6608_vlan.proto='none'
+      uci set network.cr6608_vlan.ipv6='0'
+      lan_zone_add cr6608_vlan
+      client_net='cr6608_vlan'
+      uci set wireless."$ifc24".network='cr6608_vlan'; uci set wireless."$ifc5".network='cr6608_vlan'
+      # the rescue Wi-Fi IP and the extra device IP follow the clients into the VLAN
+      uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vlan_id"
+      uci -q get network.smartap_devip >/dev/null 2>&1 && uci set network.smartap_devip.device="br-lan.$vlan_id"
       uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     else
       # Plain AP: tear down every VLAN artifact, put everything back on the plain br-lan.
@@ -904,6 +929,11 @@ EOF
       lan_zone_del smartap_vlan
       uci set network.lan.device='br-lan'
       uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+      uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
+      uci -q get network.smartap_devip >/dev/null 2>&1 && uci set network.smartap_devip.device='br-lan'
+      # standalone per-port VLANs from the security page still apply in plain modes
+      [ -r /usr/libexec/cr6608-vlan-lib ] && . /usr/libexec/cr6608-vlan-lib
+      type cr6608_apply_port_vlans >/dev/null 2>&1 && cr6608_apply_port_vlans ""
       uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     fi
     case "$program_mode" in
@@ -1004,8 +1034,14 @@ EOF
     else
       uci -q delete dhcp.lan 2>/dev/null || true
     fi
-    if [ "$nat_enabled" = "1" ]; then for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do uci set firewall."$z".masq='1'; done; fi
-    [ "$firewall_enabled" = "1" ] && /etc/init.d/firewall enable >/dev/null 2>&1
+    for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do
+      [ "$nat_enabled" = "1" ] && uci set firewall."$z".masq='1' || uci set firewall."$z".masq='0'
+    done
+    if [ "$firewall_enabled" = "0" ]; then
+      /etc/init.d/firewall disable >/dev/null 2>&1; /etc/init.d/firewall stop >/dev/null 2>&1
+    else
+      /etc/init.d/firewall enable  >/dev/null 2>&1; /etc/init.d/firewall start >/dev/null 2>&1
+    fi
     if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then
       [ -f /etc/rc.button/reset.smartap.orig ] || cp /etc/rc.button/reset /etc/rc.button/reset.smartap.orig 2>/dev/null
       printf '%s\n' '#!/bin/sh' 'logger -t cr6608 "reset button blocked by CR6608 policy"' 'exit 0' > /etc/rc.button/reset
@@ -1372,6 +1408,7 @@ case "$section" in
       eval "en$n=\"\$(uci -q get smartap.lan$n.enabled 2>/dev/null)\"; en$n=\${en$n:-1}"
       eval "il$n=\"\$(uci -q get smartap.lan$n.isolate 2>/dev/null)\"; il$n=\${il$n:-0}"
       eval "vl$n=\"\$(uci -q get smartap.lan$n.vlan 2>/dev/null)\"; vl$n=\${vl$n:-$mgmt_vlan}"
+      eval "vm$n=\"\$(uci -q get smartap.lan$n.vlan_mode 2>/dev/null)\"; vm$n=\${vm$n:-access}"
     done
     yn() { [ "$1" = "1" ] && echo "مفعّل" || echo "متوقف"; }
     lvl() { [ "$1" = "1" ] && echo ok || echo warn; }
@@ -1396,13 +1433,16 @@ iso_wifi24|عزل أجهزة واي فاي 2.4G|$iso24|تشغيل = أجهزة �
 iso_wifi5|عزل أجهزة واي فاي 5G|$iso5|نفس الفكرة لشبكة Smart-AP-5G. تشغيل = عزل الأجهزة عن بعض. إيقاف = تشوف بعضها.|select|0|wifi||1:تشغيل,0:إيقاف
 lan1_enabled|منفذ LAN1: تشغيل/إيقاف|$en1|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به. شغّله لاستخدام المنفذ.|select|0|ports||1:يعمل,0:موقوف
 lan1_isolate|عزل منفذ LAN1|$il1|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
-lan1_vlan|VLAN لمنفذ LAN1|$vl1|اتركه 1 (شبكة الإدارة العادية). غيّره فقط لو تبي هذا المنفذ على شبكة VLAN منفصلة عند سويتش يدعم VLAN.|number|0|ports|
+lan1_vlan|VLAN لمنفذ LAN1|$vl1|1 = بدون فيلان (شبكة الإدارة العادية). رقم 2-4094 = هذا المنفذ داخل الفيلان: أي جهاز توصله به يدخل شبكة الفيلان مباشرة.|number|0|ports|
+lan1_vlan_mode|طريقة فيلان LAN1|$vm1|ضمن الفيلان = الجهاز الموصول يدخل الفيلان مباشرة (الوضع الطبيعي). ترنك = للسويتش/الميكروتك الذي يفهم VLAN (الفيلان يمر tagged مع بقاء الإدارة).|select|0|ports||access:ضمن الفيلان (مباشر),trunk:ترنك (سويتش VLAN)
 lan2_enabled|منفذ LAN2: تشغيل/إيقاف|$en2|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به.|select|0|ports||1:يعمل,0:موقوف
 lan2_isolate|عزل منفذ LAN2|$il2|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
-lan2_vlan|VLAN لمنفذ LAN2|$vl2|اتركه 1 عادةً. غيّره فقط لشبكة VLAN منفصلة.|number|0|ports|
+lan2_vlan|VLAN لمنفذ LAN2|$vl2|1 = بدون فيلان. رقم 2-4094 = المنفذ داخل الفيلان مباشرة.|number|0|ports|
+lan2_vlan_mode|طريقة فيلان LAN2|$vm2|ضمن الفيلان = مباشر للجهاز. ترنك = للسويتش الذي يفهم VLAN.|select|0|ports||access:ضمن الفيلان (مباشر),trunk:ترنك (سويتش VLAN)
 lan3_enabled|منفذ LAN3: تشغيل/إيقاف|$en3|إيقاف = يُطفأ المنفذ فلا يعمل أي جهاز موصول به.|select|0|ports||1:يعمل,0:موقوف
 lan3_isolate|عزل منفذ LAN3|$il3|تشغيل = الجهاز على هذا المنفذ يشوف الإنترنت فقط ولا يشوف بقية الأجهزة.|select|0|ports||1:تشغيل,0:إيقاف
-lan3_vlan|VLAN لمنفذ LAN3|$vl3|اتركه 1 عادةً. غيّره فقط لشبكة VLAN منفصلة.|number|0|ports|
+lan3_vlan|VLAN لمنفذ LAN3|$vl3|1 = بدون فيلان. رقم 2-4094 = المنفذ داخل الفيلان مباشرة.|number|0|ports|
+lan3_vlan_mode|طريقة فيلان LAN3|$vm3|ضمن الفيلان = مباشر للجهاز. ترنك = للسويتش الذي يفهم VLAN.|select|0|ports||access:ضمن الفيلان (مباشر),trunk:ترنك (سويتش VLAN)
 EOF
 )"
     text="الوصول للوحة مضمون دائماً على 192.168.1.1 عبر أي كيبل، وعلى 221.221.221.221 عبر أي شبكة واي فاي (بعنوان ثابت على جهازك)."
@@ -1430,7 +1470,7 @@ EOF
     saved() { uci -q get smartap.quick."$1" 2>/dev/null; }
     royal_mode="$(saved program_mode)"; [ -n "$royal_mode" ] || royal_mode="ap"
     royal_ip="$(saved device_ip)"; [ -n "$royal_ip" ] || royal_ip="$(uci -q get network.lan.ipaddr)"
-    royal_vlan="$(saved vlan_id)"
+    royal_vlan="$(saved vlan_id)"; [ -n "$royal_vlan" ] || royal_vlan="$(uci -q get cr6608quick.default.vlan_id 2>/dev/null)"
     royal_ssid="$(saved ssid)"; [ -n "$royal_ssid" ] || royal_ssid="$(uci -q get wireless.wifinet0.ssid)"
     ch24="$(saved ch24)"; [ -n "$ch24" ] || ch24="$(uci -q get wireless.radio0.channel)"
     ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
@@ -1444,16 +1484,21 @@ EOF
     royal_security="$(saved security)"; [ -n "$royal_security" ] || case "$enc" in none|'') royal_security="open" ;; *sae*) royal_security="wpa3" ;; *) royal_security="wpa2" ;; esac
     wan_proto="$(uci -q get network.wan.proto 2>/dev/null)"
     pppoe_user="$(uci -q get network.wan.username 2>/dev/null)"
-    dhcp_ignore="$(uci -q get dhcp.lan.ignore 2>/dev/null)"
+    # DHCP truth: a pool must EXIST and not be ignored (apply deletes dhcp.lan entirely)
+    if uci -q get dhcp.lan >/dev/null 2>&1 && [ "$(uci -q get dhcp.lan.ignore)" != "1" ]; then dhcp_now=1; else dhcp_now=0; fi
     firewall_enabled="$( /etc/init.d/firewall enabled >/dev/null 2>&1 && echo 1 || echo 0 )"
-    nat_enabled="$(uci show firewall 2>/dev/null | grep -Eq "\\.name='wan'|\\.name=wan" && uci show firewall 2>/dev/null | grep -q "\\.masq='1'\\|\\.masq=1" && echo 1 || echo 0)"
+    # NAT truth: the wan zone's own masq flag (not a grep that matches ANY masq anywhere)
+    nat_enabled=0
+    for _z in $(uci show firewall 2>/dev/null | awk -F'[.=]' "/\\.name='wan'/{print \$2}"); do
+      [ "$(uci -q get firewall.$_z.masq)" = "1" ] && nat_enabled=1
+    done
     reset_enabled="$(saved reset_button_enabled)"; [ -n "$reset_enabled" ] || reset_enabled="1"
     reset_mode="$(saved reset_mode)"; [ -n "$reset_mode" ] || reset_mode="factory"
     form="$(form_json <<EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
 device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضافي تدخل به على الجهاز. حتى في الفيلان/الميش يبقى الوصول مضموناً دائماً: (1) بالكيبل على 192.168.1.1 الثابت، (2) بالكيبل والواي فاي على هذا العنوان، (3) بالواي فاي على 221.221.221.221 الاحتياطي — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
-vlan_id|رقم VLAN|${royal_vlan:-10}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
-ssid|اسم البث SSID|${royal_ssid:-Smart-AP}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
+vlan_id|رقم VLAN|${royal_vlan:-50}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
+ssid|اسم البث SSID|${royal_ssid:-Smart ap 2.4G}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 ch5|قناة 5G|${ch5:-36}|أي قناة 5G مسموحة (36/40/44/48/149/153/157/161…). 36 افتراضي للتوافق الأوسع، لكن اختر أي قناة تريد|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 htmode24|عرض قناة 2.4G|${ht24:-HE20}|عرض النطاق/السرعة: HE20 أو HE40 (40 أسرع، 20 أثبت)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE20:HE20 (ثابت),HE40:HE40 (أسرع),HT20:HT20,HT40:HT40
@@ -1471,10 +1516,9 @@ pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها 
 broadband_port|منفذ دخول البرودباند|wan|المنفذ الموصول بمودم المزوّد — الافتراضي WAN|select|0|device|pppoe_ap|wan:WAN (الافتراضي),lan1:LAN1,lan2:LAN2
 reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
 reset_mode|طريقة الفورمات|${reset_mode}|سياسة موثقة داخل Xiaomi CR6608|select|0|security|all|factory:Factory reset,reboot:Reboot only,disabled:Blocked
-nat_enabled|NAT|${nat_enabled:-1}|تفعيل NAT على منطقة WAN|select|0|advanced|all|1:مفعل,0:معطل
-dhcp_server|DHCP Server|$([ "$dhcp_ignore" = "1" ] && echo 0 || echo 1)|تشغيل/إيقاف DHCP للـ LAN|select|0|advanced|all|1:مفعل,0:معطل
-firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تفعيل الخدمة فقط، لا يتم تعطيلها تلقائياً إلا بطلب مؤكد|select|0|advanced|all|1:مفعل,0:معطل
-watchcat_enabled|إعادة التشغيل التلقائي WatchCat|$(saved watchcat_enabled || echo 0)|يحفظ السياسة، ويتطلب الحزمة إن لم تكن مثبتة|select|0|advanced|all|0:معطل,1:مفعل
+nat_enabled|NAT|${nat_enabled:-0}|تشغيل/إيقاف NAT على منطقة WAN — يُطبَّق فعلياً في الاتجاهين|select|0|advanced|all|1:مفعل,0:معطل
+dhcp_server|DHCP Server|${dhcp_now:-0}|تشغيل/إيقاف موزّع العناوين للـ LAN — يُطبَّق فعلياً|select|0|advanced|all|1:مفعل,0:معطل
+firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تشغيل/إيقاف خدمة الجدار فعلياً وفوراً (بدون إعادة تشغيل)|select|0|advanced|all|1:مفعل,0:معطل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل
 fake_mesh|FAKE MESH (WDS)|$(saved fake_mesh || echo 0)|يفعّل WDS إذا كان التعريف يدعمه|select|0|advanced|all|0:معطل,1:مفعل
 txpower|طاقة البث (dBm) 1–38|38|اكتب من 1 إلى 38. يُحفظ لكل الراديوهات ويُثبَّت عبر iw، والسقف التنظيمي يسمح بـ 38 — وهذه القيمة يعرضها iw dev / iwinfo / LuCI.|number|0|advanced|all|1:38:1

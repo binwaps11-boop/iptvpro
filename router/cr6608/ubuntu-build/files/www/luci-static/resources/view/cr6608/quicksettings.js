@@ -199,9 +199,6 @@ return view.extend({
 		o = s.taboption('advanced', form.Flag, 'firewall_enabled', _('جدار الحماية'));
 		o.default = '1';
 
-		o = s.taboption('advanced', form.Flag, 'watchcat_enabled', _('إعادة التشغيل التلقائي (WatchCat)'));
-		o.default = '0';
-
 		o = s.taboption('advanced', form.Flag, 'broadband_enabled', _('البرودباند'));
 		o.default = '0';
 

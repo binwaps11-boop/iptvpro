@@ -107,73 +107,27 @@ apply_ports() {
 # dashboard stays reachable untagged everywhere. When all ports use the management VLAN
 # we remove VLAN filtering entirely (plain bridge = original behaviour).
 clear_smartap_vlan() {
-	while uci show network 2>/dev/null | grep -q "\.name='SmartAP-vlan"; do
+	while uci show network 2>/dev/null | grep -Eq "\.name='SmartAP-(vlan|pv)"; do
 		local idx
-		idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-vlan.*/\1/p" | head -n1)"
+		idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-\(vlan\|pv\).*/\1/p" | head -n1)"
 		[ -n "$idx" ] || break
 		uci -q delete "network.$idx" || break
 	done
 }
 
 apply_vlan() {
-	# Defer entirely to Quick Settings when an AP-VLAN is active there — one VLAN owner only.
-	if uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan" \
-		|| uci -q get network.smartap_vlan >/dev/null 2>&1 || uci -q get network.cr6608_vlan >/dev/null 2>&1; then
-		log "quick-settings AP-VLAN active; security-page VLAN skipped (single owner)"
-		return 0
-	fi
-	local mgmt need=0
-	mgmt="$(g $STATE.management.vlan)"; mgmt="${mgmt:-$MGMT_DEFAULT_VLAN}"
-	# VLAN 0 is not a valid 802.1Q management id and would strand 192.168.1.1 on
-	# br-lan.0. Treat 0/empty/out-of-range as the management default (1).
-	case "$mgmt" in ''|0|*[!0-9]*) mgmt="$MGMT_DEFAULT_VLAN" ;; esac
-	[ "$mgmt" -ge 1 ] 2>/dev/null && [ "$mgmt" -le 4094 ] 2>/dev/null || mgmt="$MGMT_DEFAULT_VLAN"
-	for p in $PORTS; do
-		local v; v="$(g $STATE.$p.vlan)"; v="${v:-$mgmt}"
-		[ "$v" != "$mgmt" ] && need=1
-	done
-
-	clear_smartap_vlan
-
-	if [ "$need" = "0" ]; then
-		# no segmentation requested -> plain bridge, management everywhere
-		uci -q delete network.@device[0].vlan_filtering 2>/dev/null
-		# put the management L3 back on the plain bridge (undo any br-lan.<vid> from a
-		# previous VLAN apply) so 192.168.1.1 stays reachable.
-		uci set network.lan.device='br-lan'
-		uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
-		uci commit network
-		/etc/init.d/network reload >/dev/null 2>&1 || true
-		return 0
-	fi
-
-	# management VLAN untagged (u*) on all bridge ports incl. wan uplink
-	uci set network.@device[0].vlan_filtering='1'
-	local s
-	s="$(uci add network bridge-vlan)"
-	uci set "network.$s.name=SmartAP-vlan-mgmt"
-	uci set "network.$s.device=br-lan"
-	uci set "network.$s.vlan=$mgmt"
-	for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$s.ports=$p:u*"; done
-	# move the management L3 onto the native VLAN device so 192.168.1.1 is never stranded
-	# when the management VLAN id is not the bridge's default PVID 1.
-	uci set network.lan.device="br-lan.$mgmt"
-	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device="br-lan.$mgmt"
-
-	# each non-management client VLAN, tagged on its port(s)
-	for p in $PORTS; do
-		local v; v="$(g $STATE.$p.vlan)"; v="${v:-$mgmt}"
-		[ "$v" = "$mgmt" ] && continue
-		local vs
-		vs="$(uci add network bridge-vlan)"
-		uci set "network.$vs.name=SmartAP-vlan-$p"
-		uci set "network.$vs.device=br-lan"
-		uci set "network.$vs.vlan=$v"
-		uci add_list "network.$vs.ports=$p:t"
-	done
+	# Single owner: /usr/libexec/cr6608-vlan-lib builds the wired-port membership from
+	# smartap.<port>.vlan (+vlan_mode) — ACCESS by default (a plain device plugged into
+	# the port lands inside the VLAN), 'trunk' for VLAN-aware gear. The active quick-
+	# settings VLAN (Wi-Fi side) is respected: wan defaults to a trunk carrying it.
+	[ -r /usr/libexec/cr6608-vlan-lib ] || { log "vlan lib missing; ports unchanged"; return 0; }
+	. /usr/libexec/cr6608-vlan-lib
+	local qvid=""
+	qvid="$(uci -q get network.cr6608_vlan.device 2>/dev/null | sed -n 's/^br-lan\.\([0-9]\+\)$/\1/p')"
+	cr6608_apply_port_vlans "$qvid"
 	uci commit network
 	/etc/init.d/network reload >/dev/null 2>&1 || true
-	log "vlan applied (management $mgmt untagged on all ports)"
+	log "port vlans applied (quick vid='${qvid:-none}'; access/trunk per smartap config)"
 }
 
 # management always reachable: keep recovery interface + lan input open
