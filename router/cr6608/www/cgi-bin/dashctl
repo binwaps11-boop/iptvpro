@@ -879,7 +879,8 @@ EOF
     # Bandwidth (HT/HE mode) is user-selectable per band — any channel + any rate. Mesh uses
     # radio1's channel+htmode, so this also sets the mesh backhaul width (HE20..HE160).
     case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) uci set wireless.radio0.htmode="$htmode24" ;; esac
-    case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) uci set wireless.radio1.htmode="$htmode5" ;; esac
+    case "$htmode5" in HE160|VHT160) htmode5="HE80" ;; esac   # DBDC MT7915: 80MHz is the physical max
+    case "$htmode5" in HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) uci set wireless.radio1.htmode="$htmode5" ;; esac
     if [ "$security" != "open" ] && [ -z "$wifi_password" ] && [ -z "$(uci -q get wireless."$ifc24".key 2>/dev/null)" ]; then
       security="open"   # a keyless WPA config would silence both bands — refuse it
     fi
@@ -918,7 +919,6 @@ EOF
       # the rescue Wi-Fi IP and the extra device IP follow the clients into the VLAN
       uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vlan_id"
       uci -q get network.smartap_devip >/dev/null 2>&1 && uci set network.smartap_devip.device="br-lan.$vlan_id"
-      uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
     else
       # Plain AP: tear down every VLAN artifact, put everything back on the plain br-lan.
       mgmt_isolated=0; client_net='lan'
@@ -1506,7 +1506,7 @@ ssid|اسم البث SSID|${royal_ssid:-Smart ap 2.4G}|اسم الشبكة ال�
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 ch5|قناة 5G|${ch5:-36}|أي قناة 5G مسموحة (36/40/44/48/149/153/157/161…). 36 افتراضي للتوافق الأوسع، لكن اختر أي قناة تريد|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 htmode24|عرض قناة 2.4G|${ht24:-HE20}|عرض النطاق/السرعة: HE20 أو HE40 (40 أسرع، 20 أثبت)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE20:HE20 (ثابت),HE40:HE40 (أسرع),HT20:HT20,HT40:HT40
-htmode5|عرض قناة 5G / السرعة|${ht5:-HE80}|أي معدل نقل: HE20/HE40/HE80/HE160. الميش يستخدم نفس العرض — اختر الأنسب لقناتك|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE80:HE80 (سريع),HE160:HE160 (الأسرع),HE40:HE40,HE20:HE20 (الأثبت),VHT80:VHT80,HT20:HT20
+htmode5|عرض قناة 5G / السرعة|${ht5:-HE80}|أقصى عرض يدعمه هذا الجهاز (MT7915 ثنائي النطاق) هو 80MHz — لذلك HE80 هو الأسرع الحقيقي|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE80:HE80 (الأسرع الحقيقي),HE40:HE40,HE20:HE20 (الأثبت),VHT80:VHT80,HT20:HT20
 mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون نفسه على الوحدتين، ونفس قناة 5G وعرضها|text|0|device|mesh,mesh_vlan|
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسِل (الموصول بالميكروتك): يبثّ للجوالات على 2.4G و5G ويحمل رابط الميش. المستقبِل: يبثّ للجوالات على 2.4G فقط، و5G مخصّص لاستقبال الميش|select|0|device|mesh,mesh_vlan|sender:مرسِل (يبثّ 2.4+5G),receiver:مستقبِل (يبثّ 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|

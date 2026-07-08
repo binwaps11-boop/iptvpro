@@ -269,8 +269,14 @@ apply_config() {
 	backup_configs
 	bool_on "$clear_previous" && cleanup_previous
 
-	valid_ip "$ip" && uci set network.lan.ipaddr="$ip"
-	valid_ip "$netmask" && uci set network.lan.netmask="$netmask"
+	# MANAGEMENT CONTRACT: cable access at 192.168.1.1 NEVER moves (a stale/foreign
+	# lan_ipaddr — e.g. preserved from an old build — must not strand the dashboard).
+	# A different requested device IP becomes the EXTRA access alias instead.
+	uci set network.lan.ipaddr='192.168.1.1'
+	uci set network.lan.netmask='255.255.255.0'
+	if valid_ip "$ip" && [ "$ip" != "192.168.1.1" ] && [ -z "$access_ipaddr" ]; then
+		access_ipaddr="$ip"
+	fi
 	uci set network.lan.delegate='0'
 
 	case "$mode" in
@@ -315,7 +321,8 @@ apply_config() {
 	valid_country "$country24" && uci set wireless.radio0.country="$(echo "$country24" | tr a-z A-Z)"
 	valid_country "$country5" && uci set wireless.radio1.country="$(echo "$country5" | tr a-z A-Z)"
 	case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) htmode24='HE20' ;; esac
-	case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) ;; *) htmode5='HE80' ;; esac
+	case "$htmode5" in HE160|VHT160) log "160MHz not supported by this DBDC MT7915 (2x2, max 80MHz); using HE80"; htmode5='HE80' ;; esac
+	case "$htmode5" in HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) ;; *) htmode5='HE80' ;; esac
 	uci set wireless.radio0.htmode="$htmode24"
 	uci set wireless.radio1.htmode="$htmode5"
 	uci set wireless.radio0.legacy_rates='0'
