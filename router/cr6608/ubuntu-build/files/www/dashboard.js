@@ -1795,6 +1795,8 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
   }
   async function loadData() {
     if (!state.session) return;
+    if (state._pollBusy) return;   // never stack polls when the device is slow
+    state._pollBusy = true;
     var start = performance.now();
     var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
     var killer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 15000) : null;
@@ -1818,6 +1820,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         toast(state.lang === "ar" ? "تعذّر الوصول للوحة — إعادة المحاولة تلقائياً" : "Panel unreachable — retrying");
       }
     } finally {
+      state._pollBusy = false;
       if (killer) clearTimeout(killer);
     }
   }

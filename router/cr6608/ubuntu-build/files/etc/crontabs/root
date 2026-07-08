@@ -1,2 +1,3 @@
 0 4 * * * /usr/sbin/smartap-selftest >/dev/null 2>&1
 30 3 * * * /usr/sbin/smartap-autochannel >/dev/null 2>&1
+*/5 * * * * /usr/sbin/cr6608-wifi-sentinel >/dev/null 2>&1

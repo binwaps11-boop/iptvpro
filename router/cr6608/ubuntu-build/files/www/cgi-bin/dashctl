@@ -83,6 +83,8 @@ backup_cfg() {
   [ -f /etc/config/smartap ] || touch /etc/config/smartap 2>/dev/null
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   tar -czf "/root/dashboard-backups/smartap-${tag}-${ts}.tar.gz" /etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/smartap /etc/crontabs/root /etc/passwd /etc/shadow /etc/rc.button/reset 2>/dev/null
+  # keep only the 10 newest backups so the flash overlay can never fill up
+  ls -1t /root/dashboard-backups/smartap-*.tar.gz 2>/dev/null | sed -n '11,$p' | while read -r old; do rm -f "$old"; done
   printf '/root/dashboard-backups/smartap-%s-%s.tar.gz' "$tag" "$ts"
 }
 # APPLY & KEEP: settings are applied and saved immediately — there is NO auto-revert

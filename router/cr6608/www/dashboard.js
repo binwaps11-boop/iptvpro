@@ -7,7 +7,7 @@
   var AUTH = "/ubus";
   var ANON = "00000000000000000000000000000000";
   var LS = "smartap.";
-  var UI_VERSION = "cr6608-smartap-live-sync-v7";
+  var UI_VERSION = "cr6608-smartap-live-sync-v8";
   if (localStorage.getItem(LS + "uiVersion") !== UI_VERSION) {
     localStorage.setItem(LS + "theme", "dark");
     localStorage.setItem(LS + "interval", "5");
@@ -476,7 +476,10 @@
   function event(msg, type) {
     state.events.unshift({ t:Date.now(), msg:msg, type:type || "info" });
     state.events = state.events.slice(0, 80);
-    localStorage.setItem(LS + "events", JSON.stringify(state.events));
+    // Persist only meaningful events; never store transient "error" alerts so they
+    // don't replay as stale "Failed to fetch" after the panel recovers or reloads.
+    if ((type || "info") !== "error")
+      localStorage.setItem(LS + "events", JSON.stringify(state.events.filter(function (e) { return e.type !== "error"; })));
   }
   function loginMessage(msg, bad) {
     var el = $("loginMsg");
@@ -601,9 +604,6 @@
     var nav = [
       ["overview","overview","bolt"],
       ["quick","quick","gear"],
-      ["netmgr","netmgr","net"],
-      ["wifimgr","wifimgr","wifi"],
-      ["sysmgr","sysmgr","cpu"],
       ["isolation","isolation","shield"],
       ["network","network","net"],
       ["devices","devices","device"],
@@ -620,7 +620,7 @@
   }
   function showSection(id) {
     document.body.dataset.activeSection = id;
-    ["overview","network","devices","wifi","insights","system","quick","isolation","actions","netmgr","wifimgr","sysmgr"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
+    ["overview","network","devices","wifi","insights","system","quick","isolation","actions"].forEach(function (s) { if ($(s)) $(s).hidden = s !== id; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-section]"), function (b) { b.classList.toggle("active", b.dataset.section === id); });
     if (adminGroups()[id] && $(id) && (!$(id).innerHTML || $(id).dataset.uiVersion !== UI_VERSION)) {
       $(id).innerHTML = renderAdminBranch(id);
@@ -1154,39 +1154,10 @@
     // Only sections whose backend is fully supported on this build are listed.
     // (SQM and igmpproxy-IPTV are intentionally omitted: SQM caps throughput and
     //  igmpproxy/udpxy are not installed.)
-    return {
-      netmgr: {
-        title: ar ? "الشبكة المحلية" : "Network",
-        desc: ar ? "DHCP، السويتش والمنافذ، حماية الحلقات، الضيوف والجدولة، الجيران" : "DHCP, switch/ports, loop guard, guest & schedule, neighbors",
-        items: [
-          ["dhcp", ar ? "الشبكة / DHCP" : "LAN / DHCP", ""],
-          ["switchmgr", ar ? "السويتش والمنافذ" : "Switch / Ports", ""],
-          ["loopguard", ar ? "حماية الحلقات (STP)" : "Loop Guard", ""],
-          ["netcfg", ar ? "شبكة الضيوف والجدولة" : "Guest & Reboot", ""],
-          ["neighbors", ar ? "جيران الجسر" : "Bridge Neighbors", ""]
-        ]
-      },
-      wifimgr: {
-        title: ar ? "لاسلكي AX1800" : "Wireless AX1800",
-        desc: ar ? "الشبكات، محلل القنوات، تحسين الأداء، الأجهزة المتصلة، طاقة البث" : "Networks, analyzer, optimizer, clients, TX power",
-        items: [
-          ["wireless", ar ? "شبكات الواي فاي" : "Wi-Fi Networks", ""],
-          ["analyzer", ar ? "محلل القنوات" : "Analyzer", ""],
-          ["optimizer", ar ? "تحسين الأداء" : "Optimizer", ""],
-          ["clients", ar ? "أجهزة الواي فاي" : "Wi-Fi Clients", ""],
-          ["power", ar ? "طاقة البث" : "TX Power", "protected"]
-        ]
-      },
-      sysmgr: {
-        title: ar ? "النظام والأدوات" : "System & Tools",
-        desc: ar ? "معلومات الجهاز، أدوات الشبكة، اختبار السرعة" : "Device info, network tools, speed test",
-        items: [
-          ["specs", ar ? "معلومات الجهاز" : "Device Info", ""],
-          ["nettools", ar ? "أدوات الشبكة" : "Network Tools", ""],
-          ["speed", ar ? "اختبار السرعة" : "Speed Test", ""]
-        ]
-      }
-    };
+    // netmgr/wifimgr/sysmgr grouped sections were removed (owner request: they
+    // duplicated the existing الشبكة/لاسلكي/النظام sections and confused the menu).
+    // Their useful controls live on in Quick Settings (wizard) + TX Power + isolation.
+    return {};
   }
   // Strip anything that looks like code / commands / paths / config so the panels
   // never expose build or programming details — keep only plain human sentences.
@@ -1293,7 +1264,7 @@
       '<button class="wizard-tab" data-wizard-tab="security">2. إعدادات الحماية</button>' +
       '<button class="wizard-tab" data-wizard-tab="advanced">3. إعدادات متقدمة</button>' +
       '</div>' +
-      '<p class="mode-hint">كل تطبيق يُحفظ فوراً (Apply & Keep) مع نسخة احتياطية وتأكيد قبل التنفيذ، طاقة البث من 1 إلى 38 (تختارها من التبويب المتقدم).</p>' +
+      '<p class="mode-hint">كل تطبيق يُحفظ ويُطبَّق فوراً بضغطة واحدة (Apply & Keep) مع نسخة احتياطية، طاقة البث 38 dBm (تعدّلها من 1 إلى 38 في التبويب المتقدم).</p>' +
       '<section class="royal-pane" data-wizard-pane="device"><div class="royal-grid wizard-fields">' + group("device") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="security" hidden><div class="royal-grid wizard-fields">' + group("security") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="advanced" hidden><div class="royal-grid wizard-fields">' + group("advanced") + '</div></section>' +
@@ -1640,7 +1611,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       [!!p.hw_offload,1],[!!p.sw_offload,1],[!!p.rps,1],[!!p.fastopen,1],[H.num(p.dns_cache)>=4000,1],[!!p.sgi,1]];
     var on=items.filter(function(x){return x[0];}).length, tot=items.length;
     var head="<div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px'><span>"+(A?"المُفعّل":"Active")+"</span><b class='latin' style='color:var(--excellent)'>"+on+"/"+tot+"</b></div>"+H.bar(on,tot,"var(--excellent)")+
-      "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin:6px 0'><span>"+(A?"قوة البث":"TX power")+"</span><b class='latin' style='color:var(--excellent)'>"+(H.finite(H.num(p.txpower))?p.txpower:35)+" dBm</b></div>";
+      "<div style='display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin:6px 0'><span>"+(A?"قوة البث":"TX power")+"</span><b class='latin' style='color:var(--excellent)'>"+(H.finite(H.num(p.txpower))?p.txpower:38)+" dBm</b></div>";
     var body=head+
       grp(A?"MIMO / AX":"MIMO / AX",
         row(p.mu_bf_he,"MU-MIMO (AX)","MU-MIMO (AX)",A?"إرسال لعدة أجهزة معاً":"serve many at once")+
@@ -1824,19 +1795,33 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
   }
   async function loadData() {
     if (!state.session) return;
+    if (state._pollBusy) return;   // never stack polls when the device is slow
+    state._pollBusy = true;
     var start = performance.now();
+    var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var killer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 15000) : null;
     try {
-      var res = await fetch(authUrl(API), { cache:"no-store" });
+      var res = await fetch(authUrl(API), { cache:"no-store", signal: ctrl ? ctrl.signal : undefined });
       var text = await res.text();
       state.lastLatency = Math.max(1, performance.now() - start);
       if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول Xiaomi CR6608.");
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = JSON.parse(text);
+      state.apiFails = 0; state._apiToastShown = false;   // recovered
       render(data);
     } catch (e) {
+      // Transient network hiccups (slow CGI, a dropped poll) must NOT spam the
+      // Events card or persist across reloads. Only surface after 3 consecutive
+      // failures, and never write these to localStorage.
+      state.apiFails = (state.apiFails || 0) + 1;
       updateAvailability(false);
-      toast("API: " + e.message);
-      event("API error: " + e.message, "error");
+      if (state.apiFails >= 3 && !state._apiToastShown) {
+        state._apiToastShown = true;
+        toast(state.lang === "ar" ? "تعذّر الوصول للوحة — إعادة المحاولة تلقائياً" : "Panel unreachable — retrying");
+      }
+    } finally {
+      state._pollBusy = false;
+      if (killer) clearTimeout(killer);
     }
   }
   async function speedTest() {
@@ -2149,9 +2134,9 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       var navEl = document.querySelector(".nav");
       if (navEl && navEl.parentElement && !$("navSearch")) {
         var si = document.createElement("input");
-        si.id = "navSearch"; si.type = "search";
+        si.id = "navSearch"; si.type = "search"; si.setAttribute("dir", "auto");
         si.placeholder = state.lang === "ar" ? "بحث سريع…" : "Quick search…";
-        si.style.cssText = "width:100%;margin:0 0 8px;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--text);font:inherit";
+        // styled from the stylesheet (#navSearch) so the mobile bottom-bar rules apply
         navEl.parentElement.insertBefore(si, navEl);
         si.oninput = function () {
           var q = si.value.trim().toLowerCase();
