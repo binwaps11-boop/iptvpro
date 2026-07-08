@@ -3,6 +3,8 @@
 CFG="cr6608quick.default"
 BACKUP_DIR="/root/cr6608-quicksettings-backups"
 
+[ -r /usr/libexec/cr6608-txpower-lib ] && . /usr/libexec/cr6608-txpower-lib
+
 qget() {
 	uci -q get "$1" 2>/dev/null || true
 }
@@ -18,6 +20,17 @@ valid_ip() {
 bool_on() {
 	case "$1" in
 		1|on|true|yes|enabled) return 0 ;;
+	esac
+	return 1
+}
+
+valid_country() {
+	echo "$1" | grep -Eq '^[A-Za-z][A-Za-z0-9]$'
+}
+
+valid_ch24() {
+	case "$1" in
+		1|2|3|4|5|6|7|8|9|10|11) return 0 ;;
 	esac
 	return 1
 }
@@ -40,6 +53,7 @@ ensure_wifi_iface() {
 	uci set wireless."$sid".wmm='1'
 	uci set wireless."$sid".isolate='0'
 	uci set wireless."$sid".disassoc_low_ack='0'
+	uci set wireless."$sid".max_inactivity='3600'
 	uci set wireless."$sid".multicast_to_unicast='1'
 	uci set wireless."$sid".dtim_period='2'
 	uci set wireless."$sid".ieee80211k='1'
@@ -197,12 +211,17 @@ EOS
 apply_config() {
 	local mode ip netmask ssid ssid5 ch24 ch5 vlan mesh_id wds_ssid hide security key
 	local pppoe_user pppoe_pass pppoe_port dhcp_server firewall_enabled reset_lock reset_custom reset_seconds
-	local admin_password change_password clear_previous target_network
+	local admin_password change_password clear_previous target_network txp0 txp1 country24 country5 radio0_enabled radio1_enabled cc_all txp_all
 
 	mode="$(qget "$CFG.mode")"; [ -n "$mode" ] || mode='ap'
 	ip="$(qget "$CFG.lan_ipaddr")"; netmask="$(qget "$CFG.lan_netmask")"
 	ssid="$(qget "$CFG.ssid")"; ssid5="$(qget "$CFG.ssid5")"
 	ch24="$(qget "$CFG.channel24")"; ch5="$(qget "$CFG.channel5")"
+	country24="$(qget "$CFG.country24")"; country5="$(qget "$CFG.country5")"
+	# accept the singular key too (Argon quick page / CGI may send just "country")
+	cc_all="$(qget "$CFG.country")"
+	[ -n "$country24" ] || country24="$cc_all"
+	[ -n "$country5" ] || country5="$cc_all"
 	vlan="$(qget "$CFG.vlan_id")"; mesh_id="$(qget "$CFG.mesh_id")"; wds_ssid="$(qget "$CFG.wds_ssid")"
 	hide="$(qget "$CFG.hide_ssid")"; security="$(qget "$CFG.security")"; key="$(qget "$CFG.wifi_key")"
 	pppoe_user="$(qget "$CFG.pppoe_user")"; pppoe_pass="$(qget "$CFG.pppoe_pass")"; pppoe_port="$(qget "$CFG.pppoe_port")"
@@ -210,6 +229,12 @@ apply_config() {
 	reset_lock="$(qget "$CFG.reset_lock")"; reset_custom="$(qget "$CFG.reset_custom")"; reset_seconds="$(qget "$CFG.reset_seconds")"
 	admin_password="$(qget "$CFG.admin_password")"; change_password="$(qget "$CFG.change_password")"
 	clear_previous="$(qget "$CFG.clear_previous")"
+	txp0="$(qget "$CFG.txpower_radio0")"; txp1="$(qget "$CFG.txpower_radio1")"
+	# accept the singular key too ("txpower" applies to both radios)
+	txp_all="$(qget "$CFG.txpower")"
+	[ -n "$txp0" ] || txp0="$txp_all"
+	[ -n "$txp1" ] || txp1="$txp_all"
+	radio0_enabled="$(qget "$CFG.radio0_enabled")"; radio1_enabled="$(qget "$CFG.radio1_enabled")"
 	target_network='lan'
 
 	backup_configs
@@ -238,7 +263,7 @@ apply_config() {
 			;;
 	esac
 
-	[ -n "$ssid" ] || ssid='Smart-AP'
+	[ -n "$ssid" ] || ssid='Smart ap 2.4G'
 	[ -n "$ssid5" ] || ssid5="${ssid}-5G"
 	ensure_wifi_iface wifinet0 radio0 "$ssid"
 	ensure_wifi_iface wifinet1 radio1 "$ssid5"
@@ -247,14 +272,28 @@ apply_config() {
 	set_security wifinet0 "$security" "$key"
 	set_security wifinet1 "$security" "$key"
 
-	[ -n "$ch24" ] && [ "$ch24" != "auto" ] && uci set wireless.radio0.channel="$ch24"
+	[ -n "$ch24" ] && valid_ch24 "$ch24" && uci set wireless.radio0.channel="$ch24"
 	[ -n "$ch5" ] && [ "$ch5" != "auto" ] && uci set wireless.radio1.channel="$ch5"
+	valid_country "$country24" && uci set wireless.radio0.country="$(echo "$country24" | tr a-z A-Z)"
+	valid_country "$country5" && uci set wireless.radio1.country="$(echo "$country5" | tr a-z A-Z)"
 	uci set wireless.radio0.htmode='HE20'
 	uci set wireless.radio1.htmode='HE80'
 	uci set wireless.radio0.legacy_rates='0'
 	uci set wireless.radio1.legacy_rates='0'
 	uci set wireless.radio0.airtime_mode='1'
 	uci set wireless.radio1.airtime_mode='1'
+	bool_on "${radio0_enabled:-1}" && uci set wireless.radio0.disabled='0' || uci set wireless.radio0.disabled='1'
+	bool_on "${radio1_enabled:-1}" && uci set wireless.radio1.disabled='0' || uci set wireless.radio1.disabled='1'
+	# TX Power must NEVER abort the whole save: clamp to a valid 1..38 and continue.
+	case "${txp0:-38}" in ''|*[!0-9]*|0) txp0=38 ;; esac
+	case "${txp1:-38}" in ''|*[!0-9]*|0) txp1=38 ;; esac
+	[ "${txp0:-38}" -ge 1 ] 2>/dev/null && [ "${txp0:-38}" -le 38 ] 2>/dev/null || txp0=38
+	[ "${txp1:-38}" -ge 1 ] 2>/dev/null && [ "${txp1:-38}" -le 38 ] 2>/dev/null || txp1=38
+	if type cr6608_txpower_apply_pair >/dev/null 2>&1; then
+		cr6608_txpower_apply_pair "$txp0" "$txp1" || log "txpower helper reported an issue (radio0=$txp0 radio1=$txp1); continuing"
+	fi
+	uci set wireless.radio0.txpower="$txp0"
+	uci set wireless.radio1.txpower="$txp1"
 
 	case "$mode" in
 		mesh|mesh_vlan)
@@ -305,18 +344,24 @@ apply_config() {
 		uci -q delete "$CFG.change_password"
 	fi
 
-	uci commit network
-	uci commit wireless
-	uci commit dhcp
-	uci commit firewall
-	uci commit cr6608quick
+	# Commit is the part that MUST succeed for the save to count. Track it and make it
+	# the function's success signal; the reloads below are best-effort (never fatal).
+	rc=0
+	uci commit network  || rc=1
+	uci commit wireless || rc=1
+	uci commit dhcp     || rc=1
+	uci commit firewall || rc=1
+	uci commit cr6608quick || rc=1
 
-	log "applied mode=$mode target=$target_network txpower untouched: radio0=$(qget wireless.radio0.txpower) radio1=$(qget wireless.radio1.txpower)"
+	log "applied mode=$mode target=$target_network commit_rc=$rc txpower targets: radio0=${txp0:-38} radio1=${txp1:-38}; uci radio0=$(qget wireless.radio0.txpower) radio1=$(qget wireless.radio1.txpower)"
 
 	/etc/init.d/network reload >/dev/null 2>&1 || true
+	/usr/sbin/cr6608-safe-wifi-reload 8 >/dev/null 2>&1 || true
 	wifi reload >/dev/null 2>&1 || true
+	[ -x /usr/sbin/cr6608-force-txpower38 ] && /usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1 || true
 	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
 	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	return "$rc"
 }
 
 case "$1" in

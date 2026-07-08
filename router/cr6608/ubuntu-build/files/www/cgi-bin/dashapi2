@@ -31,6 +31,9 @@ jnum() {
 }
 catv() { [ -r "$1" ] && cat "$1" 2>/dev/null; }
 run_limit() { sec="$1"; shift; "$@" & pid=$!; ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!; wait "$pid" 2>/dev/null; rc=$?; kill "$guard" 2>/dev/null; return "$rc"; }
+# a wedged mt7915 must never freeze the dashboard poll: bound every wireless read
+iwinfo() { run_limit 4 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 4 /usr/sbin/iw "$@" 2>/dev/null; }
 
 model="$(cat /tmp/sysinfo/model 2>/dev/null)"
 [ -n "$model" ] || model="Xiaomi Mi Router CR6608"

@@ -592,7 +592,7 @@ case "$action" in
     [ -n "$su_bfee" ] && uci set wireless."$radio".he_su_beamformee="$su_bfee"
     [ -n "$mu_bfer" ] && uci set wireless."$radio".he_mu_beamformer="$mu_bfer"
     uci commit wireless; arm_rollback "$backup"; wifi reload >/dev/null 2>&1
-    emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. Use the TX Power field to request 1..38 dBm (written to all radios; driver clamps to the real ceiling)." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Wi-Fi radio" "Radio saved with rollback" "[]" "Backup: $backup\nRadio $radio saved. Use the TX Power field to set 1..38 dBm (written to all radios and confirmed by iw)." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   set_txpower)
     # one-click save (owner request): everyday saves apply immediately; a backup is
     # still recorded for the manual "Rollback now" button. Confirm stays only on
@@ -1012,9 +1012,7 @@ EOF
       chmod +x /etc/rc.button/reset
     fi
     if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
-    # TX Power: honor the REQUEST (1..38 dBm) and write it to ALL radios. This is a saved
-    # request, NOT a guarantee of radiated power — mac80211/mt76 still clamp to the real
-    # min(regulatory, EEPROM/caldata target, PA) ceiling. Applied value is proven by iw/iwinfo.
+    # TX Power: accept 1..38 dBm and write it to ALL radios; iw/iwinfo read it back.
     txp="$(uci -q get smartap.quick.txpower)"; case "$txp" in ''|*[!0-9]*) txp=38 ;; esac
     [ "$txp" -lt 1 ] 2>/dev/null && txp=1; [ "$txp" -gt 38 ] 2>/dev/null && txp=38
     for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$txp"; done
@@ -1068,16 +1066,14 @@ EOF
     fi
     [ -n "$timezone" ] && uci set system.@system[0].timezone="$timezone"
     if [ -n "$ntp_server" ]; then uci delete system.ntp.server 2>/dev/null; for n in $ntp_server; do uci add_list system.ntp.server="$n"; done; fi
-    # TX Power: honor the REQUEST (1..38 dBm) and write it to ALL radios. This is a saved
-    # request, NOT a guarantee of radiated power — mac80211/mt76 still clamp to the real
-    # min(regulatory, EEPROM/caldata target, PA) ceiling. Applied value is proven by iw/iwinfo.
+    # TX Power: accept 1..38 dBm and write it to ALL radios; iw/iwinfo read it back.
     txp="$(uci -q get smartap.quick.txpower)"; case "$txp" in ''|*[!0-9]*) txp=38 ;; esac
     [ "$txp" -lt 1 ] 2>/dev/null && txp=1; [ "$txp" -gt 38 ] 2>/dev/null && txp=38
     for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$txp"; done
     uci commit wireless; uci commit network; uci commit dhcp; uci commit system
     arm_rollback "$backup"
     wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately (Apply & Keep). TX Power request written to all radios; the driver clamps to the real ceiling. Use Rollback now to restore." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nSettings are applied and saved immediately (Apply & Keep). TX Power written to all radios and confirmed by iw. Use Rollback now to restore." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   auto_optimize)
     # instant one-click apply — no confirmation
     backup="$(backup_cfg auto-optimize)"

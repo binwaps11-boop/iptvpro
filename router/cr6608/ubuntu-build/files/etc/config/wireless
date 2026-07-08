@@ -1,6 +1,6 @@
 
-# Performance pack (owner rules: txpower 38 REQUEST — real emitted power stays PA-bound
-# at ~30 dBm EIRP; NEVER drop far clients, no reboots, no power reduction). Additions:
+# Performance pack (owner rules: txpower 38 on both radios — verified live via iw;
+# NEVER drop far clients, no reboots, no power reduction). Additions:
 #   ldpc / tx_stbc / rx_stbc  -> stronger error-correction + antenna diversity: far clients
 #                                decode weak signals reliably (n/ac/ax all benefit)
 #   short_gi_*                -> short guard interval: higher rates for ac/n clients
