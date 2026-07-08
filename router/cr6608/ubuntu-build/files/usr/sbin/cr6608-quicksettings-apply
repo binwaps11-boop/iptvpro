@@ -230,6 +230,7 @@ apply_config() {
 	local htmode24 htmode5 mesh_role fake_mesh nat_enabled access_ipaddr _z
 
 	mode="$(qget "$CFG.mode")"; [ -n "$mode" ] || mode='ap'
+	[ "$mode" = "pppoe_ap" ] && mode='pppoe'
 	ip="$(qget "$CFG.lan_ipaddr")"; netmask="$(qget "$CFG.lan_netmask")"
 	ssid="$(qget "$CFG.ssid")"; ssid5="$(qget "$CFG.ssid5")"
 	ch24="$(qget "$CFG.channel24")"; ch5="$(qget "$CFG.channel5")"
@@ -273,7 +274,14 @@ apply_config() {
 	uci set network.lan.delegate='0'
 
 	case "$mode" in
-		pppoe) set_pppoe_wan "$pppoe_user" "$pppoe_pass" "$pppoe_port" ;;
+		pppoe)
+			if [ -z "$pppoe_user" ] && [ -z "$(uci -q get network.wan.username 2>/dev/null)" ]; then
+				# credential-less pppoe would just flap the wan port forever — refuse it
+				log "pppoe requested with no username anywhere; keeping plain AP ports"
+				mode='ap'; set_ap_ports
+			else
+				set_pppoe_wan "$pppoe_user" "$pppoe_pass" "$pppoe_port"
+			fi ;;
 		*) set_ap_ports ;;
 	esac
 

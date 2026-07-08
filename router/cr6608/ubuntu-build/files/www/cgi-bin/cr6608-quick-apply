@@ -51,6 +51,8 @@ pick() { v=""; for k in "$@"; do v="$(jget "$k")"; [ -n "$v" ] && break; done; p
 # mode/security/channel value sets MUST match the LuCI ListValue options exactly, else a
 # valid selection is silently dropped while the UI still reports success.
 mode="$(pick mode program_mode | grep -oE '^(ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe|pppoe_ap)$')"
+# canonical executor vocabulary: 'pppoe_ap' (dashboard name) IS 'pppoe'
+[ "$mode" = "pppoe_ap" ] && mode="pppoe"
 ip="$(pick lan_ipaddr ipaddr device_ip | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
 nm="$(pick lan_netmask netmask | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
 vlan="$(pick vlan_id | grep -oE '^[0-9]{1,4}$')"
@@ -61,6 +63,9 @@ c5="$(pick channel5 | grep -oE '^(auto|[0-9]{1,3})$')"
 tx="$(pick txpower | grep -oE '^[0-9]{1,2}$')"
 cc="$(pick country | grep -oE '^[A-Za-z][A-Za-z0-9]$')"
 sec="$(pick security | grep -oE '^(open|wpa2|wpa3|mixed|psk2|sae|sae-mixed|none)$')"
+# normalize legacy aliases to the executor's vocabulary — psk2 stored raw used to be
+# applied as OPEN (silent security downgrade)
+case "$sec" in psk2) sec="wpa2" ;; sae) sec="wpa3" ;; sae-mixed) sec="mixed" ;; none) sec="open" ;; esac
 key="$(pick wifi_key key)"
 hide="$(pick hide_ssid | grep -oE '^[01]$')"
 meshid="$(pick mesh_id | cut -c1-32)"

@@ -1,15 +1,18 @@
 #!/bin/sh /etc/rc.common
-
+# Native LuCI "Save & Apply" commits cr6608quick via rpcd/procd reload_config. Only a
+# procd-registered reload trigger receives that event — this stub wires it to the SAME
+# executor the page button uses, so that path really applies instead of only committing.
 START=99
+USE_PROCD=1
 
-start() {
+start_service() {
 	return 0
+}
+
+service_triggers() {
+	procd_add_reload_trigger "cr6608quick"
 }
 
 reload_service() {
 	/usr/sbin/cr6608-quicksettings-apply apply
-}
-
-restart() {
-	reload_service
 }

@@ -825,6 +825,10 @@ EOF
     case "$security" in open|wpa2|wpa3|mixed) : ;; *) security="wpa2" ;; esac
     if [ "$security" != "open" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -lt 8 ]; then emit false "Quick Setup" "Weak Wi-Fi password" "[]" "Wi-Fi password must be 8+ characters, or leave blank to keep current key." "[]" "[]"; exit 0; fi
     if [ -n "$device_password" ] && [ "${#device_password}" -lt 8 ]; then emit false "Quick Setup" "Weak admin password" "[]" "Device password must be 8+ characters, or leave blank to keep current password." "[]" "[]"; exit 0; fi
+    # PPPoE without credentials (typed now or stored before) would only flap the wan port
+    if { [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; } && [ -z "$pppoe_user" ] && [ -z "$(uci -q get network.wan.username 2>/dev/null)" ]; then
+      emit false "Quick Setup" "PPPoE بلا بيانات" "[]" "لتفعيل البرودباند أدخل اسم مستخدم PPPoE (وكلمة السر) أولاً — لم يُغيَّر أي شيء." "[]" "[]"; exit 0
+    fi
     backup="$(backup_cfg royal-apply)"
     [ "$delete_previous" = "1" ] && {
       for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
