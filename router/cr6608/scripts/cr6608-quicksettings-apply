@@ -59,6 +59,8 @@ ensure_wifi_iface() {
 	uci set wireless."$sid".dtim_period='2'
 	uci set wireless."$sid".ieee80211k='1'
 	uci set wireless."$sid".ieee80211v='1'
+	# hide/broadcast SSID (was stored but never applied to the client APs)
+	if [ "$hide" = "1" ]; then uci set wireless."$sid".hidden='1'; else uci -q delete wireless."$sid".hidden; fi
 }
 
 set_security() {
@@ -86,6 +88,7 @@ set_security() {
 		*)
 			uci set wireless."$sid".encryption='none'
 			uci -q delete wireless."$sid".key
+			uci -q delete "$CFG.wifi_key" 2>/dev/null
 			;;
 	esac
 }
