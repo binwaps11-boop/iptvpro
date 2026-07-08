@@ -124,6 +124,10 @@ apply_vlan() {
 	fi
 	local mgmt need=0
 	mgmt="$(g $STATE.management.vlan)"; mgmt="${mgmt:-$MGMT_DEFAULT_VLAN}"
+	# VLAN 0 is not a valid 802.1Q management id and would strand 192.168.1.1 on
+	# br-lan.0. Treat 0/empty/out-of-range as the management default (1).
+	case "$mgmt" in ''|0|*[!0-9]*) mgmt="$MGMT_DEFAULT_VLAN" ;; esac
+	[ "$mgmt" -ge 1 ] 2>/dev/null && [ "$mgmt" -le 4094 ] 2>/dev/null || mgmt="$MGMT_DEFAULT_VLAN"
 	for p in $PORTS; do
 		local v; v="$(g $STATE.$p.vlan)"; v="${v:-$mgmt}"
 		[ "$v" != "$mgmt" ] && need=1
