@@ -202,7 +202,7 @@ return view.extend({
 		o.depends('reset_custom', '1');
 
 		o = s.taboption('advanced', form.Flag, 'nat_enabled', _('NAT (فيلان موجَّه)'));
-		o.default = '0';
+		o.default = '1';
 		o.description = _('مع الفيلان: يجعل الجهاز يوزّع عناوين داخل الفيلان ويوصلها للإنترنت بنفسه (لا يلزم ضبط الميكروتك). تنبيه: هذا NAT مزدوج — بث IPTV (multicast) قد لا يعبر، والأفضل لخدمات الإنترنت العادية.');
 
 		o = s.taboption('advanced', form.Flag, 'dhcp_server', _('DHCP Server'));

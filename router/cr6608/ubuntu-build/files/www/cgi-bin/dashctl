@@ -1319,7 +1319,7 @@ pppoe_user|اسم مستخدم PAP/CHAP|${pppoe_user}|خاص بوضع البرو
 pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها إن وجدت|password|0|device|pppoe_ap|
 broadband_port|منفذ دخول البرودباند|wan|المنفذ الموصول بمودم المزوّد — الافتراضي WAN|select|0|device|pppoe_ap|wan:WAN (الافتراضي),lan1:LAN1,lan2:LAN2
 reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
-nat_enabled|NAT (فيلان موجَّه)|${nat_enabled:-0}|مع الفيلان: الجهاز يوزّع العناوين داخل الفيلان ويربطها بالإنترنت بنفسه (لا يلزم ضبط الميكروتك). تنبيه صريح: NAT مزدوج — بث IPTV (multicast) قد لا يعبر|select|0|advanced|all|1:مفعل,0:معطل
+nat_enabled|NAT (فيلان موجَّه)|${nat_enabled:-1}|مع الفيلان: الجهاز يوزّع العناوين داخل الفيلان ويربطها بالإنترنت بنفسه (لا يلزم ضبط الميكروتك). تنبيه صريح: NAT مزدوج — بث IPTV (multicast) قد لا يعبر|select|0|advanced|all|1:مفعل,0:معطل
 dhcp_server|DHCP Server|${dhcp_now:-0}|تشغيل/إيقاف موزّع العناوين للـ LAN — يُطبَّق فعلياً|select|0|advanced|all|1:مفعل,0:معطل
 firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تشغيل/إيقاف خدمة الجدار فعلياً وفوراً (بدون إعادة تشغيل)|select|0|advanced|all|1:مفعل,0:معطل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل

@@ -315,6 +315,16 @@ apply_config() {
 		*) set_ap_ports ;;
 	esac
 
+	# VLAN modes default to ROUTED (self-serve DHCP + NAT to the untagged uplink) so a
+	# programmed VLAN connects the phone and gives internet out of the box even when the
+	# upstream router knows nothing about the tag. Set NAT off explicitly for a pure
+	# trunk toward a VLAN-aware Mikrotik that hands out the addresses itself.
+	case "$mode" in
+		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
+			[ -z "$nat_enabled" ] && nat_enabled='1'
+			;;
+	esac
+
 	case "$mode" in
 		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
 			if set_vlan_target "$vlan"; then
@@ -518,6 +528,8 @@ runtime_apply() {
 	fi
 	exec 9>"$RLOCK"; flock 9
 	echo "phase=reloading ts=$(date +%s)" > "$STATUS"
+	# (fd 9 is intentionally held for the whole reload phase; the process exits at
+	#  the end of runtime_apply which releases it - nothing long-lived inherits it)
 
 	/etc/init.d/network reload >/dev/null 2>&1 || true
 	if [ "$w0" = "1" ] && [ "$w1" = "1" ]; then
@@ -583,30 +595,28 @@ spawn_runtime() {
 	return 0
 }
 
-# adopt_live_state — BOOT ONLY: a change made outside quick settings (LuCI native
-# pages, SSH) must survive a power cycle. Before the boot re-apply we adopt the live
-# values into the store, so boot converges STRUCTURE (lan exists, wifi attached,
-# rescue present) without reverting the owner's out-of-band edits.
+# adopt_live_state — BOOT ONLY, SAFETY-SCOPED. The cr6608quick store is the single
+# source of truth for the programmed config (IP, VLAN, SSID, channel...): at boot the
+# store WINS so a programmed VLAN/IP always comes back exactly as set — power cycles
+# never revert quick-settings. The ONLY thing we adopt from the live config is a Wi-Fi
+# KEY: if the radios currently run secured but the store says open (e.g. a key was set
+# from the LuCI Wireless page), we must not silently re-open the network at boot.
 adopt_live_state() {
-	local v
-	v="$(uci -q get network.lan.ipaddr)"; valid_ip "$v" && uci -q set "$CFG.lan_ipaddr=$v"
-	v="$(uci -q get network.lan.netmask)"; valid_ip "$v" && uci -q set "$CFG.lan_netmask=$v"
-	v="$(uci -q get wireless.wifinet0.ssid)"; [ -n "$v" ] && uci -q set "$CFG.ssid=$v"
-	v="$(uci -q get wireless.wifinet1.ssid)"; [ -n "$v" ] && uci -q set "$CFG.ssid5=$v"
-	v="$(uci -q get wireless.radio0.channel)"; [ -n "$v" ] && uci -q set "$CFG.channel24=$v"
-	v="$(uci -q get wireless.radio1.channel)"; [ -n "$v" ] && uci -q set "$CFG.channel5=$v"
-	v="$(uci -q get wireless.radio0.htmode)"; [ -n "$v" ] && uci -q set "$CFG.htmode24=$v"
-	v="$(uci -q get wireless.radio1.htmode)"; [ -n "$v" ] && uci -q set "$CFG.htmode5=$v"
-	# security: a key set from the Wireless panel must NOT be re-opened at boot
-	v="$(uci -q get wireless.wifinet0.encryption)"
-	case "$v" in
-		psk2) uci -q set "$CFG.security=wpa2" ;;
-		sae) uci -q set "$CFG.security=wpa3" ;;
-		sae-mixed) uci -q set "$CFG.security=mixed" ;;
-		none|'') uci -q set "$CFG.security=open" ;;
+	local enc key skey
+	enc="$(uci -q get wireless.wifinet0.encryption)"
+	key="$(uci -q get wireless.wifinet0.key)"
+	skey="$(uci -q get "$CFG.wifi_key")"
+	case "$enc" in
+		psk2|sae|sae-mixed)
+			# live is secured; only override the store if the store would OPEN it
+			[ "$(uci -q get "$CFG.security")" = "open" ] || [ -z "$(uci -q get "$CFG.security")" ] && {
+				case "$enc" in psk2) uci -q set "$CFG.security=wpa2" ;; sae) uci -q set "$CFG.security=wpa3" ;; sae-mixed) uci -q set "$CFG.security=mixed" ;; esac
+				[ -n "$key" ] && uci -q set "$CFG.wifi_key=$key"
+				uci -q commit cr6608quick
+				log "boot: adopted the live Wi-Fi key so a secured network is not re-opened"
+			}
+			;;
 	esac
-	v="$(uci -q get wireless.wifinet0.key)"; [ -n "$v" ] && uci -q set "$CFG.wifi_key=$v"
-	uci -q commit cr6608quick
 }
 
 STATUS=/tmp/cr6608-apply.status
@@ -617,7 +627,7 @@ do_config() {
 	# serialize the config+commit critical section against other applies
 	exec 8>"$RLOCK.cfg"; flock -w 30 8 || log "config lock busy >30s - proceeding"
 	apply_config; _rc=$?
-	flock -u 8
+	flock -u 8; exec 8>&-
 	return "$_rc"
 }
 
