@@ -249,7 +249,7 @@ apply_config() {
 	local pppoe_user pppoe_pass pppoe_port dhcp_server firewall_enabled reset_lock reset_custom reset_seconds
 	local admin_password change_password clear_previous target_network txp0 txp1 country24 country5 radio0_enabled radio1_enabled cc_all txp_all
 	local pre_w0 pre_w1 pre_wx post_w0 post_w1 post_wx w0 w1 pre_dhcp pre_fw
-	local htmode24 htmode5 mesh_role fake_mesh nat_enabled access_ipaddr _z
+	local htmode24 htmode5 mesh_role fake_mesh nat_enabled access_ipaddr _z _want_masq
 
 	mode="$(qget "$CFG.mode")"; [ -n "$mode" ] || mode='ap'
 	[ "$mode" = "pppoe_ap" ] && mode='pppoe'
@@ -461,9 +461,13 @@ apply_config() {
 		/etc/init.d/firewall disable >/dev/null 2>&1 || true
 	fi
 
-	# NAT: real in both directions on the wan-named zone
+	# NAT: real masquerade on the wan-named zone. On when the user turns NAT on OR
+	# when we are the router for the link (PPPoE broadband client) — a PPPoE uplink
+	# must always masquerade or LAN clients get no internet, independent of the toggle.
+	_want_masq=0
+	{ bool_on "$nat_enabled" || [ "$mode" = "pppoe" ]; } && _want_masq=1
 	for _z in $(uci show firewall 2>/dev/null | awk -F'[.=]' "/\\.name='wan'/{print \$2}"); do
-		bool_on "$nat_enabled" && uci set firewall."$_z".masq='1' || uci set firewall."$_z".masq='0'
+		uci set firewall."$_z".masq="$_want_masq"
 	done
 
 	# FAKE MESH (WDS/4addr) on both client APs when requested
