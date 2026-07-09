@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# Generate wireless config if it does not exist yet
+[ -f /etc/config/wireless ] || wifi config
+
+# Enable all WiFi radios (country PA — must match 99-cr6608-stable, which runs first;
+# this file sorts last, so a stale 'US' here would silently override PA on the radios).
+for radio in $(uci show wireless | sed -n "s/^\(wireless\.radio[0-9]\+\)=wifi-device.*/\1/p"); do
+	uci set ${radio}.disabled='0'
+	uci set ${radio}.country='PA'
+done
+
+# Make default WiFi open and visible
+for iface in $(uci show wireless | sed -n "s/^\(wireless\.default_radio[0-9]\+\)=wifi-iface.*/\1/p"); do
+	uci set ${iface}.disabled='0'
+	uci set ${iface}.ssid='Smart ap 2.4G'
+	uci set ${iface}.encryption='none'
+done
+
+uci commit wireless
+wifi reload
+
+exit 0

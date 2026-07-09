@@ -93,6 +93,13 @@ mrl="$(pick mesh_role | grep -oE '^(sender|receiver)$')"
 u mode        "$mode"
 u lan_ipaddr  "$ip"
 u lan_netmask "$nm"
+case "$mode" in
+  *vlan*)
+    if [ -z "$vlan" ] || [ "$vlan" -lt 2 ] 2>/dev/null || [ "$vlan" -gt 4094 ] 2>/dev/null; then
+      printf 'Content-Type: application/json\n\n{"ok":false,"error":"vlan","msg":"VLAN ID must be 2-4094 (1 is the management VLAN)"}\n'
+      exit 0
+    fi ;;
+esac
 u vlan_id     "$vlan"
 u ssid        "$s24"
 u ssid5       "$s5"
@@ -129,11 +136,14 @@ mq program_mode "$pm"; mq ssid "$s24"; mq ch24 "$c24"; mq ch5 "$c5"
 mq vlan_id "$vlan"; mq security "$sec"; mq hide_ssid "$hide"
 mq nat_enabled "$natf"; mq dhcp_server "$dhcps"; mq firewall_enabled "$fw"
 mq broadband_enabled "$bbe"; mq fake_mesh "$fkm"; mq htmode24 "$h24"; mq htmode5 "$h5"
-mq device_ip "$aip"; mq mesh_role "$mrl"
+mq device_ip "$ip"; mq mesh_role "$mrl"
+mq mesh_id "$meshid"; mq wds_peer_ssid "$wds"
+# wizard stores the INVERSE vocabulary for the reset button
+[ -n "$rlk" ] && { [ "$rlk" = "1" ] && mq reset_button_enabled "0" || mq reset_button_enabled "1"; }
 uci -q commit smartap
-# txpower stays owner-fixed at 38 on both radios
-uw txpower_radio0 "${tx:-38}"
-uw txpower_radio1 "${tx:-38}"
+# txpower: write only when the page really sent a value (an absent field must
+# NOT silently reset a stored setting)
+[ -n "$tx" ] && { uw txpower_radio0 "$tx"; uw txpower_radio1 "$tx"; }
 uci -q commit cr6608quick
 
 # ---- real apply (output kept off stdout so the HTTP response closes promptly) ----

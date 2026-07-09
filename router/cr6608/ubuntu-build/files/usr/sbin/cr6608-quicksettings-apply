@@ -33,6 +33,13 @@ valid_country() {
 	echo "$1" | grep -Eq '^[A-Za-z][A-Za-z0-9]$'
 }
 
+valid_ch5() {
+	case "$1" in
+		auto|36|40|44|48|149|153|157|161|165) return 0 ;;
+	esac
+	return 1
+}
+
 valid_ch24() {
 	case "$1" in
 		auto|1|2|3|4|5|6|7|8|9|10|11) return 0 ;;
@@ -44,7 +51,10 @@ backup_configs() {
 	mkdir -p "$BACKUP_DIR"
 	tar -czf "$BACKUP_DIR/config-before-$(date +%Y%m%d-%H%M%S).tgz" \
 		/etc/config/network /etc/config/wireless /etc/config/dhcp \
-		/etc/config/firewall /etc/config/system 2>/dev/null || true
+		/etc/config/firewall /etc/config/system /etc/config/cr6608quick \
+		/etc/config/smartap 2>/dev/null || true
+	# rotation: keep the newest 10 so the overlay never fills up
+	ls -t "$BACKUP_DIR"/config-before-*.tgz 2>/dev/null | tail -n +11 | while read -r f; do rm -f "$f"; done
 }
 
 ensure_wifi_iface() {
@@ -270,7 +280,7 @@ apply_config() {
 	pre_w0="$(uci -q show wireless.radio0 2>/dev/null; uci -q show wireless.wifinet0 2>/dev/null)"
 	pre_w1="$(uci -q show wireless.radio1 2>/dev/null; uci -q show wireless.wifinet1 2>/dev/null)"
 	pre_wx="$(uci -q show wireless 2>/dev/null | grep -Ev '^wireless\.(radio0|radio1|wifinet0|wifinet1)[.=]')"
-	pre_dhcp="$(uci -q show dhcp 2>/dev/null)"
+	pre_dhcp="$(uci -q show dhcp 2>/dev/null; uci -q get network.lan.ipaddr)"
 	pre_fw="$(uci -q show firewall 2>/dev/null)"
 
 	backup_configs
@@ -347,7 +357,7 @@ apply_config() {
 	set_security wifinet1 "$security" "$key"
 
 	[ -n "$ch24" ] && valid_ch24 "$ch24" && uci set wireless.radio0.channel="$ch24"
-	[ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+	[ -n "$ch5" ] && valid_ch5 "$ch5" && uci set wireless.radio1.channel="$ch5"
 	valid_country "$country24" && uci set wireless.radio0.country="$(echo "$country24" | tr a-z A-Z)"
 	valid_country "$country5" && uci set wireless.radio1.country="$(echo "$country5" | tr a-z A-Z)"
 	case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) htmode24='HE20' ;; esac
@@ -379,6 +389,9 @@ apply_config() {
 	uci -q delete wireless.cr6608_wds
 	uci -q delete wireless.smartap_mesh
 	uci -q delete wireless.smartap_wds
+	# ancient builds used ap24/ap5 iface names - drop them so SSIDs never duplicate
+	uci -q delete wireless.ap24
+	uci -q delete wireless.ap5
 
 	case "$mode" in
 		mesh|mesh_vlan)
@@ -437,6 +450,17 @@ apply_config() {
 		uci -q delete wireless.wifinet0.wds; uci -q delete wireless.wifinet1.wds
 	fi
 
+	# rescue interfaces are ALWAYS members of the lan zone (input allowed) - the
+	# routed-VLAN uplink zone must never swallow the wired rescue path
+	_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='lan'.*/\1/p" | head -1)"
+	if [ -n "$_z" ]; then
+		for _ri in wlanrescue recovery; do
+			uci -q get network.$_ri >/dev/null 2>&1 || continue
+			uci -q del_list firewall.$_z.network="$_ri"
+			uci add_list firewall.$_z.network="$_ri"
+		done
+	fi
+
 	# ONE device IP only (network.lan). The old extra-alias model (smartap_devip)
 	# confused the owner — 192.168.1.1 seemed to "stay" — so it is gone for good.
 	uci -q delete network.smartap_devip
@@ -472,10 +496,11 @@ apply_config() {
 	[ "$pre_w0" != "$post_w0" ] && w0=1
 	[ "$pre_w1" != "$post_w1" ] && w1=1
 	[ "$pre_wx" != "$post_wx" ] && { w0=1; w1=1; }	# mesh/WDS sections changed -> full pass
-	[ "$pre_dhcp" != "$(uci -q show dhcp 2>/dev/null)" ] && dh=1
+	[ "$pre_dhcp" != "$(uci -q show dhcp 2>/dev/null; uci -q get network.lan.ipaddr)" ] && dh=1
 	[ "$pre_fw" != "$(uci -q show firewall 2>/dev/null)" ] && fw=1
 	bool_on "$firewall_enabled" && fwen=1 || fwen=0
 	echo "w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen" > "$SCOPE"
+	RT_SCOPE="w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen"
 	return "$rc"
 }
 
@@ -486,7 +511,11 @@ apply_config() {
 # retries once, so one apply == one applied result.
 runtime_apply() {
 	local w0=1 w1=1 dh=1 fw=1 fwen=1 n try
-	[ -f "$SCOPE" ] && . "$SCOPE" 2>/dev/null
+	if [ -n "$1" ]; then
+		eval "$1"			# scope passed by our spawner (race-free)
+	elif [ -f "$SCOPE" ]; then
+		. "$SCOPE" 2>/dev/null
+	fi
 	exec 9>"$RLOCK"; flock 9
 	echo "phase=reloading ts=$(date +%s)" > "$STATUS"
 
@@ -500,19 +529,30 @@ runtime_apply() {
 	fi
 	# firewall: start/stop AFTER commit (fw4 reads the committed file)
 	if [ "$fwen" = "1" ]; then
-		[ "$fw" = "1" ] && { /etc/init.d/firewall restart >/dev/null 2>&1 || /etc/init.d/firewall start >/dev/null 2>&1 || true; }
+		if [ "$fw" = "1" ]; then
+			/etc/init.d/firewall restart >/dev/null 2>&1 || true
+		else
+			/etc/init.d/firewall start >/dev/null 2>&1 || true
+		fi
 	else
 		/etc/init.d/firewall stop >/dev/null 2>&1 || true
 	fi
 	[ "$dh" = "1" ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+	# pin 38 immediately (not only after the settle loop) - no clamped-power window
+	[ -x /usr/sbin/cr6608-force-txpower38 ] && /usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1 || true
 
 	# CONVERGENCE CHECK: each enabled radio must actually be broadcasting. Missing
 	# after the reload -> one targeted retry. This closes the "apply twice" hole.
 	for try in 1 2; do
 		sleep "${CR6608_SETTLE:-8}"
 		n=0
-		[ "$(uci -q get wireless.radio0.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy0-ap0' && { wifi up radio0 >/dev/null 2>&1; n=1; }
-		[ "$(uci -q get wireless.radio1.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy1-ap0' && { wifi up radio1 >/dev/null 2>&1; n=1; }
+		if [ "$(uci -q get wireless.radio0.disabled)" != "1" ] && [ "$(uci -q get wireless.wifinet0.disabled)" != "1" ]; then
+			iwinfo 2>/dev/null | grep -q '^phy0-ap0' || { wifi up radio0 >/dev/null 2>&1; n=1; }
+		fi
+		# radio1's client AP is intentionally OFF in mesh-receiver mode - do not kick it
+		if [ "$(uci -q get wireless.radio1.disabled)" != "1" ] && [ "$(uci -q get wireless.wifinet1.disabled)" != "1" ]; then
+			iwinfo 2>/dev/null | grep -q '^phy1-ap0' || { wifi up radio1 >/dev/null 2>&1; n=1; }
+		fi
 		[ "$n" = "0" ] && break
 		log "convergence retry $try: a radio was missing after reload - kicked it"
 	done
@@ -527,20 +567,54 @@ runtime_apply() {
 spawn_runtime() {
 	echo "phase=saving ts=$(date +%s)" > "$STATUS"
 	if command -v setsid >/dev/null 2>&1; then
-		setsid "$0" __runtime </dev/null >>/tmp/cr6608-apply.log 2>&1 &
+		setsid "$0" __runtime "$RT_SCOPE" </dev/null >>/tmp/cr6608-apply.log 2>&1 &
 	else
-		( trap '' HUP INT TERM; "$0" __runtime </dev/null >>/tmp/cr6608-apply.log 2>&1 ) &
+		( trap '' HUP INT TERM; "$0" __runtime "$RT_SCOPE" </dev/null >>/tmp/cr6608-apply.log 2>&1 ) &
 	fi
 	return 0
+}
+
+# adopt_live_state — BOOT ONLY: a change made outside quick settings (LuCI native
+# pages, SSH) must survive a power cycle. Before the boot re-apply we adopt the live
+# values into the store, so boot converges STRUCTURE (lan exists, wifi attached,
+# rescue present) without reverting the owner's out-of-band edits.
+adopt_live_state() {
+	local v
+	v="$(uci -q get network.lan.ipaddr)"; valid_ip "$v" && uci -q set "$CFG.lan_ipaddr=$v"
+	v="$(uci -q get network.lan.netmask)"; valid_ip "$v" && uci -q set "$CFG.lan_netmask=$v"
+	v="$(uci -q get wireless.wifinet0.ssid)"; [ -n "$v" ] && uci -q set "$CFG.ssid=$v"
+	v="$(uci -q get wireless.wifinet1.ssid)"; [ -n "$v" ] && uci -q set "$CFG.ssid5=$v"
+	v="$(uci -q get wireless.radio0.channel)"; [ -n "$v" ] && uci -q set "$CFG.channel24=$v"
+	v="$(uci -q get wireless.radio1.channel)"; [ -n "$v" ] && uci -q set "$CFG.channel5=$v"
+	v="$(uci -q get wireless.radio0.htmode)"; [ -n "$v" ] && uci -q set "$CFG.htmode24=$v"
+	v="$(uci -q get wireless.radio1.htmode)"; [ -n "$v" ] && uci -q set "$CFG.htmode5=$v"
+	# security: a key set from the Wireless panel must NOT be re-opened at boot
+	v="$(uci -q get wireless.wifinet0.encryption)"
+	case "$v" in
+		psk2) uci -q set "$CFG.security=wpa2" ;;
+		sae) uci -q set "$CFG.security=wpa3" ;;
+		sae-mixed) uci -q set "$CFG.security=mixed" ;;
+		none|'') uci -q set "$CFG.security=open" ;;
+	esac
+	v="$(uci -q get wireless.wifinet0.key)"; [ -n "$v" ] && uci -q set "$CFG.wifi_key=$v"
+	uci -q commit cr6608quick
 }
 
 STATUS=/tmp/cr6608-apply.status
 SCOPE=/tmp/cr6608-apply.scope
 RLOCK=/tmp/cr6608-apply.lock
 
+do_config() {
+	# serialize the config+commit critical section against other applies
+	exec 8>"$RLOCK.cfg"; flock -w 30 8 || log "config lock busy >30s - proceeding"
+	apply_config; _rc=$?
+	flock -u 8
+	return "$_rc"
+}
+
 case "$1" in
-	apply|'') apply_config && spawn_runtime ;;
-	sync) apply_config && runtime_apply ;;	# inline (boot / scripts that must wait)
-	__runtime) runtime_apply ;;
+	apply|'') do_config && spawn_runtime ;;
+	sync) adopt_live_state; do_config && runtime_apply ;;	# inline (boot path)
+	__runtime) runtime_apply "$2" ;;
 	*) echo "usage: $0 [apply|sync]" >&2; exit 1 ;;
 esac

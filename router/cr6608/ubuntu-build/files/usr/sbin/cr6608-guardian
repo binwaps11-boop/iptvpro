@@ -1,0 +1,85 @@
+#!/bin/sh
+# cr6608-guardian — the ONE background caretaker. Replaces (and retires) the old
+# wifi-sentinel cron, rescue-guard service, led-watch daemon and hotplug pokes that
+# used to overlap and fight each other. One loop, four duties, zero surprises:
+#   1. LED     (2s):  the Internet LED follows REAL carrier on ANY wired port
+#   2. Wi-Fi   (30s): an enabled radio whose AP iface vanished gets ONE targeted
+#                     "wifi up" after 2 consecutive misses, max once/10min/radio
+#   3. Rescue  (30s): wlanrescue 221.221.221.221 + recovery 192.168.66.1 must EXIST
+#                     (placement/device stays owned by the apply engine)
+#   4. Power   (30s): txpower drifted off 38 -> re-pin via cr6608-force-txpower38
+# NEVER reboots anything. Sleeps while an apply is in flight and for the first
+# 3 minutes after boot (netifd/hostapd are still settling).
+LED=""
+for d in /sys/class/leds/blue:net /sys/class/leds/yellow:net; do
+	[ -d "$d" ] && LED="$d" && break
+done
+[ -n "$LED" ] && echo none > "$LED/trigger" 2>/dev/null
+
+log() { logger -t cr6608-guardian "$*"; }
+up_since() { cut -d. -f1 /proc/uptime 2>/dev/null; }
+
+miss0=0; miss1=0; last_kick0=0; last_kick1=0
+tick=0
+while :; do
+	# ---- duty 1: LED (every cycle) --------------------------------------
+	if [ -n "$LED" ]; then
+		c=0
+		for p in wan lan1 lan2 lan3; do
+			[ "$(cat /sys/class/net/$p/carrier 2>/dev/null)" = "1" ] && { c=1; break; }
+		done
+		grep -q '\[none\]' "$LED/trigger" 2>/dev/null || echo none > "$LED/trigger" 2>/dev/null
+		echo "$( [ "$c" = "1" ] && echo 255 || echo 0 )" > "$LED/brightness" 2>/dev/null
+	fi
+
+	tick=$((tick + 1))
+	if [ $((tick % 15)) -eq 0 ]; then
+		now="$(up_since)"
+		# boot grace + apply-in-flight: observe, never interfere
+		if [ "${now:-0}" -ge 180 ] && ! grep -q '^phase=reloading' /tmp/cr6608-apply.status 2>/dev/null; then
+			# ---- duty 2: Wi-Fi presence -------------------------------------
+			if [ "$(uci -q get wireless.radio0.disabled)" != "1" ]; then
+				if iwinfo 2>/dev/null | grep -q '^phy0-ap0'; then miss0=0; else miss0=$((miss0+1)); fi
+				if [ "$miss0" -ge 2 ] && [ $((now - last_kick0)) -ge 600 ]; then
+					log "radio0 AP iface missing twice - one targeted wifi up"
+					wifi up radio0 >/dev/null 2>&1; last_kick0=$now; miss0=0
+				fi
+			else miss0=0; fi
+			if [ "$(uci -q get wireless.radio1.disabled)" != "1" ]; then
+				if iwinfo 2>/dev/null | grep -q '^phy1-ap0'; then miss1=0; else miss1=$((miss1+1)); fi
+				if [ "$miss1" -ge 2 ] && [ $((now - last_kick1)) -ge 600 ]; then
+					log "radio1 AP iface missing twice - one targeted wifi up"
+					wifi up radio1 >/dev/null 2>&1; last_kick1=$now; miss1=0
+				fi
+			else miss1=0; fi
+			# ---- duty 3: rescue interfaces exist -----------------------------
+			fix=0
+			if ! uci -q get network.wlanrescue >/dev/null 2>&1; then
+				uci set network.wlanrescue='interface'
+				uci set network.wlanrescue.proto='static'
+				uci set network.wlanrescue.ipaddr='221.221.221.221'
+				uci set network.wlanrescue.netmask='255.255.255.0'
+				uci set network.wlanrescue.ipv6='0'
+				uci set network.wlanrescue.device='br-lan'
+				fix=1
+			fi
+			if ! uci -q get network.recovery >/dev/null 2>&1; then
+				uci set network.recovery='interface'
+				uci set network.recovery.proto='static'
+				uci set network.recovery.ipaddr='192.168.66.1'
+				uci set network.recovery.netmask='255.255.255.0'
+				uci set network.recovery.ipv6='0'
+				uci set network.recovery.device='br-lan'
+				fix=1
+			fi
+			[ "$fix" = "1" ] && { uci commit network; /etc/init.d/network reload >/dev/null 2>&1; log "rescue interface was missing - recreated"; }
+			# ---- duty 4: txpower drift ---------------------------------------
+			tp="$(iwinfo phy0-ap0 info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p')"
+			if [ -n "$tp" ] && [ "$tp" != "38" ] && [ -x /usr/sbin/cr6608-force-txpower38 ]; then
+				log "txpower drifted to $tp - re-pinning 38"
+				/usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1
+			fi
+		fi
+	fi
+	sleep 2
+done

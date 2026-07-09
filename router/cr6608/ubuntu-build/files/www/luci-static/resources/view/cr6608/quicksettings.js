@@ -17,7 +17,7 @@ return view.extend({
 	FIELDS: ['mode','lan_ipaddr','lan_netmask','vlan_id','ssid','ssid5','channel24',
 		'channel5','mesh_id','wds_ssid','hide_ssid','security','wifi_key','change_password',
 		'admin_password','clear_previous','pppoe_user','pppoe_pass','pppoe_port','reset_lock',
-		'reset_custom','reset_seconds','nat_enabled','dhcp_server','firewall_enabled',
+		'reset_custom','reset_seconds','nat_enabled','dhcp_server','firewall_enabled','mesh_role',
 		'watchcat_enabled','broadband_enabled','fake_mesh'],
 	handleSaveApply: function(ev, mode) {
 		var self = this;
@@ -127,10 +127,20 @@ return view.extend({
 		o.value('40', '40');
 		o.value('44', '44');
 		o.value('48', '48');
+		o.value('149', '149');
+		o.value('153', '153');
+		o.value('157', '157');
+		o.value('161', '161');
 		o.value('auto', _('تلقائي'));
 
 		o = s.taboption('device', form.Value, 'mesh_id', _('عنوان Mesh'));
 		o.datatype = 'maxlength(32)';
+		o.depends('mode', 'mesh');
+		o.depends('mode', 'mesh_vlan');
+
+		o = s.taboption('device', form.ListValue, 'mesh_role', _('دور Mesh'));
+		o.value('sender', _('مرسل (الرئيسي)'));
+		o.value('receiver', _('مستقبل (يوسع التغطية)'));
 		o.depends('mode', 'mesh');
 		o.depends('mode', 'mesh_vlan');
 

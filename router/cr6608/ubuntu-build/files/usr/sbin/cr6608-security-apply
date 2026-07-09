@@ -130,10 +130,11 @@ apply_vlan() {
 	log "port vlans applied (quick vid='${qvid:-none}'; access/trunk per smartap config)"
 }
 
-# management always reachable: keep recovery interface + lan input open
+# management always reachable: the rescue interfaces must exist (placement is the
+# apply engine's job; the guardian also re-creates them if they ever get deleted)
 ensure_management() {
-	# Keep the static recovery IP, DHCP management alias and firewall zone in sync.
-	[ -x /usr/sbin/smartap-bootstrap ] && /usr/sbin/smartap-bootstrap quiet >/dev/null 2>&1 || true
+	type cr6608_ensure_lan >/dev/null 2>&1 && cr6608_ensure_lan
+	return 0
 }
 
 case "$1" in

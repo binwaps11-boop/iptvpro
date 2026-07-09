@@ -85,7 +85,7 @@ backup_cfg() {
   mkdir -p /root/dashboard-backups
   [ -f /etc/config/smartap ] || touch /etc/config/smartap 2>/dev/null
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  tar -czf "/root/dashboard-backups/smartap-${tag}-${ts}.tar.gz" /etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/smartap /etc/crontabs/root /etc/passwd /etc/shadow /etc/rc.button/reset 2>/dev/null
+  tar -czf "/root/dashboard-backups/smartap-${tag}-${ts}.tar.gz" /etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/smartap /etc/config/cr6608quick /etc/crontabs/root /etc/passwd /etc/shadow /etc/rc.button/reset 2>/dev/null
   # keep only the 10 newest backups so the flash overlay can never fill up
   ls -1t /root/dashboard-backups/smartap-*.tar.gz 2>/dev/null | sed -n '11,$p' | while read -r old; do rm -f "$old"; done
   printf '/root/dashboard-backups/smartap-%s-%s.tar.gz' "$tag" "$ts"
@@ -173,8 +173,9 @@ store_royal_config() {
   local _m _rb _tp _dp
   _m="$(safe_word "$(param program_mode)")"; case "$_m" in pppoe_ap) _m="pppoe" ;; esac
   [ -n "$_m" ] && uci -q set cr6608quick.default.mode="$_m"
-  [ "$(safe_num "$(param broadband_enabled)")" = "1" ] && [ -n "$(param pppoe_user)" ] && uci -q set cr6608quick.default.mode='pppoe'
+  case "$_m" in ''|ap) [ "$(safe_num "$(param broadband_enabled)")" = "1" ] && [ -n "$(param pppoe_user)" ] && uci -q set cr6608quick.default.mode='pppoe' ;; esac
   _rmap device_ip lan_ipaddr;     _rmap vlan_id vlan_id;        _rmap ssid ssid
+  _rmap ssid5 ssid5;              _rmap netmask lan_netmask
   _rmap ch24 channel24;           _rmap ch5 channel5
   _rmap htmode24 htmode24;        _rmap htmode5 htmode5
   _rmap mesh_id mesh_id;          _rmap mesh_role mesh_role;    _rmap wds_peer_ssid wds_ssid
@@ -280,7 +281,10 @@ case "$action" in
     rb="$(cat /tmp/smartap-rollback-backup 2>/dev/null)"
     if [ -r "$rb" ]; then
       tar -xzf "$rb" -C / 2>/dev/null
-      /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+      # the snapshot includes cr6608quick (the desired state) - re-apply through the
+      # single engine so runtime, store and disk all converge on the restored state
+      /usr/sbin/cr6608-quicksettings-apply apply >/dev/null 2>&1 || { /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1; }
+      /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
       rm -f /tmp/smartap-rollback-armed
       emit true "Rollback" "Restored previous backup" "[]" "Restored: $rb" "[]" "[]"
     else
@@ -288,26 +292,6 @@ case "$action" in
     fi
     exit 0 ;;
   clear_api_cache) rm -f /tmp/dashapi2.cache /tmp/dashapi2.cache.ts; emit true "Cache" "Cache cleared" "[]" "Live API cache was cleared." "[]" "[]"; exit 0 ;;
-  eeprom_status)
-    out="$(/usr/sbin/cr6608-eeprom-power status 2>&1)"
-    drv="$(cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm 2>/dev/null)"
-    emit true "EEPROM / RF Power" "Status" "[]" "Driver RF override (cr6608_rf_38dbm)= ${drv:-unknown}\n$out" "[]" "[]"; exit 0 ;;
-  eeprom_backup)
-    out="$(/usr/sbin/cr6608-eeprom-power backup 2>&1)"
-    emit true "EEPROM Backup" "Factory backed up" "[]" "$out\nنسخة المعايرة الاحتياطية جاهزة للتنزيل: http://<router>/factory.orig" "[]" "[]"; exit 0 ;;
-  eeprom_boost)
-    confirm_required "EEPROM power boost (writes calibration flash)"
-    out="$(/usr/sbin/cr6608-eeprom-power apply 2>&1)"
-    case "$out" in
-      APPLIED-OK*) emit true "EEPROM Boost" "Applied (+6 dB rate delta)" "[]" "$out\nتم رفع دلتا الطاقة في المعايرة على أعلى قيمة تسمح بها المعايرة." "[]" "[]" ;;
-      ALREADY-APPLIED*) emit true "EEPROM Boost" "Already applied" "[]" "$out" "[]" "[]" ;;
-      *) emit false "EEPROM Boost" "Failed / rolled back" "[]" "$out\nتمت استعادة المعايرة الأصلية تلقائيًا." "[]" "[]" ;;
-    esac
-    exit 0 ;;
-  eeprom_restore)
-    confirm_required "Restore original Factory calibration"
-    out="$(/usr/sbin/cr6608-eeprom-power restore 2>&1)"
-    emit true "EEPROM Restore" "Factory calibration restored" "[]" "$out" "[]" "[]"; exit 0 ;;
   add_interface)
     confirm_required "Add interface"
     ifname="$(safe_word "$(param if_name)")"; proto="$(safe_word "$(param if_proto)")"; dev="$(safe_word "$(param if_device)")"
@@ -845,7 +829,7 @@ EOF
     # requested IP (inside the VLAN in VLAN modes), rebuilds backhaul ifaces, then
     # runs the reload phase DETACHED so a closed browser can never half-apply.
     if ! /usr/sbin/cr6608-quicksettings-apply apply >/dev/null 2>&1; then
-      emit false "Quick Setup" "Apply failed" "[]" "Backup: $backup\nCommit failed — nothing was changed. سجل الأخطاء: logread -e cr6608" "[]" "[]"; exit 0
+      emit false "Quick Setup" "Apply failed" "[]" "Backup: $backup\nApply did not complete — some settings may be saved but not active. أعد المحاولة أو راجع السجل: سجل الأخطاء: logread -e cr6608" "[]" "[]"; exit 0
     fi
     arm_rollback "$backup"
     newip="$(uci -q get network.lan.ipaddr)"
@@ -1269,7 +1253,24 @@ EOF
     text="لوحة التحكم الرئيسية لجهاز Xiaomi CR6608."
     emit true "Xiaomi CR6608 Control Panel" "Single-page Xiaomi CR6608 interface with raw OpenWrt editor" "$cards" "$text" '[{"id":"raw_uci_set","label":"UCI set option","confirm":true},{"id":"raw_uci_delete","label":"UCI delete option","confirm":true},{"id":"raw_uci_add_section","label":"UCI add section","confirm":true},{"id":"raw_uci_delete_section","label":"UCI delete section","confirm":true},{"id":"raw_uci_commit_reload","label":"Commit + reload config","confirm":true}]' "$form" ;;
   wizard)
-    saved() { uci -q get smartap.quick."$1" 2>/dev/null; }
+    saved() {
+      # unified store first (executor names), legacy smartap.quick as fallback
+      local _v _k="$1"
+      case "$_k" in
+        device_ip) _v="$(uci -q get cr6608quick.default.lan_ipaddr 2>/dev/null)" ;;
+        ch24) _v="$(uci -q get cr6608quick.default.channel24 2>/dev/null)" ;;
+        ch5) _v="$(uci -q get cr6608quick.default.channel5 2>/dev/null)" ;;
+        wds_peer_ssid) _v="$(uci -q get cr6608quick.default.wds_ssid 2>/dev/null)" ;;
+        program_mode) _v="$(uci -q get cr6608quick.default.mode 2>/dev/null)" ;;
+        reset_button_enabled)
+          _v="$(uci -q get cr6608quick.default.reset_lock 2>/dev/null)"
+          [ "$_v" = "1" ] && _v="0" || { [ "$_v" = "0" ] && _v="1"; } ;;
+        txpower) _v="$(uci -q get cr6608quick.default.txpower_radio0 2>/dev/null)" ;;
+        *) _v="$(uci -q get cr6608quick.default."$_k" 2>/dev/null)" ;;
+      esac
+      [ -n "$_v" ] || _v="$(uci -q get smartap.quick."$_k" 2>/dev/null)"
+      printf '%s' "$_v"
+    }
     royal_mode="$(saved program_mode)"; [ -n "$royal_mode" ] || royal_mode="ap"
     royal_ip="$(saved device_ip)"; [ -n "$royal_ip" ] || royal_ip="$(uci -q get network.lan.ipaddr)"
     royal_vlan="$(saved vlan_id)"; [ -n "$royal_vlan" ] || royal_vlan="$(uci -q get cr6608quick.default.vlan_id 2>/dev/null)"
@@ -1300,7 +1301,8 @@ EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
 device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضافي تدخل به على الجهاز. حتى في الفيلان/الميش يبقى الوصول مضموناً دائماً: (1) بالكيبل على 192.168.1.1 الثابت، (2) بالكيبل والواي فاي على هذا العنوان، (3) بالواي فاي على 221.221.221.221 الاحتياطي — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
 vlan_id|رقم VLAN|${royal_vlan:-50}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
-ssid|اسم البث SSID|${royal_ssid:-Smart ap 2.4G}|اسم الشبكة الأساسي 2.4G و5G|text|0|device|all|
+ssid|اسم بث 2.4G|${royal_ssid:-Smart ap 2.4G}|اسم شبكة 2.4G|text|0|device|all|
+ssid5|اسم بث 5G|$(uci -q get cr6608quick.default.ssid5 2>/dev/null)|اسم شبكة 5G (فارغ = الاسم-5G)|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 ch5|قناة 5G|${ch5:-36}|أي قناة 5G مسموحة (36/40/44/48/149/153/157/161…). 36 افتراضي للتوافق الأوسع، لكن اختر أي قناة تريد|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
 htmode24|عرض قناة 2.4G|${ht24:-HE20}|عرض النطاق/السرعة: HE20 أو HE40 (40 أسرع، 20 أثبت)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|HE20:HE20 (ثابت),HE40:HE40 (أسرع),HT20:HT20,HT40:HT40
@@ -1309,7 +1311,7 @@ mesh_id|عنوان Mesh|${mesh_id:-CR6608-Mesh}|Mesh ID — لازم يكون ن
 mesh_role|دور الوحدة في الميش|${mesh_role:-sender}|المرسِل (الموصول بالميكروتك): يبثّ للجوالات على 2.4G و5G ويحمل رابط الميش. المستقبِل: يبثّ للجوالات على 2.4G فقط، و5G مخصّص لاستقبال الميش|select|0|device|mesh,mesh_vlan|sender:مرسِل (يبثّ 2.4+5G),receiver:مستقبِل (يبثّ 2.4 فقط)
 wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة التي يستقبل منها WDS|text|0|device|wds_receiver,wds_receiver_vlan|
 hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور (يطبّق على 2.4G و5G)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|0:ظاهر,1:مخفي
-security|نوع الحماية|${royal_security:-wpa2}|Open / WPA2 / WPA3 mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3 mixed
+security|نوع الحماية|${royal_security:-open}|Open / WPA2 / WPA3 / WPA3-mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3,mixed:WPA2+WPA3 mixed
 wifi_password|كلمة مرور Wi-Fi||اتركها فارغة للاحتفاظ بالمفتاح الحالي|password|0|device|all|
 device_password|تغيير كلمة مرور الجهاز||اختياري، لا تظهر في السجلات ولا الروابط|password|0|device|all|
 delete_previous|حذف الإعدادات السابقة|0|يحذف فقط أقسام Xiaomi CR6608 السابقة، لا يعمل firstboot|select|0|device|all|0:لا,1:نعم
@@ -1317,7 +1319,6 @@ pppoe_user|اسم مستخدم PAP/CHAP|${pppoe_user}|خاص بوضع البرو
 pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها إن وجدت|password|0|device|pppoe_ap|
 broadband_port|منفذ دخول البرودباند|wan|المنفذ الموصول بمودم المزوّد — الافتراضي WAN|select|0|device|pppoe_ap|wan:WAN (الافتراضي),lan1:LAN1,lan2:LAN2
 reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
-reset_mode|طريقة الفورمات|${reset_mode}|سياسة موثقة داخل Xiaomi CR6608|select|0|security|all|factory:Factory reset,reboot:Reboot only,disabled:Blocked
 nat_enabled|NAT|${nat_enabled:-0}|تشغيل/إيقاف NAT على منطقة WAN — يُطبَّق فعلياً في الاتجاهين|select|0|advanced|all|1:مفعل,0:معطل
 dhcp_server|DHCP Server|${dhcp_now:-0}|تشغيل/إيقاف موزّع العناوين للـ LAN — يُطبَّق فعلياً|select|0|advanced|all|1:مفعل,0:معطل
 firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تشغيل/إيقاف خدمة الجدار فعلياً وفوراً (بدون إعادة تشغيل)|select|0|advanced|all|1:مفعل,0:معطل
