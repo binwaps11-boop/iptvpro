@@ -116,7 +116,10 @@ mode_has_vlan() {
   return 1
 }
 valid_ipv4() {
-  printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+  printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
+  local IFS=. o
+  for o in $1; do [ "$o" -le 255 ] 2>/dev/null || return 1; done
+  return 0
 }
 config_radio_iface() {
   radio="$1"
