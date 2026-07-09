@@ -88,7 +88,6 @@ fkm="$(pick fake_mesh | grep -oE '^[01]$')"
 h24="$(pick htmode24 | grep -oE '^(HT20|HT40|HE20|HE40|VHT20|VHT40)$')"
 h5="$(pick htmode5 | grep -oE '^(HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160)$')"
 case "$h5" in HE160|VHT160) h5="HE80" ;; esac   # DBDC MT7915: 80MHz physical max
-aip="$(pick access_ipaddr device_ip | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
 mrl="$(pick mesh_role | grep -oE '^(sender|receiver)$')"
 
 u mode        "$mode"
@@ -121,7 +120,6 @@ u reset_seconds "$rsc"
 [ -n "$fkm" ] && uw fake_mesh "$fkm"
 u htmode24 "$h24"
 u htmode5  "$h5"
-u access_ipaddr "$aip"
 u mesh_role "$mrl"
 # keep the dashboard preview truthful: mirror the shared keys into smartap.quick
 mq() { [ -n "$2" ] && uci -q set smartap.quick."$1"="$2"; }

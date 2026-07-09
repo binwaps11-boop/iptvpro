@@ -170,7 +170,8 @@ store_royal_config() {
   local _m _rb _tp _dp
   _m="$(safe_word "$(param program_mode)")"; case "$_m" in pppoe_ap) _m="pppoe" ;; esac
   [ -n "$_m" ] && uci -q set cr6608quick.default.mode="$_m"
-  _rmap device_ip access_ipaddr;  _rmap vlan_id vlan_id;        _rmap ssid ssid
+  [ "$(safe_num "$(param broadband_enabled)")" = "1" ] && [ -n "$(param pppoe_user)" ] && uci -q set cr6608quick.default.mode='pppoe'
+  _rmap device_ip lan_ipaddr;     _rmap vlan_id vlan_id;        _rmap ssid ssid
   _rmap ch24 channel24;           _rmap ch5 channel5
   _rmap htmode24 htmode24;        _rmap htmode5 htmode5
   _rmap mesh_id mesh_id;          _rmap mesh_role mesh_role;    _rmap wds_peer_ssid wds_ssid
@@ -774,7 +775,7 @@ EOF
     confirm_required "Quick Setup reset"
     backup="$(backup_cfg royal-reset)"
     uci -q delete smartap.quick
-    for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
+    for s in smartap_guest smartap_mesh smartap_wds cr6608_mesh cr6608_wds; do uci -q delete wireless."$s"; done
     for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
     uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
     uci -q delete network.smartap_devip; lan_zone_del smartap_devip
@@ -831,248 +832,22 @@ EOF
     fi
     backup="$(backup_cfg royal-apply)"
     [ "$delete_previous" = "1" ] && {
-      for s in smartap_guest smartap_mesh smartap_wds; do uci -q delete wireless."$s"; done
+      for s in smartap_guest smartap_mesh smartap_wds cr6608_mesh cr6608_wds; do uci -q delete wireless."$s"; done
       for s in guest mesh smartap_vlan; do uci -q delete network."$s"; uci -q delete dhcp."$s"; done
     }
     store_royal_config
-    # Ethernet access stays FIXED at 192.168.1.1 always (built-in, never overwritten by
-    # programming). The IP the user types is added as an EXTRA always-on alias on the same
-    # bridge, so the unit answers at BOTH 192.168.1.1 and the chosen IP — over cable and
-    # Wi-Fi — even in VLAN/mesh. (Wi-Fi rescue 221.221.221.221 and 192.168.66.1 also stay.)
-    uci set network.lan.ipaddr='192.168.1.1'; uci set network.lan.netmask='255.255.255.0'
-    if [ -n "$device_ip" ] && [ "$device_ip" != "192.168.1.1" ]; then
-      uci set network.smartap_devip='interface'
-      uci set network.smartap_devip.device='br-lan'
-      uci set network.smartap_devip.proto='static'
-      uci set network.smartap_devip.ipaddr="$device_ip"
-      uci set network.smartap_devip.netmask='255.255.255.0'
-      uci set network.smartap_devip.ipv6='0'
-      lan_zone_add smartap_devip
-    else
-      uci -q delete network.smartap_devip
+    # ONE ENGINE: the wizard writes the unified store (above) and the SAME executor
+    # that serves the LuCI quick page applies it — there is no second apply path left
+    # to diverge. The executor: self-heals network.lan, moves the device to the
+    # requested IP (inside the VLAN in VLAN modes), rebuilds backhaul ifaces, then
+    # runs the reload phase DETACHED so a closed browser can never half-apply.
+    if ! /usr/sbin/cr6608-quicksettings-apply apply >/dev/null 2>&1; then
+      emit false "Quick Setup" "Apply failed" "[]" "Backup: $backup\nCommit failed — nothing was changed. سجل الأخطاء: logread -e cr6608" "[]" "[]"; exit 0
     fi
-    ifc24="$(config_radio_iface radio0)"; [ -n "$ifc24" ] || ifc24="wifinet0"
-    ifc5="$(config_radio_iface radio1)"; [ -n "$ifc5" ] || ifc5="wifinet1"
-    # default both client APs ON; a mesh "receiver" below turns the 5G client AP off,
-    # and any previous receiver programming is cleared here so re-programming AP re-enables 5G.
-    uci set wireless."$ifc24".disabled='0'; uci set wireless."$ifc5".disabled='0'
-    # FORCE both client-radio interfaces back to AP mode and clear any station/WDS leftovers,
-    # and re-enable the radios themselves. This is why the SSID vanished before: if a radio
-    # was previously switched to Client (sta) / mesh / WDS (via the Wi-Fi editor or native
-    # LuCI), the wizard used to leave mode=sta, so "switch back to Access Point" never
-    # rebroadcast. Now every AP re-program deterministically restores the broadcast.
-    for _ci in "$ifc24" "$ifc5"; do
-      uci set wireless."$_ci".mode='ap'
-      uci -q delete wireless."$_ci".bssid
-      uci -q delete wireless."$_ci".wds
-    done
-    uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'
-    # remove any mesh iface from prior programming unless this run is a mesh mode
-    case "$program_mode" in mesh|mesh_vlan) : ;; *) uci -q delete wireless.smartap_mesh ;; esac
-    # same for the WDS-receiver station: remove it unless THIS run is a WDS-receiver, else a
-    # leftover sta on radio1 keeps trying to associate to the old peer and bridges back into
-    # LAN (breaks 5G / causes a loop) after switching to plain AP.
-    case "$program_mode" in wds_receiver|wds_receiver_vlan) : ;; *) uci -q delete wireless.smartap_wds ;; esac
-    # the LuCI-side executor names its backhaul ifaces cr6608_*: drop those leftovers too,
-    # since this wizard rebuilds the backhaul (as smartap_*) from the same unified store
-    uci -q delete wireless.cr6608_mesh
-    uci -q delete wireless.cr6608_wds
-    [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
-    [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
-    [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
-    # Bandwidth (HT/HE mode) is user-selectable per band — any channel + any rate. Mesh uses
-    # radio1's channel+htmode, so this also sets the mesh backhaul width (HE20..HE160).
-    case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) uci set wireless.radio0.htmode="$htmode24" ;; esac
-    case "$htmode5" in HE160|VHT160) htmode5="HE80" ;; esac   # DBDC MT7915: 80MHz is the physical max
-    case "$htmode5" in HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) uci set wireless.radio1.htmode="$htmode5" ;; esac
-    if [ "$security" != "open" ] && [ -z "$wifi_password" ] && [ -z "$(uci -q get wireless."$ifc24".key 2>/dev/null)" ]; then
-      security="open"   # a keyless WPA config would silence both bands — refuse it
-    fi
-    set_wifi_security "$ifc24" "$security" "$wifi_password"
-    set_wifi_security "$ifc5" "$security" "$wifi_password"
-    # hide SSID applies to BOTH bands (was 2.4G only).
-    if [ "$hide_ssid" = "1" ]; then
-      uci set wireless."$ifc24".hidden='1'; uci set wireless."$ifc5".hidden='1'
-    else
-      uci -q delete wireless."$ifc24".hidden; uci -q delete wireless."$ifc5".hidden
-    fi
-    if mode_has_vlan "$program_mode"; then
-      mgmt_isolated=1
-      # teardown of EVERY previous model: bridge-vlan sections, the old 8021q uplink,
-      # stale interfaces — then the shared lib rebuilds the wired layout per-port.
-      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
-        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
-        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
-      done
-      uci -q delete network.smartap_vlan; uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
-      uci -q delete dhcp.smartap_vlan
-      lan_zone_del smartap_vlan
-      for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-      for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
-      # SINGLE VLAN OWNER: the same lib the LuCI executor and security page use.
-      [ -r /usr/libexec/cr6608-vlan-lib ] && . /usr/libexec/cr6608-vlan-lib
-      type cr6608_apply_port_vlans >/dev/null 2>&1 && cr6608_apply_port_vlans "$vlan_id"
-      # Wi-Fi (both bands) lives INSIDE the VLAN; the device answers on the extra IP there
-      uci set network.cr6608_vlan='interface'
-      uci set network.cr6608_vlan.device="br-lan.$vlan_id"
-      uci set network.cr6608_vlan.proto='none'
-      uci set network.cr6608_vlan.ipv6='0'
-      lan_zone_add cr6608_vlan
-      client_net='cr6608_vlan'
-      uci set wireless."$ifc24".network='cr6608_vlan'; uci set wireless."$ifc5".network='cr6608_vlan'
-      # the rescue Wi-Fi IP and the extra device IP follow the clients into the VLAN
-      uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vlan_id"
-      uci -q get network.smartap_devip >/dev/null 2>&1 && uci set network.smartap_devip.device="br-lan.$vlan_id"
-    else
-      # Plain AP: tear down every VLAN artifact, put everything back on the plain br-lan.
-      mgmt_isolated=0; client_net='lan'
-      while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-"; do
-        vidx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
-        [ -n "$vidx" ] || break; uci -q delete "network.$vidx" || break
-      done
-      uci -q delete network.@device[0].vlan_filtering
-      for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
-      uci -q delete network.smartap_vlan; uci -q delete network.smartap_vdev; uci -q delete network.smartap_wandev
-      uci -q delete dhcp.smartap_vlan
-      lan_zone_del smartap_vlan
-      uci set network.lan.device='br-lan'
-      uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
-      uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
-      uci -q get network.smartap_devip >/dev/null 2>&1 && uci set network.smartap_devip.device='br-lan'
-      # standalone per-port VLANs from the security page still apply in plain modes
-      [ -r /usr/libexec/cr6608-vlan-lib ] && . /usr/libexec/cr6608-vlan-lib
-      type cr6608_apply_port_vlans >/dev/null 2>&1 && cr6608_apply_port_vlans ""
-      uci set wireless."$ifc24".network='lan'; uci set wireless."$ifc5".network='lan'
-    fi
-    case "$program_mode" in
-      mesh|mesh_vlan)
-        # 802.11s mesh backhaul on the 5G radio (radio1), plus client APs.
-        #  Both units share: same mesh_id, same 5G channel (ch5), same encryption.
-        #  mesh_fwding=1 so nodes FORWARD each other's traffic (without it the 2nd unit
-        #  "joins but nothing passes" — looks like a refusal). mesh_rssi_threshold=0.
-        #  Source method (802.11s): BOTH units are identical peers — 2.4G AP for phones +
-        #  5G dedicated to the mesh backhaul (no 5G AP). Just cable ONE unit to the Mikrotik.
-        uci -q get wireless.smartap_mesh >/dev/null || uci set wireless.smartap_mesh='wifi-iface'
-        uci set wireless.smartap_mesh.device='radio1'; uci set wireless.smartap_mesh.mode='mesh'; uci set wireless.smartap_mesh.network="${client_net:-lan}"; uci set wireless.smartap_mesh.mesh_id="${mesh_id:-CR6608-Mesh}"; uci set wireless.smartap_mesh.disabled='0'
-        uci set wireless.smartap_mesh.mesh_fwding='1'; uci set wireless.smartap_mesh.mesh_rssi_threshold='0'
-        if [ "$security" != "none" ] && [ -n "$wifi_password" ] && [ "${#wifi_password}" -ge 8 ]; then
-          uci set wireless.smartap_mesh.encryption='sae'; uci set wireless.smartap_mesh.key="$wifi_password"
-        else
-          uci set wireless.smartap_mesh.encryption='none'; uci -q delete wireless.smartap_mesh.key
-        fi
-        uci -q delete wireless.smartap_mesh.ssid; uci -q delete wireless.smartap_mesh.isolate
-        uci -q delete wireless.smartap_mesh.disassoc_low_ack
-        # Source mesh config as-is, with ONE difference the owner asked for: the SENDER also
-        # keeps its 5G AP ON so phones can connect on 5G (it shares radio1's channel with the
-        # mesh backhaul). 2.4G AP is on for both units. On the RECEIVER the 5G AP is OFF so
-        # radio1 is dedicated to the mesh backhaul.
-        uci set wireless."$ifc24".disabled='0'
-        if [ "$mesh_role" = "receiver" ]; then
-          uci set wireless."$ifc5".disabled='1'
-        else
-          uci set wireless."$ifc5".disabled='0'
-        fi
-        ;;
-      wds_sender|wds_sender_vlan)
-        uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'
-        ;;
-      wds_receiver|wds_receiver_vlan)
-        # dedicate radio1 to the WDS backhaul: turn the 5G client AP OFF so the station can
-        # FOLLOW the upstream peer's channel (like the mesh receiver does). Otherwise a
-        # co-located 5G AP pins radio1 to channel 36 and the uplink only works if the peer
-        # happens to be on 36.
-        uci set wireless."$ifc5".disabled='1'
-        uci -q get wireless.smartap_wds >/dev/null || uci set wireless.smartap_wds='wifi-iface'
-        uci set wireless.smartap_wds.device='radio1'; uci set wireless.smartap_wds.mode='sta'; uci set wireless.smartap_wds.network="${client_net:-lan}"; uci set wireless.smartap_wds.ssid="${wds_peer_ssid:-$ssid}"; uci set wireless.smartap_wds.wds='1'; uci set wireless.smartap_wds.disabled='0'
-        set_wifi_security smartap_wds "$security" "$wifi_password"
-        ;;
-    esac
-    [ "$fake_mesh" = "1" ] && { uci set wireless."$ifc24".wds='1'; uci set wireless."$ifc5".wds='1'; }
-    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ]; then
-      # PPPoE client: the broadband port must LEAVE the bridge, otherwise pppd cannot
-      # bind it (this was why PPPoE never connected). Validate credentials first.
-      case "$broadband_port" in lan1|lan2|lan3|wan) : ;; *) broadband_port="wan" ;; esac
-      if [ "$program_mode" = "pppoe_ap" ] && [ -z "$pppoe_user" ]; then
-        emit false "Quick Setup" "PPPoE username required" "[]" "أدخل اسم مستخدم PPPoE. / Enter the PPPoE username." "[]" "[]"; exit 0
-      fi
-      uci -q del_list network.@device[0].ports="$broadband_port"
-      uci -q get network.wan >/dev/null || uci set network.wan='interface'
-      uci set network.wan.device="$broadband_port"; uci set network.wan.proto='pppoe'
-      [ -n "$pppoe_user" ] && uci set network.wan.username="$pppoe_user"
-      [ -n "$pppoe_pass" ] && uci set network.wan.password="$pppoe_pass"
-      uci set network.wan.ipv6='0'; uci set network.wan.disabled='0'; uci set network.wan.auto='1'
-    elif [ "${mgmt_isolated:-0}" = "1" ]; then
-      # VLAN mode: cable ports stay in the bridge; the RAW wan port stays OUT (only its
-      # tagged sub-interface wan.<vid> is in the bridge, so the uplink carries the VLAN only).
-      for p in lan1 lan2 lan3; do
-        [ -d "/sys/class/net/$p" ] || continue
-        uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
-      done
-      uci -q del_list network.@device[0].ports='wan'
-      uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
-    else
-      # Plain AP (not PPPoE): make sure every port is back in the bridge and the wan interface
-      # is parked, so AP modes always have all 4 ports working as LAN.
-      for p in lan1 lan2 lan3 wan; do
-        [ -d "/sys/class/net/$p" ] || continue
-        uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"
-      done
-      uci -q get network.wan >/dev/null && { uci set network.wan.disabled='1'; uci set network.wan.auto='0'; }
-    fi
-    # Switching to any NON-PPPoE mode (AP / VLAN / mesh / WDS) fully REMOVES the PPPoE client:
-    # revert the wan proto and clear its credentials so no PPPoE config lingers.
-    if [ "$program_mode" != "pppoe_ap" ] && [ "$broadband_enabled" != "1" ]; then
-      if [ "$(uci -q get network.wan.proto)" = "pppoe" ]; then
-        uci set network.wan.proto='none'
-        uci -q delete network.wan.username
-        uci -q delete network.wan.password
-      fi
-    fi
-    # DHCP policy by mode. In broadband/PPPoE the device IS the main router, so it MUST hand
-    # out addresses to its Wi-Fi/LAN clients (they get internet automatically, no manual IP).
-    # In every AP mode there is an upstream router, so DHCP stays fully off.
-    # PPPoE/broadband => device is the main router (must serve DHCP). In AP modes DHCP is off
-    # by default (an upstream router serves it), BUT the "DHCP Server" toggle now works: set it
-    # to 1 to make the CR6608 hand out addresses even in AP mode (was previously ignored).
-    if [ "$program_mode" = "pppoe_ap" ] || [ "$broadband_enabled" = "1" ] || [ "$dhcp_server" = "1" ]; then
-      uci set dhcp.lan='dhcp'; uci set dhcp.lan.interface='lan'
-      uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'
-      uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
-      uci set dhcp.lan.dhcpv6='disabled'; uci set dhcp.lan.ra='disabled'; uci set dhcp.lan.ndp='disabled'
-    else
-      uci -q delete dhcp.lan 2>/dev/null || true
-    fi
-    for z in $(uci show firewall | awk -F'[.=]' "/\\.name='wan'|\\.name=wan/{print \$2}"); do
-      [ "$nat_enabled" = "1" ] && uci set firewall."$z".masq='1' || uci set firewall."$z".masq='0'
-    done
-    if [ "$firewall_enabled" = "0" ]; then
-      /etc/init.d/firewall disable >/dev/null 2>&1; /etc/init.d/firewall stop >/dev/null 2>&1
-    else
-      /etc/init.d/firewall enable  >/dev/null 2>&1; /etc/init.d/firewall start >/dev/null 2>&1
-    fi
-    if { [ "$reset_button_enabled" = "0" ] || [ "$reset_mode" = "disabled" ]; } && [ -f /etc/rc.button/reset ]; then
-      [ -f /etc/rc.button/reset.smartap.orig ] || cp /etc/rc.button/reset /etc/rc.button/reset.smartap.orig 2>/dev/null
-      printf '%s\n' '#!/bin/sh' 'logger -t cr6608 "reset button blocked by CR6608 policy"' 'exit 0' > /etc/rc.button/reset
-      chmod +x /etc/rc.button/reset
-    elif [ "$reset_mode" = "reboot" ] && [ -f /etc/rc.button/reset ]; then
-      [ -f /etc/rc.button/reset.smartap.orig ] || cp /etc/rc.button/reset /etc/rc.button/reset.smartap.orig 2>/dev/null
-      printf '%s\n' '#!/bin/sh' 'logger -t cr6608 "reset button changed to reboot-only by CR6608 policy"' 'reboot' 'exit 0' > /etc/rc.button/reset
-      chmod +x /etc/rc.button/reset
-    elif [ "$reset_button_enabled" = "1" ] && [ -f /etc/rc.button/reset.smartap.orig ]; then
-      cp /etc/rc.button/reset.smartap.orig /etc/rc.button/reset
-      chmod +x /etc/rc.button/reset
-    fi
-    if [ -n "$device_password" ]; then printf '%s\n%s\n' "$device_password" "$device_password" | passwd root >/dev/null 2>&1 || { emit false "Quick Setup" "Password change failed" "[]" "Backup: $backup\nThe device password could not be changed. No password is displayed." "[]" "[]"; exit 0; }; fi
-    # TX Power: accept 1..38 dBm and write it to ALL radios; iw/iwinfo read it back.
-    txp="$(uci -q get smartap.quick.txpower)"; case "$txp" in ''|*[!0-9]*) txp=38 ;; esac
-    [ "$txp" -lt 1 ] 2>/dev/null && txp=1; [ "$txp" -gt 38 ] 2>/dev/null && txp=38
-    for _r in $(uci show wireless | sed -n "s/^wireless\.\([^=]*\)=wifi-device/\1/p"); do uci set wireless."$_r".txpower="$txp"; done
-    uci commit wireless; uci commit network; uci commit dhcp; uci commit firewall; uci -q commit smartap
     arm_rollback "$backup"
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+    newip="$(uci -q get network.lan.ipaddr)"
     txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
-    health="$(ubus call system board >/dev/null 2>&1 && echo OK || echo CHECK)"
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nHealth check: $health\nTX Power: $txcheck dBm applied.\nKeep changes after confirming the router is reachable." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nTX Power: $txcheck dBm\nعنوان الجهاز الآن: http://$newip — إذا غيّرت العنوان أو الفيلان فانتقل بالمتصفح إليه بعد ~20 ثانية (إنقاذ Wi-Fi: 221.221.221.221، إنقاذ سلكي على منفذ بدون فيلان: 192.168.66.1).\nالتطبيق يكتمل في الخلفية ولا يتوقف حتى لو أُغلق المتصفح." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_quick)
     confirm_required "Quick Setup"
     ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
@@ -1373,6 +1148,22 @@ EOF
     mac="$(safe_mac "$(param mac)")"; iface="$(safe_word "$(param iface)")"; [ -n "$iface" ] || iface='phy0-ap0'
     out="$(ubus call hostapd."$iface" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":60}" 2>&1 | redact)"
     emit true "Wi-Fi Clients" "Deauth command sent" "[]" "${out:-Client disconnect requested for $mac on $iface.}" "[]" "[]"; exit 0 ;;
+  set_clock)
+    # the unit is often OFFLINE (AP behind Mikrotik with no internet) so NTP never
+    # syncs - the dashboard sends the phone/PC clock instead. Applied only when the
+    # drift is real (>60s); never touches anything else. No reboot, no reload.
+    ep="$(safe_num "$(param epoch)")"
+    [ -n "$ep" ] && [ "$ep" -gt 1700000000 ] 2>/dev/null || { emit false "Clock" "Bad epoch" "[]" "epoch parameter missing/invalid." "[]" "[]"; exit 0; }
+    now="$(date +%s)"; d=$((ep - now)); [ "$d" -lt 0 ] && d=$((-d))
+    if [ "$d" -gt 60 ]; then
+      date -s "@$ep" >/dev/null 2>&1
+      logger -t cr6608-clock "clock set from browser (drift was ${d}s)"
+      emit true "Clock" "تم ضبط الوقت" "[]" "فرق الوقت كان ${d} ثانية — ضُبطت ساعة الجهاز من ساعة المتصفح: $(date)." "[]" "[]"; exit 0
+    fi
+    emit true "Clock" "الوقت مضبوط" "[]" "لا فرق يذكر ($d ثانية) — لا تغيير." "[]" "[]"; exit 0 ;;
+  apply_status)
+    st="$(cat /tmp/cr6608-apply.status 2>/dev/null)"
+    emit true "Apply" "status" "[]" "${st:-phase=idle}" "[]" "[]"; exit 0 ;;
   firewall_reload) confirm_required "Firewall"; /etc/init.d/firewall reload >/tmp/dashctl.action 2>&1; emit true "Firewall" "Firewall reloaded" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   wifi_reload) confirm_required "Wi-Fi reload"; wifi reload >/tmp/dashctl.action 2>&1; emit true "Wi-Fi reload" "Wi-Fi reload sent" "[]" "TX Power was not modified.\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
   restart_dnsmasq) confirm_required "DHCP service"; /etc/init.d/dnsmasq restart >/tmp/dashctl.action 2>&1; emit true "DHCP service" "dnsmasq restarted" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
@@ -1484,9 +1275,9 @@ EOF
     ch5="$(saved ch5)"; [ -n "$ch5" ] || ch5="$(uci -q get wireless.radio1.channel)"
     ht24="$(saved htmode24)"; [ -n "$ht24" ] || ht24="$(uci -q get wireless.radio0.htmode)"
     ht5="$(saved htmode5)"; [ -n "$ht5" ] || ht5="$(uci -q get wireless.radio1.htmode)"
-    mesh_id="$(saved mesh_id)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.smartap_mesh.mesh_id 2>/dev/null)"
+    mesh_id="$(saved mesh_id)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.cr6608_mesh.mesh_id 2>/dev/null)"; [ -n "$mesh_id" ] || mesh_id="$(uci -q get wireless.smartap_mesh.mesh_id 2>/dev/null)"
     mesh_role="$(saved mesh_role)"; [ -n "$mesh_role" ] || mesh_role="sender"
-    wds_peer="$(saved wds_peer_ssid)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.smartap_wds.ssid 2>/dev/null)"
+    wds_peer="$(saved wds_peer_ssid)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.cr6608_wds.ssid 2>/dev/null)"; [ -n "$wds_peer" ] || wds_peer="$(uci -q get wireless.smartap_wds.ssid 2>/dev/null)"
     hide_ssid="$(saved hide_ssid)"; [ -n "$hide_ssid" ] || hide_ssid="$(uci -q get wireless.wifinet0.hidden 2>/dev/null)"
     enc="$(uci -q get wireless.wifinet0.encryption 2>/dev/null)"
     royal_security="$(saved security)"; [ -n "$royal_security" ] || case "$enc" in none|'') royal_security="open" ;; *sae*) royal_security="wpa3" ;; *) royal_security="wpa2" ;; esac

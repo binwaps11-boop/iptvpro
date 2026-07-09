@@ -1808,6 +1808,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = JSON.parse(text);
       state.apiFails = 0; state._apiToastShown = false;   // recovered
+      syncClock();
       render(data);
     } catch (e) {
       // Transient network hiccups (slow CGI, a dropped poll) must NOT spam the
@@ -1881,6 +1882,17 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       params += "&" + encodeURIComponent(i.dataset.ctlField) + "=" + encodeURIComponent(i.value);
     });
     return params;
+  }
+  var clockSynced = false;
+  function syncClock() {
+    // the AP is often offline (no NTP) - push the browser clock once per session;
+    // the backend applies it only when the real drift exceeds 60s
+    if (clockSynced) return; clockSynced = true;
+    try {
+      fetch(CTL, { method:"POST", cache:"no-store",
+        headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+        body:"section=system&action=set_clock&epoch=" + Math.floor(Date.now()/1000) + "&" + sidQuery() }).catch(function(){});
+    } catch (e) {}
   }
   async function loadControl(section, actionName, params, button) {
     var box = $("ctl_" + sid(section));

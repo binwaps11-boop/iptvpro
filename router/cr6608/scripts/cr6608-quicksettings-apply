@@ -272,15 +272,22 @@ apply_config() {
 	backup_configs
 	bool_on "$clear_previous" && cleanup_previous
 
-	# MANAGEMENT CONTRACT: cable access at 192.168.1.1 NEVER moves (a stale/foreign
-	# lan_ipaddr — e.g. preserved from an old build — must not strand the dashboard).
-	# A different requested device IP becomes the EXTRA access alias instead.
-	uci set network.lan.ipaddr='192.168.1.1'
-	uci set network.lan.netmask='255.255.255.0'
-	if valid_ip "$ip" && [ "$ip" != "192.168.1.1" ] && [ -z "$access_ipaddr" ]; then
-		access_ipaddr="$ip"
-	fi
+	# SELF-HEAL first: lan must always exist (seen deleted in the field — without it
+	# Wi-Fi has no bridge and the unit disappears after a power cycle).
+	type cr6608_ensure_lan >/dev/null 2>&1 && cr6608_ensure_lan
+
+	# OWNER SEMANTICS: the requested device IP IS the device IP — it REPLACES the old
+	# one (192.168.1.1 is only the factory default, it does not stick around). Rescue
+	# access stays fixed: 221.221.221.221 over Wi-Fi and 192.168.66.1 (recovery) over
+	# a no-VLAN wired port, so a typo in the IP can never lock the owner out.
+	valid_ip "$ip" || ip="$(uci -q get network.lan.ipaddr)"
+	valid_ip "$ip" || ip='192.168.1.1'
+	valid_ip "$netmask" || netmask='255.255.255.0'
+	uci set network.lan.proto='static'
+	uci set network.lan.ipaddr="$ip"
+	uci set network.lan.netmask="$netmask"
 	uci set network.lan.delegate='0'
+	uci set network.lan.ipv6='0'
 
 	case "$mode" in
 		pppoe)
@@ -298,13 +305,29 @@ apply_config() {
 		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
 			if set_vlan_target "$vlan"; then
 				target_network='cr6608_vlan'
+				# the device itself lives INSIDE the VLAN: management (the IP above)
+				# rides br-lan.<vid> — 192.168.1.1 on br-lan.1 is GONE in VLAN mode.
+				# recovery (192.168.66.1) stays on br-lan.1 as the wired rescue.
+				uci set network.lan.device="br-lan.$vlan"
+				# ROUTED VLAN: NAT on means the AP routes the VLAN to the untagged
+				# upstream itself — the VLAN connects even if the upstream router
+				# knows nothing about the tag. That needs our own DHCP + firewall.
+				if bool_on "$nat_enabled"; then
+					dhcp_server='1'; firewall_enabled='1'
+					type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan on
+					log "routed VLAN $vlan: uplink via br-lan.1 (DHCP) + NAT + local DHCP forced on"
+				else
+					type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan off
+				fi
 			else
 				clear_vlan
+				type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan off
 				log "VLAN mode requested but VLAN ID '$vlan' is invalid (must be 2-4094); staying on management LAN"
 			fi
 			;;
 		*)
 			clear_vlan
+			type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan off
 			# standalone per-port VLANs from the security page still apply in plain modes
 			type cr6608_apply_port_vlans >/dev/null 2>&1 && cr6608_apply_port_vlans ""
 			;;
@@ -389,12 +412,13 @@ apply_config() {
 		uci -q delete dhcp.lan 2>/dev/null || true
 	fi
 
+	# enable/disable is the persistent flag; the actual start/stop happens in the
+	# runtime phase AFTER commit (fw4 reads the committed file — starting it here
+	# would load the OLD rules on the first apply).
 	if bool_on "$firewall_enabled"; then
 		/etc/init.d/firewall enable >/dev/null 2>&1 || true
-		/etc/init.d/firewall start  >/dev/null 2>&1 || true
 	else
 		/etc/init.d/firewall disable >/dev/null 2>&1 || true
-		/etc/init.d/firewall stop    >/dev/null 2>&1 || true
 	fi
 
 	# NAT: real in both directions on the wan-named zone
@@ -409,23 +433,12 @@ apply_config() {
 		uci -q delete wireless.wifinet0.wds; uci -q delete wireless.wifinet1.wds
 	fi
 
-	# EXTRA access IP (reachable over Wi-Fi + access ports, even inside the VLAN)
-	if [ -n "$access_ipaddr" ] && valid_ip "$access_ipaddr" && [ "$access_ipaddr" != "$(uci -q get network.lan.ipaddr)" ]; then
-		uci set network.smartap_devip='interface'
-		uci set network.smartap_devip.proto='static'
-		uci set network.smartap_devip.ipaddr="$access_ipaddr"
-		uci set network.smartap_devip.netmask='255.255.255.0'
-		uci set network.smartap_devip.ipv6='0'
-		if [ "$target_network" = "cr6608_vlan" ]; then
-			uci set network.smartap_devip.device="br-lan.$vlan"
-		else
-			uci set network.smartap_devip.device='br-lan'
-		fi
-		_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='lan'.*/\1/p" | head -1)"
-		[ -n "$_z" ] && { uci -q del_list firewall.$_z.network='smartap_devip'; uci add_list firewall.$_z.network='smartap_devip'; }
-	else
-		uci -q delete network.smartap_devip
-	fi
+	# ONE device IP only (network.lan). The old extra-alias model (smartap_devip)
+	# confused the owner — 192.168.1.1 seemed to "stay" — so it is gone for good.
+	uci -q delete network.smartap_devip
+	_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='lan'.*/\1/p" | head -1)"
+	[ -n "$_z" ] && uci -q del_list firewall.$_z.network='smartap_devip'
+	uci -q delete "$CFG.access_ipaddr"
 
 	set_reset_button "$reset_lock" "$reset_custom" "$reset_seconds"
 
@@ -446,35 +459,84 @@ apply_config() {
 
 	log "applied mode=$mode target=$target_network commit_rc=$rc txpower targets: radio0=${txp0:-38} radio1=${txp1:-38}; uci radio0=$(qget wireless.radio0.txpower) radio1=$(qget wireless.radio1.txpower)"
 
-	# Decide the reload SCOPE from what actually changed on disk.
+	# Decide the reload SCOPE from what actually changed on disk and hand it to the
+	# runtime phase via the scope file (the runtime runs in its own session).
 	post_w0="$(uci -q show wireless.radio0 2>/dev/null; uci -q show wireless.wifinet0 2>/dev/null)"
 	post_w1="$(uci -q show wireless.radio1 2>/dev/null; uci -q show wireless.wifinet1 2>/dev/null)"
 	post_wx="$(uci -q show wireless 2>/dev/null | grep -Ev '^wireless\.(radio0|radio1|wifinet0|wifinet1)[.=]')"
-	w0=0; w1=0
+	w0=0; w1=0; dh=0; fw=0
 	[ "$pre_w0" != "$post_w0" ] && w0=1
 	[ "$pre_w1" != "$post_w1" ] && w1=1
 	[ "$pre_wx" != "$post_wx" ] && { w0=1; w1=1; }	# mesh/WDS sections changed -> full pass
+	[ "$pre_dhcp" != "$(uci -q show dhcp 2>/dev/null)" ] && dh=1
+	[ "$pre_fw" != "$(uci -q show firewall 2>/dev/null)" ] && fw=1
+	bool_on "$firewall_enabled" && fwen=1 || fwen=0
+	echo "w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen" > "$SCOPE"
+	return "$rc"
+}
+
+# runtime_apply — the RELOAD phase. Runs detached from whoever asked for the apply
+# (the browser closing, uhttpd killing the CGI, an SSH drop — none of it can stop a
+# save from reaching the air anymore: this is why applies used to need 2+ attempts).
+# Serialized by an exclusive lock; verifies the radios actually came back and
+# retries once, so one apply == one applied result.
+runtime_apply() {
+	local w0=1 w1=1 dh=1 fw=1 fwen=1 n try
+	[ -f "$SCOPE" ] && . "$SCOPE" 2>/dev/null
+	exec 9>"$RLOCK"; flock 9
+	echo "phase=reloading ts=$(date +%s)" > "$STATUS"
 
 	/etc/init.d/network reload >/dev/null 2>&1 || true
 	if [ "$w0" = "1" ] && [ "$w1" = "1" ]; then
 		/usr/sbin/cr6608-safe-wifi-reload 8 >/dev/null 2>&1 || wifi reload >/dev/null 2>&1 || true
 	elif [ "$w0" = "1" ]; then
-		log "scoped wifi reload: radio0 only (5G clients untouched)"
 		wifi up radio0 >/dev/null 2>&1 || true
 	elif [ "$w1" = "1" ]; then
-		log "scoped wifi reload: radio1 only (2.4G clients untouched)"
 		wifi up radio1 >/dev/null 2>&1 || true
-	else
-		log "no wireless delta - wifi untouched (zero client disruption)"
 	fi
+	# firewall: start/stop AFTER commit (fw4 reads the committed file)
+	if [ "$fwen" = "1" ]; then
+		[ "$fw" = "1" ] && { /etc/init.d/firewall restart >/dev/null 2>&1 || /etc/init.d/firewall start >/dev/null 2>&1 || true; }
+	else
+		/etc/init.d/firewall stop >/dev/null 2>&1 || true
+	fi
+	[ "$dh" = "1" ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+
+	# CONVERGENCE CHECK: each enabled radio must actually be broadcasting. Missing
+	# after the reload -> one targeted retry. This closes the "apply twice" hole.
+	for try in 1 2; do
+		sleep "${CR6608_SETTLE:-8}"
+		n=0
+		[ "$(uci -q get wireless.radio0.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy0-ap0' && { wifi up radio0 >/dev/null 2>&1; n=1; }
+		[ "$(uci -q get wireless.radio1.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy1-ap0' && { wifi up radio1 >/dev/null 2>&1; n=1; }
+		[ "$n" = "0" ] && break
+		log "convergence retry $try: a radio was missing after reload - kicked it"
+	done
 	[ -x /usr/sbin/cr6608-force-txpower38 ] && /usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1 || true
-	# dnsmasq/firewall bounce ONLY when their config really changed
-	[ "$pre_dhcp" != "$(uci -q show dhcp 2>/dev/null)" ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-	[ "$pre_fw" != "$(uci -q show firewall 2>/dev/null)" ] && /etc/init.d/firewall reload >/dev/null 2>&1 || true
-	return "$rc"
+	echo "phase=done rc=0 ts=$(date +%s)" > "$STATUS"
+	log "runtime apply finished (w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen)"
+	return 0
 }
 
+# spawn_runtime — launch runtime_apply in ITS OWN SESSION (setsid): uhttpd's kill of
+# the CGI process group, a closed browser, or a dropped SSH session cannot reach it.
+spawn_runtime() {
+	echo "phase=saving ts=$(date +%s)" > "$STATUS"
+	if command -v setsid >/dev/null 2>&1; then
+		setsid "$0" __runtime </dev/null >>/tmp/cr6608-apply.log 2>&1 &
+	else
+		( trap '' HUP INT TERM; "$0" __runtime </dev/null >>/tmp/cr6608-apply.log 2>&1 ) &
+	fi
+	return 0
+}
+
+STATUS=/tmp/cr6608-apply.status
+SCOPE=/tmp/cr6608-apply.scope
+RLOCK=/tmp/cr6608-apply.lock
+
 case "$1" in
-	apply|'') apply_config ;;
-	*) echo "usage: $0 apply" >&2; exit 1 ;;
+	apply|'') apply_config && spawn_runtime ;;
+	sync) apply_config && runtime_apply ;;	# inline (boot / scripts that must wait)
+	__runtime) runtime_apply ;;
+	*) echo "usage: $0 [apply|sync]" >&2; exit 1 ;;
 esac

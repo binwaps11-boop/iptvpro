@@ -11,6 +11,45 @@
 # Management guarantee: VLAN 1 keeps the dashboard reachable on every NORMAL/TRUNK port;
 # Wi-Fi rescue 221.221.221.221 covers the case where every port is put in the VLAN.
 
+# cr6608_ensure_lan — SELF-HEAL: the lan interface must always exist. It was seen
+# deleted in the field; without it Wi-Fi has no bridge and the unit vanishes after
+# a power cycle. Recreates it with safe defaults (caller then sets IP/device).
+cr6608_ensure_lan() {
+	uci -q get network.lan >/dev/null 2>&1 && return 0
+	uci set network.lan='interface'
+	uci set network.lan.proto='static'
+	uci set network.lan.device='br-lan'
+	uci set network.lan.ipaddr='192.168.1.1'
+	uci set network.lan.netmask='255.255.255.0'
+	logger -t cr6608-vlan-lib "network.lan was MISSING - recreated (self-heal)" 2>/dev/null
+	return 0
+}
+
+# cr6608_routed_vlan <on|off> — ROUTED VLAN: the AP itself routes the client VLAN to
+# the plain untagged upstream LAN (uplink = DHCP client on br-lan.1), so the VLAN
+# WORKS even when the upstream router knows nothing about the tag. 'off' removes it.
+cr6608_routed_vlan() {
+	local _z
+	if [ "$1" = "on" ]; then
+		uci set network.cr6608_uplink='interface'
+		uci set network.cr6608_uplink.device='br-lan.1'
+		uci set network.cr6608_uplink.proto='dhcp'
+		uci set network.cr6608_uplink.ipv6='0'
+		uci set network.cr6608_uplink.defaultroute='1'
+		_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='wan'.*/\1/p" | head -1)"
+		if [ -n "$_z" ]; then
+			uci -q del_list "firewall.$_z.network=cr6608_uplink"
+			uci add_list "firewall.$_z.network=cr6608_uplink"
+			uci set "firewall.$_z.masq=1"
+		fi
+	else
+		_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='wan'.*/\1/p" | head -1)"
+		[ -n "$_z" ] && uci -q del_list "firewall.$_z.network=cr6608_uplink"
+		uci -q delete network.cr6608_uplink
+	fi
+	return 0
+}
+
 cr6608_clear_port_vlans() {
 	while uci -q show network 2>/dev/null | grep -Eq "\.name='SmartAP-(qvlan|pv)"; do
 		local idx
