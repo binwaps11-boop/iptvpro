@@ -1300,7 +1300,7 @@ EOF
     form="$(form_json <<EOF
 program_mode|وضع البرمجة / Programming mode|${royal_mode:-ap}|اختر وضع التشغيل ثم ستظهر الحقول المطلوبة فقط|select|0|device|all|ap:Access Point (AP),ap_vlan:AP + VLAN,mesh:Mesh,mesh_vlan:Mesh + VLAN,wds_sender:WDS مرسل,wds_sender_vlan:WDS مرسل + VLAN,wds_receiver:WDS مستقبل,wds_receiver_vlan:WDS مستقبل + VLAN,pppoe_ap:Access Point برودباند (PPPoE)
 device_ip|عنوان IP للجهاز|${royal_ip:-192.168.1.1}|عنوان إضافي تدخل به على الجهاز. حتى في الفيلان/الميش يبقى الوصول مضموناً دائماً: (1) بالكيبل على 192.168.1.1 الثابت، (2) بالكيبل والواي فاي على هذا العنوان، (3) بالواي فاي على 221.221.221.221 الاحتياطي — ثبّت على جهازك IP من نفس الشبكة|text|0|device|all|
-vlan_id|رقم VLAN|${royal_vlan:-50}|يظهر فقط في أوضاع VLAN — يوسم رابط الميكروتك فقط، ولا يمس دخولك للصفحة|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
+vlan_id|رقم VLAN|${royal_vlan:-50}|من 2 إلى 4094 (1 محجوز للإدارة). الجهاز والواي-فاي يدخلون هذا الفيلان؛ فعّل NAT بالأسفل ليربط الفيلان بالإنترنت دون ضبط الميكروتك|number|0|device|ap_vlan,mesh_vlan,wds_sender_vlan,wds_receiver_vlan|
 ssid|اسم بث 2.4G|${royal_ssid:-Smart ap 2.4G}|اسم شبكة 2.4G|text|0|device|all|
 ssid5|اسم بث 5G|$(uci -q get cr6608quick.default.ssid5 2>/dev/null)|اسم شبكة 5G (فارغ = الاسم-5G)|text|0|device|all|
 ch24|قناة 2.4G|${ch24:-1}|يفضل 1 أو 6 أو 11|number|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|
@@ -1319,7 +1319,7 @@ pppoe_user|اسم مستخدم PAP/CHAP|${pppoe_user}|خاص بوضع البرو
 pppoe_pass|كلمة سر PPPoE||اتركها فارغة للاحتفاظ بها إن وجدت|password|0|device|pppoe_ap|
 broadband_port|منفذ دخول البرودباند|wan|المنفذ الموصول بمودم المزوّد — الافتراضي WAN|select|0|device|pppoe_ap|wan:WAN (الافتراضي),lan1:LAN1,lan2:LAN2
 reset_button_enabled|زر الفورمات Reset|${reset_enabled}|تعطيل/تفعيل سكربت زر reset فقط|select|0|security|all|1:مفعل,0:مقفل
-nat_enabled|NAT|${nat_enabled:-0}|تشغيل/إيقاف NAT على منطقة WAN — يُطبَّق فعلياً في الاتجاهين|select|0|advanced|all|1:مفعل,0:معطل
+nat_enabled|NAT (فيلان موجَّه)|${nat_enabled:-0}|مع الفيلان: الجهاز يوزّع العناوين داخل الفيلان ويربطها بالإنترنت بنفسه (لا يلزم ضبط الميكروتك). تنبيه صريح: NAT مزدوج — بث IPTV (multicast) قد لا يعبر|select|0|advanced|all|1:مفعل,0:معطل
 dhcp_server|DHCP Server|${dhcp_now:-0}|تشغيل/إيقاف موزّع العناوين للـ LAN — يُطبَّق فعلياً|select|0|advanced|all|1:مفعل,0:معطل
 firewall_enabled|جدار الحماية|${firewall_enabled:-1}|تشغيل/إيقاف خدمة الجدار فعلياً وفوراً (بدون إعادة تشغيل)|select|0|advanced|all|1:مفعل,0:معطل
 broadband_enabled|البرودباند|$([ "$wan_proto" = "pppoe" ] && echo 1 || echo 0)|تفعيل PPPoE على منفذ WAN|select|0|advanced|all|0:معطل,1:مفعل

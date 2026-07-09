@@ -102,7 +102,8 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.taboption('device', form.Value, 'vlan_id', _('رقم VLAN'));
-		o.datatype = 'range(1,4094)';
+		o.datatype = 'range(2,4094)';
+		o.description = _('من 2 إلى 4094 (الرقم 1 محجوز لشبكة الإدارة). الواي-فاي وكل المنافذ تدخل هذا الفيلان.');
 		o.depends('mode', 'ap_vlan');
 		o.depends('mode', 'mesh_vlan');
 		o.depends('mode', 'wds_sender_vlan');
@@ -200,8 +201,9 @@ return view.extend({
 		o.datatype = 'range(5,1000)';
 		o.depends('reset_custom', '1');
 
-		o = s.taboption('advanced', form.Flag, 'nat_enabled', _('NAT'));
+		o = s.taboption('advanced', form.Flag, 'nat_enabled', _('NAT (فيلان موجَّه)'));
 		o.default = '0';
+		o.description = _('مع الفيلان: يجعل الجهاز يوزّع عناوين داخل الفيلان ويوصلها للإنترنت بنفسه (لا يلزم ضبط الميكروتك). تنبيه: هذا NAT مزدوج — بث IPTV (multicast) قد لا يعبر، والأفضل لخدمات الإنترنت العادية.');
 
 		o = s.taboption('advanced', form.Flag, 'dhcp_server', _('DHCP Server'));
 		o.default = '1';
