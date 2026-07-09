@@ -345,6 +345,14 @@ apply_config() {
 	uci set wireless.radio0.txpower="$txp0"
 	uci set wireless.radio1.txpower="$txp1"
 
+	# every apply rebuilds the backhaul from the unified store: drop stale backhaul
+	# ifaces from BOTH engines (wizard names smartap_*, this executor names cr6608_*)
+	# so switching modes or engines never leaves a leftover mesh/WDS iface behind
+	uci -q delete wireless.cr6608_mesh
+	uci -q delete wireless.cr6608_wds
+	uci -q delete wireless.smartap_mesh
+	uci -q delete wireless.smartap_wds
+
 	case "$mode" in
 		mesh|mesh_vlan)
 			[ -n "$mesh_id" ] || mesh_id='CR6608-Mesh'

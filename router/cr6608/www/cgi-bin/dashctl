@@ -873,6 +873,10 @@ EOF
     # leftover sta on radio1 keeps trying to associate to the old peer and bridges back into
     # LAN (breaks 5G / causes a loop) after switching to plain AP.
     case "$program_mode" in wds_receiver|wds_receiver_vlan) : ;; *) uci -q delete wireless.smartap_wds ;; esac
+    # the LuCI-side executor names its backhaul ifaces cr6608_*: drop those leftovers too,
+    # since this wizard rebuilds the backhaul (as smartap_*) from the same unified store
+    uci -q delete wireless.cr6608_mesh
+    uci -q delete wireless.cr6608_wds
     [ -n "$ssid" ] && { uci set wireless."$ifc24".ssid="$ssid"; uci set wireless."$ifc5".ssid="${ssid}-5G"; }
     [ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
     [ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
