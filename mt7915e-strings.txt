@@ -1,0 +1,5 @@
+cr6608_rf_38dbm
+CR6608-RF-38DBM-LINEAR enabled
+parmtype=cr6608_rf_38dbm:bool
+cr6608_rf_38dbm
+cr6608_rf_38dbm_banner

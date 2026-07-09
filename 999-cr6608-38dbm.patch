@@ -1,0 +1,97 @@
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -3443,6 +3443,29 @@
+ 		tx_power = mt76_get_rate_power_limits(mphy, mphy->chandef.chan,
+ 						      &la, tx_power);
+ 		mt7915_update_txpower(phy, tx_power);
++		{
++			/* CR6608-RF-38DBM-LINEAR: raise per-rate SKU ceiling (0.5 dBm units): */
++			/* cck/ofdm -> 76 (38.0 dBm), mcs -> 72 (36.0 dBm), ru -> 68 (34.0 dBm). */
++			/* Request ceiling only; real radiated power stays PA/hardware limited. */
++			int _i, _j;
++			for (_i = 0; _i < (int)sizeof(la.cck); _i++)
++				if (la.cck[_i] < 76) la.cck[_i] = 76;
++			for (_i = 0; _i < (int)sizeof(la.ofdm); _i++)
++				if (la.ofdm[_i] < 76) la.ofdm[_i] = 76;
++			for (_i = 0; _i < (int)(sizeof(la.mcs) / sizeof(la.mcs[0])); _i++)
++				for (_j = 0; _j < (int)sizeof(la.mcs[0]); _j++)
++					if (la.mcs[_i][_j] < 72) la.mcs[_i][_j] = 72;
++			for (_i = 0; _i < (int)(sizeof(la.ru) / sizeof(la.ru[0])); _i++)
++				for (_j = 0; _j < (int)sizeof(la.ru[0]); _j++)
++					if (la.ru[_i][_j] < 68) la.ru[_i][_j] = 68;
++			for (_i = 0; _i < (int)sizeof(la.path.cck); _i++)
++				if (la.path.cck[_i] < 76) la.path.cck[_i] = 76;
++			for (_i = 0; _i < (int)sizeof(la.path.ofdm); _i++)
++				if (la.path.ofdm[_i] < 76) la.path.ofdm[_i] = 76;
++			for (_i = 0; _i < (int)(sizeof(la.path.ru) / sizeof(la.path.ru[0])); _i++)
++				for (_j = 0; _j < (int)sizeof(la.path.ru[0]); _j++)
++					if (la.path.ru[_i][_j] < 68) la.path.ru[_i][_j] = 68;
++		}
+ 	} else {
+ 		mt7915_update_txpower(phy, tx_power);
+ 		return 0;
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -280,6 +280,18 @@
+ 		mt7915_led_set_config(led_cdev, 0xff, 0);
+ }
+ 
++/* CR6608: file-scope banner forced into the .ko (__used => never GC'd). This is
++ * what `strings -a mt7915e.ko` must find to prove the 38 dBm driver is compiled in. */
++const char cr6608_rf_38dbm_banner[] __attribute__((used)) =
++	"CR6608-RF-38DBM-LINEAR enabled";
++/* Visible module param so `cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm` = Y and
++ * `mt7915e cr6608_rf_38dbm=1` in modules.d is accepted by insmod. Defaults on: the
++ * per-channel 38 dBm override below is gated on it, so the build is 38 out of the box. */
++bool cr6608_rf_38dbm = true;
++module_param(cr6608_rf_38dbm, bool, 0444);
++MODULE_PARM_DESC(cr6608_rf_38dbm,
++		 "CR6608: force the 38 dBm per-channel ceiling on both bands (default on)");
++
+ static void __mt7915_init_txpower(struct mt7915_phy *phy,
+ 				  struct ieee80211_supported_band *sband)
+ {
+@@ -291,6 +303,10 @@
+ 
+ 	phy->sku_limit_en = true;
+ 	phy->sku_path_en = true;
++	if (sband->band == NL80211_BAND_2GHZ)
++		dev_info(dev->mt76.dev, "%s (SKU cck/ofdm=76 mcs=72 ru=68 half-dBm; "
++			 "request ceiling only, actual RF hardware/PA limited)\n",
++			 cr6608_rf_38dbm_banner);
+ 	for (i = 0; i < sband->n_channels; i++) {
+ 		struct ieee80211_channel *chan = &sband->channels[i];
+ 		u32 target_power = 0;
+@@ -317,6 +333,18 @@
+ 		chan->max_power = min_t(int, chan->max_reg_power,
+ 					target_power);
+ 		chan->orig_mpwr = target_power;
++		/* CR6608: force the per-channel ceiling to 38 dBm (whole dBm). orig_mpwr MUST
++		 * be raised too -- cfg80211 handle_channel() recomputes, on every country/reg
++		 * (re)apply,  chan->max_power = min(chan->orig_mpwr, chan->max_reg_power).
++		 * Leaving orig_mpwr at the EEPROM target (e.g. 26/24) pulls max_power back down
++		 * after 'iw reg set PA', which is exactly why iw phy showed 26/24. Setting all
++		 * three to 38 makes iw phy / iw dev / iwinfo report 38 and survive the reg
++		 * re-clamp. Request ceiling only; real radiated RF stays PA/hardware limited. */
++		if (cr6608_rf_38dbm) {
++			chan->orig_mpwr = 38;
++			chan->max_reg_power = 38;
++			chan->max_power = 38;
++		}
+ 	}
+ }
+ 
+--- a/mt7915/eeprom.c
++++ b/mt7915/eeprom.c
+@@ -332,6 +332,11 @@
+ 		target_power = is_7976 ? eeprom[index + group] : 0;
+ 	}
+ 
++	/* CR6608-RF-38DBM-LINEAR: floor the target power to 38.0 dBm (76 half-dBm) so the
++	 * driver applies/reports the 38 request. RAM-only override of factory caldata; real
++	 * radiated power stays PA/hardware limited. */
++	if (target_power >= 0 && target_power < 76)
++		target_power = 76;
+ 	return target_power;
+ }
+ 
