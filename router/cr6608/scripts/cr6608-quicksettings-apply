@@ -204,11 +204,19 @@ set_vlan_target() {
 		uci set network.lan.device='br-lan.1'
 	fi
 
-	# NO separate client interface: the Wi-Fi rides the SAME 'lan' interface, which now
-	# lives on br-lan.<vid> WITH the device IP and the local DHCP pool. One interface per
-	# bridge-vlan device is what makes DHCP actually reach the phone (a redundant second
-	# proto=none interface on the same device left the phone stuck at "obtaining IP").
-	uci -q delete network.cr6608_vlan
+	# management stays on the NATIVE VLAN (br-lan.1) with its own device IP, so the
+	# dashboard IP is reachable over any LAN cable regardless of the client VLAN.
+	uci set network.lan.device='br-lan.1'
+
+	# client L2 interface the Wi-Fi rides: br-lan.<vid> with NO IP (proto none). The
+	# 2.4G/5G clients get their address AND internet from the UPSTREAM Mikrotik DHCP on
+	# this tagged VLAN. The device is a PURE BRIDGE/TRUNK AP here — it never serves DHCP
+	# and never routes, so it can never loop or fight the Mikrotik. (This is the v80
+	# model the owner confirmed works on the real hardware.)
+	uci set network.cr6608_vlan='interface'
+	uci set network.cr6608_vlan.device="br-lan.$vid"
+	uci set network.cr6608_vlan.proto='none'
+
 	# Wi-Fi rescue 221.221.221.221 follows the clients into the VLAN so the programming
 	# page stays reachable over Wi-Fi even while the unit is on the VLAN.
 	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vid"
@@ -312,35 +320,36 @@ apply_config() {
 		*) set_ap_ports ;;
 	esac
 
-	# VLAN modes default to ROUTED (self-serve DHCP + NAT to the untagged uplink) so a
-	# programmed VLAN connects the phone and gives internet out of the box even when the
-	# upstream router knows nothing about the tag. Set NAT off explicitly for a pure
-	# trunk toward a VLAN-aware Mikrotik that hands out the addresses itself.
-	case "$mode" in
-		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
-			[ -z "$nat_enabled" ] && nat_enabled='1'
-			;;
-	esac
-
+	# VLAN modes = PURE TRUNK (the v80 model, proven on the real hardware): tag the
+	# client VLAN out the wired ports toward the Mikrotik and let the Mikrotik do DHCP +
+	# routing. Both radios ride br-lan.<vid> with NO IP. The device stays a plain bridge
+	# AP — it never serves DHCP and never routes on the client VLAN, so it can never loop
+	# or compete with the Mikrotik. Management keeps its IP on the native VLAN (br-lan.1).
 	case "$mode" in
 		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
 			if set_vlan_target "$vlan"; then
-				target_network='lan'   # Wi-Fi rides 'lan' (now on br-lan.<vid> with IP+DHCP)
-				# the device itself lives INSIDE the VLAN: management (the IP above)
-				# rides br-lan.<vid> — 192.168.1.1 on br-lan.1 is GONE in VLAN mode.
-				uci set network.lan.device="br-lan.$vlan"
-				# ROUTED VLAN: NAT on means the AP routes the VLAN to the untagged
-				# upstream itself — the VLAN connects even if the upstream router
-				# knows nothing about the tag. That needs our own DHCP + firewall.
 				if bool_on "$nat_enabled"; then
+					# ADVANCED opt-in (nat on): the AP ROUTES the client VLAN itself to
+					# the untagged uplink — use only when the upstream is NOT VLAN-aware.
+					# Device serves its own DHCP + NAT on br-lan.<vid>; management moves in.
+					uci set network.lan.device="br-lan.$vlan"
+					uci -q delete network.cr6608_vlan
+					target_network='lan'
 					dhcp_server='1'; firewall_enabled='1'
 					type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan on
-					log "routed VLAN $vlan: uplink via br-lan.1 (DHCP) + NAT + local DHCP forced on"
+					log "routed VLAN $vlan (nat opt-in): local DHCP + NAT via br-lan.1 uplink"
 				else
+					# DEFAULT = v80 PURE TRUNK: tag the client VLAN out the wired ports to
+					# the Mikrotik and let the Mikrotik do DHCP + routing. The device serves
+					# NO DHCP and never routes on the VLAN, so it can never loop. Wi-Fi rides
+					# br-lan.<vid> (no IP); management keeps its IP on the native br-lan.1.
+					target_network='cr6608_vlan'
 					type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan off
+					log "pure-trunk VLAN $vlan: Wi-Fi on br-lan.$vlan, Mikrotik owns DHCP"
 				fi
 			else
 				clear_vlan
+				target_network='lan'
 				type cr6608_routed_vlan >/dev/null 2>&1 && cr6608_routed_vlan off
 				log "VLAN mode requested but VLAN ID '$vlan' is invalid (must be 2-4094); staying on management LAN"
 			fi
