@@ -1,8 +1,6 @@
 config smartap 'management'
 	option ipaddr '192.168.1.1'
-	option recovery_always '1'
-	option recovery_wifi '1'
-	option vlan '0'
+	option vlan '1'
 
 config smartap 'security'
 	option enabled '1'

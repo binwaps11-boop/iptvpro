@@ -5,7 +5,7 @@
 #   1. LED     (2s):  the Internet LED follows REAL carrier on ANY wired port
 #   2. Wi-Fi   (30s): an enabled radio whose AP iface vanished gets ONE targeted
 #                     "wifi up" after 2 consecutive misses, max once/10min/radio
-#   3. Rescue  (30s): wlanrescue 221.221.221.221 + recovery 192.168.66.1 must EXIST
+#   3. Rescue  (30s): wlanrescue 221.221.221.221 must EXIST
 #                     (placement/device stays owned by the apply engine)
 #   4. Power   (30s): txpower drifted off 38 -> re-pin via cr6608-force-txpower38
 # NEVER reboots anything. Sleeps while an apply is in flight and for the first
@@ -61,15 +61,6 @@ while :; do
 				uci set network.wlanrescue.netmask='255.255.255.0'
 				uci set network.wlanrescue.ipv6='0'
 				uci set network.wlanrescue.device='br-lan'
-				fix=1
-			fi
-			if ! uci -q get network.recovery >/dev/null 2>&1; then
-				uci set network.recovery='interface'
-				uci set network.recovery.proto='static'
-				uci set network.recovery.ipaddr='192.168.66.1'
-				uci set network.recovery.netmask='255.255.255.0'
-				uci set network.recovery.ipv6='0'
-				uci set network.recovery.device='br-lan'
 				fix=1
 			fi
 			[ "$fix" = "1" ] && { uci commit network; /etc/init.d/network reload >/dev/null 2>&1; log "rescue interface was missing - recreated"; }

@@ -95,7 +95,6 @@ cr6608_apply_port_vlans() { # $1 = active quick-settings client VID ('' when non
 		# nothing asks for a VLAN -> plain bridge, management everywhere (original state)
 		uci -q delete network.@device[0].vlan_filtering
 		uci set network.lan.device='br-lan'
-		uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
 		return 0
 	fi
 
@@ -107,7 +106,6 @@ cr6608_apply_port_vlans() { # $1 = active quick-settings client VID ('' when non
 	uci set "network.$s.vlan=1"
 	for p in $mgmt_ports; do uci add_list "network.$s.ports=$p:u*"; done
 	uci set network.lan.device='br-lan.1'
-	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
 
 	for v in $vids; do
 		s="$(uci add network bridge-vlan)"

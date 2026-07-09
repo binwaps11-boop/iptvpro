@@ -131,8 +131,6 @@ clear_vlan() {
 	uci -q delete network.@device[0].vlan_filtering
 	# management interface back on the plain bridge
 	uci set network.lan.device='br-lan'
-	# recovery interface back on the plain bridge if it was moved
-	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
 	# Wi-Fi rescue 221.221.221.221 back on the plain bridge (it follows the Wi-Fi clients)
 	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
 	# drop any SmartAP quick bridge-vlan sections
@@ -204,7 +202,6 @@ set_vlan_target() {
 		uci set "network.$c.name=SmartAP-qvlan-client"; uci set "network.$c.device=br-lan"; uci set "network.$c.vlan=$vid"
 		for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list "network.$c.ports=$p:t"; done
 		uci set network.lan.device='br-lan.1'
-		uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
 	fi
 
 	# client L3 interface Wi-Fi bridges into; no IP (clients use the upstream DHCP)
@@ -292,8 +289,8 @@ apply_config() {
 
 	# OWNER SEMANTICS: the requested device IP IS the device IP — it REPLACES the old
 	# one (192.168.1.1 is only the factory default, it does not stick around). Rescue
-	# access stays fixed: 221.221.221.221 over Wi-Fi and 192.168.66.1 (recovery) over
-	# a no-VLAN wired port, so a typo in the IP can never lock the owner out.
+	# rescue access stays fixed: 221.221.221.221 over Wi-Fi, so a typo in the IP can
+	# never lock the owner out of the Wi-Fi rescue page.
 	valid_ip "$ip" || ip="$(uci -q get network.lan.ipaddr)"
 	valid_ip "$ip" || ip='192.168.1.1'
 	valid_ip "$netmask" || netmask='255.255.255.0'
@@ -331,7 +328,6 @@ apply_config() {
 				target_network='cr6608_vlan'
 				# the device itself lives INSIDE the VLAN: management (the IP above)
 				# rides br-lan.<vid> — 192.168.1.1 on br-lan.1 is GONE in VLAN mode.
-				# recovery (192.168.66.1) stays on br-lan.1 as the wired rescue.
 				uci set network.lan.device="br-lan.$vlan"
 				# ROUTED VLAN: NAT on means the AP routes the VLAN to the untagged
 				# upstream itself — the VLAN connects even if the upstream router
@@ -464,7 +460,7 @@ apply_config() {
 	# routed-VLAN uplink zone must never swallow the wired rescue path
 	_z="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='lan'.*/\1/p" | head -1)"
 	if [ -n "$_z" ]; then
-		for _ri in wlanrescue recovery; do
+		for _ri in wlanrescue; do
 			uci -q get network.$_ri >/dev/null 2>&1 || continue
 			uci -q del_list firewall.$_z.network="$_ri"
 			uci add_list firewall.$_z.network="$_ri"

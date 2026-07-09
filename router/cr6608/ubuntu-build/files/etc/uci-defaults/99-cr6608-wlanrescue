@@ -13,13 +13,5 @@ uci set network.wlanrescue.ipv6='0'
 # br-lan.<vid> in VLAN modes and back to br-lan in AP mode.
 [ -n "$(uci -q get network.wlanrescue.device)" ] || uci set network.wlanrescue.device='br-lan'
 
-# WIRED rescue 192.168.66.1: reachable on a no-VLAN port even after the owner moves
-# the device IP into a VLAN (the engine parks it on br-lan.1 in VLAN mode).
-[ -n "$(uci -q get network.recovery)" ] || uci set network.recovery='interface'
-uci set network.recovery.proto='static'
-uci set network.recovery.ipaddr='192.168.66.1'
-uci set network.recovery.netmask='255.255.255.0'
-uci set network.recovery.ipv6='0'
-[ -n "$(uci -q get network.recovery.device)" ] || uci set network.recovery.device='br-lan'
 uci commit network
 exit 0

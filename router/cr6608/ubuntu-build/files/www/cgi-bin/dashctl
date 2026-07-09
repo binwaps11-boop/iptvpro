@@ -571,7 +571,6 @@ case "$action" in
           for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && uci add_list network."$m".ports="$p:u*"; done
         fi
         uci set network.lan.device='br-lan.1'
-        uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
       fi
     else
       # delete path: once no client VLAN (vlan != 1) remains, fully tear filtering down and put
@@ -584,7 +583,6 @@ case "$action" in
         for z in $(uci show network 2>/dev/null | awk -F'[.=]' '/=bridge-vlan/{print $2}'); do uci -q delete network."$z"; done
         uci -q delete network.@device[0].vlan_filtering
         uci set network.lan.device='br-lan'
-        uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
       fi
     fi
     uci commit network; arm_rollback "$backup"; /etc/init.d/network reload >/dev/null 2>&1
@@ -778,7 +776,6 @@ EOF
     uci set network.lan.device='br-lan'
     for p in $(uci -q get network.@device[0].ports | tr ' ' '\n' | grep '^wan\.'); do uci -q del_list network.@device[0].ports="$p"; done
     for p in lan1 lan2 lan3 wan; do [ -d "/sys/class/net/$p" ] && { uci -q get network.@device[0].ports | tr ' ' '\n' | grep -qx "$p" || uci add_list network.@device[0].ports="$p"; }; done
-    uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan'
     uci -q delete dhcp.lan 2>/dev/null || true
     for r in "$(config_radio_iface radio0)" "$(config_radio_iface radio1)" wifinet0 wifinet1; do [ -n "$r" ] && uci -q get wireless."$r" >/dev/null 2>&1 && uci set wireless."$r".network='lan'; done
     uci -q commit smartap; uci commit wireless; uci commit network; uci commit dhcp; uci -q commit firewall
@@ -834,7 +831,7 @@ EOF
     arm_rollback "$backup"
     newip="$(uci -q get network.lan.ipaddr)"
     txcheck="$(uci -q get wireless.radio0.txpower 2>/dev/null)/$(uci -q get wireless.radio1.txpower 2>/dev/null)"
-    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nTX Power: $txcheck dBm\nعنوان الجهاز الآن: http://$newip — إذا غيّرت العنوان أو الفيلان فانتقل بالمتصفح إليه بعد ~20 ثانية (إنقاذ Wi-Fi: 221.221.221.221، إنقاذ سلكي على منفذ بدون فيلان: 192.168.66.1).\nالتطبيق يكتمل في الخلفية ولا يتوقف حتى لو أُغلق المتصفح." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Quick Setup" "Applied & saved (Apply & Keep)" "[]" "Backup: $backup\nMode: $program_mode\nTX Power: $txcheck dBm\nعنوان الجهاز الآن: http://$newip — إذا غيّرت العنوان أو الفيلان فانتقل بالمتصفح إليه بعد ~20 ثانية (إنقاذ Wi-Fi: افتح 221.221.221.221 من أي شبكة للجهاز).\nالتطبيق يكتمل في الخلفية ولا يتوقف حتى لو أُغلق المتصفح." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_quick)
     confirm_required "Quick Setup"
     ssid24="$(param ssid24 | cut -c1-32)"; ssid5="$(param ssid5 | cut -c1-32)"; pass24="$(param pass24 | cut -c1-64)"; pass5="$(param pass5 | cut -c1-64)"
