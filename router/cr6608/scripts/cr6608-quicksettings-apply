@@ -521,7 +521,7 @@ runtime_apply() {
 
 	/etc/init.d/network reload >/dev/null 2>&1 || true
 	if [ "$w0" = "1" ] && [ "$w1" = "1" ]; then
-		/usr/sbin/cr6608-safe-wifi-reload 8 >/dev/null 2>&1 || wifi reload >/dev/null 2>&1 || true
+		wifi reload >/dev/null 2>&1 || true
 	elif [ "$w0" = "1" ]; then
 		wifi up radio0 >/dev/null 2>&1 || true
 	elif [ "$w1" = "1" ]; then
@@ -557,9 +557,18 @@ runtime_apply() {
 		log "convergence retry $try: a radio was missing after reload - kicked it"
 	done
 	[ -x /usr/sbin/cr6608-force-txpower38 ] && /usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1 || true
-	echo "phase=done rc=0 ts=$(date +%s)" > "$STATUS"
-	log "runtime apply finished (w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen)"
-	return 0
+	# honest status: rc=0 only if every enabled AP is really broadcasting now
+	crc=0
+	[ "$(uci -q get wireless.radio0.disabled)" != "1" ] && [ "$(uci -q get wireless.wifinet0.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy0-ap0' && crc=1
+	[ "$(uci -q get wireless.radio1.disabled)" != "1" ] && [ "$(uci -q get wireless.wifinet1.disabled)" != "1" ] && ! iwinfo 2>/dev/null | grep -q '^phy1-ap0' && crc=1
+	if [ "$crc" = "0" ]; then
+		echo "phase=done rc=0 ts=$(date +%s)" > "$STATUS"
+	else
+		echo "phase=degraded rc=1 ts=$(date +%s)" > "$STATUS"
+		log "runtime apply: a radio did not come back after 2 retries (the guardian will keep trying)"
+	fi
+	log "runtime apply finished (w0=$w0 w1=$w1 dh=$dh fw=$fw fwen=$fwen crc=$crc)"
+	return "$crc"
 }
 
 # spawn_runtime — launch runtime_apply in ITS OWN SESSION (setsid): uhttpd's kill of
@@ -613,7 +622,7 @@ do_config() {
 }
 
 case "$1" in
-	apply|'') do_config && spawn_runtime ;;
+	apply|'') do_config && spawn_runtime || echo "phase=failed rc=1 ts=$(date +%s)" > "$STATUS" ;;
 	sync) adopt_live_state; do_config && runtime_apply ;;	# inline (boot path)
 	__runtime) runtime_apply "$2" ;;
 	*) echo "usage: $0 [apply|sync]" >&2; exit 1 ;;

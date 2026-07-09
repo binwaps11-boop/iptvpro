@@ -53,8 +53,10 @@ pick() { v=""; for k in "$@"; do v="$(jget "$k")"; [ -n "$v" ] && break; done; p
 mode="$(pick mode program_mode | grep -oE '^(ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe|pppoe_ap)$')"
 # canonical executor vocabulary: 'pppoe_ap' (dashboard name) IS 'pppoe'
 [ "$mode" = "pppoe_ap" ] && mode="pppoe"
-ip="$(pick lan_ipaddr ipaddr device_ip | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
-nm="$(pick lan_netmask netmask | grep -oE '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
+ip4ok() { echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1; local IFS=. o; for o in $1; do [ "$o" -le 255 ] 2>/dev/null || return 1; done; return 0; }
+ip="$(pick lan_ipaddr ipaddr device_ip)"; ip4ok "$ip" || ip=""
+nm="$(pick lan_netmask netmask)"; ip4ok "$nm" || nm=""
+_dummy_ip="$(echo)"
 vlan="$(pick vlan_id | grep -oE '^[0-9]{1,4}$')"
 s24="$(pick ssid ssid24 | cut -c1-32)"
 s5="$(pick ssid5 | cut -c1-32)"
