@@ -175,9 +175,9 @@ set_pppoe_wan() {
 #   * Management VLAN 1 stays UNTAGGED (native/pvid) on every wired port, so the
 #     dashboard IP the user set is reachable over any LAN cable.
 #   * The client VLAN <vid> is TAGGED on every wired port (trunk toward the Mikrotik).
-#   * Both Wi-Fi radios join the client VLAN (their network is set to cr6608_vlan by
-#     the caller), so 2.4G and 5G clients live inside <vid> and get their IPs from the
-#     upstream Mikrotik DHCP on that VLAN.
+#   * Both Wi-Fi radios join the client VLAN via the 'lan' network, which now lives on
+#     br-lan.<vid> with the device IP + local DHCP — so 2.4G/5G clients get an IP from
+#     the device (routed/NAT) or from the upstream Mikrotik DHCP (pure trunk).
 # Uses bridge-VLAN filtering (the DSA way) — NOT an 8021q device stacked on the bridge.
 set_vlan_target() {
 	local vid="$1" p m c
@@ -204,13 +204,13 @@ set_vlan_target() {
 		uci set network.lan.device='br-lan.1'
 	fi
 
-	# client L3 interface Wi-Fi bridges into; no IP (clients use the upstream DHCP)
-	uci set network.cr6608_vlan='interface'
-	uci set network.cr6608_vlan.device="br-lan.$vid"
-	uci set network.cr6608_vlan.proto='none'
-	# The Wi-Fi rescue IP 221.221.221.221 must FOLLOW the Wi-Fi clients into the client
-	# VLAN — phones live inside <vid>, so if 221 stayed on the management side they could
-	# never open the programming page while the unit is programmed AP+VLAN.
+	# NO separate client interface: the Wi-Fi rides the SAME 'lan' interface, which now
+	# lives on br-lan.<vid> WITH the device IP and the local DHCP pool. One interface per
+	# bridge-vlan device is what makes DHCP actually reach the phone (a redundant second
+	# proto=none interface on the same device left the phone stuck at "obtaining IP").
+	uci -q delete network.cr6608_vlan
+	# Wi-Fi rescue 221.221.221.221 follows the clients into the VLAN so the programming
+	# page stays reachable over Wi-Fi even while the unit is on the VLAN.
 	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vid"
 	return 0
 }
@@ -325,7 +325,7 @@ apply_config() {
 	case "$mode" in
 		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
 			if set_vlan_target "$vlan"; then
-				target_network='cr6608_vlan'
+				target_network='lan'   # Wi-Fi rides 'lan' (now on br-lan.<vid> with IP+DHCP)
 				# the device itself lives INSIDE the VLAN: management (the IP above)
 				# rides br-lan.<vid> — 192.168.1.1 on br-lan.1 is GONE in VLAN mode.
 				uci set network.lan.device="br-lan.$vlan"
@@ -426,9 +426,17 @@ apply_config() {
 			;;
 	esac
 
-	# DHCP: a real user toggle (dhcp_server), and PPPoE-client mode always forces it on.
+	# DHCP: a real user toggle (dhcp_server), and PPPoE-client + routed-VLAN modes force it on.
 	if [ "$mode" = "pppoe" ] || bool_on "$dhcp_server"; then
-		uci -q get dhcp.lan >/dev/null 2>&1 || { uci set dhcp.lan=dhcp; uci set dhcp.lan.interface='lan'; uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'; }
+		# ALWAYS (re)assert a working IPv4 pool — not only when the section is new. The boot
+		# config ships dhcp.lan with ignore=1 and NO range; without an explicit start/limit
+		# dnsmasq serves nothing and the phone hangs at "obtaining IP". Set the full pool
+		# every time so a programmed VLAN really hands out addresses.
+		uci set dhcp.lan='dhcp'
+		uci set dhcp.lan.interface='lan'
+		uci set dhcp.lan.start='100'
+		uci set dhcp.lan.limit='150'
+		uci set dhcp.lan.leasetime='12h'
 		uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
 		uci -q set dhcp.lan.dhcpv6='disabled'; uci -q set dhcp.lan.ra='disabled'; uci -q set dhcp.lan.ndp='disabled'
 	else
