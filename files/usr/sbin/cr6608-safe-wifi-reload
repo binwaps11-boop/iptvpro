@@ -1,0 +1,46 @@
+#!/bin/sh
+
+BACKUP="$2"
+OWN_BACKUP=0
+[ -r "$BACKUP" ] || {
+	BACKUP="/tmp/cr6608-wireless-last-good.conf"
+	cp -f /etc/config/wireless "$BACKUP" 2>/dev/null || exit 1
+	OWN_BACKUP=1
+}
+
+radio_enabled() {
+	[ "$(uci -q get wireless."$1".disabled 2>/dev/null)" != "1" ]
+}
+
+phy_has_interface() {
+	local expected="phy#$1"
+	iw dev 2>/dev/null | awk -v expected="$expected" '
+		/^phy#/ { active = ($1 == expected) }
+		active && $1 == "Interface" { found = 1 }
+		END { exit(found ? 0 : 1) }
+	'
+}
+
+wifi reload >/dev/null 2>&1 || true
+sleep "${1:-8}"
+
+failed=0
+if radio_enabled radio0 && ! phy_has_interface 0; then
+	failed=1
+fi
+if radio_enabled radio1 && ! phy_has_interface 1; then
+	failed=1
+fi
+
+if [ "$failed" = "1" ]; then
+	cp -f "$BACKUP" /etc/config/wireless 2>/dev/null
+	uci revert wireless >/dev/null 2>&1 || true
+	uci commit wireless >/dev/null 2>&1 || true
+	wifi reload >/dev/null 2>&1 || true
+	logger -t cr6608-safe-apply "Wi-Fi reload failed; restored previous wireless config"
+	exit 1
+fi
+
+logger -t cr6608-safe-apply "Wi-Fi reload OK"
+[ "$OWN_BACKUP" = "1" ] && rm -f "$BACKUP"
+exit 0

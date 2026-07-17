@@ -1,0 +1,122 @@
+#!/bin/sh
+# Compatibility name kept for existing hotplug/sentinel hooks.
+# Applies the configured CR6608 TX power per radio instead of forcing 38.
+
+LOG="logger -t cr6608-txpower"
+LOCK="/var/lock/cr6608-txpower.lock"
+
+lock_wait=0
+while ! mkdir "$LOCK" 2>/dev/null; do
+	if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+		rmdir "$LOCK" 2>/dev/null || true
+		continue
+	fi
+	[ "$lock_wait" -lt 30 ] || { $LOG "TX-power apply lock timed out"; exit 75; }
+	sleep 1
+	lock_wait=$((lock_wait + 1))
+done
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+
+[ -r /usr/libexec/cr6608-txpower-lib ] && . /usr/libexec/cr6608-txpower-lib
+
+valid_target() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 38 ] 2>/dev/null
+}
+
+target_for_radio() {
+	local radio target
+	if type cr6608_txpower_target_for_radio >/dev/null 2>&1; then
+		cr6608_txpower_target_for_radio "$1"
+		return
+	fi
+	target="$(uci -q get wireless.$1.txpower 2>/dev/null)"
+	valid_target "$target" && printf '%s\n' "$target" || printf '38\n'
+}
+
+phy_for_radio() {
+	local radio="$1" status ifname wiphy
+	if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+		status="$(ubus call network.wireless status 2>/dev/null)"
+		for ifname in $(printf '%s\n' "$status" | jsonfilter -e "@.$radio.interfaces[*].ifname" 2>/dev/null); do
+			wiphy="$(iw dev "$ifname" info 2>/dev/null | awk '$1 == "wiphy" { print $2; exit }')"
+			case "$wiphy" in ''|*[!0-9]*) ;; *) printf 'phy%s\n' "$wiphy"; return 0 ;; esac
+		done
+	fi
+	# Deterministic fallback for the CR6608's two fixed radios during early boot.
+	case "$radio" in radio0) printf 'phy0\n' ;; radio1) printf 'phy1\n' ;; *) return 1 ;; esac
+}
+
+ifaces_for_phy() {
+	local phy="$1" ifname wiphy
+	for ifname in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+		wiphy="$(iw dev "$ifname" info 2>/dev/null | awk '$1 == "wiphy" { print $2; exit }')"
+		[ "phy$wiphy" = "$phy" ] && printf '%s\n' "$ifname"
+	done
+}
+
+apply_phy() {
+	local phy="$1" target="$2" mbm
+	valid_target "$target" || target=38
+	mbm="${target}00"
+	iw phy "$phy" set txpower fixed "$mbm" 2>/dev/null || \
+	iw phy "$phy" set txpower limit "$mbm" 2>/dev/null
+}
+
+read_iface_power() {
+	local phy="$1" out="" i v
+	for i in $(ifaces_for_phy "$phy"); do
+		v="$(iw dev "$i" info 2>/dev/null | awk '/txpower/{print $2" "$3}')"
+		[ -n "$v" ] && out="${out}${i}=${v} "
+	done
+	printf '%s\n' "$out"
+}
+
+radio_ready() {
+	local radio="$1" phy="$2" target="$3" i value target_centi delta found=0
+	[ "$(uci -q get wireless.$radio.disabled 2>/dev/null)" = "1" ] && return 0
+	[ -n "$phy" ] || return 1
+	[ -d "/sys/class/ieee80211/$phy" ] || return 1
+	target_centi=$((target * 100))
+	for i in $(ifaces_for_phy "$phy"); do
+		found=1
+		value="$(iw dev "$i" info 2>/dev/null | awk '/txpower/{printf "%d", ($2 * 100) + 0.5; exit}')"
+		case "$value" in ''|*[!0-9]*) return 1 ;; esac
+		delta=$((value - target_centi)); [ "$delta" -lt 0 ] && delta=$((-delta))
+		# Do not accept a silently clamped or stale value. A one-dBm tolerance
+		# covers integer/quarter-dBm driver rounding without making the UI fictitious.
+		[ "$delta" -le 100 ] 2>/dev/null || return 1
+	done
+	[ "$found" = "1" ]
+}
+
+t0="$(target_for_radio radio0)"
+t1="$(target_for_radio radio1)"
+p0="$(phy_for_radio radio0)" || p0=""
+p1="$(phy_for_radio radio1)" || p1=""
+
+n=0
+ready=0
+# The first phy hotplug event arrives well before netifd creates both AP
+# interfaces. Give the second radio enough time to settle, then verify the
+# actual iw read-back instead of logging a false boot failure after five seconds.
+while [ "$n" -lt 25 ]; do
+	apply_failed=0
+	if [ "$(uci -q get wireless.radio0.disabled 2>/dev/null)" != "1" ]; then
+		[ -n "$p0" ] && [ -d "/sys/class/ieee80211/$p0" ] && apply_phy "$p0" "$t0" || apply_failed=1
+	fi
+	if [ "$(uci -q get wireless.radio1.disabled 2>/dev/null)" != "1" ]; then
+		[ -n "$p1" ] && [ -d "/sys/class/ieee80211/$p1" ] && apply_phy "$p1" "$t1" || apply_failed=1
+	fi
+	if [ "$apply_failed" = "0" ] && radio_ready radio0 "$p0" "$t0" && radio_ready radio1 "$p1" "$t1"; then
+		ready=1
+		break
+	fi
+	sleep 1
+	n=$((n+1))
+done
+
+$LOG "configured target: radio0=${t0}dBm phy=${p0:-missing} $(read_iface_power "$p0")"
+$LOG "configured target: radio1=${t1}dBm phy=${p1:-missing} $(read_iface_power "$p1")"
+[ "$ready" = "1" ] || { $LOG "TX-power runtime verification failed after ${n} attempts"; exit 1; }
+exit 0

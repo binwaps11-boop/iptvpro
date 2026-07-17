@@ -1,0 +1,103 @@
+#!/bin/sh
+. /usr/libexec/cr6608-session-auth
+reject_request() {
+  printf 'Status: %s\r\n' "$1"
+  [ "$1" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+  printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
+  printf '{"ok":false,"error":"%s"}\n' "$2"
+  exit 0
+}
+[ "${REQUEST_METHOD:-GET}" = POST ] || reject_request "405 Method Not Allowed" "method"
+body_len="${CONTENT_LENGTH:-0}"
+case "$body_len" in ''|*[!0-9]*) reject_request "400 Bad Request" "content_length" ;; esac
+[ "${#body_len}" -le 4 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+[ "$body_len" -le 4096 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+REQ=""
+[ "$body_len" -gt 0 ] 2>/dev/null && REQ="$(dd bs=1 count="$body_len" 2>/dev/null)"
+# --- safety: no system command may hang the API ---
+run_limit() {
+  sec="$1"; shift
+  "$@" & pid=$!
+  ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  guard_children="$(pgrep -P "$guard" 2>/dev/null)"
+  kill "$guard" 2>/dev/null
+  [ -n "$guard_children" ] && kill $guard_children 2>/dev/null
+  wait "$guard" 2>/dev/null
+  return "$rc"
+}
+ubus() { run_limit 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { run_limit 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 6 /usr/sbin/iw "$@" 2>/dev/null; }
+param() {
+  printf '%s' "$REQ" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf 'X-Content-Type-Options: nosniff\r\n'
+  printf 'Referrer-Policy: no-referrer\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+json_msg() {
+  msg="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' ')"
+  printf '{"ok":%s,"message":"%s"}\n' "$1" "$msg"
+}
+
+sid="$(cr6608_session_from_request "$(param sid)")"
+cr6608_session_valid "$sid" || deny_auth
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf 'Referrer-Policy: no-referrer\r\n'
+printf '\r\n'
+
+action="$(param action)"
+confirm="$(param confirm)"
+
+case "$action" in
+  refresh)
+    json_msg true "تم تحديث البيانات من الواجهة."
+    ;;
+  speedtest)
+    json_msg true "اختبار السرعة الخارجي غير مفعل لأن اللوحة تعمل offline؛ استخدم الاختبار المحلي داخل الواجهة."
+    ;;
+  reconnect)
+    if [ "$confirm" = "1" ]; then
+      # real reconnect: renew wan (if any) and reload network + wifi
+      ( ifup wan >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1 ) >/dev/null 2>&1 &
+      json_msg true "تم تنفيذ إعادة الاتصال: أعيد تحميل الشبكة والواي فاي وتجديد WAN إن وجد."
+    else
+      json_msg false "إعادة الاتصال تحتاج تأكيداً (اضغط الزر مرة أخرى)."
+    fi
+    ;;
+  wifi_toggle)
+    if [ "$confirm" = "1" ]; then
+      d0="$(uci -q get wireless.radio0.disabled)"; d0="${d0:-0}"
+      if [ "$d0" = "0" ]; then
+        uci set wireless.radio0.disabled='1'; uci set wireless.radio1.disabled='1'; state="أُطفئ"
+      else
+        uci set wireless.radio0.disabled='0'; uci set wireless.radio1.disabled='0'; state="شُغّل"
+      fi
+      uci commit wireless; ( wifi reload ) >/dev/null 2>&1 &
+      json_msg true "تم: $state الواي فاي على الحزمتين. إذا كنت متصلاً عبر الواي فاي وأطفأته، ادخل عبر الكيبل لإعادته."
+    else
+      json_msg false "تبديل WiFi يحتاج تأكيداً (اضغط الزر مرة أخرى خلال 6 ثوانٍ)."
+    fi
+    ;;
+  reboot)
+    if [ "$confirm" = "1" ]; then
+      (sleep 2; reboot) >/dev/null 2>&1 &
+      json_msg true "تم إرسال أمر إعادة التشغيل. سيعود الراوتر بعد قليل."
+    else
+      json_msg false "إعادة التشغيل تحتاج تأكيداً."
+    fi
+    ;;
+  *)
+    json_msg false "إجراء غير معروف."
+    ;;
+esac

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Heal a corrupt /etc/config/smartap on first boot. Some earlier builds shipped a JSON
+# config-export snapshot at this path; libuci cannot parse it, so every `uci smartap.*`
+# read/write fails and Quick Settings / Security / port-isolation / auto-channel / per-client
+# QoS silently stop persisting. Runs (numeric 93) BEFORE the security service (98) so the
+# apply tool sees a valid file. If the live file is unreadable, restore the pristine rootfs
+# copy (/rom); otherwise start clean.
+if ! uci -q show smartap >/dev/null 2>&1; then
+	if [ -f /rom/etc/config/smartap ] && head -c1 /rom/etc/config/smartap 2>/dev/null | grep -q '[a-z]'; then
+		cp /rom/etc/config/smartap /etc/config/smartap
+	else
+		: > /etc/config/smartap
+	fi
+	logger -t cr6608 "healed unreadable /etc/config/smartap at boot" 2>/dev/null || true
+fi
+exit 0

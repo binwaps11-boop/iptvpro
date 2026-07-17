@@ -1,0 +1,32 @@
+#!/bin/sh
+# Address-handout policy. IPv6 is fully off everywhere. IPv4 DHCP is added ONLY when the user
+# saves + enables the PPPoE-client mode in Quick Settings; the shipped default (Access Point)
+# has no DHCP pool, and nothing enables one automatically.
+
+# --- IPv4 DHCP: the shipped config carries NO pool, and DHCP is turned on ONLY by saving the
+# PPPoE-client mode in Quick Settings. Nothing here (and nothing on later boots) adds or
+# removes a pool automatically, so the DHCP state is exactly whatever the last save produced.
+# On this first-boot default (Access Point) there is simply no pool, so no DHCP is served.
+uci -q set dhcp.@dnsmasq[0].filter_aaaa='1'   # never answer IPv6 (AAAA) DNS either
+# odhcpd (DHCPv6/RA server) hard-off; also stop+disable the service if it ever exists
+uci -q set dhcp.odhcpd.disabled='1' 2>/dev/null || true
+uci -q set dhcp.odhcpd.maindhcp='0' 2>/dev/null || true
+[ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd stop >/dev/null 2>&1; /etc/init.d/odhcpd disable >/dev/null 2>&1; }
+uci -q commit dhcp
+
+# --- IPv6: disable on every network interface (the kernel here also has no IPv6 at all) ---
+for i in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=interface$/\1/p"); do
+	uci -q set network."$i".ipv6='0'
+	uci -q set network."$i".delegate='0'
+done
+uci -q commit network
+
+# --- belt-and-suspenders sysctl: refuse IPv6 addressing/RA if a module ever appeared ---
+{
+	echo 'net.ipv6.conf.all.disable_ipv6=1'
+	echo 'net.ipv6.conf.default.disable_ipv6=1'
+	echo 'net.ipv6.conf.all.accept_ra=0'
+} 2>/dev/null | while read l; do sysctl -w "$l" >/dev/null 2>&1; done
+
+/etc/init.d/dnsmasq reload >/dev/null 2>&1
+exit 0

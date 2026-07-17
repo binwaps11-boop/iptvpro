@@ -1,0 +1,524 @@
+#!/bin/sh
+
+MAX_BODY=32768
+TMP_DIR="${CR6608_TMP_DIR:-/tmp}"
+JSONFILTER_BIN="${CR6608_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+UBUS_BIN="${CR6608_UBUS_BIN:-/bin/ubus}"
+ID_BIN="${CR6608_ID_BIN:-id}"
+EXECUTOR="${CR6608_QUICK_EXECUTOR:-/usr/sbin/cr6608-quicksettings-apply}"
+SAFE_APPLY="${CR6608_SAFE_APPLY:-/usr/sbin/cr6608-safe-apply}"
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+JSHN_LIB="${CR6608_JSHN_LIB:-/usr/share/libubox/jshn.sh}"
+DASHSESS_DIR="${CR6608_DASHSESS_DIR:-/tmp/dashsess}"
+WRITE_PACKAGES="network wireless dhcp firewall cr6608quick smartap"
+
+BODY_FILE=""
+SCALAR_FILE=""
+REQUEST_FILE=""
+PASSWORD_FILE=""
+LOG_FILE=""
+apply_lock="$TMP_DIR/cr6608-apply.lock"
+lock_owner=0
+my_start=""
+
+export LC_ALL=C
+set -f
+umask 077
+
+headers() {
+	status="$1"
+	[ -n "$status" ] && echo "Status: $status"
+	[ "$status" = "405 Method Not Allowed" ] && echo "Allow: POST"
+	echo "Content-Type: application/json"
+	echo "Cache-Control: no-store"
+	echo "Pragma: no-cache"
+	echo "X-Content-Type-Options: nosniff"
+	echo "Referrer-Policy: no-referrer"
+	echo "Content-Security-Policy: default-src 'none'"
+	echo ""
+}
+
+reply_json() {
+	status="$1"; body="$2"
+	headers "$status"
+	printf '%s\n' "$body"
+	exit 0
+}
+
+fail_request() {
+	status="$1"; code="$2"; detail="$3"
+	headers "$status"
+	printf '{"ok":false,"applied":false,"error":"%s","detail":"%s"}\n' "$code" "$detail"
+	exit 0
+}
+
+lock_start() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+
+release_lock() {
+	local opid ostart
+	[ "$lock_owner" = "1" ] || return 0
+	[ -d "$apply_lock" ] && [ ! -L "$apply_lock" ] || return 0
+	if [ ! -f "$apply_lock/owner" ] || [ -L "$apply_lock/owner" ]; then
+		rmdir "$apply_lock" 2>/dev/null
+		return 0
+	fi
+	read -r opid ostart < "$apply_lock/owner" 2>/dev/null
+	[ "$opid" = "$$" ] && [ "$ostart" = "$my_start" ] || return 0
+	rm -f "$apply_lock/owner" 2>/dev/null
+	rmdir "$apply_lock" 2>/dev/null
+}
+
+cleanup() {
+	release_lock
+	[ -n "$BODY_FILE" ] && rm -f "$BODY_FILE"
+	[ -n "$SCALAR_FILE" ] && rm -f "$SCALAR_FILE"
+	[ -n "$REQUEST_FILE" ] && rm -f "$REQUEST_FILE"
+	[ -n "$PASSWORD_FILE" ] && rm -f "$PASSWORD_FILE"
+	[ -n "$LOG_FILE" ] && rm -f "$LOG_FILE"
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' HUP INT TERM
+
+[ "${REQUEST_METHOD:-GET}" = "POST" ] || fail_request "405 Method Not Allowed" "method" "POST required"
+case "${CONTENT_TYPE:-}" in application/json|application/json\;*) ;; *) fail_request "415 Unsupported Media Type" "content_type" "application/json required" ;; esac
+
+LEN="${CONTENT_LENGTH:-}"
+case "$LEN" in '') fail_request "411 Length Required" "content_length" "Content-Length required" ;; *[!0-9]*) fail_request "400 Bad Request" "content_length" "Invalid Content-Length" ;; esac
+[ "${#LEN}" -le 5 ] 2>/dev/null || fail_request "413 Payload Too Large" "payload_too_large" "Request body exceeds 32768 bytes"
+[ "$LEN" -gt 0 ] 2>/dev/null || fail_request "400 Bad Request" "empty_body" "JSON body required"
+[ "$LEN" -le "$MAX_BODY" ] 2>/dev/null || fail_request "413 Payload Too Large" "payload_too_large" "Request body exceeds 32768 bytes"
+
+BODY_FILE="$(mktemp "$TMP_DIR/cr6608-quick-body.XXXXXX" 2>/dev/null)" || fail_request "500 Internal Server Error" "temporary_file" "Request storage unavailable"
+chmod 0600 "$BODY_FILE" 2>/dev/null || fail_request "500 Internal Server Error" "temporary_file" "Request storage unavailable"
+dd bs=1 count="$LEN" of="$BODY_FILE" 2>/dev/null
+ACTUAL="$(wc -c < "$BODY_FILE" 2>/dev/null | tr -d ' ')"
+[ "$ACTUAL" = "$LEN" ] || fail_request "400 Bad Request" "short_body" "Request body shorter than Content-Length"
+
+first_char="$(tr -d ' \t\r\n' < "$BODY_FILE" | cut -c1)"
+[ "$first_char" = "{" ] || fail_request "400 Bad Request" "json" "JSON object required"
+"$JSONFILTER_BIN" -i "$BODY_FILE" -e '@' >/dev/null 2>&1 || fail_request "400 Bad Request" "json" "Malformed JSON"
+
+jget() {
+	"$JSONFILTER_BIN" -i "$BODY_FILE" -e "@.$1" 2>/dev/null
+}
+
+pick() {
+	local key value
+	for key in "$@"; do
+		value="$(jget "$key")"
+		[ -n "$value" ] && { printf '%s' "$value"; return 0; }
+	done
+	return 0
+}
+
+# Reject decoded controls and multi-line values before command substitution can trim them.
+SCALAR_FILE="$(mktemp "$TMP_DIR/cr6608-quick-scalar.XXXXXX" 2>/dev/null)" || fail_request "500 Internal Server Error" "temporary_file" "Validation storage unavailable"
+for field in sid luci_sid mode program_mode lan_ipaddr ipaddr device_ip lan_netmask netmask vlan_id ssid ssid24 ssid5 channel24 ch24 channel5 ch5 txpower_radio0 txpower0 txpower_radio1 txpower1 txpower country24 country5 country security wifi_key wifi_password key hide_ssid mesh_id wds_ssid wds_peer_ssid pppoe_user pppoe_pass pppoe_port broadband_port nat_enabled dhcp_server firewall_enabled change_password admin_password device_password clear_previous delete_previous reset_lock reset_button_enabled reset_custom reset_mode reset_seconds broadband_enabled fake_mesh watchcat_enabled htmode24 htmode5 mesh_role radio0_enabled radio1_enabled; do
+	"$JSONFILTER_BIN" -i "$BODY_FILE" -e "@.$field" > "$SCALAR_FILE" 2>/dev/null || true
+	lines="$(wc -l < "$SCALAR_FILE" 2>/dev/null | tr -d ' ')"
+	case "$lines" in ''|*[!0-9]*) fail_request "400 Bad Request" "json" "Invalid JSON field" ;; esac
+	[ "$lines" -le 1 ] 2>/dev/null || fail_request "400 Bad Request" "$field" "Control characters are not allowed"
+	grep -q '[[:cntrl:]]' "$SCALAR_FILE" 2>/dev/null && fail_request "400 Bad Request" "$field" "Control characters are not allowed"
+done
+rm -f "$SCALAR_FILE"; SCALAR_FILE=""
+
+[ -r "$SESSION_AUTH_LIB" ] || fail_request "500 Internal Server Error" "auth" "Authentication helper unavailable"
+. "$SESSION_AUTH_LIB"
+
+valid_sid() {
+	case "$1" in ''|*[!A-Fa-f0-9]*|00000000000000000000000000000000) return 1 ;; esac
+	[ "${#1}" = 32 ] 2>/dev/null
+}
+
+dashboard_root_session() {
+	local sid="$1" dir="$DASHSESS_DIR" file
+	valid_sid "$sid" || return 1
+	file="$dir/$sid"
+	[ -d "$dir" ] && [ ! -L "$dir" ] && cr6608_path_owned_by_root "$dir" || return 1
+	[ -f "$file" ] && [ ! -L "$file" ] && cr6608_path_owned_by_root "$file" || return 1
+	cr6608_session_valid "$sid"
+}
+
+ubus_root_with_write_acl() {
+	local sid="$1" session username package access
+	valid_sid "$sid" || return 1
+	session="$("$UBUS_BIN" call session get "{\"ubus_rpc_session\":\"$sid\"}" 2>/dev/null)" || return 1
+	username="$("$JSONFILTER_BIN" -s "$session" -e '@.values.username' 2>/dev/null)"
+	[ -n "$username" ] || username="$("$JSONFILTER_BIN" -s "$session" -e '@.data.username' 2>/dev/null)"
+	[ "$username" = "root" ] || return 1
+	for package in $WRITE_PACKAGES; do
+		access="$("$UBUS_BIN" call session access "{\"ubus_rpc_session\":\"$sid\",\"scope\":\"uci\",\"object\":\"$package\",\"function\":\"write\"}" 2>/dev/null)" || return 1
+		access="$("$JSONFILTER_BIN" -s "$access" -e '@.access' 2>/dev/null)"
+		case "$access" in true|1) ;; *) return 1 ;; esac
+	done
+	return 0
+}
+
+[ "$("$ID_BIN" -u 2>/dev/null)" = "0" ] || fail_request "500 Internal Server Error" "privilege" "CGI is not running as root"
+
+ok_auth=0
+authenticated_luci_sid=""
+sid="$(printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^sid=\([0-9A-Fa-f]\{32\}\)$/\1/p' | head -n1)"
+[ -z "$sid" ] && sid="$(pick sid)"
+sid="$(cr6608_session_from_request "$sid")"
+dashboard_root_session "$sid" && ok_auth=1
+
+luci_sid="$(pick luci_sid)"
+if ubus_root_with_write_acl "$luci_sid"; then
+	[ "$ok_auth" = "1" ] || ok_auth=1
+	authenticated_luci_sid="$luci_sid"
+fi
+
+if [ "$ok_auth" != "1" ]; then
+	for luci_sid in $(printf '%s' "${HTTP_COOKIE:-}" | tr ';' '\n' | sed -n 's/^[[:space:]]*sysauth[A-Za-z0-9_]*=\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p'); do
+		if ubus_root_with_write_acl "$luci_sid"; then ok_auth=1; authenticated_luci_sid="$luci_sid"; break; fi
+	done
+fi
+
+[ "$ok_auth" = "1" ] || fail_request "403 Forbidden" "auth" "Root authentication with UCI write access required"
+
+# LuCI handleSave stages a private rpcd delta. The sanitized JSON above already
+# captured those values, so clear that delta before the CLI transaction starts.
+if [ -n "$authenticated_luci_sid" ]; then
+	for package in $WRITE_PACKAGES; do
+		"$UBUS_BIN" call uci revert "{\"ubus_rpc_session\":\"$authenticated_luci_sid\",\"config\":\"$package\"}" >/dev/null 2>&1 || \
+			fail_request "409 Conflict" "uci_delta" "Could not clear the staged LuCI change set"
+	done
+fi
+
+# Serialize all config mutations and reject hostile or live lock ownership.
+my_start="$(lock_start "$$")"
+[ -n "$my_start" ] || fail_request "500 Internal Server Error" "lock" "Could not identify lock owner"
+if ! mkdir "$apply_lock" 2>/dev/null; then
+	if [ ! -d "$apply_lock" ] || [ -L "$apply_lock" ] || ! cr6608_path_owned_by_root "$apply_lock"; then
+		fail_request "409 Conflict" "busy" "Another apply is in progress"
+	fi
+	if [ ! -f "$apply_lock/owner" ] || [ -L "$apply_lock/owner" ] || ! cr6608_path_owned_by_root "$apply_lock/owner"; then
+		fail_request "409 Conflict" "busy" "Another apply is in progress"
+	fi
+	read -r opid ostart < "$apply_lock/owner" 2>/dev/null
+	live_start="$(lock_start "$opid")"
+	if [ -z "$opid" ] || [ -z "$ostart" ] || [ "$live_start" != "$ostart" ]; then
+		rm -f "$apply_lock/owner" 2>/dev/null
+		rmdir "$apply_lock" 2>/dev/null
+		mkdir "$apply_lock" 2>/dev/null || fail_request "409 Conflict" "busy" "Another apply is in progress"
+	else
+		fail_request "409 Conflict" "busy" "Another apply is in progress"
+	fi
+fi
+lock_owner=1
+chmod 0700 "$apply_lock" 2>/dev/null || fail_request "500 Internal Server Error" "lock" "Could not secure apply lock"
+printf '%s %s\n' "$$" "$my_start" > "$apply_lock/owner" || fail_request "500 Internal Server Error" "lock" "Could not record apply lock"
+chmod 0600 "$apply_lock/owner" 2>/dev/null || fail_request "500 Internal Server Error" "lock" "Could not secure apply lock"
+
+qget() { "$UCI_BIN" -q get "$1" 2>/dev/null || true; }
+UCI_BIN="${CR6608_UCI_BIN:-/sbin/uci}"
+
+resolved() {
+	local value="$1" key="$2" fallback="$3"
+	[ -n "$value" ] || value="$(qget "cr6608quick.default.$key")"
+	[ -n "$value" ] || value="$fallback"
+	printf '%s' "$value"
+}
+
+valid_text() {
+	[ "${#1}" -le "$2" ] 2>/dev/null || return 1
+	[ -z "$1" ] || ! printf '%s' "$1" | grep -q '[[:cntrl:]]'
+}
+
+valid_ip() {
+	local old_ifs octet
+	case "$1" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+	old_ifs="$IFS"; IFS=.; set -- $1; IFS="$old_ifs"
+	[ "$#" -eq 4 ] || return 1
+	for octet in "$@"; do
+		case "$octet" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+		[ "$octet" -ge 0 ] 2>/dev/null && [ "$octet" -le 255 ] 2>/dev/null || return 1
+	done
+	return 0
+}
+
+valid_management_ip() {
+	local first
+	valid_ip "$1" || return 1
+	first="${1%%.*}"
+	case "$first" in 0|127|22[4-9]|23[0-9]|24[0-9]|25[0-5]) return 1 ;; esac
+	return 0
+}
+
+valid_mask() {
+	case "$1" in
+		128.0.0.0|192.0.0.0|224.0.0.0|240.0.0.0|248.0.0.0|252.0.0.0|254.0.0.0|255.0.0.0|\
+		255.128.0.0|255.192.0.0|255.224.0.0|255.240.0.0|255.248.0.0|255.252.0.0|255.254.0.0|255.255.0.0|\
+		255.255.128.0|255.255.192.0|255.255.224.0|255.255.240.0|255.255.248.0|255.255.252.0|255.255.254.0|255.255.255.0|\
+		255.255.255.128|255.255.255.192|255.255.255.224|255.255.255.240|255.255.255.248|255.255.255.252) return 0 ;;
+	esac
+	return 1
+}
+
+valid_management_host() {
+	local address="$1" netmask="$2" calculated network broadcast
+	valid_management_ip "$address" && valid_mask "$netmask" || return 1
+	calculated="$(/bin/ipcalc.sh "$address" "$netmask" 2>/dev/null)" || return 1
+	network="$(printf '%s\n' "$calculated" | sed -n 's/^NETWORK=//p' | head -n 1)"
+	broadcast="$(printf '%s\n' "$calculated" | sed -n 's/^BROADCAST=//p' | head -n 1)"
+	[ -n "$network" ] && [ -n "$broadcast" ] && \
+		[ "$address" != "$network" ] && [ "$address" != "$broadcast" ]
+}
+
+valid_vlan() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 2 ] 2>/dev/null && [ "$1" -le 4094 ] 2>/dev/null
+}
+
+valid_wpa_key() {
+	local key="$1" length="${#1}"
+	if [ "$length" -ge 8 ] 2>/dev/null && [ "$length" -le 63 ] 2>/dev/null; then
+		valid_text "$key" 63
+		return $?
+	fi
+	if [ "$length" -eq 64 ] 2>/dev/null; then
+		case "$key" in *[!0-9A-Fa-f]*) return 1 ;; *) return 0 ;; esac
+	fi
+	return 1
+}
+
+normalize_bool() {
+	case "$1" in 1|on|true|yes|enabled) printf '1' ;; 0|off|false|no|disabled) printf '0' ;; '') printf '%s' "$2" ;; *) return 1 ;; esac
+}
+
+normalize_security() {
+	case "$1" in wpa2|psk2) printf 'wpa2' ;; wpa3|sae) printf 'wpa3' ;; mixed|sae-mixed) printf 'mixed' ;; open|none|'') printf 'open' ;; *) return 1 ;; esac
+}
+
+valid_ch5() {
+	case "$1" in auto) return 0 ;; ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 30 ] 2>/dev/null && [ "$1" -le 196 ] 2>/dev/null
+}
+
+valid_country_code() {
+	case "$1" in [A-Z0-9][A-Z0-9]) return 0 ;; esac
+	return 1
+}
+
+country_supported() {
+	local radio="$1" code="$2" data match
+	data="$("$UBUS_BIN" call iwinfo countrylist "{\"device\":\"$radio\"}" 2>/dev/null)" || return 1
+	match="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.iso3166=\"$code\"].iso3166" 2>/dev/null | head -n 1)"
+	[ "$match" = "$code" ]
+}
+
+channel_supported() {
+	local radio="$1" channel="$2" data reported restricted disabled flags
+	[ "$channel" = "auto" ] && return 0
+	data="$("$UBUS_BIN" call iwinfo freqlist "{\"device\":\"$radio\"}" 2>/dev/null)" || return 1
+	reported="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].channel" 2>/dev/null | head -n 1)"
+	restricted="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].restricted" 2>/dev/null | head -n 1)"
+	disabled="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].disabled" 2>/dev/null | head -n 1)"
+	flags="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].flags[*]" 2>/dev/null | tr 'A-Z' 'a-z')"
+	case "$disabled" in true|1) return 1 ;; esac
+	case " $flags " in *" disabled "*) return 1 ;; esac
+	[ "$reported" = "$channel" ] && [ "$restricted" = "false" ]
+}
+
+mode="$(resolved "$(pick mode program_mode)" mode ap)"
+[ "$mode" = "pppoe_ap" ] && mode='pppoe'
+case "$mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe) ;; *) fail_request "400 Bad Request" "mode" "Unsupported programming mode" ;; esac
+
+# The live LAN values own management state. An unrelated quick-settings apply
+# must never resurrect stale cr6608quick metadata over Network > Interfaces.
+ip="$(pick lan_ipaddr ipaddr device_ip)"; [ -n "$ip" ] || ip="$(qget network.lan.ipaddr)"; [ -n "$ip" ] || ip='192.168.1.1'
+nm="$(pick lan_netmask netmask)"; [ -n "$nm" ] || nm="$(qget network.lan.netmask)"; [ -n "$nm" ] || nm='255.255.255.0'
+vlan="$(resolved "$(pick vlan_id)" vlan_id '')"
+ssid="$(resolved "$(pick ssid ssid24)" ssid 'Smart ap 2.4G')"
+ssid5="$(resolved "$(pick ssid5)" ssid5 "${ssid}-5G")"
+c24="$(resolved "$(pick channel24 ch24)" channel24 '')"
+c5="$(resolved "$(pick channel5 ch5)" channel5 '')"
+country_all="$(qget cr6608quick.default.country)"
+cc24="$(resolved "$(pick country24 country)" country24 "$country_all")"
+cc5="$(resolved "$(pick country5 country)" country5 "$country_all")"
+ht24="$(resolved "$(pick htmode24)" htmode24 HE20)"
+ht5="$(resolved "$(pick htmode5)" htmode5 HE80)"
+meshid="$(resolved "$(pick mesh_id)" mesh_id '')"
+meshrole="$(resolved "$(pick mesh_role)" mesh_role sender)"
+wds="$(resolved "$(pick wds_ssid wds_peer_ssid)" wds_ssid '')"
+
+sec="$(normalize_security "$(resolved "$(pick security)" security open)")" || fail_request "400 Bad Request" "security" "Unsupported Wi-Fi security mode"
+key="$(resolved "$(pick wifi_key wifi_password key)" wifi_key '')"
+case "$sec" in
+	wpa2|wpa3|mixed)
+		[ -n "$key" ] || key="$(qget wireless.wifinet0.key)"
+		[ -n "$key" ] || key="$(qget wireless.wifinet1.key)"
+		valid_wpa_key "$key" || fail_request "400 Bad Request" "wifi_key" "Protected Wi-Fi requires 8-63 characters or 64 hexadecimal digits"
+		;;
+	open) key='' ;;
+esac
+
+hide="$(normalize_bool "$(resolved "$(pick hide_ssid)" hide_ssid 0)" 0)" || fail_request "400 Bad Request" "hide_ssid" "Invalid hide setting"
+natf="$(normalize_bool "$(resolved "$(pick nat_enabled)" nat_enabled 0)" 0)" || fail_request "400 Bad Request" "nat_enabled" "Invalid NAT setting"
+dhcps="$(normalize_bool "$(resolved "$(pick dhcp_server)" dhcp_server 0)" 0)" || fail_request "400 Bad Request" "dhcp_server" "Invalid DHCP setting"
+fw="$(normalize_bool "$(resolved "$(pick firewall_enabled)" firewall_enabled 1)" 1)" || fail_request "400 Bad Request" "firewall_enabled" "Invalid firewall setting"
+clr="$(normalize_bool "$(resolved "$(pick clear_previous delete_previous)" clear_previous 1)" 1)" || fail_request "400 Bad Request" "clear_previous" "Invalid cleanup setting"
+rlk="$(normalize_bool "$(resolved "$(pick reset_lock)" reset_lock 0)" 0)" || fail_request "400 Bad Request" "reset_lock" "Invalid reset-lock setting"
+rbe_raw="$(pick reset_button_enabled)"
+if [ -n "$rbe_raw" ]; then rbe="$(normalize_bool "$rbe_raw" 1)" || fail_request "400 Bad Request" "reset_button_enabled" "Invalid reset-button setting"; [ "$rbe" = "0" ] && rlk=1 || rlk=0; fi
+rcu="$(normalize_bool "$(resolved "$(pick reset_custom)" reset_custom 0)" 0)" || fail_request "400 Bad Request" "reset_custom" "Invalid reset setting"
+bbe="$(normalize_bool "$(resolved "$(pick broadband_enabled)" broadband_enabled 0)" 0)" || fail_request "400 Bad Request" "broadband_enabled" "Invalid broadband setting"
+fkm="$(normalize_bool "$(resolved "$(pick fake_mesh)" fake_mesh 0)" 0)" || fail_request "400 Bad Request" "fake_mesh" "Invalid fake-mesh setting"
+watchcat="$(normalize_bool "$(resolved "$(pick watchcat_enabled)" watchcat_enabled 0)" 0)" || fail_request "400 Bad Request" "watchcat_enabled" "Invalid watchcat setting"
+r0e="$(normalize_bool "$(resolved "$(pick radio0_enabled)" radio0_enabled 1)" 1)" || fail_request "400 Bad Request" "radio0_enabled" "Invalid radio setting"
+r1e="$(normalize_bool "$(resolved "$(pick radio1_enabled)" radio1_enabled 1)" 1)" || fail_request "400 Bad Request" "radio1_enabled" "Invalid radio setting"
+
+rmode="$(resolved "$(pick reset_mode)" reset_mode '')"
+rseconds="$(resolved "$(pick reset_seconds)" reset_seconds 15)"
+case "$rmode" in ''|factory|reboot|disabled) ;; *) fail_request "400 Bad Request" "reset_mode" "Invalid reset mode" ;; esac
+[ "$rmode" = "disabled" ] && rlk=1
+case "$rseconds" in ''|*[!0-9]*) fail_request "400 Bad Request" "reset_seconds" "Reset duration must be 5-1000 seconds" ;; esac
+[ "$rseconds" -ge 5 ] 2>/dev/null && [ "$rseconds" -le 1000 ] 2>/dev/null || fail_request "400 Bad Request" "reset_seconds" "Reset duration must be 5-1000 seconds"
+
+txall="$(resolved "$(pick txpower)" txpower 38)"
+tx0="$(resolved "$(pick txpower_radio0 txpower0)" txpower_radio0 "$txall")"
+tx1="$(resolved "$(pick txpower_radio1 txpower1)" txpower_radio1 "$txall")"
+for tx in "$tx0" "$tx1"; do case "$tx" in ''|*[!0-9]*) fail_request "400 Bad Request" "txpower" "Allowed range is 1-38 dBm" ;; esac; [ "$tx" -ge 1 ] 2>/dev/null && [ "$tx" -le 38 ] 2>/dev/null || fail_request "400 Bad Request" "txpower" "Allowed range is 1-38 dBm"; done
+
+pppoe_user="$(resolved "$(pick pppoe_user)" pppoe_user '')"
+pppoe_pass="$(resolved "$(pick pppoe_pass)" pppoe_pass '')"
+pppoe_port="$(resolved "$(pick pppoe_port broadband_port)" pppoe_port wan)"
+
+valid_management_host "$ip" "$nm" || fail_request "400 Bad Request" "ipaddr" "Management IP must be a usable host address, not a network or broadcast address"
+if [ -n "$vlan" ]; then valid_vlan "$vlan" || fail_request "400 Bad Request" "vlan" "VLAN ID must be 2-4094"; fi
+case "$mode" in *_vlan) valid_vlan "$vlan" || fail_request "400 Bad Request" "vlan" "VLAN mode requires VLAN ID 2-4094" ;; esac
+if [ "$mode" = "pppoe" ]; then
+	pppoe_port='wan'
+	bbe='1'
+	natf='1'
+	dhcps='1'
+	fw='1'
+else
+	pppoe_port='wan'
+	bbe='0'
+	natf='0'
+	dhcps='0'
+	[ "$(qget smartap.security.enabled)" = "1" ] && fw='1'
+fi
+clr='1'
+case "$pppoe_port" in wan) ;; *) fail_request "400 Bad Request" "pppoe_port" "PPPoE is reserved for WAN" ;; esac
+
+valid_text "$ssid" 32 && [ -n "$ssid" ] || fail_request "400 Bad Request" "ssid" "SSID must be 1-32 characters"
+valid_text "$ssid5" 32 && [ -n "$ssid5" ] || fail_request "400 Bad Request" "ssid5" "5 GHz SSID must be 1-32 characters"
+valid_text "$meshid" 32 || fail_request "400 Bad Request" "mesh_id" "Mesh ID must be at most 32 characters"
+valid_text "$wds" 32 || fail_request "400 Bad Request" "wds_ssid" "WDS peer SSID must be at most 32 characters"
+valid_text "$pppoe_user" 64 || fail_request "400 Bad Request" "pppoe_user" "PPPoE username is too long"
+valid_text "$pppoe_pass" 64 || fail_request "400 Bad Request" "pppoe_pass" "PPPoE password is too long"
+case "$c24" in ''|auto|1|2|3|4|5|6|7|8|9|10|11|12|13) ;; *) fail_request "400 Bad Request" "channel24" "Unsupported 2.4 GHz channel" ;; esac
+[ -z "$c5" ] || valid_ch5 "$c5" || fail_request "400 Bad Request" "channel5" "Unsupported 5 GHz channel"
+cc24="$(printf '%s' "$cc24" | tr a-z A-Z)"; cc5="$(printf '%s' "$cc5" | tr a-z A-Z)"
+valid_country_code "$cc24" && country_supported radio0 "$cc24" || fail_request "400 Bad Request" "country24" "Country is not reported by the 2.4 GHz driver"
+valid_country_code "$cc5" && country_supported radio1 "$cc5" || fail_request "400 Bad Request" "country5" "Country is not reported by the 5 GHz driver"
+active_cc24="$(qget wireless.radio0.country | tr a-z A-Z)"; active_cc5="$(qget wireless.radio1.country | tr a-z A-Z)"
+if [ -n "$active_cc24" ] && [ "$cc24" != "$active_cc24" ] && [ "$c24" != "auto" ]; then
+	fail_request "409 Conflict" "country_channel24" "Set the 2.4 GHz channel to Automatic when changing country, then apply a fixed live channel after reload"
+fi
+if [ -n "$active_cc5" ] && [ "$cc5" != "$active_cc5" ] && [ "$c5" != "auto" ]; then
+	fail_request "409 Conflict" "country_channel5" "Set the 5 GHz channel to Automatic when changing country, then apply a fixed live channel after reload"
+fi
+channel_supported radio0 "$c24" || fail_request "400 Bad Request" "channel24" "The selected 2.4 GHz channel is unavailable or restricted for the active country"
+channel_supported radio1 "$c5" || fail_request "400 Bad Request" "channel5" "The selected 5 GHz channel is unavailable or restricted for the active country"
+case "$ht24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) fail_request "400 Bad Request" "htmode24" "Unsupported 2.4 GHz width" ;; esac
+case "$ht5" in HE160|VHT160) ht5='HE80' ;; HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) ;; *) fail_request "400 Bad Request" "htmode5" "Unsupported 5 GHz width" ;; esac
+case "$meshrole" in sender|receiver) ;; *) fail_request "400 Bad Request" "mesh_role" "Invalid mesh role" ;; esac
+case "$mode" in mesh|mesh_vlan) [ -n "$meshid" ] || meshid='CR6608-Mesh' ;; esac
+case "$mode" in wds_receiver|wds_receiver_vlan) [ -n "$wds" ] || wds="$ssid" ;; esac
+
+if [ "$mode" = "pppoe" ]; then
+	[ -n "$pppoe_user" ] || pppoe_user="$(qget network.wan.username)"
+	[ -n "$pppoe_pass" ] || pppoe_pass="$(qget network.wan.password)"
+	[ -n "$pppoe_user" ] || fail_request "400 Bad Request" "pppoe_user" "PPPoE username required"
+	valid_text "$pppoe_user" 64 && valid_text "$pppoe_pass" 64 || fail_request "400 Bad Request" "pppoe" "Invalid stored PPPoE credentials"
+fi
+
+admin_password="$(pick admin_password device_password)"
+cpw_raw="$(pick change_password)"
+[ -n "$admin_password" ] && cpw_raw=1
+cpw="$(normalize_bool "$cpw_raw" 0)" || fail_request "400 Bad Request" "change_password" "Invalid password-change setting"
+if [ "$cpw" = "1" ]; then
+	[ "${#admin_password}" -ge 8 ] 2>/dev/null && valid_text "$admin_password" 80 || fail_request "400 Bad Request" "admin_password" "Admin password must be 8-80 characters"
+fi
+
+[ -r "$JSHN_LIB" ] || fail_request "500 Internal Server Error" "json" "JSON builder unavailable"
+. "$JSHN_LIB"
+REQUEST_FILE="$(mktemp "$TMP_DIR/cr6608-quick-request.XXXXXX" 2>/dev/null)" || fail_request "500 Internal Server Error" "temporary_file" "Request handoff unavailable"
+chmod 0600 "$REQUEST_FILE" 2>/dev/null || fail_request "500 Internal Server Error" "temporary_file" "Request handoff unavailable"
+json_init
+json_add_string mode "$mode"
+json_add_string lan_ipaddr "$ip"
+json_add_string lan_netmask "$nm"
+json_add_string vlan_id "$vlan"
+json_add_string ssid "$ssid"
+json_add_string ssid5 "$ssid5"
+json_add_string channel24 "$c24"
+json_add_string channel5 "$c5"
+json_add_string country24 "$cc24"
+json_add_string country5 "$cc5"
+json_add_string htmode24 "$ht24"
+json_add_string htmode5 "$ht5"
+json_add_string mesh_id "$meshid"
+json_add_string mesh_role "$meshrole"
+json_add_string wds_ssid "$wds"
+json_add_string security "$sec"
+json_add_string wifi_key "$key"
+json_add_string hide_ssid "$hide"
+json_add_string pppoe_user "$pppoe_user"
+json_add_string pppoe_pass "$pppoe_pass"
+json_add_string pppoe_port "$pppoe_port"
+json_add_string nat_enabled "$natf"
+json_add_string dhcp_server "$dhcps"
+json_add_string firewall_enabled "$fw"
+json_add_string clear_previous "$clr"
+json_add_string reset_lock "$rlk"
+json_add_string reset_custom "$rcu"
+json_add_string reset_mode "$rmode"
+json_add_string reset_seconds "$rseconds"
+json_add_string broadband_enabled "$bbe"
+json_add_string fake_mesh "$fkm"
+json_add_string watchcat_enabled "$watchcat"
+json_add_string radio0_enabled "$r0e"
+json_add_string radio1_enabled "$r1e"
+json_add_string txpower_radio0 "$tx0"
+json_add_string txpower_radio1 "$tx1"
+json_add_string txpower "$tx0"
+json_add_string change_password "$cpw"
+json_dump > "$REQUEST_FILE" || fail_request "500 Internal Server Error" "json" "Could not build sanitized request"
+
+if [ "$cpw" = "1" ]; then
+	PASSWORD_FILE="$(mktemp "$TMP_DIR/cr6608-quick-password.XXXXXX" 2>/dev/null)" || fail_request "500 Internal Server Error" "temporary_file" "Password handoff unavailable"
+	chmod 0600 "$PASSWORD_FILE" 2>/dev/null || fail_request "500 Internal Server Error" "temporary_file" "Password handoff unavailable"
+	printf '%s\n' "$admin_password" > "$PASSWORD_FILE" || fail_request "500 Internal Server Error" "temporary_file" "Password handoff unavailable"
+fi
+admin_password=''
+rm -f "$BODY_FILE"; BODY_FILE=""
+
+LOG_FILE="$(mktemp "$TMP_DIR/cr6608-quick-apply-log.XXXXXX" 2>/dev/null)" || fail_request "500 Internal Server Error" "temporary_file" "Apply log unavailable"
+chmod 0600 "$LOG_FILE" 2>/dev/null || fail_request "500 Internal Server Error" "temporary_file" "Apply log unavailable"
+CR6608_QUICK_REQUEST_FILE="$REQUEST_FILE" CR6608_ADMIN_PASSWORD_FILE="$PASSWORD_FILE" "$EXECUTOR" apply > "$LOG_FILE" 2>&1
+rc=$?
+rm -f "$REQUEST_FILE" "$PASSWORD_FILE"
+REQUEST_FILE=""; PASSWORD_FILE=""
+
+if [ "$rc" = "0" ]; then
+	safe_status="$("$SAFE_APPLY" status 2>/dev/null)"
+	pending="$(printf '%s\n' "$safe_status" | sed -n 's/^state=//p' | head -n1)"
+	[ "$pending" = "armed" ] || reply_json "500 Internal Server Error" '{"ok":false,"applied":true,"error":"rollback_guard","detail":"Apply completed but the reachability guard is not armed"}'
+	rollback_token="$(printf '%s\n' "$safe_status" | sed -n 's/^token=//p' | head -n1)"
+	case "$rollback_token" in ''|*[!0-9a-f]*) reply_json "500 Internal Server Error" '{"ok":false,"applied":true,"error":"rollback_guard","detail":"Apply completed but its rollback token is invalid"}' ;; esac
+	[ "${#rollback_token}" -eq 32 ] 2>/dev/null || reply_json "500 Internal Server Error" '{"ok":false,"applied":true,"error":"rollback_guard","detail":"Apply completed but its rollback token is invalid"}'
+	reply_json "" "{\"ok\":true,\"applied\":true,\"pending_confirmation\":true,\"rollback_token\":\"$rollback_token\"}"
+fi
+
+tail_text="$(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ' | tr -cd '\11\40-\176' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-300)"
+headers "500 Internal Server Error"
+printf '{"ok":false,"applied":false,"code":%s,"detail":"%s"}\n' "$rc" "$tail_text"
+exit 0

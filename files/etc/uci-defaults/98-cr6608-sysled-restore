@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# Keep boot/failsafe/upgrade LEDs under the DTS diagnostic state machine. Older
+# images reused them for ethernet links, which made boot state ambiguous.
+for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
+	case "$(uci -q get "system.$s.sysfs")" in
+		blue:sys|yellow:sys) uci -q delete "system.$s" ;;
+	esac
+done
+
+# The two network LEDs cover every LAN bridge member and the reserved WAN port
+# without a polling daemon.
+uci -q set system.led_lan1='led'
+uci -q set system.led_lan1.name='LAN bridge link and traffic'
+uci -q set system.led_lan1.sysfs='blue:net'
+uci -q set system.led_lan1.trigger='netdev'
+uci -q set system.led_lan1.dev='br-lan'
+uci -q set system.led_lan1.mode='link tx rx'
+uci -q set system.led_lan2='led'
+uci -q set system.led_lan2.name='WAN link and traffic'
+uci -q set system.led_lan2.sysfs='yellow:net'
+uci -q set system.led_lan2.trigger='netdev'
+uci -q set system.led_lan2.dev='wan'
+uci -q set system.led_lan2.mode='link tx rx'
+uci -q commit system
+
+if [ -d /sys/class/leds/blue:sys ]; then
+	printf '%s\n' default-on > /sys/class/leds/blue:sys/trigger 2>/dev/null || true
+	printf '%s\n' 1 > /sys/class/leds/blue:sys/brightness 2>/dev/null || true
+fi
+exit 0

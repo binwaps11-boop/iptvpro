@@ -1,0 +1,29 @@
+#!/bin/sh
+# Compare configured power with values reported by the running wireless stack.
+
+echo "================ CR6608 TX-POWER VERIFY ================"
+echo "# 1) Configured values in /etc/config/wireless:"
+uci show wireless | grep txpower
+echo
+echo "# 2) Regulatory domain:"
+iw reg get 2>/dev/null | sed -n '1,20p'
+echo
+echo "# 3) Per-channel limits exposed by the driver:"
+iw phy 2>/dev/null | grep -iE 'MHz|dBm' | head -60
+echo
+echo "# 4) Current driver-declared power per interface:"
+for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+	applied="$(iw dev "$iface" info 2>/dev/null | awk '/txpower/{print $2, $3}')"
+	echo "   $iface : ${applied:-unknown}"
+done
+echo
+echo "# 5) iwinfo view:"
+iwinfo 2>/dev/null | grep -iE 'ESSID|Tx-Power|Mode|Channel' | head -40
+echo
+echo "# 6) Driver module and RF marker:"
+cat /etc/modules.d/mt7915e 2>/dev/null || true
+cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm 2>/dev/null || true
+dmesg 2>/dev/null | grep -i 'CR6608-RF' | tail -5
+echo
+echo "Driver-reported dBm is not a calibrated measurement of radiated RF power."
+echo "========================================================="

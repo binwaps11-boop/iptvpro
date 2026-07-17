@@ -1,0 +1,114 @@
+#!/bin/sh
+
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+SET_COOKIE=""
+
+reply() {
+	status="$1"; payload="$2"
+	[ -n "$status" ] && printf 'Status: %s\r\n' "$status"
+	[ "$status" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+	printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n'
+	[ -n "$SET_COOKIE" ] && printf 'Set-Cookie: %s\r\n' "$SET_COOKIE"
+	printf '\r\n'
+	printf '%s\n' "$payload"
+	exit 0
+}
+
+[ -r "$SESSION_AUTH_LIB" ] || reply "500 Internal Server Error" '{"ok":false,"message":"session security helper unavailable"}'
+. "$SESSION_AUTH_LIB" || reply "500 Internal Server Error" '{"ok":false,"message":"session security helper unavailable"}'
+
+[ "${REQUEST_METHOD:-GET}" = POST ] || reply "405 Method Not Allowed" '{"ok":false,"message":"POST required"}'
+CL="${CONTENT_LENGTH:-0}"
+case "$CL" in ''|*[!0-9]*) reply "400 Bad Request" '{"ok":false,"message":"invalid Content-Length"}' ;; esac
+[ "${#CL}" -le 4 ] 2>/dev/null && [ "$CL" -le 4096 ] 2>/dev/null || reply "413 Payload Too Large" '{"ok":false,"message":"request too large"}'
+BODY=""
+[ "$CL" -gt 0 ] 2>/dev/null && BODY="$(head -c "$CL" 2>/dev/null)"
+
+form_value() {
+	printf '%s' "$BODY" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 | awk '
+		BEGIN { for (i = 0; i < 256; i++) { x = sprintf("%02X", i); h[x] = h[tolower(x)] = sprintf("%c", i) } }
+		{ gsub(/\+/, " "); n = split($0, a, "%"); out = a[1];
+		  for (i = 2; i <= n; i++) { c = substr(a[i], 1, 2); out = out ((c in h) ? h[c] substr(a[i], 3) : "%" a[i]) }
+		  printf "%s", out }
+	'
+}
+
+case "${CONTENT_TYPE:-}" in
+	application/json*)
+		user="$(jsonfilter -s "$BODY" -e '@.username' 2>/dev/null)"
+		pass="$(jsonfilter -s "$BODY" -e '@.password' 2>/dev/null)"
+		;;
+	application/x-www-form-urlencoded*)
+		user="$(form_value username)"
+		pass="$(form_value password)"
+		;;
+	*) reply "415 Unsupported Media Type" '{"ok":false,"message":"JSON or form body required"}' ;;
+esac
+
+client="$(printf '%s' "${REMOTE_ADDR:-unknown}" | sed 's/[^0-9A-Fa-f:.]//g' | cut -c1-64)"
+[ -n "$client" ] || client=unknown
+RATE_DIR=/tmp/dashlogin-rate
+umask 077
+cr6608_prepare_root_dir "$RATE_DIR" 0700 ||
+	reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+rate_id="$(printf '%s' "$client" | md5sum | cut -c1-32)"
+rate_file="$RATE_DIR/$rate_id"
+rate_lock="$rate_file.lock"
+[ ! -L "$rate_lock" ] || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+exec 8>>"$rate_lock" || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+chmod 0600 "$rate_lock" 2>/dev/null || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+cr6608_path_owned_by_root "$rate_lock" || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+flock -x 8 || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+now="$(date +%s 2>/dev/null)"; case "$now" in ''|*[!0-9]*) now=0 ;; esac
+fails=0; window="$now"
+if [ -r "$rate_file" ]; then
+	read -r fails window < "$rate_file" || true
+fi
+case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
+case "$window" in ''|*[!0-9]*) window="$now" ;; esac
+[ $((now - window)) -le 60 ] 2>/dev/null || { fails=0; window="$now"; }
+if [ "$fails" -ge 5 ] 2>/dev/null; then
+	sleep 2
+	reply "429 Too Many Requests" '{"ok":false,"message":"too many failed attempts; retry later"}'
+fi
+
+login_failed() {
+	fails=$((fails + 1))
+	printf '%s %s\n' "$fails" "$window" >"$rate_file" ||
+		reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+	sleep "$([ "$fails" -ge 3 ] 2>/dev/null && echo 2 || echo 1)"
+	reply "401 Unauthorized" '{"ok":false,"message":"invalid username or password"}'
+}
+
+[ -n "$user" ] || user=root
+[ "$user" = root ] || login_failed
+
+# Smart AP web authentication is intentionally independent from /etc/shadow.
+# Only the salted digest is stored; SSH and LuCI keep the root credential.
+web_salt='cr66ui918d35a3'
+web_hash='610fcf426f1f8b06bf9fcad6729efbefcfe4ae879fde2e609cce8a7b657d808c'
+candidate="$(printf '%s:%s' "$web_salt" "$pass" | sha256sum | awk '{print $1}')"
+[ "$candidate" = "$web_hash" ] || login_failed
+
+rm -f "$rate_file" 2>/dev/null || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+
+cr6608_luci_session_lock || reply "503 Service Unavailable" '{"ok":false,"message":"session lock unavailable"}'
+existing_tok="$(cr6608_session_from_request)"
+if cr6608_session_valid "$existing_tok"; then
+	tok="$existing_tok"
+else
+	tok="$(cr6608_random_hex32)" || reply "500 Internal Server Error" '{"ok":false,"message":"session creation failed"}'
+fi
+session_epoch="$(date +%s 2>/dev/null)"
+session_uptime="$(cr6608_uptime_seconds)"
+case "$session_epoch" in ''|*[!0-9]*) reply "500 Internal Server Error" '{"ok":false,"message":"session clock unavailable"}' ;; esac
+case "$session_uptime" in ''|*[!0-9]*) reply "500 Internal Server Error" '{"ok":false,"message":"session clock unavailable"}' ;; esac
+printf '%s %s\n' "$session_epoch" "$session_uptime" > "/tmp/dashsess/$tok" 2>/dev/null || reply "500 Internal Server Error" '{"ok":false,"message":"session creation failed"}'
+for stale_file in $(find /tmp/dashsess -type f ! -name '.luci-session.lock' -mmin +720 -print 2>/dev/null); do
+	stale_sid="${stale_file##*/}"
+	cr6608_valid_hex32 "$stale_sid" && cr6608_revoke_session_unlocked "$stale_sid" >/dev/null 2>&1 || true
+done
+secure_cookie=""
+[ "${HTTPS:-off}" = on ] && secure_cookie=" Secure;"
+SET_COOKIE="cr6608_sid=$tok; Path=/; Max-Age=43200;${secure_cookie} HttpOnly; SameSite=Strict"
+reply "" '{"ok":true}'

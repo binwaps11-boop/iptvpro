@@ -1,0 +1,68 @@
+#!/bin/sh
+
+# Seed systems without an RTC or network time. Never move a valid clock back.
+ANCHOR_FILE="/etc/smartap-time-anchor"
+TAG="smartap-time-anchor"
+ACTION="${1:-apply}"
+
+fail() {
+	logger -t "$TAG" "$1"
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+valid_epoch() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "${#1}" -eq 10 ] && [ "$1" -ge 1577836800 ] 2>/dev/null
+}
+
+if [ "$ACTION" = refresh ]; then
+	now="$(date +%s 2>/dev/null)"
+	valid_epoch "$now" || fail "current time is outside the accepted range"
+	tmp="${ANCHOR_FILE}.tmp.$$"
+	umask 022
+	printf '%s\n' "$now" > "$tmp" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to write temporary time anchor"
+	}
+	chmod 0644 "$tmp" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to set temporary time anchor permissions"
+	}
+	mv -f "$tmp" "$ANCHOR_FILE" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to atomically refresh time anchor"
+	}
+	logger -t "$TAG" "time anchor refreshed successfully to $now"
+	exit 0
+fi
+
+[ "$ACTION" = apply ] || fail "unknown action: $ACTION"
+[ -r "$ANCHOR_FILE" ] || fail "time anchor is missing"
+
+anchor="$(sed -n '1p' "$ANCHOR_FILE" 2>/dev/null)"
+case "$anchor" in
+	''|*[!0-9]*)
+		fail "time anchor is invalid"
+		;;
+esac
+
+# Ten decimal digits keep BusyBox integer comparisons in the supported range.
+valid_epoch "$anchor" || fail "time anchor is outside the accepted range"
+
+now="$(date +%s 2>/dev/null)"
+case "$now" in
+	''|*[!0-9]*)
+		fail "current time is unreadable"
+		;;
+esac
+
+if [ "$now" -lt "$anchor" ]; then
+	date -u -s "@$anchor" >/dev/null 2>&1 || fail "failed to apply time anchor"
+	logger -t "$TAG" "clock advanced to the image build time"
+	now="$anchor"
+fi
+
+logger -t "$TAG" "time anchor check succeeded (anchor=$anchor current=$now)"
+
+exit 0

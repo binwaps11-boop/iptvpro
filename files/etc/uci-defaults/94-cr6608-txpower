@@ -1,0 +1,16 @@
+#!/bin/sh
+# First-boot TX power baseline. This sets the default to 38 dBm on both radios
+# after a clean flash/reset only. The hotplug helper then pins the currently
+# configured wireless.radio*.txpower target via iw, so later operator choices
+# from 1..38 are preserved and are not forced back to 38.
+uci -q set wireless.radio0.txpower='38'
+uci -q set wireless.radio1.txpower='38'
+
+# 2.4G at 20 MHz: narrower, cleaner channel -> better range and less
+# co-channel interference in crowded 2.4G. 5G stays wide (HE80) for throughput.
+uci -q set wireless.radio0.htmode='HE20'
+uci -q set wireless.radio1.channel='36'
+uci -q set wireless.radio0.he_su_beamformer='1'; uci -q set wireless.radio0.he_su_beamformee='1'; uci -q set wireless.radio0.he_mu_beamformer='1'
+uci -q set wireless.radio1.he_su_beamformer='1'; uci -q set wireless.radio1.he_su_beamformee='1'; uci -q set wireless.radio1.he_mu_beamformer='1'
+uci -q commit wireless
+exit 0

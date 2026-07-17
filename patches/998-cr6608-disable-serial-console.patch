@@ -1,0 +1,13 @@
+diff --git a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+@@ -5,4 +5,9 @@
+ / {
+ 	compatible = "xiaomi,mi-router-cr6608", "mediatek,mt7621-soc";
+ 	model = "Xiaomi Mi Router CR6608";
++
++	chosen {
++		bootargs = "rootfstype=squashfs,jffs2 console=ttynull";
++		bootargs-override = "rootfstype=squashfs,jffs2 console=ttynull";
++	};
+ };

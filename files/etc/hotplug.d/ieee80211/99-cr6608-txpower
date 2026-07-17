@@ -1,0 +1,4 @@
+#!/bin/sh
+# On every ieee80211 hotplug (boot + wifi reload re-creates the phy), pin radios
+# to their configured wireless.radio*.txpower targets with read-back logging.
+[ -x /usr/sbin/cr6608-force-txpower38 ] && ( sleep 3; /usr/sbin/cr6608-force-txpower38 ) &

@@ -1,0 +1,363 @@
+#!/bin/sh
+# Persistent, connectivity-confirmed rollback guard for network and Wi-Fi changes.
+
+set -u
+
+STATE="${CR6608_SAFE_STATE:-/etc/smartap-pending-rollback}"
+POINTER="${CR6608_SAFE_POINTER:-/tmp/smartap-rollback-backup}"
+META="${CR6608_SAFE_META:-/tmp/smartap-rollback-meta}"
+ARMED="${CR6608_SAFE_ARMED:-/tmp/smartap-rollback-armed}"
+RETAINED_IP="${CR6608_SAFE_RETAINED_IP:-/tmp/cr6608-safe-retained-ip}"
+LOCK="${CR6608_SAFE_LOCK:-/tmp/cr6608-safe-apply.lock}"
+SELF="${CR6608_SAFE_SELF:-/usr/sbin/cr6608-safe-apply}"
+TAG="cr6608-safe-apply"
+
+log() {
+	logger -t "$TAG" "$*" 2>/dev/null || true
+}
+
+valid_bit() {
+	case "$1" in 0|1) return 0 ;; esac
+	return 1
+}
+
+valid_token() {
+	case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+	[ "${#1}" -eq 32 ] 2>/dev/null
+}
+
+valid_timeout() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 30 ] 2>/dev/null && [ "$1" -le 600 ] 2>/dev/null
+}
+
+valid_cleanup_delay() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 30 ] 2>/dev/null
+}
+
+valid_ipv4() {
+	[ -n "$1" ] && /bin/ipcalc.sh "$1" 255.255.255.255 >/dev/null 2>&1
+}
+
+valid_prefix() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 0 ] 2>/dev/null && [ "$1" -le 32 ] 2>/dev/null
+}
+
+valid_management_device() {
+	case "$1" in
+		br-lan) return 0 ;;
+		br-lan.*)
+			local vid="${1#br-lan.}"
+			case "$vid" in ''|*[!0-9]*) return 1 ;; esac
+			[ "$vid" -ge 1 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null
+			return $?
+			;;
+	esac
+	return 1
+}
+
+valid_backup() {
+	local path="$1" owner members
+	case "$path" in
+		/root/dashboard-backups/smartap-*.tar.gz|/root/cr6608-quicksettings-backups/config-before-*.tgz) ;;
+		*) return 1 ;;
+	esac
+	case "$path" in *..*|*[!A-Za-z0-9_./:-]*) return 1 ;; esac
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -s "$path" ] || return 1
+	owner="$(stat -c '%u' "$path" 2>/dev/null)"
+	[ "$owner" = "0" ] || return 1
+	members="$(mktemp /tmp/cr6608-safe-members.XXXXXX 2>/dev/null)" || return 1
+	if ! tar -tzf "$path" >"$members" 2>/dev/null; then
+		rm -f "$members"
+		return 1
+	fi
+	while IFS= read -r member; do
+		case "$member" in
+			etc|etc/|etc/config|etc/config/|etc/config/*|etc/crontabs|etc/crontabs/|etc/crontabs/root|etc/passwd|etc/shadow|etc/rc.button|etc/rc.button/|etc/rc.button/reset|etc/rc.button/reset.smartap-orig) ;;
+			*) rm -f "$members"; return 1 ;;
+		esac
+	done <"$members"
+	rm -f "$members"
+	return 0
+}
+
+state_value() {
+	sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n 1
+}
+
+load_state() {
+	[ -f "$STATE" ] && [ ! -L "$STATE" ] || return 1
+	version="$(state_value version)"
+	token="$(state_value token)"
+	backup="$(state_value backup)"
+	old_fw="$(state_value old_firewall)"
+	old_security="$(state_value old_security)"
+	orig_existed="$(state_value reset_original_existed)"
+	smartap_existed="$(state_value smartap_existed)"
+	quick_existed="$(state_value quick_existed)"
+	reset_existed="$(state_value reset_existed)"
+	case "$version" in
+		1) [ -n "$old_security" ] || old_security=1 ;;
+		2) : ;;
+		*) return 1 ;;
+	esac
+	valid_token "$token" && valid_backup "$backup" || return 1
+	valid_bit "$old_fw" && valid_bit "$orig_existed" && valid_bit "$smartap_existed" && \
+		valid_bit "$quick_existed" && valid_bit "$reset_existed" && valid_bit "$old_security"
+}
+
+load_manual_pointer() {
+	local meta_backup
+	backup="$(sed -n '1p' "$POINTER" 2>/dev/null)"
+	[ -r "$META" ] || return 1
+	IFS='|' read -r meta_backup old_fw orig_existed smartap_existed quick_existed reset_existed old_security <"$META" || return 1
+	[ -n "$old_security" ] || old_security=1
+	[ "$backup" = "$meta_backup" ] && valid_backup "$backup" || return 1
+	valid_bit "$old_fw" && valid_bit "$orig_existed" && valid_bit "$smartap_existed" && \
+		valid_bit "$quick_existed" && valid_bit "$reset_existed" && valid_bit "$old_security"
+}
+
+acquire_lock() {
+	local n=0 owner
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		owner="$(sed -n '1p' "$LOCK/pid" 2>/dev/null)"
+		case "$owner" in ''|*[!0-9]*) owner=0 ;; esac
+		if [ "$owner" = "0" ] || ! kill -0 "$owner" 2>/dev/null; then
+			rm -f "$LOCK/pid" 2>/dev/null
+			rmdir "$LOCK" 2>/dev/null || true
+			continue
+		fi
+		n=$((n + 1))
+		[ "$n" -le 5 ] || return 1
+		sleep 1
+	done
+	printf '%s\n' "$$" >"$LOCK/pid" || { rmdir "$LOCK" 2>/dev/null; return 1; }
+	trap 'rm -f "$LOCK/pid" 2>/dev/null; rmdir "$LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+}
+
+clear_pending() {
+	rm -f "$STATE" "$ARMED"
+}
+
+cleanup_retained_ip() {
+	local requested="${1:-}" marker_token="" retained_ip="" prefix="" device="" current="" address_text=""
+	[ -f "$RETAINED_IP" ] && [ ! -L "$RETAINED_IP" ] || return 0
+	IFS='|' read -r marker_token retained_ip prefix device <"$RETAINED_IP" || return 1
+	valid_token "$marker_token" && valid_ipv4 "$retained_ip" && valid_prefix "$prefix" && \
+		valid_management_device "$device" || return 1
+	[ -z "$requested" ] || [ "$requested" = "$marker_token" ] || return 2
+	current="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+	if [ "$current" != "$retained_ip" ] && ip link show dev "$device" >/dev/null 2>&1; then
+		address_text="$(ip -4 address show dev "$device" 2>/dev/null)" || return 1
+		if printf '%s\n' "$address_text" | awk -v address="$retained_ip/$prefix" \
+			'{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i + 1) == address) found = 1 } END { exit(found ? 0 : 1) }'; then
+			ip -4 address del "$retained_ip/$prefix" dev "$device" >/dev/null 2>&1 || return 1
+			address_text="$(ip -4 address show dev "$device" 2>/dev/null)" || return 1
+			if printf '%s\n' "$address_text" | awk -v address="$retained_ip/$prefix" \
+				'{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i + 1) == address) found = 1 } END { exit(found ? 0 : 1) }'; then
+				return 1
+			fi
+		fi
+	fi
+	rm -f "$RETAINED_IP"
+	log "temporary management address removed"
+}
+
+spawn_alias_cleanup() {
+	local confirmed_token="$1"
+	[ -f "$RETAINED_IP" ] || return 0
+	if command -v start-stop-daemon >/dev/null 2>&1; then
+		start-stop-daemon -S -b -x "$SELF" -- cleanup-ip "$confirmed_token" 5 >/dev/null 2>&1
+	else
+		"$SELF" cleanup-ip "$confirmed_token" 5 </dev/null >/dev/null 2>&1 &
+	fi
+}
+
+write_state() {
+	local tmp="${STATE}.tmp.$$"
+	umask 077
+	{
+		printf 'version=2\n'
+		printf 'token=%s\n' "$token"
+		printf 'backup=%s\n' "$backup"
+		printf 'old_firewall=%s\n' "$old_fw"
+		printf 'old_security=%s\n' "$old_security"
+		printf 'reset_original_existed=%s\n' "$orig_existed"
+		printf 'smartap_existed=%s\n' "$smartap_existed"
+		printf 'quick_existed=%s\n' "$quick_existed"
+		printf 'reset_existed=%s\n' "$reset_existed"
+		printf 'armed_epoch=%s\n' "$(date +%s 2>/dev/null || echo 0)"
+		printf 'timeout=%s\n' "$timeout"
+	} >"$tmp" || { rm -f "$tmp"; return 1; }
+	chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+	mv -f "$tmp" "$STATE" || { rm -f "$tmp"; return 1; }
+	printf '%s\n' "$backup" >"$POINTER" || return 1
+	printf '%s|%s|%s|%s|%s|%s|%s\n' "$backup" "$old_fw" "$orig_existed" "$smartap_existed" "$quick_existed" "$reset_existed" "$old_security" >"$META" || return 1
+	printf '%s\n' "$token" >"$ARMED" || return 1
+	chmod 0600 "$POINTER" "$META" "$ARMED" 2>/dev/null || return 1
+}
+
+spawn_watch() {
+	if command -v start-stop-daemon >/dev/null 2>&1; then
+		start-stop-daemon -S -b -x "$SELF" -- watch "$token" "$timeout" >/dev/null 2>&1
+	else
+		"$SELF" watch "$token" "$timeout" </dev/null >/dev/null 2>&1 &
+	fi
+}
+
+restore_loaded() {
+	local failed=0 pkg
+	for pkg in network wireless dhcp firewall smartap cr6608quick system uhttpd dropbear; do
+		uci -q revert "$pkg" >/dev/null 2>&1 || true
+	done
+	tar -xzf "$backup" -C / >/dev/null 2>&1 || return 1
+	[ "$smartap_existed" = "1" ] || rm -f /etc/config/smartap
+	[ "$quick_existed" = "1" ] || rm -f /etc/config/cr6608quick
+	[ "$reset_existed" = "1" ] || rm -f /etc/rc.button/reset
+	[ "$orig_existed" = "1" ] || rm -f /etc/rc.button/reset.smartap-orig
+	/etc/init.d/network reload >/dev/null 2>&1 || failed=1
+	wifi reload >/dev/null 2>&1 || failed=1
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || failed=1
+	if [ "$old_security" = "1" ]; then
+		/etc/init.d/cr6608-security enable >/dev/null 2>&1 || failed=1
+		if [ -x /usr/sbin/cr6608-security-apply ]; then /usr/sbin/cr6608-security-apply boot >/dev/null 2>&1 || failed=1; fi
+	else
+		/etc/init.d/cr6608-security disable >/dev/null 2>&1 || failed=1
+		if [ -x /usr/sbin/cr6608-security-apply ]; then /usr/sbin/cr6608-security-apply clear-runtime >/dev/null 2>&1 || failed=1; fi
+	fi
+	if [ "$old_fw" = "1" ]; then
+		/etc/init.d/firewall enable >/dev/null 2>&1 || failed=1
+		/etc/init.d/firewall start >/dev/null 2>&1 || failed=1
+		/etc/init.d/firewall reload >/dev/null 2>&1 || failed=1
+	else
+		/etc/init.d/firewall disable >/dev/null 2>&1 || failed=1
+		/etc/init.d/firewall stop >/dev/null 2>&1 || failed=1
+	fi
+	# Management access must recover together with its restored configuration.
+	/etc/init.d/uhttpd enable >/dev/null 2>&1 || failed=1
+	/etc/init.d/uhttpd restart >/dev/null 2>&1 || failed=1
+	/etc/init.d/dropbear enable >/dev/null 2>&1 || failed=1
+	/etc/init.d/dropbear restart >/dev/null 2>&1 || failed=1
+	[ "$failed" = "0" ]
+}
+
+do_arm() {
+	[ "$#" -eq 8 ] || return 2
+	backup="$1"; old_fw="$2"; orig_existed="$3"; smartap_existed="$4"
+	quick_existed="$5"; reset_existed="$6"; old_security="$7"; timeout="$8"
+	valid_backup "$backup" || return 2
+	valid_bit "$old_fw" && valid_bit "$orig_existed" && valid_bit "$smartap_existed" && \
+		valid_bit "$quick_existed" && valid_bit "$reset_existed" && valid_bit "$old_security" && valid_timeout "$timeout" || return 2
+	token="$(hexdump -v -n 16 -e '1/1 "%02x"' /dev/urandom 2>/dev/null)"
+	valid_token "$token" || return 1
+	acquire_lock || return 1
+	# Never stack a new network transaction on top of an unconfirmed one. The
+	# original stable backup and token remain authoritative until confirm/rollback.
+	if [ -e "$STATE" ] || [ -L "$STATE" ] || [ -e "$ARMED" ] || [ -L "$ARMED" ]; then
+		log "refusing to replace an existing pending rollback transaction"
+		return 3
+	fi
+	if ! cleanup_retained_ip; then
+		log "refusing to arm while temporary management address cleanup is pending"
+		return 1
+	fi
+	write_state || { clear_pending; return 1; }
+	spawn_watch || { clear_pending; return 1; }
+	log "rollback armed for ${timeout}s token=$token"
+	printf '%s\n' "$token"
+}
+
+do_confirm() {
+	local requested="${1:-}" confirmed_token
+	valid_token "$requested" || return 2
+	acquire_lock || return 1
+	[ -f "$STATE" ] || return 1
+	load_state || return 1
+	[ "$requested" = "$token" ] || return 2
+	confirmed_token="$token"
+	clear_pending
+	spawn_alias_cleanup "$confirmed_token" || cleanup_retained_ip "$confirmed_token" >/dev/null 2>&1 || true
+	log "pending rollback confirmed"
+}
+
+do_retain_ip() {
+	local retained_ip="${1:-}" netmask="${2:-}" device="${3:-}" prefix current tmp
+	valid_ipv4 "$retained_ip" || return 2
+	valid_management_device "$device" || return 2
+	prefix="$(/bin/ipcalc.sh "$retained_ip" "$netmask" 2>/dev/null | sed -n 's/^PREFIX=//p' | head -n 1)"
+	valid_prefix "$prefix" || return 2
+	acquire_lock || return 1
+	load_state || return 1
+	current="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+	if [ "$retained_ip" = "$current" ]; then
+		cleanup_retained_ip "$token" >/dev/null 2>&1 || true
+		return 0
+	fi
+	ip link show dev "$device" >/dev/null 2>&1 || return 1
+	ip -4 address replace "$retained_ip/$prefix" dev "$device" >/dev/null 2>&1 || return 1
+	tmp="${RETAINED_IP}.tmp.$$"
+	printf '%s|%s|%s|%s\n' "$token" "$retained_ip" "$prefix" "$device" >"$tmp" || { rm -f "$tmp"; return 1; }
+	chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+	mv -f "$tmp" "$RETAINED_IP" || { rm -f "$tmp"; return 1; }
+	log "temporary management address retained until explicit confirmation"
+}
+
+do_rollback() {
+	local requested="${1:-}" from_state=0
+	acquire_lock || return 1
+	if load_state; then
+		from_state=1
+		[ -z "$requested" ] || [ "$requested" = "$token" ] || return 2
+	elif [ -n "$requested" ]; then
+		# A watcher always supplies its token. If the state is gone, the user
+		# already confirmed the change; never fall through to manual rollback.
+		log "expired rollback watcher ignored after confirmation"
+		return 0
+	elif ! load_manual_pointer; then
+		return 1
+	fi
+	cleanup_retained_ip "${token:-}" >/dev/null 2>&1 || true
+	log "restoring rollback backup $backup"
+	if restore_loaded; then
+		rm -f "$STATE" "$ARMED" "$POINTER" "$META"
+		log "rollback completed"
+		return 0
+	fi
+	[ "$from_state" = "1" ] || printf '%s\n' "$backup" >"$POINTER"
+	log "rollback did not complete cleanly"
+	return 1
+}
+
+case "${1:-status}" in
+	arm) shift; do_arm "$@" ;;
+	confirm) do_confirm "${2:-}" ;;
+	retain-ip) do_retain_ip "${2:-}" "${3:-}" "${4:-}" ;;
+	rollback) do_rollback "${2:-}" ;;
+	cleanup-ip)
+		valid_token "${2:-}" && valid_cleanup_delay "${3:-}" || exit 2
+		sleep "$3"
+		cleanup_retained_ip "$2"
+		;;
+	watch)
+		valid_token "${2:-}" && valid_timeout "${3:-}" || exit 2
+		sleep "$3"
+		do_rollback "$2"
+		;;
+	boot)
+		if [ -f "$STATE" ]; then
+			log "unconfirmed settings found at boot; rolling back"
+			do_rollback
+		fi
+		cleanup_retained_ip >/dev/null 2>&1 || log "temporary management address cleanup remains pending"
+		;;
+	status)
+		if load_state; then
+			printf 'state=armed\ntoken=%s\nbackup=%s\n' "$token" "$backup"
+		else
+			printf 'state=clean\n'
+		fi
+		;;
+	*) echo "usage: $0 {arm BACKUP FW ORIG SMARTAP QUICK RESET SECURITY TIMEOUT|retain-ip OLD_IP NETMASK br-lan[.VID]|confirm TOKEN|rollback [TOKEN]|boot|status}" >&2; exit 2 ;;
+esac

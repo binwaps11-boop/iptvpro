@@ -1,0 +1,73 @@
+#!/bin/sh
+# Per-client bridge rate guard using nftables. Values are stored as Mbit/s in
+# smartap qos sections (mac, down, up). Excess traffic is dropped above the
+# configured rate; normal traffic is not queued or redirected.
+
+TABLE=smartap_qos
+TMP="/tmp/cr6608-smartap-qos.$$.nft"
+ACTIVE=/tmp/cr6608-smartap-qos.active.nft
+
+cleanup() {
+	rm -f "$TMP"
+}
+trap cleanup EXIT INT TERM
+
+remove_table() {
+	nft delete table bridge "$TABLE" >/dev/null 2>&1 || true
+	rm -f "$ACTIVE"
+}
+
+valid_rate() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 10000 ] 2>/dev/null
+}
+
+entries="$(uci -q show smartap 2>/dev/null | awk -F'[.=]' '/=qos$/{print $2}')"
+[ -n "$entries" ] || { remove_table; exit 0; }
+
+{
+	echo "table bridge $TABLE {"
+	echo " chain forward {"
+	echo "  type filter hook forward priority 10; policy accept;"
+} > "$TMP"
+
+rules=0
+for sec in $entries; do
+	mac="$(uci -q get smartap."$sec".mac 2>/dev/null | tr A-F a-f)"
+	dn="$(uci -q get smartap."$sec".down 2>/dev/null)"
+	up="$(uci -q get smartap."$sec".up 2>/dev/null)"
+	case "$mac" in
+		[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+		*) continue ;;
+	esac
+	if valid_rate "$dn"; then
+		rate=$((dn * 125)); burst=$((rate / 10)); [ "$burst" -ge 64 ] || burst=64
+		echo "  ether daddr $mac limit rate over $rate kbytes/second burst $burst kbytes counter drop comment \"SmartAP down $sec\"" >> "$TMP"
+		rules=$((rules + 1))
+	fi
+	if valid_rate "$up"; then
+		rate=$((up * 125)); burst=$((rate / 10)); [ "$burst" -ge 64 ] || burst=64
+		echo "  ether saddr $mac limit rate over $rate kbytes/second burst $burst kbytes counter drop comment \"SmartAP up $sec\"" >> "$TMP"
+		rules=$((rules + 1))
+	fi
+done
+
+{
+	echo " }"
+	echo "}"
+} >> "$TMP"
+
+[ "$rules" -gt 0 ] || { remove_table; exit 0; }
+nft -c -f "$TMP" >/dev/null 2>&1 || {
+	logger -t smartap-qos "invalid generated rules; previous table kept"
+	exit 1
+}
+
+remove_table
+nft -f "$TMP" || {
+	logger -t smartap-qos "failed to install bridge rate rules"
+	exit 1
+}
+cp -f "$TMP" "$ACTIVE"
+logger -t smartap-qos "installed $rules bridge rate rules"
+exit 0

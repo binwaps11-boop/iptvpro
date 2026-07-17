@@ -1,0 +1,40 @@
+#!/bin/sh
+# cr6608-wifi-sentinel — self-healing for the RADIOS ONLY. NEVER reboots anything.
+# Cron runs it every 5 minutes: if a radio is enabled in uci but its AP interface
+# has been missing for TWO consecutive checks, bring that radio back with a
+# targeted `wifi up radioX` (the other radio and its clients are untouched),
+# then re-apply the saved per-radio TX power target.
+# Guards: skips the first 3 minutes after boot, skips while an apply/reload is
+# in flight, and heals each radio at most once per 10 minutes (no flapping).
+UP="$(cut -d. -f1 /proc/uptime)"
+[ "${UP:-0}" -lt 180 ] && exit 0
+pgrep -f cr6608-quicksettings-apply >/dev/null 2>&1 && exit 0
+pgrep -f cr6608-safe-wifi-reload   >/dev/null 2>&1 && exit 0
+pgrep -f cr6608-security-apply     >/dev/null 2>&1 && exit 0
+pgrep -f smartap-autochannel       >/dev/null 2>&1 && exit 0
+ST=/tmp/cr6608-wifi-sentinel
+mkdir -p "$ST"
+
+check_radio() { # $1=radioX  $2=phyX
+	radio="$1"; phy="$2"
+	# owner intentionally disabled it -> nothing to heal
+	[ "$(uci -q get wireless.$radio.disabled)" = "1" ] && { rm -f "$ST/$radio.miss"; return 0; }
+	if iw dev 2>/dev/null | grep -q "Interface ${phy}-"; then
+		rm -f "$ST/$radio.miss"
+		return 0
+	fi
+	miss=$(( $(cat "$ST/$radio.miss" 2>/dev/null || echo 0) + 1 ))
+	echo "$miss" > "$ST/$radio.miss"
+	[ "$miss" -lt 2 ] && return 0
+	last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
+	[ $(( UP - last )) -lt 600 ] && return 0
+	echo "$UP" > "$ST/$radio.heal"
+	rm -f "$ST/$radio.miss"
+	logger -t cr6608-sentinel "$radio ($phy) down for 2 checks -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
+	wifi up "$radio" >/dev/null 2>&1
+	[ -x /usr/sbin/cr6608-force-txpower38 ] && /usr/sbin/cr6608-force-txpower38 >/dev/null 2>&1
+}
+
+check_radio radio0 phy0
+check_radio radio1 phy1
+exit 0

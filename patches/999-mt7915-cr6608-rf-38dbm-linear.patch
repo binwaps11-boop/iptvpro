@@ -1,0 +1,147 @@
+diff --git a/mt7915/eeprom.c b/mt7915/eeprom.c
+index eb92cbf..866c835 100644
+--- a/mt7915/eeprom.c
++++ b/mt7915/eeprom.c
+@@ -332,6 +332,10 @@ int mt7915_eeprom_get_target_power(struct mt7915_dev *dev,
+ 		target_power = is_7976 ? eeprom[index + group] : 0;
+ 	}
+ 
++	if (mt7915_cr6608_rf_38dbm_enabled(dev) &&
++	    target_power < MT7915_CR6608_MAX_HALF_DBM)
++		target_power = MT7915_CR6608_MAX_HALF_DBM;
++
+ 	return target_power;
+ }
+ 
+@@ -356,7 +360,12 @@ s8 mt7915_eeprom_get_power_delta(struct mt7915_dev *dev, int band)
+ 
+ 	delta = FIELD_GET(MT_EE_RATE_DELTA_MASK, val);
+ 
+-	return val & MT_EE_RATE_DELTA_SIGN ? delta : -delta;
++	delta = val & MT_EE_RATE_DELTA_SIGN ? delta : -delta;
++
++	if (mt7915_cr6608_rf_38dbm_enabled(dev))
++		delta += MT7915_CR6608_EXTRA_DELTA_HALF;
++
++	return delta;
+ }
+ 
+ bool
+diff --git a/mt7915/init.c b/mt7915/init.c
+index 2da6ea9..7d30b09 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -317,6 +317,14 @@ static void __mt7915_init_txpower(struct mt7915_phy *phy,
+ 		chan->max_power = min_t(int, chan->max_reg_power,
+ 					target_power);
+ 		chan->orig_mpwr = target_power;
++
++		if (mt7915_cr6608_rf_38dbm_enabled(dev)) {
++			chan->max_reg_power =
++				max_t(int, chan->max_reg_power,
++				      MT7915_CR6608_MAX_DBM);
++			chan->max_power = MT7915_CR6608_MAX_DBM;
++			chan->orig_mpwr = MT7915_CR6608_MAX_DBM;
++		}
+ 	}
+ }
+ 
+@@ -325,6 +333,10 @@ void mt7915_init_txpower(struct mt7915_phy *phy)
+ 	if (!phy)
+ 		return;
+ 
++	if (mt7915_cr6608_rf_38dbm_enabled(phy->dev))
++		dev_info(phy->dev->mt76.dev,
++			 "CR6608-RF-38DBM-LINEAR enabled (SKU cck/ofdm=76 mcs=72 ru=68 half-dBm; request ceiling only, actual RF hardware/PA limited)\n");
++
+ 	if (phy->mt76->cap.has_2ghz)
+ 		__mt7915_init_txpower(phy, &phy->mt76->sband_2g.sband);
+ 	if (phy->mt76->cap.has_5ghz)
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index 40364ee..07a49af 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -2,6 +2,7 @@
+ /* Copyright (C) 2020 MediaTek Inc. */
+ 
+ #include <linux/fs.h>
++#include <linux/of.h>
+ #include "mt7915.h"
+ #include "mcu.h"
+ #include "mac.h"
+@@ -39,6 +40,21 @@ static bool sr_scene_detect = true;
+ module_param(sr_scene_detect, bool, 0644);
+ MODULE_PARM_DESC(sr_scene_detect, "Enable firmware scene detection algorithm");
+ 
++static bool cr6608_rf_38dbm;
++module_param(cr6608_rf_38dbm, bool, 0444);
++MODULE_PARM_DESC(cr6608_rf_38dbm,
++		 "CR6608: raise mt7915 SKU/target power ceiling to 38 dBm request");
++
++bool mt7915_cr6608_rf_38dbm_enabled(struct mt7915_dev *dev)
++{
++	if (!dev ||
++	    !is_mt7915(&dev->mt76) ||
++	    !of_machine_is_compatible("xiaomi,mi-router-cr6608"))
++		return false;
++
++	return cr6608_rf_38dbm;
++}
++
+ static u8
+ mt7915_mcu_get_sta_nss(u16 mcs_map)
+ {
+@@ -3442,6 +3464,34 @@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ 	if (phy->sku_limit_en) {
+ 		tx_power = mt76_get_rate_power_limits(mphy, mphy->chandef.chan,
+ 						      &la, tx_power);
++		if (mt7915_cr6608_rf_38dbm_enabled(dev)) {
++			int r, c;
++
++			for (r = 0; r < ARRAY_SIZE(la.cck); r++)
++				la.cck[r] = min_t(s8,
++						  max_t(s8, la.cck[r],
++							MT7915_CR6608_MAX_HALF_DBM),
++						  tx_power);
++			for (r = 0; r < ARRAY_SIZE(la.ofdm); r++)
++				la.ofdm[r] = min_t(s8,
++						   max_t(s8, la.ofdm[r],
++							 MT7915_CR6608_MAX_HALF_DBM),
++						   tx_power);
++			for (r = 0; r < ARRAY_SIZE(la.mcs); r++)
++				for (c = 0; c < ARRAY_SIZE(la.mcs[r]); c++)
++					la.mcs[r][c] =
++						min_t(s8,
++						      max_t(s8, la.mcs[r][c],
++							    MT7915_CR6608_CAP_MCS_HALF),
++						      tx_power);
++			for (r = 0; r < ARRAY_SIZE(la.ru); r++)
++				for (c = 0; c < ARRAY_SIZE(la.ru[r]); c++)
++					la.ru[r][c] =
++						min_t(s8,
++						      max_t(s8, la.ru[r][c],
++							    MT7915_CR6608_CAP_RU_HALF),
++						      tx_power);
++		}
+ 		mt7915_update_txpower(phy, tx_power);
+ 	} else {
+ 		mt7915_update_txpower(phy, tx_power);
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 7d98a42..9c8b627 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -435,6 +435,14 @@ void mt7915_unregister_device(struct mt7915_dev *dev);
+ int mt7915_eeprom_init(struct mt7915_dev *dev);
+ void mt7915_eeprom_parse_hw_cap(struct mt7915_dev *dev,
+ 				struct mt7915_phy *phy);
++bool mt7915_cr6608_rf_38dbm_enabled(struct mt7915_dev *dev);
++
++#define MT7915_CR6608_MAX_HALF_DBM	76	/* 38.0 dBm, 0.5 dBm units */
++#define MT7915_CR6608_CAP_MCS_HALF	72	/* 36.0 dBm data cap */
++#define MT7915_CR6608_CAP_RU_HALF	68	/* 34.0 dBm HE RU cap */
++#define MT7915_CR6608_MAX_DBM		38
++#define MT7915_CR6608_EXTRA_DELTA_HALF	12	/* +6.0 dB */
++
+ int mt7915_eeprom_get_target_power(struct mt7915_dev *dev,
+ 				   struct ieee80211_channel *chan,
+ 				   u8 chain_idx);

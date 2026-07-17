@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+start() {
+	return 0
+}
+
+reload_service() {
+	/usr/sbin/cr6608-quicksettings-apply apply
+}
+
+restart() {
+	reload_service
+}

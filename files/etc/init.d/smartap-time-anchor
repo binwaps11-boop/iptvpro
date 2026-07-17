@@ -1,0 +1,12 @@
+#!/bin/sh /etc/rc.common
+
+START=01
+STOP=89
+
+boot() {
+	/usr/sbin/smartap-time-anchor
+}
+
+start() {
+	boot
+}

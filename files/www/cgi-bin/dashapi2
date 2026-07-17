@@ -1,0 +1,572 @@
+#!/bin/sh
+
+. /usr/libexec/cr6608-session-auth
+
+qparam() {
+  printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 | sed 's/[^A-Fa-f0-9]//g'
+}
+
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf 'X-Content-Type-Options: nosniff\r\n'
+  printf 'Referrer-Policy: no-referrer\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"error":"forbidden","message":"valid Smart AP session required"}\n'
+  exit 0
+}
+
+sid="$(cr6608_session_from_request "$(qparam sid)")"
+cr6608_session_valid "$sid" || deny_auth
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf 'Referrer-Policy: no-referrer\r\n'
+printf '\r\n'
+
+# The overview only needs counters from procfs. Serving this lightweight path
+# avoids running the full wireless collector every few seconds while keeping
+# traffic, CPU, memory and load figures live.
+case "&${QUERY_STRING:-}&" in
+  *'&lite=1&'*)
+    lite_uptime="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; lite_uptime="${lite_uptime:-0}"
+    set -- $(cat /proc/loadavg 2>/dev/null); lite_l1="${1:-0}"; lite_l5="${2:-0}"; lite_l15="${3:-0}"
+    set -- $(awk '
+      /^MemTotal:/ {t=$2*1024}
+      /^MemFree:/ {f=$2*1024}
+      /^MemAvailable:/ {a=$2*1024}
+      END {printf "%s %s %s", t+0, f+0, a+0}
+    ' /proc/meminfo 2>/dev/null)
+    lite_mt="${1:-0}"; lite_mf="${2:-0}"; lite_ma="${3:-$lite_mf}"
+    set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%s %s %s", $2*1024, $3*1024, $4*1024}')
+    lite_st="${1:-0}"; lite_su="${2:-0}"; lite_sa="${3:-0}"
+    set -- $(awk '
+      BEGIN{dl=0; ul=0}
+      $1 ~ /^phy[0-9]+-ap[0-9]+:$/ {dl+=$10; ul+=$2}
+      END{printf "%s %s", dl, ul}
+    ' /proc/net/dev 2>/dev/null)
+    lite_rx="${1:-0}"; lite_tx="${2:-0}"
+    set -- $(awk '/^cpu /{total=0; for(i=2;i<=NF;i++) total+=$i; idle=$5+$6; printf "%s %s", total, total-idle}' /proc/stat 2>/dev/null)
+    lite_total="${1:-0}"; lite_busy="${2:-0}"; lite_cpu=""; lite_prev=/tmp/dashapi2.lite.cpu
+    if [ -r "$lite_prev" ]; then
+      read lite_old_total lite_old_busy lite_old_pct < "$lite_prev"
+      lite_dt=$((lite_total - ${lite_old_total:-0})); lite_db=$((lite_busy - ${lite_old_busy:-0}))
+      if [ "$lite_dt" -gt 0 ] 2>/dev/null && [ "$lite_db" -ge 0 ] 2>/dev/null; then
+        lite_cpu="$(awk -v b="$lite_db" -v t="$lite_dt" 'BEGIN{v=b*100/t; if(v<0)v=0; if(v>100)v=100; printf "%d",v}')"
+      else
+        lite_cpu="${lite_old_pct:-0}"
+      fi
+    fi
+    if [ -z "$lite_cpu" ]; then
+      lite_cores="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ "${lite_cores:-0}" -gt 0 ] 2>/dev/null || lite_cores=1
+      lite_cpu="$(awk -v l="$lite_l1" -v c="$lite_cores" 'BEGIN{v=l*100/c; if(v<0)v=0; if(v>100)v=100; printf "%d",v}')"
+    fi
+    printf '%s %s %s\n' "$lite_total" "$lite_busy" "$lite_cpu" > "$lite_prev" 2>/dev/null
+    lite_cores="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ "${lite_cores:-0}" -gt 0 ] 2>/dev/null || lite_cores=1
+    printf '{"ok":true,"lite":true,"uptime":%s,"load":[%s,%s,%s],"cpu":{"cores":%s,"percent":%s,"source":"/proc/stat"},"mem":{"total":%s,"free":%s,"available":%s,"source":"/proc/meminfo"},"storage":{"total":%s,"used":%s,"available":%s,"source":"df -k /overlay"},"traffic":{"source":"/proc/net/dev","rx_bytes":%s,"tx_bytes":%s}}\n' \
+      "$lite_uptime" "$lite_l1" "$lite_l5" "$lite_l15" "$lite_cores" "$lite_cpu" \
+      "$lite_mt" "$lite_mf" "$lite_ma" "$lite_st" "$lite_su" "$lite_sa" "$lite_rx" "$lite_tx"
+    exit 0
+    ;;
+esac
+
+# Share one short-lived hardware snapshot between dashboard tabs. Without this,
+# every open phone/browser tab runs ten mt76/iw probes at the same time.
+response_cache="/tmp/dashapi2.response"
+cache_lock="/tmp/dashapi2.lock"
+cache_owner=0
+cache_pid="$$"
+proc_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+cache_start="$(proc_start "$cache_pid")"
+cache_now="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; cache_now="${cache_now:-0}"
+cache_ts="$(sed -n '1p' "$response_cache" 2>/dev/null)"
+case "$cache_ts" in ''|*[!0-9]*) cache_ts=0 ;; esac
+cache_age=$((cache_now - cache_ts))
+if [ -r "$response_cache" ] && [ "$cache_age" -ge 0 ] && [ "$cache_age" -le 12 ]; then
+  tail -n +2 "$response_cache"
+  exit 0
+fi
+if mkdir "$cache_lock" 2>/dev/null; then
+  cache_owner=1
+  printf '%s %s\n' "$cache_pid" "$cache_start" > "$cache_lock/owner"
+else
+  lock_pid=""; lock_start=""; read lock_pid lock_start < "$cache_lock/owner" 2>/dev/null
+  live_start="$(proc_start "$lock_pid")"
+  if [ -z "$lock_pid" ] || [ -z "$lock_start" ] || [ "$live_start" != "$lock_start" ]; then
+    rm -f "$cache_lock/owner" 2>/dev/null; rmdir "$cache_lock" 2>/dev/null
+    if mkdir "$cache_lock" 2>/dev/null; then
+      cache_owner=1
+      printf '%s %s\n' "$cache_pid" "$cache_start" > "$cache_lock/owner"
+    fi
+  fi
+fi
+if [ "$cache_owner" = "0" ]; then
+  # A collector is already running. Returning the last complete snapshot is
+  # better than occupying another uhttpd worker for four seconds.
+  if [ -r "$response_cache" ]; then
+    tail -n +2 "$response_cache"
+    exit 0
+  fi
+  cache_wait=0
+  while [ -d "$cache_lock" ] && [ "$cache_wait" -lt 4 ]; do sleep 1; cache_wait=$((cache_wait + 1)); done
+  if [ -r "$response_cache" ]; then
+    tail -n +2 "$response_cache"
+    exit 0
+  fi
+  printf '{"ok":false,"error":"busy","message":"hardware snapshot is already being collected"}\n'
+  exit 0
+fi
+cache_cleanup() {
+  rm -f "${response_cache}.$$" "/tmp/dashapi2.devices.$$" "/tmp/dashapi2.arp.$$" "/tmp/dashapi2.fdb.$$" "/tmp/dashapi2.lease.$$" 2>/dev/null
+  [ "$cache_owner" = "1" ] || return 0
+  owner_pid=""; owner_start=""; read owner_pid owner_start < "$cache_lock/owner" 2>/dev/null
+  [ "$owner_pid" = "$cache_pid" ] && [ "$owner_start" = "$cache_start" ] || return 0
+  rm -f "$cache_lock/owner" 2>/dev/null
+  rmdir "$cache_lock" 2>/dev/null
+}
+trap cache_cleanup EXIT HUP INT TERM
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' '
+}
+jstr() { printf '"%s"' "$(json_escape "$1")"; }
+jnum() {
+  case "$1" in ''|*[!0-9.-]*) printf 'null' ;; *) printf '%s' "$1" ;; esac
+}
+catv() { [ -r "$1" ] && cat "$1" 2>/dev/null; }
+run_limit() {
+  sec="$1"; shift
+  "$@" & pid=$!
+  ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  guard_children="$(pgrep -P "$guard" 2>/dev/null)"
+  kill "$guard" 2>/dev/null
+  [ -n "$guard_children" ] && kill $guard_children 2>/dev/null
+  wait "$guard" 2>/dev/null
+  return "$rc"
+}
+# a wedged mt7915 must never freeze the dashboard poll: bound every wireless read
+iwinfo() { run_limit 4 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 4 /usr/sbin/iw "$@" 2>/dev/null; }
+# prune per-client counter files older than a day so /tmp never creeps on long uptimes
+find /tmp -maxdepth 1 -name 'dashapi2.sta.*' -mmin +1440 -delete 2>/dev/null
+
+model="$(cat /tmp/sysinfo/model 2>/dev/null)"
+[ -n "$model" ] || model="Xiaomi Mi Router CR6608"
+host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+osver="$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_DESCRIPTION")"
+[ -n "$osver" ] || osver="$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_RELEASE")"
+kernel="$(uname -r 2>/dev/null)"
+uptime_s="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; [ -n "$uptime_s" ] || uptime_s=0
+set -- $(cat /proc/loadavg 2>/dev/null)
+l1="${1:-0}"; l5="${2:-0}"; l15="${3:-0}"
+cpu_units="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"
+[ "${cpu_units:-0}" -gt 0 ] 2>/dev/null || cpu_units=1
+
+mt="$(awk '/^MemTotal:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"
+mf="$(awk '/^MemFree:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"
+ma="$(awk '/^MemAvailable:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"
+[ -n "$ma" ] || ma="$mf"
+set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%s %s %s", $2*1024, $3*1024, $4*1024}')
+st_total="${1:-0}"; st_used="${2:-0}"; st_avail="${3:-0}"
+
+# CPU%: honest average over a >=15s window. Back-to-back dashboard polls used to make the
+# delta window equal the collector's OWN busy burst (2 polls within ~1s -> "97%" while
+# loadavg showed 0.00) — short windows now REUSE the last good reading and keep the old
+# baseline instead of resampling.
+set -- $(awk '/^cpu /{total=0; for(i=2;i<=NF;i++) total+=$i; idle=$5+$6; busy=total-idle; printf "%s %s", total, busy}' /proc/stat 2>/dev/null)
+cpu_total="${1:-0}"; cpu_busy="${2:-0}"; cpu_pct=""
+cpu_prev="/tmp/dashapi2.cpu"
+if [ -r "$cpu_prev" ]; then
+  read old_total old_busy old_ts old_pct < "$cpu_prev"
+  dt_wall=$((uptime_s - ${old_ts:-0}))
+  dt_cpu=$((cpu_total - ${old_total:-0}))
+  db_cpu=$((cpu_busy - ${old_busy:-0}))
+  if [ -n "$old_ts" ] && [ "$dt_wall" -ge 15 ] 2>/dev/null && [ "$dt_cpu" -gt 0 ] 2>/dev/null && [ "$db_cpu" -ge 0 ] 2>/dev/null; then
+    cpu_pct="$(awk -v b="$db_cpu" -v t="$dt_cpu" 'BEGIN{v=(b/t)*100; if(v<0)v=0; if(v>100)v=100; printf "%d", v}')"
+    printf '%s %s %s %s\n' "$cpu_total" "$cpu_busy" "$uptime_s" "$cpu_pct" > "$cpu_prev" 2>/dev/null
+  elif [ "$old_pct" -ge 0 ] 2>/dev/null; then
+    cpu_pct="$old_pct"
+  fi
+fi
+if [ -z "$cpu_pct" ]; then
+  cpu_pct="$(awk -v l="$l1" -v c="$cpu_units" 'BEGIN{v=(l*100)/c; if(v<0)v=0; if(v>100)v=100; printf "%d", v}')"
+  printf '%s %s %s %s\n' "$cpu_total" "$cpu_busy" "$uptime_s" "$cpu_pct" > "$cpu_prev" 2>/dev/null
+fi
+
+temp_c=""
+for t in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
+  [ -r "$t" ] || continue
+  tv="$(cat "$t" 2>/dev/null)"
+  case "$tv" in ''|*[!0-9-]*) ;; *) temp_c="$(awk -v v="$tv" 'BEGIN{if(v>1000) printf "%.1f", v/1000; else printf "%.1f", v}')"; break ;; esac
+done
+
+lan_dev="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+[ -n "$lan_dev" ] || lan_dev="$(uci -q get network.lan.device)"
+[ -n "$lan_dev" ] || lan_dev=br-lan
+lanip="$(ip -4 -o addr show dev "$lan_dev" 2>/dev/null | awk '{print $4; exit}')"
+[ -n "$lanip" ] || lanip="$(uci -q get network.lan.ipaddr)"
+default4="$(ip -4 route show default 2>/dev/null | head -n 1)"
+default_dev="$(printf '%s\n' "$default4" | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+default_gw="$(printf '%s\n' "$default4" | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
+[ -n "$default_dev" ] && internet_online=true || internet_online=false
+latency_ms=""
+if [ -n "$default_gw" ]; then
+  latency_ms="$(ping -c 1 -W 1 "$default_gw" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n 1)"
+fi
+if [ -z "$latency_ms" ] && [ -n "$default_dev" ]; then
+  run_limit 2 nslookup openwrt.org 1.1.1.1 >/dev/null 2>&1 && latency_ms="1.0"
+fi
+now_s="$(date +%s 2>/dev/null || echo 0)"
+
+iface_json() {
+  dev="$1"
+  [ -d "/sys/class/net/$dev" ] || return 1
+  set -- $(awk -v d="$dev:" '$1==d{printf "%s %s %s %s %s %s", $2, $10, $4, $12, $5, $13}' /proc/net/dev 2>/dev/null)
+  rx="${1:-0}"; tx="${2:-0}"; rxerr="${3:-0}"; txerr="${4:-0}"; rxd="${5:-0}"; txd="${6:-0}"
+  rx_rate=0; tx_rate=0; pdev="$(printf '%s' "$dev" | tr -c 'A-Za-z0-9_.-' '_')"; prev="/tmp/dashapi2.iface.$pdev"
+  if [ -r "$prev" ]; then
+    read old_rx old_tx old_ts < "$prev"
+    dt=$((now_s - old_ts))
+    if [ "$dt" -gt 0 ] 2>/dev/null; then
+      drx=$((rx - old_rx)); dtx=$((tx - old_tx))
+      [ "$drx" -lt 0 ] 2>/dev/null && drx=0
+      [ "$dtx" -lt 0 ] 2>/dev/null && dtx=0
+      rx_rate=$((drx / dt)); tx_rate=$((dtx / dt))
+    fi
+  fi
+  printf '%s %s %s\n' "$rx" "$tx" "$now_s" > "$prev" 2>/dev/null
+  oper="$(catv "/sys/class/net/$dev/operstate")"; [ -n "$oper" ] || oper="unknown"
+  speed="$(catv "/sys/class/net/$dev/speed")"; [ "$speed" = "-1" ] && speed=0; [ -n "$speed" ] || speed=0
+  carrier="$(catv "/sys/class/net/$dev/carrier")"; [ "$carrier" = "1" ] && connected=true || connected=false
+  mac="$(catv "/sys/class/net/$dev/address")"
+  case "$dev" in br-*) typ="bridge" ;; phy*) typ="wifi" ;; lan*) typ="switch" ;; wan) typ="ethernet" ;; eth*) typ="switch-cpu" ;; *) typ="interface" ;; esac
+  printf '{"name":%s,"type":%s,"connected":%s,"operstate":%s,"speed_mbps":%s,"mac":%s,"counter_source":"/proc/net/dev","rx_bytes":%s,"tx_bytes":%s,"rx_bps":%s,"tx_bps":%s,"rx_errors":%s,"tx_errors":%s,"rx_dropped":%s,"tx_dropped":%s}' \
+    "$(jstr "$dev")" "$(jstr "$typ")" "$connected" "$(jstr "$oper")" "$(jnum "$speed")" "$(jstr "$mac")" \
+    "$(jnum "$rx")" "$(jnum "$tx")" "$(jnum "$rx_rate")" "$(jnum "$tx_rate")" "$(jnum "$rxerr")" "$(jnum "$txerr")" "$(jnum "$rxd")" "$(jnum "$txd")"
+}
+
+interfaces="["
+first=1
+for dev_path in /sys/class/net/br-lan /sys/class/net/br-lan.* \
+  /sys/class/net/eth0 /sys/class/net/wan /sys/class/net/lan1 \
+  /sys/class/net/lan2 /sys/class/net/lan3 /sys/class/net/phy0-ap0 \
+  /sys/class/net/phy0-ap1 /sys/class/net/phy1-ap0; do
+  [ -d "$dev_path" ] || continue
+  dev="${dev_path##*/}"
+  [ "$first" = 1 ] || interfaces="$interfaces,"
+  interfaces="$interfaces$(iface_json "$dev")"
+  first=0
+done
+interfaces="$interfaces]"
+
+# Directional download/upload measured at the Wi-Fi client edge only. On a bridging AP
+# every forwarded byte is both RX on the uplink port AND TX on the client port, so summing
+# all ports makes RX==TX (the old bug). The Wi-Fi radios are always the client side, so:
+#   download (to clients) = TX bytes on phyX-apY   -> reported as traffic rx (وارد)
+#   upload   (from clients) = RX bytes on phyX-apY  -> reported as traffic tx (صادر)
+# $2 = rx_bytes, $10 = tx_bytes in /proc/net/dev.
+set -- $(awk '
+  BEGIN{dl=0; ul=0}
+  $1 ~ /^phy[0-9]+-ap[0-9]+:$/ {dl+=$10; ul+=$2}
+  END{printf "%s %s", dl, ul}
+' /proc/net/dev 2>/dev/null)
+traffic_rx="${1:-0}"; traffic_tx="${2:-0}"
+traffic_now="$now_s"
+rx_bps=0; tx_bps=0; traffic_prev="/tmp/dashapi2.traffic"
+if [ -r "$traffic_prev" ]; then
+  read old_rx old_tx old_ts < "$traffic_prev"
+  dt=$((traffic_now - old_ts))
+  if [ "$dt" -gt 0 ] 2>/dev/null; then
+    drx=$((traffic_rx - old_rx)); dtx=$((traffic_tx - old_tx))
+    [ "$drx" -lt 0 ] 2>/dev/null && drx=0
+    [ "$dtx" -lt 0 ] 2>/dev/null && dtx=0
+    rx_bps=$((drx / dt)); tx_bps=$((dtx / dt))
+  fi
+fi
+printf '%s %s %s\n' "$traffic_rx" "$traffic_tx" "$traffic_now" > "$traffic_prev" 2>/dev/null
+
+client_ip() {
+  m="$(printf '%s' "$1" | tr A-F a-f)"
+  ip="$(awk -v m="$m" 'tolower($4)==m{print $1; exit}' /proc/net/arp 2>/dev/null)"
+  [ -n "$ip" ] || ip="$(ip neigh show 2>/dev/null | awk -v m="$m" 'tolower($5)==m && $1 ~ /\./ {print $1; exit}')"
+  printf '%s' "$ip"
+}
+
+wifi_dev_for_if() {
+  case "$1" in phy0-ap*|phy0-mesh*) echo "radio0" ;; phy1-ap*|phy1-mesh*) echo "radio1" ;; mesh*) echo "radio1" ;; *) echo "" ;; esac
+}
+uci_iface_for_if() {
+  ifn="$1"; dev="$(wifi_dev_for_if "$ifn")"
+  want="ap"
+  case "$ifn" in *mesh*) want="mesh" ;; esac
+  [ -n "$dev" ] || return
+  uci -q show wireless 2>/dev/null | awk -F'[.=]' -v d="$dev" -v want="$want" '
+    /=wifi-iface/{sec=$2; ok=0}
+    $0 ~ "\\."sec"\\.device=.?"d".?"{ok=1}
+    ok && $0 ~ "\\."sec"\\.mode=.?"want".?"{print sec; exit}
+  '
+}
+
+survey_raw() {
+  IF="$1"; fallback_noise="$2"
+  iw dev "$IF" survey dump 2>/dev/null | awk -v fb="$fallback_noise" '
+    /^Survey data/ { inuse=0 }
+    /\[in use\]/ { inuse=1 }
+    inuse && /noise:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^-?[0-9]+$/) { noise=$i; break }
+    }
+    inuse && /channel active time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { active=$i; break }
+    }
+    inuse && /channel busy time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { busy=$i; break }
+    }
+    inuse && /channel receive time:/ && $0 !~ /BSS/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { rx=$i; break }
+    }
+    inuse && /channel BSS receive time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { bss=$i; break }
+    }
+    inuse && /channel transmit time:/ {
+      for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { tx=$i; break }
+    }
+    END {
+      if (noise == "") noise=fb
+      if (noise == "") noise="null"
+      if (active == "") active=0
+      if (busy == "") busy=0
+      if (rx == "") rx=0
+      if (tx == "") tx=0
+      if (bss == "") bss=0
+      printf "%s %s %s %s %s %s\n", noise, active, busy, rx, tx, bss
+    }'
+}
+
+device_rows="/tmp/dashapi2.devices.$$"
+: > "$device_rows"
+station_json() {
+  IF="$1"; noise="$2"
+  printf '['
+  sf=1
+  iw dev "$IF" station dump 2>/dev/null | awk '
+    function flush(){ if(mac!="") printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n", mac, sig, inact, conn, txr, rxr, rxb, txb, txp, txretry, txfail }
+    /^Station/ { flush(); mac=$2; sig=""; inact=""; conn=""; txr=""; rxr=""; rxb=""; txb=""; txp=""; txretry=""; txfail="" }
+    /^[ \t]*signal:/ { sig=$2 }
+    /inactive time:/ { inact=$3 }
+    /connected time:/ { conn=$3 }
+    /tx bitrate:/ { txr=$3 }
+    /rx bitrate:/ { rxr=$3 }
+    /rx bytes:/ { rxb=$3 }
+    /tx bytes:/ { txb=$3 }
+    /tx packets:/ { txp=$3 }
+    /tx retries:/ { txretry=$3 }
+    /tx failed:/ { txfail=$3 }
+    END{ flush() }
+  ' | while IFS='|' read -r mac sig inact conn txr rxr rxb txb txp txretry txfail; do
+    [ -n "$mac" ] || continue
+    ip="$(client_ip "$mac")"
+    snr="$(awk -v s="$sig" -v n="$noise" 'BEGIN{if(s!=""&&n!="")printf "%d", s-n}')"
+    upload_bps=0
+    download_bps=0
+    safe_mac="$(printf '%s' "$mac" | tr -c 'A-Za-z0-9_.-' '_')"
+    prev="/tmp/dashapi2.sta.$safe_mac"
+    bad_counter=0
+    case "$rxb" in ''|*[!0-9]*) bad_counter=1 ;; esac
+    case "$txb" in ''|*[!0-9]*) bad_counter=1 ;; esac
+    if [ "$bad_counter" = 1 ]; then
+      rxb=""
+      txb=""
+    else
+      if [ -r "$prev" ]; then
+        read old_rxb old_txb old_ts < "$prev"
+        dt=$((now_s - old_ts))
+        if [ "$dt" -gt 0 ] 2>/dev/null; then
+          drx=$((rxb - old_rxb))
+          dtx=$((txb - old_txb))
+          [ "$drx" -lt 0 ] 2>/dev/null && drx=0
+          [ "$dtx" -lt 0 ] 2>/dev/null && dtx=0
+          upload_bps=$((drx / dt))
+          download_bps=$((dtx / dt))
+        fi
+      fi
+      printf '%s %s %s\n' "$rxb" "$txb" "$now_s" > "$prev" 2>/dev/null
+    fi
+    printf '%s|%s|%s|WiFi|%s\n' "$(printf '%s' "$mac" | tr A-F a-f)" "$ip" "$IF" "$sig" >> "$device_rows"
+    [ "$sf" = 1 ] || printf ','
+    printf '{"mac":%s,"ip":%s,"signal_dbm":%s,"noise_dbm":%s,"snr":%s,"tx_rate":%s,"rx_rate":%s,"inactive_ms":%s,"conn_s":%s,"expected_mbps":null,"counter_source":"iw station dump","rx_bytes":%s,"tx_bytes":%s,"tx_packets":%s,"tx_retries":%s,"tx_failed":%s,"upload_bytes":%s,"download_bytes":%s,"upload_bps":%s,"download_bps":%s}' \
+      "$(jstr "$mac")" "$(jstr "$ip")" "$(jnum "$sig")" "$(jnum "$noise")" "$(jnum "$snr")" \
+      "$(jnum "$txr")" "$(jnum "$rxr")" "$(jnum "$inact")" "$(jnum "$conn")" \
+      "$(jnum "$rxb")" "$(jnum "$txb")" "$(jnum "$txp")" "$(jnum "$txretry")" "$(jnum "$txfail")" \
+      "$(jnum "$rxb")" "$(jnum "$txb")" "$(jnum "$upload_bps")" "$(jnum "$download_bps")"
+    sf=0
+  done
+  printf ']'
+}
+
+wifi="["
+wf=1
+health_busy_max=""
+for IF in $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E '^(phy[0-9]+-(ap|mesh)[0-9]+|mesh[0-9]+)$' | sort -u); do
+  [ -d "/sys/class/net/$IF" ] || continue
+  [ "$IF" = "phy0-ap1" ] && continue
+  cli="$(iwinfo "$IF" info 2>/dev/null)"
+  ssid="$(printf '%s\n' "$cli" | sed -n 's/.*ESSID: "\([^"]*\)".*/\1/p' | head -n 1)"
+  ifc="$(uci_iface_for_if "$IF")"
+  mode="$(uci -q get wireless."$ifc".mode 2>/dev/null)"
+  [ -n "$ssid" ] || ssid="$(uci -q get wireless."$ifc".mesh_id 2>/dev/null)"
+  [ -n "$ssid" ] || ssid="$IF"
+  channel="$(printf '%s\n' "$cli" | awk '/Channel:/{for(i=1;i<=NF;i++)if($i=="Channel:"){print $(i+1); exit}}')"
+  htmode="$(printf '%s\n' "$cli" | sed -n 's/.*HT Mode: \([^ ]*\).*/\1/p' | head -n 1)"
+  signal="$(printf '%s\n' "$cli" | awk '/Signal:/{print $2; exit}')"; [ "$signal" = "unknown" ] && signal=""
+  noise="$(printf '%s\n' "$cli" | awk '/Noise:/{for(i=1;i<=NF;i++) if($i=="Noise:"){print $(i+1); exit}}')"; [ "$noise" = "unknown" ] && noise=""
+  bitrate="$(printf '%s\n' "$cli" | awk '/Bit Rate:/{print $3; exit}')"; [ "$bitrate" = "unknown" ] && bitrate=""
+  enc="$(printf '%s\n' "$cli" | sed -n 's/.*Encryption: \(.*\)$/\1/p' | head -n 1)"
+  hw="$(printf '%s\n' "$cli" | sed -n 's/.*HW Mode(s): \(.*\)$/\1/p' | head -n 1)"
+  [ -n "$enc" ] || enc="$(uci -q get wireless."$ifc".encryption 2>/dev/null)"
+  [ -n "$enc" ] || enc="none"
+  case "$channel" in ''|*[!0-9]*) band="WiFi" ;; *) [ "$channel" -ge 36 ] 2>/dev/null && band="5G" || band="2.4G" ;; esac
+  dev="$(wifi_dev_for_if "$IF")"
+  tx_req="$(uci -q get wireless."$dev".txpower 2>/dev/null)"
+  [ -n "$tx_req" ] || tx_req="$(uci -q get wireless."$ifc".txpower 2>/dev/null)"
+  tx_applied="$(iw dev "$IF" info 2>/dev/null | awk '/txpower/{print $2; exit}')"
+  tx_max="$(iwinfo "$IF" txpower 2>/dev/null | awk '/dBm/{v=($1=="*" ? $2 : $1)} END{print v}')"
+  set -- $(survey_raw "$IF" "$noise")
+  survey_noise="${1:-null}"; survey_active="${2:-0}"; survey_busy="${3:-0}"; survey_rx="${4:-0}"; survey_tx="${5:-0}"; survey_bss="${6:-0}"
+  [ "$survey_noise" != "null" ] && [ -n "$survey_noise" ] && noise="$survey_noise"
+  survey_busy_pct=""
+  safe_if="$(printf '%s' "$IF" | tr -c 'A-Za-z0-9_.-' '_')"
+  survey_prev="/tmp/dashapi2.survey.$safe_if"
+  if [ "$survey_active" -gt 0 ] 2>/dev/null; then
+    if [ -r "$survey_prev" ]; then
+      read old_active old_busy old_rx old_tx old_bss old_ts < "$survey_prev"
+      da=$((survey_active - old_active))
+      db=$((survey_busy - old_busy))
+      [ "$da" -lt 0 ] 2>/dev/null && da=0
+      [ "$db" -lt 0 ] 2>/dev/null && db=0
+      if [ "$da" -gt 0 ] 2>/dev/null; then
+        survey_busy_pct="$(awk -v b="$db" -v a="$da" 'BEGIN{v=b*100/a; if(v<0)v=0; if(v>100)v=100; printf "%.1f", v}')"
+      fi
+    fi
+    [ -n "$survey_busy_pct" ] || survey_busy_pct="$(awk -v b="$survey_busy" -v a="$survey_active" 'BEGIN{v=b*100/a; if(v<0)v=0; if(v>100)v=100; printf "%.1f", v}')"
+  fi
+  printf '%s %s %s %s %s %s\n' "$survey_active" "$survey_busy" "$survey_rx" "$survey_tx" "$survey_bss" "$now_s" > "$survey_prev" 2>/dev/null
+  if [ -n "$survey_busy_pct" ]; then
+    if [ -z "$health_busy_max" ] || awk -v b="$survey_busy_pct" -v m="$health_busy_max" 'BEGIN{exit !(b>m)}'; then
+      health_busy_max="$survey_busy_pct"
+    fi
+  fi
+  stations="$(station_json "$IF" "$noise")"
+  clients_w="$(printf '%s' "$stations" | grep -o '"mac"' | wc -l | tr -d ' ')"
+  [ "$wf" = 1 ] || wifi="$wifi,"
+  wifi="$wifi{\"iface\":$(jstr "$IF"),\"ssid\":$(jstr "$ssid"),\"mode\":$(jstr "$mode"),\"band\":$(jstr "$band"),\"channel\":$(jstr "$channel"),\"htmode\":$(jstr "$htmode"),\"signal_dbm\":$(jnum "$signal"),\"noise_dbm\":$(jnum "$noise"),\"bitrate_mbps\":$(jnum "$bitrate"),\"hw_modes\":$(jstr "$hw"),\"encryption\":$(jstr "$enc"),\"clients\":$(jnum "$clients_w"),\"up\":true,\"txpower\":{\"requested_dbm\":$(jnum "$tx_req"),\"applied_dbm\":$(jnum "$tx_applied"),\"max_dbm\":$(jnum "$tx_max"),\"source\":\"uci+iw\"},\"survey\":{\"source\":\"iw survey dump\",\"busy_pct\":$(jnum "$survey_busy_pct"),\"noise_dbm\":$(jnum "$noise"),\"active_ms\":$(jnum "$survey_active"),\"busy_ms\":$(jnum "$survey_busy"),\"receive_ms\":$(jnum "$survey_rx"),\"transmit_ms\":$(jnum "$survey_tx"),\"bss_receive_ms\":$(jnum "$survey_bss")},\"stations\":$stations}"
+  wf=0
+done
+wifi="$wifi]"
+
+# LIVE devices only — no phantoms. A wired device counts as PRESENT only while the
+# bridge FDB still holds its MAC on a port (the switch ages dead entries out within
+# minutes); stale ARP leftovers are dropped (ARP must be COMPLETE, flags 0x2).
+# Hostnames come from DHCP leases; the port column shows the physical port (lan1..).
+arp_rows="/tmp/dashapi2.arp.$$"
+fdb_live="/tmp/dashapi2.fdb.$$"
+lease_rows="/tmp/dashapi2.lease.$$"
+bridge fdb show 2>/dev/null | awk '$1 ~ /:/ && !/permanent/ && !/self/ {mac=tolower($1);dev="";for(k=1;k<=NF;k++)if($k=="dev")dev=$(k+1); if(dev!=""&&mac!="00:00:00:00:00:00")print mac"|"dev}' > "$fdb_live"
+awk 'NR>1 && $3=="0x2" && $4 ~ /:/ && $4!="00:00:00:00:00:00" && $1 ~ /\./ {print tolower($4) "|" $1 "|" $6 "|Ethernet|"}' /proc/net/arp 2>/dev/null > "$arp_rows"
+awk 'NF>=4{print tolower($2)"|"$4}' /tmp/dhcp.leases 2>/dev/null > "$lease_rows"
+devices_body="$(awk -F'|' '
+  FILENAME ~ /fdb/   { fdbport[$1]=$2; next }
+  FILENAME ~ /lease/ { lhost[$1]=$2; next }
+  FILENAME ~ /devices/ { wifi[$1]=1 }
+  { rows[NR]=$0 }
+  END{
+    n=0
+    for(i=1;i<=NR;i++){
+      if(rows[i]=="") continue
+      split(rows[i],f,"|"); mac=f[1]
+      if(mac=="" || seen[mac]) continue
+      if(!wifi[mac] && !(mac in fdbport)) continue
+      seen[mac]=1; n++
+      host=lhost[mac]; if(host=="*") host=""
+      port=f[3]; if(mac in fdbport) port=fdbport[mac]
+      printf "%s|%s|%s|%s|%s|%s\n", mac, f[2], port, f[4], f[5], host
+    }
+  }' "$fdb_live" "$lease_rows" "$device_rows" "$arp_rows" | while IFS='|' read -r mac ip iface typ sig host; do
+  [ -n "$mac" ] || continue
+  [ "$dfirst" = "" ] && dfirst=1
+  [ "$dfirst" = 1 ] || printf ','
+  printf '{"ip":%s,"mac":%s,"iface":%s,"type":%s,"host":%s,"signal":%s}' \
+    "$(jstr "$ip")" "$(jstr "$mac")" "$(jstr "$iface")" "$(jstr "$typ")" "$(jstr "$host")" "$(jnum "$sig")"
+  dfirst=0
+done)"
+devices="[$devices_body]"
+rm -f "$device_rows" "$arp_rows" "$fdb_live" "$lease_rows" 2>/dev/null
+clients="$(printf '%s' "$devices_body" | grep -o '"mac"' | wc -l | tr -d ' ')"
+[ -n "$clients" ] || clients=0
+
+mem_pct="$(awk -v t="$mt" -v a="$ma" 'BEGIN{if(t>0)printf "%d", (1-a/t)*100; else print 0}')"
+st_pct="$(awk -v t="$st_total" -v u="$st_used" 'BEGIN{if(t>0)printf "%d", (u/t)*100; else print 0}')"
+score=100
+[ "${cpu_pct:-0}" -gt 90 ] 2>/dev/null && score=$((score-10))
+[ "${mem_pct:-0}" -gt 90 ] 2>/dev/null && score=$((score-10))
+[ "${st_pct:-0}" -gt 90 ] 2>/dev/null && score=$((score-10))
+if [ -n "$temp_c" ]; then awk -v t="$temp_c" 'BEGIN{exit !(t>=70)}' && score=$((score-15)); fi
+[ "$score" -lt 0 ] && score=0
+if [ "$score" -ge 95 ]; then grade="excellent"; elif [ "$score" -ge 70 ]; then grade="ok"; else grade="weak"; fi
+health="{\"score\":$score,\"grade\":$(jstr "$grade"),\"busy_pct\":$(jnum "$health_busy_max"),\"reasons\":[{\"level\":\"ok\",\"ar\":\"الواجهة متزامنة مع قراءات النظام الحية\",\"en\":\"Dashboard is synced with live system counters\"}]}"
+
+# Performance pack live state (read from uci/sysfs so the dashboard shows the REAL config).
+pget() { uci -q get "$1" 2>/dev/null; }
+pb() { [ "$1" = "1" ] && echo true || echo false; }
+# perf JSON is ~24 uci/sysfs forks; cache it for 60s so fast dashboard polls don't burn CPU.
+perf_cache="/tmp/dashapi2.perf"
+perf=""
+if [ -r "$perf_cache" ]; then
+  pc_ts="$(sed -n '1p' "$perf_cache" 2>/dev/null)"
+  [ "$((uptime_s - ${pc_ts:-0}))" -lt 60 ] 2>/dev/null && perf="$(sed -n '2p' "$perf_cache" 2>/dev/null)"
+fi
+if [ -z "$perf" ]; then
+  drv_banner="$(dmesg 2>/dev/null | grep -oiE 'CR6608-RF-[0-9]+DBM[A-Za-z-]*' | tail -1)"; [ -n "$drv_banner" ] || drv_banner="$(logread 2>/dev/null | grep -oiE 'CR6608-RF-[0-9]+DBM[A-Za-z-]*' | tail -1)"
+  perf="{\"driver_banner\":$(jstr "$drv_banner"),\"txpower\":$(jnum "$(pget wireless.radio1.txpower)"),\"dynack\":$([ "$(pget wireless.radio0.distance)" = "auto" ] && echo true || echo false),\"ldpc\":$(pb "$(pget wireless.radio1.ldpc)"),\"stbc\":$(pb "$(pget wireless.radio1.tx_stbc)"),\"sgi\":$(pb "$(pget wireless.radio1.short_gi_80)"),\"su_bf\":$(pb "$(pget wireless.radio1.he_su_beamformer)"),\"mu_bf_he\":$(pb "$(pget wireless.radio1.he_mu_beamformer)"),\"mu_bf_vht\":$(pb "$(pget wireless.radio1.mu_beamformer)"),\"spatial_reuse\":$([ -n "$(pget wireless.radio1.he_spr_sr_control)" ] && echo true || echo false),\"bss_color\":$(pb "$(pget wireless.radio1.he_bss_color)"),\"airtime\":$(pb "$(pget wireless.radio0.airtime_mode)"),\"kv\":$(pb "$(pget wireless.wifinet0.ieee80211k)"),\"m2u\":$(pb "$(pget wireless.wifinet0.multicast_to_unicast)"),\"maxassoc\":$(jnum "$(pget wireless.wifinet0.maxassoc)"),\"max_inact\":$(jnum "$(pget wireless.wifinet0.max_inactivity)"),\"keep_weak\":$([ "$(pget wireless.wifinet0.disassoc_low_ack)" = "0" ] && echo true || echo false),\"hw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading_hw)"),\"sw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading)"),\"rps\":$(pb "$(pget network.globals.packet_steering)"),\"dns_cache\":$(jnum "$(pget dhcp.@dnsmasq[0].cachesize)"),\"fastopen\":$([ "$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null)" = "3" ] && echo true || echo false),\"backlog\":$(jnum "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)")}"
+  { echo "$uptime_s"; echo "$perf"; } > "$perf_cache" 2>/dev/null
+fi
+
+# Customer/device identity advertised to MikroTik Neighbor Discovery (MNDP).
+identity_enabled="$(pget smartap.identity.enabled)"; [ -n "$identity_enabled" ] || identity_enabled=1
+identity_customer="$(pget smartap.identity.customer_name)"
+identity_device="$(pget smartap.identity.device_name)"; [ -n "$identity_device" ] || identity_device="${host:-CR6608}"
+identity_phone="$(pget smartap.identity.phone)"
+identity_interval="$(pget smartap.identity.interval)"; [ -n "$identity_interval" ] || identity_interval=30
+neighbor_identity="$(sed -n '1p' /tmp/cr6608-mndp.fields 2>/dev/null)"
+if [ -z "$neighbor_identity" ]; then
+  neighbor_identity="$identity_device"
+  [ -n "$identity_customer" ] && neighbor_identity="$identity_customer | $neighbor_identity"
+  [ -n "$identity_phone" ] && neighbor_identity="$neighbor_identity | Tel:$identity_phone"
+fi
+neighbor_state="$(sed -n 's/^state=//p' /tmp/cr6608-neighbor.status 2>/dev/null | head -n1)"; [ -n "$neighbor_state" ] || neighbor_state="starting"
+neighbor_last="$(sed -n 's/^last_epoch=//p' /tmp/cr6608-neighbor.status 2>/dev/null | head -n1)"
+[ "$identity_enabled" = 1 ] && identity_enabled_json=true || identity_enabled_json=false
+identity="{\"enabled\":$identity_enabled_json,\"customer_name\":$(jstr "$identity_customer"),\"device_name\":$(jstr "$identity_device"),\"phone\":$(jstr "$identity_phone"),\"neighbor_identity\":$(jstr "$neighbor_identity"),\"protocol\":\"MNDP\",\"udp_port\":5678,\"interval_s\":$(jnum "$identity_interval"),\"state\":$(jstr "$neighbor_state"),\"last_epoch\":$(jnum "$neighbor_last")}" 
+
+if [ "$cache_owner" = "1" ]; then
+  cache_tmp="${response_cache}.$$"
+  exec 3>&1
+  exec > "$cache_tmp"
+  printf '%s\n' "$uptime_s"
+fi
+printf '{"ok":true,"hostname":%s,"model":%s,"board_name":"xiaomi,mi-router-cr6608","target":"ramips/mt7621","os":%s,"kernel":%s,"uptime":%s,"load":[%s,%s,%s],"cpu":{"cores":%s,"percent":%s,"source":"/proc/stat"},"mem":{"total":%s,"free":%s,"available":%s,"source":"/proc/meminfo"},"storage":{"total":%s,"used":%s,"available":%s,"source":"df -k /overlay"},"temperature_c":%s,"lan_ip":%s,"clients":%s,"backhaul":{"online":%s,"default_route":%s,"device":%s,"gateway":%s},"traffic":{"source":"/proc/net/dev","rx_bytes":%s,"tx_bytes":%s,"rx_bps":%s,"tx_bps":%s},"switch":{"mode":"Managed switch","ipv6_lan":false},"latency_ms":%s,"health":%s,"perf":%s,"identity":%s,"lte":{"available":false},"interfaces":%s,"wifi":%s,"devices":%s}\n' \
+  "$(jstr "$host")" "$(jstr "$model")" "$(jstr "$osver")" "$(jstr "$kernel")" "$(jnum "$uptime_s")" \
+  "$(jnum "$l1")" "$(jnum "$l5")" "$(jnum "$l15")" "$(jnum "$cpu_units")" "$(jnum "$cpu_pct")" \
+  "$(jnum "$mt")" "$(jnum "$mf")" "$(jnum "$ma")" "$(jnum "$st_total")" "$(jnum "$st_used")" "$(jnum "$st_avail")" "$(jnum "$temp_c")" \
+  "$(jstr "$lanip")" "$(jnum "$clients")" "$internet_online" "$(jstr "$default4")" "$(jstr "$default_dev")" "$(jstr "$default_gw")" \
+  "$(jnum "$traffic_rx")" "$(jnum "$traffic_tx")" "$(jnum "$rx_bps")" "$(jnum "$tx_bps")" "$(jnum "$latency_ms")" \
+  "$health" "$perf" "$identity" "$interfaces" "$wifi" "$devices"
+if [ "$cache_owner" = "1" ]; then
+  exec 1>&3 3>&-
+  mv "$cache_tmp" "$response_cache"
+  tail -n +2 "$response_cache"
+  cache_cleanup
+  cache_owner=0
+fi

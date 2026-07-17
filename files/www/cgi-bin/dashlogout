@@ -1,0 +1,64 @@
+#!/bin/sh
+
+reject_request() {
+	printf 'Status: %s\r\n' "$1"
+	[ "$1" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+	printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
+	printf '{"ok":false,"error":"%s"}\n' "$2"
+	exit 0
+}
+
+[ "${REQUEST_METHOD:-GET}" = POST ] || reject_request "405 Method Not Allowed" "method"
+body_len="${CONTENT_LENGTH:-0}"
+case "$body_len" in ''|*[!0-9]*) reject_request "400 Bad Request" "content_length" ;; esac
+[ "${#body_len}" -le 4 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+[ "$body_len" -le 4096 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+POST_DATA=""
+if [ "$body_len" -gt 0 ] 2>/dev/null; then
+	POST_DATA="$(head -c "$body_len" 2>/dev/null)"
+fi
+. /usr/libexec/cr6608-session-auth
+. /usr/share/libubox/jshn.sh
+redirect="$(printf '%s' "$POST_DATA" | tr '&' '\n' | sed -n 's/^redirect=//p' | head -n 1)"
+[ "$redirect" = 1 ] || redirect=0
+sid="$(cr6608_session_from_request)"
+
+valid_sid=0
+cr6608_valid_hex32 "$sid" && valid_sid=1
+
+revoke_failed=0
+if [ "$valid_sid" = 1 ]; then
+	if cr6608_luci_session_lock; then
+		cr6608_revoke_session_unlocked "$sid" || revoke_failed=1
+	else
+		revoke_failed=1
+	fi
+fi
+
+if [ "$revoke_failed" = 1 ]; then
+	printf 'Status: 503 Service Unavailable\r\n'
+	printf 'Content-Type: application/json\r\n'
+elif [ "$redirect" = 1 ]; then
+	printf 'Status: 303 See Other\r\n'
+	printf 'Location: /\r\n'
+	printf 'Content-Type: text/plain\r\n'
+else
+	printf 'Content-Type: application/json\r\n'
+fi
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf 'Referrer-Policy: no-referrer\r\n'
+printf 'Set-Cookie: cr6608_sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n'
+printf 'Set-Cookie: sysauth_http=; Path=/cgi-bin/luci; Max-Age=0; HttpOnly; SameSite=Strict\r\n'
+printf 'Set-Cookie: sysauth_http=; Path=/cgi-bin/luci/; Max-Age=0; HttpOnly; SameSite=Strict\r\n'
+printf 'Set-Cookie: sysauth_https=; Path=/cgi-bin/luci; Max-Age=0; Secure; HttpOnly; SameSite=Strict\r\n'
+printf 'Set-Cookie: sysauth_https=; Path=/cgi-bin/luci/; Max-Age=0; Secure; HttpOnly; SameSite=Strict\r\n'
+printf '\r\n'
+
+if [ "$revoke_failed" = 1 ]; then
+	printf '{"ok":false,"error":"revocation_failed"}\n'
+elif [ "$redirect" = 1 ]; then
+	printf 'See Other\n'
+else
+	printf '{"ok":true}\n'
+fi

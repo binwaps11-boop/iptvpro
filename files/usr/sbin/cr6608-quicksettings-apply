@@ -1,0 +1,1149 @@
+#!/bin/sh
+
+CFG="cr6608quick.default"
+CONFIG_DIR="${CR6608_CONFIG_DIR:-/etc/config}"
+BACKUP_DIR="${CR6608_BACKUP_DIR:-/root/cr6608-quicksettings-backups}"
+LIB_DIR="${CR6608_LIB_DIR:-/usr/libexec}"
+SYS_CLASS_NET="${CR6608_SYS_CLASS_NET:-/sys/class/net}"
+TMP_DIR="${CR6608_TMP_DIR:-/tmp}"
+INITD_DIR="${CR6608_INITD_DIR:-/etc/init.d}"
+CR6608_SBIN_DIR="${CR6608_SBIN_DIR:-/usr/sbin}"
+RESET_FILE="${CR6608_RESET_FILE:-/etc/rc.button/reset}"
+RESET_ORIG="${CR6608_RESET_ORIG:-${RESET_FILE}.smartap-orig}"
+UCI_BIN="${CR6608_UCI_BIN:-/sbin/uci}"
+JSONFILTER_BIN="${CR6608_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+UBUS_BIN="${CR6608_UBUS_BIN:-/bin/ubus}"
+LOGGER_BIN="${CR6608_LOGGER_BIN:-logger}"
+PASSWD_BIN="${CR6608_PASSWD_BIN:-passwd}"
+WIFI_BIN="${CR6608_WIFI_BIN:-wifi}"
+REQUEST_FILE="${CR6608_QUICK_REQUEST_FILE:-}"
+PASSWORD_FILE="${CR6608_ADMIN_PASSWORD_FILE:-}"
+DRY_RUN="${CR6608_DRY_RUN:-0}"
+UCI_PACKAGES="network wireless dhcp firewall cr6608quick smartap"
+TX_DIR=""
+TX_ARCHIVE=""
+TX_ACTIVE=0
+TX_OLD_FIREWALL=0
+TX_OLD_SECURITY=0
+TX_RESET_ORIG_EXISTED=0
+TX_SMARTAP_EXISTED=0
+TX_QUICK_EXISTED=0
+TX_RESET_EXISTED=0
+TX_OLD_MANAGEMENT_IP=""
+TX_OLD_MANAGEMENT_NETMASK="255.255.255.0"
+SAFE_ARMED=0
+SAFE_TOKEN=""
+MUTATION_FAILED=0
+wireless_backup=""
+
+export LC_ALL=C
+set -f
+
+# Track failed mandatory UCI mutations even when callers intentionally continue.
+uci() {
+	local action="" arg rc
+	"$UCI_BIN" "$@"
+	rc=$?
+	for arg in "$@"; do
+		case "$arg" in -*) ;; *) action="$arg"; break ;; esac
+	done
+	case "$action" in
+		set|add|add_list)
+			if [ "$rc" -ne 0 ]; then
+				MUTATION_FAILED=1
+				log "mandatory UCI mutation failed: $action"
+			fi
+			;;
+	esac
+	return "$rc"
+}
+
+[ -r "$LIB_DIR/cr6608-txpower-lib" ] && . "$LIB_DIR/cr6608-txpower-lib"
+[ -r "$LIB_DIR/cr6608-vlan-lib" ] && . "$LIB_DIR/cr6608-vlan-lib"
+[ -r "$LIB_DIR/cr6608-session-auth" ] && . "$LIB_DIR/cr6608-session-auth"
+
+qget() {
+	uci -q get "$1" 2>/dev/null || true
+}
+
+log() {
+	"$LOGGER_BIN" -t cr6608-quicksettings "$*" 2>/dev/null || true
+}
+
+valid_ip() {
+	local old_ifs octet
+	case "$1" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+	old_ifs="$IFS"; IFS=.; set -- $1; IFS="$old_ifs"
+	[ "$#" -eq 4 ] || return 1
+	for octet in "$@"; do
+		case "$octet" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+		[ "$octet" -ge 0 ] 2>/dev/null && [ "$octet" -le 255 ] 2>/dev/null || return 1
+	done
+	return 0
+}
+
+valid_management_ip() {
+	local first
+	valid_ip "$1" || return 1
+	first="${1%%.*}"
+	case "$first" in 0|127|22[4-9]|23[0-9]|24[0-9]|25[0-5]) return 1 ;; esac
+	return 0
+}
+
+valid_netmask() {
+	case "$1" in
+		128.0.0.0|192.0.0.0|224.0.0.0|240.0.0.0|248.0.0.0|252.0.0.0|254.0.0.0|255.0.0.0|\
+		255.128.0.0|255.192.0.0|255.224.0.0|255.240.0.0|255.248.0.0|255.252.0.0|255.254.0.0|255.255.0.0|\
+		255.255.128.0|255.255.192.0|255.255.224.0|255.255.240.0|255.255.248.0|255.255.252.0|255.255.254.0|255.255.255.0|\
+		255.255.255.128|255.255.255.192|255.255.255.224|255.255.255.240|255.255.255.248|255.255.255.252) return 0 ;;
+	esac
+	return 1
+}
+
+valid_management_host() {
+	local address="$1" netmask="$2" calculated network broadcast
+	valid_management_ip "$address" && valid_netmask "$netmask" || return 1
+	calculated="$(/bin/ipcalc.sh "$address" "$netmask" 2>/dev/null)" || return 1
+	network="$(printf '%s\n' "$calculated" | sed -n 's/^NETWORK=//p' | head -n 1)"
+	broadcast="$(printf '%s\n' "$calculated" | sed -n 's/^BROADCAST=//p' | head -n 1)"
+	[ -n "$network" ] && [ -n "$broadcast" ] && \
+		[ "$address" != "$network" ] && [ "$address" != "$broadcast" ]
+}
+
+valid_vlan() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 2 ] 2>/dev/null && [ "$1" -le 4094 ] 2>/dev/null
+}
+
+valid_ch5() {
+	case "$1" in auto) return 0 ;; ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 30 ] 2>/dev/null && [ "$1" -le 196 ] 2>/dev/null
+}
+
+valid_text() {
+	local value="$1" max="$2"
+	[ "${#value}" -le "$max" ] 2>/dev/null || return 1
+	[ -z "$value" ] || ! printf '%s' "$value" | grep -q '[[:cntrl:]]'
+}
+
+canonical_bool() {
+	case "$1" in
+		1|on|true|yes|enabled) printf '1' ;;
+		0|off|false|no|disabled) printf '0' ;;
+		'') printf '%s' "$2" ;;
+		*) return 1 ;;
+	esac
+}
+
+valid_txpower() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 38 ] 2>/dev/null
+}
+
+bool_on() {
+	case "$1" in
+		1|on|true|yes|enabled) return 0 ;;
+	esac
+	return 1
+}
+
+valid_country() {
+	case "$1" in [A-Z0-9][A-Z0-9]) return 0 ;; esac
+	return 1
+}
+
+country_supported() {
+	local radio="$1" code="$2" data match
+	data="$("$UBUS_BIN" call iwinfo countrylist "{\"device\":\"$radio\"}" 2>/dev/null)" || return 1
+	match="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.iso3166=\"$code\"].iso3166" 2>/dev/null | head -n 1)"
+	[ "$match" = "$code" ]
+}
+
+channel_supported() {
+	local radio="$1" channel="$2" data reported restricted disabled flags
+	[ "$channel" = "auto" ] && return 0
+	data="$("$UBUS_BIN" call iwinfo freqlist "{\"device\":\"$radio\"}" 2>/dev/null)" || return 1
+	reported="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].channel" 2>/dev/null | head -n 1)"
+	restricted="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].restricted" 2>/dev/null | head -n 1)"
+	disabled="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].disabled" 2>/dev/null | head -n 1)"
+	flags="$(printf '%s\n' "$data" | "$JSONFILTER_BIN" -e "@.results[@.channel=$channel].flags[*]" 2>/dev/null | tr 'A-Z' 'a-z')"
+	case "$disabled" in true|1) return 1 ;; esac
+	case " $flags " in *" disabled "*) return 1 ;; esac
+	[ "$reported" = "$channel" ] && [ "$restricted" = "false" ]
+}
+
+valid_ch24() {
+	case "$1" in
+		auto|1|2|3|4|5|6|7|8|9|10|11|12|13) return 0 ;;
+	esac
+	return 1
+}
+
+valid_wpa_key() {
+	local key="$1" len="${#1}"
+	if [ "$len" -ge 8 ] 2>/dev/null && [ "$len" -le 63 ] 2>/dev/null; then
+		valid_text "$key" 63
+		return $?
+	fi
+	if [ "$len" -eq 64 ] 2>/dev/null; then
+		case "$key" in *[!0-9A-Fa-f]*) return 1 ;; *) return 0 ;; esac
+	fi
+	return 1
+}
+
+secure_temp_file() {
+	local path="$1" size mode
+	[ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+	if [ "$DRY_RUN" != "1" ]; then
+		type cr6608_path_owned_by_root >/dev/null 2>&1 || return 1
+		cr6608_path_owned_by_root "$path" || return 1
+		mode="$(cr6608_path_permissions "$path")"
+		case "$mode" in -r--------|-rw-------) ;; *) return 1 ;; esac
+	fi
+	size="$(wc -c < "$path" 2>/dev/null | tr -d ' ')"
+	case "$size" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$size" -le 32768 ] 2>/dev/null
+}
+
+rget() {
+	[ -n "$REQUEST_FILE" ] || return 0
+	"$JSONFILTER_BIN" -i "$REQUEST_FILE" -e "@.$1" 2>/dev/null | head -n1
+}
+
+setting() {
+	local value
+	value="$(rget "$1")"
+	if [ -n "$value" ]; then
+		printf '%s' "$value"
+	else
+		qget "$CFG.${2:-$1}"
+	fi
+}
+
+transaction_begin() {
+	local pkg archive stamp pending extra target
+	for pkg in $UCI_PACKAGES; do
+		pending="$(uci -q changes "$pkg" 2>/dev/null)"
+		if [ -n "$pending" ]; then
+			log "refusing to merge pre-existing UCI delta for package $pkg"
+			return 1
+		fi
+	done
+
+	umask 077
+	TX_DIR="$(mktemp -d "$TMP_DIR/cr6608-quicksettings.XXXXXX" 2>/dev/null)" || return 1
+	mkdir -p "$TX_DIR/root/etc/config" "$TX_DIR/missing" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+	[ -e "$CONFIG_DIR/smartap" ] && TX_SMARTAP_EXISTED=1 || TX_SMARTAP_EXISTED=0
+	[ -e "$CONFIG_DIR/cr6608quick" ] && TX_QUICK_EXISTED=1 || TX_QUICK_EXISTED=0
+	[ -e "$RESET_FILE" ] && TX_RESET_EXISTED=1 || TX_RESET_EXISTED=0
+	[ -e "$RESET_ORIG" ] && TX_RESET_ORIG_EXISTED=1 || TX_RESET_ORIG_EXISTED=0
+	"$INITD_DIR/firewall" enabled >/dev/null 2>&1 && TX_OLD_FIREWALL=1 || TX_OLD_FIREWALL=0
+	"$INITD_DIR/cr6608-security" enabled >/dev/null 2>&1 && TX_OLD_SECURITY=1 || TX_OLD_SECURITY=0
+	TX_OLD_MANAGEMENT_IP="$(qget network.lan.ipaddr)"
+	TX_OLD_MANAGEMENT_NETMASK="$(qget network.lan.netmask)"
+	[ -n "$TX_OLD_MANAGEMENT_NETMASK" ] || TX_OLD_MANAGEMENT_NETMASK=255.255.255.0
+	for pkg in $UCI_PACKAGES; do
+		if [ -f "$CONFIG_DIR/$pkg" ]; then
+			cp -p "$CONFIG_DIR/$pkg" "$TX_DIR/root/etc/config/$pkg" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+		else
+			: > "$TX_DIR/missing/$pkg" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+		fi
+	done
+	for extra in /etc/passwd /etc/shadow "$RESET_FILE" "$RESET_ORIG"; do
+		[ -e "$extra" ] || continue
+		target="$TX_DIR/root$extra"
+		mkdir -p "$(dirname "$target")" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+		cp -p "$extra" "$target" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+	done
+
+	mkdir -p "$BACKUP_DIR" || { rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+	stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null)"
+	[ -n "$stamp" ] || stamp="unknown"
+	archive="$BACKUP_DIR/config-before-${stamp}-$$.tgz"
+	tar -czf "$archive.tmp" -C "$TX_DIR/root" etc 2>/dev/null || {
+		rm -f "$archive.tmp"; rm -rf "$TX_DIR"; TX_DIR=""; return 1;
+	}
+	mv -f "$archive.tmp" "$archive" || { rm -f "$archive.tmp"; rm -rf "$TX_DIR"; TX_DIR=""; return 1; }
+	TX_ARCHIVE="$archive"
+	TX_ACTIVE=1
+	ls -1t "$BACKUP_DIR"/config-before-*.tgz 2>/dev/null | sed -n '11,$p' | while IFS= read -r old; do rm -f "$old"; done
+	return 0
+}
+
+transaction_restore_runtime() {
+	local failed=0
+	"$INITD_DIR/network" reload >/dev/null 2>&1 || failed=1
+	"$WIFI_BIN" reload >/dev/null 2>&1 || failed=1
+	"$INITD_DIR/dnsmasq" restart >/dev/null 2>&1 || failed=1
+	if [ "$TX_OLD_SECURITY" = "1" ]; then
+		"$INITD_DIR/cr6608-security" enable >/dev/null 2>&1 || failed=1
+		if [ -x "$CR6608_SBIN_DIR/cr6608-security-apply" ]; then "$CR6608_SBIN_DIR/cr6608-security-apply" boot >/dev/null 2>&1 || failed=1; fi
+	else
+		"$INITD_DIR/cr6608-security" disable >/dev/null 2>&1 || failed=1
+		if [ -x "$CR6608_SBIN_DIR/cr6608-security-apply" ]; then "$CR6608_SBIN_DIR/cr6608-security-apply" clear-runtime >/dev/null 2>&1 || failed=1; fi
+	fi
+	if [ "$TX_OLD_FIREWALL" = "1" ]; then
+		"$INITD_DIR/firewall" enable >/dev/null 2>&1 || failed=1
+		"$INITD_DIR/firewall" start >/dev/null 2>&1 || failed=1
+		"$INITD_DIR/firewall" reload >/dev/null 2>&1 || failed=1
+	else
+		"$INITD_DIR/firewall" disable >/dev/null 2>&1 || failed=1
+		"$INITD_DIR/firewall" stop >/dev/null 2>&1 || failed=1
+	fi
+	[ "$failed" = "0" ]
+}
+
+transaction_rollback() {
+	local pkg failed=0
+	[ "$TX_ACTIVE" = "1" ] || return 0
+	for pkg in $UCI_PACKAGES; do uci -q revert "$pkg" >/dev/null 2>&1 || true; done
+	for pkg in $UCI_PACKAGES; do
+		if [ -f "$TX_DIR/missing/$pkg" ]; then
+			rm -f "$CONFIG_DIR/$pkg" || failed=1
+		else
+			cp -pf "$TX_DIR/root/etc/config/$pkg" "$CONFIG_DIR/$pkg" || failed=1
+		fi
+	done
+	for extra in /etc/passwd /etc/shadow; do
+		if [ -f "$TX_DIR/root$extra" ]; then cp -pf "$TX_DIR/root$extra" "$extra" || failed=1; fi
+	done
+	if [ "$TX_RESET_EXISTED" = "1" ]; then cp -pf "$TX_DIR/root$RESET_FILE" "$RESET_FILE" || failed=1; else rm -f "$RESET_FILE" || failed=1; fi
+	if [ "$TX_RESET_ORIG_EXISTED" = "1" ]; then cp -pf "$TX_DIR/root$RESET_ORIG" "$RESET_ORIG" || failed=1; else rm -f "$RESET_ORIG" || failed=1; fi
+	for pkg in $UCI_PACKAGES; do uci -q revert "$pkg" >/dev/null 2>&1 || true; done
+	if [ "$failed" = "0" ]; then
+		transaction_restore_runtime || failed=1
+	fi
+	[ "$failed" = "0" ] && safe_cancel
+	TX_ACTIVE=0
+	rm -rf "$TX_DIR"; TX_DIR=""
+	[ "$failed" = "0" ] || { log "UCI rollback was incomplete"; return 1; }
+	log "restored all UCI packages after failed apply"
+	return 0
+}
+
+transaction_finish() {
+	TX_ACTIVE=0
+	[ -n "$TX_DIR" ] && rm -rf "$TX_DIR"
+	TX_DIR=""
+	return 0
+}
+
+safe_arm_transaction() {
+	[ -x "$CR6608_SBIN_DIR/cr6608-safe-apply" ] || return 1
+	[ -n "$TX_ARCHIVE" ] || return 1
+	SAFE_TOKEN="$("$CR6608_SBIN_DIR/cr6608-safe-apply" arm "$TX_ARCHIVE" \
+		"$TX_OLD_FIREWALL" "$TX_RESET_ORIG_EXISTED" "$TX_SMARTAP_EXISTED" \
+		"$TX_QUICK_EXISTED" "$TX_RESET_EXISTED" "$TX_OLD_SECURITY" 120 2>/dev/null)" || return 1
+	case "$SAFE_TOKEN" in ''|*[!0-9a-f]*) return 1 ;; esac
+	[ "${#SAFE_TOKEN}" -eq 32 ] 2>/dev/null || return 1
+	SAFE_ARMED=1
+}
+
+safe_cancel() {
+	[ "$SAFE_ARMED" = "1" ] || return 0
+	"$CR6608_SBIN_DIR/cr6608-safe-apply" confirm "$SAFE_TOKEN" >/dev/null 2>&1 || true
+	SAFE_ARMED=0
+}
+
+trap 'transaction_rollback >/dev/null 2>&1 || true; [ -n "$wireless_backup" ] && rm -f "$wireless_backup"' EXIT
+trap 'transaction_rollback >/dev/null 2>&1 || true; exit 130' HUP INT TERM
+
+ensure_wifi_iface() {
+	local sid="$1" radio="$2" ssid="$3"
+	uci -q get wireless."$sid" >/dev/null 2>&1 || uci set wireless."$sid"='wifi-iface'
+	uci set wireless."$sid".device="$radio"
+	uci set wireless."$sid".mode='ap'
+	uci set wireless."$sid".network='lan'
+	uci set wireless."$sid".ssid="$ssid"
+	uci set wireless."$sid".disabled='0'
+	uci set wireless."$sid".wmm='1'
+	[ -n "$(uci -q get wireless."$sid".isolate 2>/dev/null)" ] || uci set wireless."$sid".isolate='0'
+	uci set wireless."$sid".disassoc_low_ack='0'
+	uci set wireless."$sid".max_inactivity='3600'
+	uci set wireless."$sid".multicast_to_unicast='1'
+	uci set wireless."$sid".dtim_period='2'
+	uci set wireless."$sid".ieee80211k='1'
+	uci set wireless."$sid".ieee80211v='1'
+	# hide/broadcast SSID (was stored but never applied to the client APs)
+	if [ "$hide" = "1" ]; then uci set wireless."$sid".hidden='1'; else uci -q delete wireless."$sid".hidden; fi
+}
+
+set_security() {
+	local sid="$1" security="$2" key="$3"
+	case "$security" in
+		wpa2)
+			uci set wireless."$sid".encryption='psk2'
+			uci set wireless."$sid".key="$key"
+			;;
+		wpa3)
+			uci set wireless."$sid".encryption='sae'
+			uci set wireless."$sid".key="$key"
+			;;
+		mixed)
+			uci set wireless."$sid".encryption='sae-mixed'
+			uci set wireless."$sid".key="$key"
+			;;
+		open)
+			uci set wireless."$sid".encryption='none'
+			uci -q delete wireless."$sid".key
+			uci -q delete "$CFG.wifi_key" 2>/dev/null
+			;;
+		*)
+			log "internal error: unsupported security mode rejected"
+			return 1
+			;;
+	esac
+}
+
+bridge_config() {
+	if type cr6608_bridge_config >/dev/null 2>&1; then
+		cr6608_bridge_config
+		return
+	fi
+	uci -q show network 2>/dev/null | sed -n "s/^\(network\.[^.=]*\)\.name='br-lan'$/\1/p" | head -n 1
+}
+
+bridge_add_port() {
+	local bridge
+	bridge="$(bridge_config)" || return 1
+	[ -n "$bridge" ] || return 1
+	uci add_list "$bridge.ports=$1"
+}
+
+has_lan_port() {
+	local bridge
+	bridge="$(bridge_config)" || return 1
+	uci -q get "$bridge.ports" | tr ' ' '\n' | grep -qx "$1"
+}
+
+strip_port_from_bridge() {
+	local port="$1" idx=0 member bridge
+	case "$port" in wan|lan1|lan2|lan3) ;; *) return 2 ;; esac
+	bridge="$(bridge_config)" || return 1
+	[ -n "$bridge" ] || return 1
+	uci -q del_list "$bridge.ports=$port" 2>/dev/null || true
+	while [ "$(uci -q get "network.@bridge-vlan[$idx]" 2>/dev/null)" = "bridge-vlan" ]; do
+		for member in $(uci -q get "network.@bridge-vlan[$idx].ports" 2>/dev/null); do
+			case "$member" in "$port"|"$port":*) uci -q del_list "network.@bridge-vlan[$idx].ports=$member" 2>/dev/null || true ;; esac
+		done
+		idx=$((idx + 1))
+	done
+}
+
+port_is_excluded() {
+	local port="$1" idx=0 member
+	case "$port" in wan|lan1|lan2|lan3) ;; *) return 2 ;; esac
+	has_lan_port "$port" && return 1
+	while [ "$(uci -q get "network.@bridge-vlan[$idx]" 2>/dev/null)" = "bridge-vlan" ]; do
+		for member in $(uci -q get "network.@bridge-vlan[$idx].ports" 2>/dev/null); do
+			case "$member" in "$port"|"$port":*) return 1 ;; esac
+		done
+		idx=$((idx + 1))
+	done
+	return 0
+}
+
+strip_wan_from_bridge() { strip_port_from_bridge wan; }
+wan_is_excluded() { port_is_excluded wan; }
+
+cleanup_previous() {
+	local cleanup_zone cleanup_network
+	uci -q delete wireless.cr6608_mesh
+	uci -q delete wireless.cr6608_wds
+	uci -q delete wireless.smartap_mesh
+	uci -q delete wireless.smartap_wds
+	uci -q delete wireless.smartap_guest
+	uci -q delete network.guest
+	uci -q delete network.mesh
+	uci -q delete network.smartap_vlan
+	uci -q delete network.smartap_vdev
+	uci -q delete dhcp.guest
+	uci -q delete dhcp.mesh
+	uci -q delete dhcp.smartap_vlan
+	uci -q delete dhcp.cr6608_vlan
+	for cleanup_zone in $(uci show firewall 2>/dev/null | awk -F'[.=]' "/\\.name='lan'/{print \$2}"); do
+		for cleanup_network in guest mesh smartap_vlan cr6608_vlan; do
+			uci -q del_list "firewall.$cleanup_zone.network=$cleanup_network" 2>/dev/null || true
+		done
+	done
+	clear_vlan
+}
+
+# clear_vlan — revert to a plain (non-filtering) bridge with management on br-lan.
+# Removes every SmartAP quick-VLAN artifact so a non-VLAN mode connects normally.
+clear_vlan() {
+	local _br
+	_br="$(bridge_config)" || return 1
+	[ -n "$_br" ] || return 1
+	uci -q delete network.cr6608_vlan
+	uci -q delete network.cr6608_vlan_dev
+	# also tear down the LEGACY 8021q model (old dashboard builds): tagged wan.<vid>
+	# bridge member + its device section — leftovers bridge tagged+untagged wan together.
+	uci -q delete network.smartap_wandev
+	for _lp in $(uci -q get "$_br.ports" 2>/dev/null | tr ' ' '\n' | grep '^wan\.'); do
+		uci -q del_list "$_br.ports=$_lp"
+	done
+	uci -q delete "$_br.vlan_filtering"
+	# management interface back on the plain bridge
+	uci set network.lan.device='br-lan'
+	# recovery interface back on the plain bridge if it was moved
+	uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='@lan'
+	# Wi-Fi rescue 221.221.221.221 back on the plain bridge (it follows the Wi-Fi clients)
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device='br-lan'
+	# drop any SmartAP quick bridge-vlan sections
+	if type cr6608_clear_port_vlans >/dev/null 2>&1; then
+		cr6608_clear_port_vlans || return 1
+	else
+		while uci -q show network 2>/dev/null | grep -q "\.name='SmartAP-qvlan"; do
+			local idx
+			idx="$(uci show network 2>/dev/null | sed -n "s/^network\.\(@bridge-vlan\[[0-9]*\]\)\.name='SmartAP-qvlan.*/\1/p" | head -n1)"
+			[ -n "$idx" ] || break
+			uci -q delete "network.$idx" || break
+			done
+	fi
+	# Quick Settings owns a LAN-only switch. WAN remains reserved for PPPoE.
+	has_lan_port lan1 || bridge_add_port lan1
+	has_lan_port lan2 || bridge_add_port lan2
+	has_lan_port lan3 || bridge_add_port lan3
+	strip_wan_from_bridge
+}
+
+set_ap_ports() {
+	has_lan_port lan1 || bridge_add_port lan1
+	has_lan_port lan2 || bridge_add_port lan2
+	has_lan_port lan3 || bridge_add_port lan3
+	strip_wan_from_bridge
+	# fully remove any PPPoE client when leaving broadband mode
+	if uci -q get network.wan >/dev/null 2>&1; then
+		[ "$(uci -q get network.wan.proto)" = "pppoe" ] && { uci set network.wan.proto='none'; uci -q delete network.wan.username; uci -q delete network.wan.password; }
+		uci set network.wan.disabled='1'
+		uci set network.wan.auto='0'
+	fi
+}
+
+set_pppoe_wan() {
+	local user="$1" pass="$2" port="$3" old_port
+	[ -n "$port" ] || port='wan'
+	old_port="$(uci -q get network.wan.device 2>/dev/null)"
+	case "$old_port" in lan1|lan2|lan3)
+		[ "$old_port" = "$port" ] || { has_lan_port "$old_port" || bridge_add_port "$old_port"; }
+		;;
+	esac
+	strip_port_from_bridge "$port" || return 1
+	strip_wan_from_bridge
+	uci set network.wan='interface'
+	uci set network.wan.device="$port"
+	uci set network.wan.proto='pppoe'
+	uci set network.wan.username="$user"
+	[ -n "$pass" ] && uci set network.wan.password="$pass"
+	uci set network.wan.ipv6='0'
+	uci set network.wan.disabled='0'
+	uci set network.wan.auto='1'
+}
+
+# set_vlan_target — correct DSA (MT7621) VLAN for "AP on a VLAN".
+#   * Management VLAN 1 stays UNTAGGED (native/pvid) on each LAN switch port, so the
+#     dashboard IP the user set is reachable over any LAN cable.
+#   * The client VLAN <vid> is TAGGED on participating LAN ports; WAN stays reserved.
+#   * Both Wi-Fi radios join the client VLAN (their network is set to cr6608_vlan by
+#     the caller), so 2.4G and 5G clients live inside <vid> and get their IPs from the
+#     upstream Mikrotik DHCP on that VLAN.
+# Uses bridge-VLAN filtering (the DSA way) — NOT an 8021q device stacked on the bridge.
+set_vlan_target() {
+	local vid="$1" ignore_policy="${2:-0}" p m c bridge
+	valid_vlan "$vid" || return 1
+
+	# start from a clean slate (removes any stale 8021q or prior quick-VLAN artifacts)
+	clear_vlan
+
+	# The shared library supplies per-LAN-port access/trunk/plain policy. Its legacy
+	# WAN membership is stripped below because WAN is reserved for PPPoE.
+	if type cr6608_apply_port_vlans >/dev/null 2>&1; then
+		cr6608_apply_port_vlans "$vid" "$ignore_policy" || return 1
+	else
+		# fallback (lib missing): legacy layout — mgmt untagged everywhere + $vid tagged
+		bridge="$(bridge_config)" || return 1
+		[ -n "$bridge" ] || return 1
+		uci set "$bridge.vlan_filtering=1"
+		m="$(uci add network bridge-vlan)"
+		uci set "network.$m.name=SmartAP-qvlan-mgmt"; uci set "network.$m.device=br-lan"; uci set "network.$m.vlan=1"
+		for p in lan1 lan2 lan3; do [ -d "$SYS_CLASS_NET/$p" ] && uci add_list "network.$m.ports=$p:u*"; done
+		c="$(uci add network bridge-vlan)"
+		uci set "network.$c.name=SmartAP-qvlan-client"; uci set "network.$c.device=br-lan"; uci set "network.$c.vlan=$vid"
+		for p in lan1 lan2 lan3; do [ -d "$SYS_CLASS_NET/$p" ] && uci add_list "network.$c.ports=$p:t"; done
+		uci set network.lan.device='br-lan.1'
+		uci -q get network.recovery >/dev/null 2>&1 && uci set network.recovery.device='br-lan.1'
+	fi
+	strip_wan_from_bridge
+
+	# client L3 interface Wi-Fi bridges into; no IP (clients use the upstream DHCP)
+	uci set network.cr6608_vlan='interface'
+	uci set network.cr6608_vlan.device="br-lan.$vid"
+	uci set network.cr6608_vlan.proto='none'
+	# The Wi-Fi rescue IP 221.221.221.221 must FOLLOW the Wi-Fi clients into the client
+	# VLAN — phones live inside <vid>, so if 221 stayed on the management side they could
+	# never open the programming page while the unit is programmed AP+VLAN.
+	uci -q get network.wlanrescue >/dev/null 2>&1 && uci set network.wlanrescue.device="br-lan.$vid"
+	return 0
+}
+
+set_reset_button() {
+	local lock="$1" custom="$2" seconds="$3" mode="$4"
+	[ "$DRY_RUN" = "1" ] && { log "dry-run: reset-button side effect deferred"; return 0; }
+	if bool_on "$lock"; then
+		[ -f "$RESET_ORIG" ] || cp -f "$RESET_FILE" "$RESET_ORIG" 2>/dev/null || return 1
+		cat > "$RESET_FILE" <<'EOS'
+#!/bin/sh
+logger -t cr6608-reset "Reset button is locked by quick settings"
+exit 0
+EOS
+		chmod 0755 "$RESET_FILE" || return 1
+		return 0
+	fi
+	if [ "$mode" = "reboot" ]; then
+		[ -f "$RESET_ORIG" ] || cp -f "$RESET_FILE" "$RESET_ORIG" 2>/dev/null || return 1
+		cat > "$RESET_FILE" <<'EOS'
+#!/bin/sh
+logger -t cr6608-reset "Reset button requested reboot-only mode"
+reboot
+EOS
+		chmod 0755 "$RESET_FILE" || return 1
+		return 0
+	fi
+	if [ -f "$RESET_ORIG" ]; then
+		cp -f "$RESET_ORIG" "$RESET_FILE" || return 1
+		chmod 0755 "$RESET_FILE" || return 1
+	fi
+	if bool_on "$custom"; then
+		log "custom reset timer requested: ${seconds:-15}s"
+	fi
+	return 0
+}
+
+apply_config() {
+	local mode ip netmask ssid ssid5 ch24 ch5 vlan mesh_id wds_ssid hide security key
+	local pppoe_user pppoe_pass pppoe_port dhcp_server firewall_enabled reset_lock reset_custom reset_seconds reset_mode
+	local admin_password change_password clear_previous target_network txp0 txp1 country24 country5 active_country24 active_country5 radio0_enabled radio1_enabled cc_all txp_all
+	local pre_net post_net pre_w0 pre_w1 pre_wx post_w0 post_w1 post_wx w0 w1 pre_dhcp pre_fw pre_firewall_enabled=0 network_changed=0
+	local htmode24 htmode5 mesh_role fake_mesh nat_enabled broadband_enabled security_enabled ignore_port_policy watchcat_enabled
+	local pkg pm post_rc=0 service_failed=0 pw_size _z management_device
+
+	if [ -n "$REQUEST_FILE" ]; then
+		secure_temp_file "$REQUEST_FILE" || { log "rejected insecure quick-settings request file"; return 2; }
+		"$JSONFILTER_BIN" -i "$REQUEST_FILE" -e '@' >/dev/null 2>&1 || { log "rejected malformed quick-settings request"; return 2; }
+	fi
+
+	mode="$(setting mode)"; [ -n "$mode" ] || mode='ap'
+	[ "$mode" = "pppoe_ap" ] && mode='pppoe'
+	ip="$(setting lan_ipaddr)"; netmask="$(setting lan_netmask)"
+	[ -n "$ip" ] || ip="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+	[ -n "$ip" ] || ip='192.168.1.1'
+	[ -n "$netmask" ] || netmask="$(uci -q get network.lan.netmask 2>/dev/null)"
+	[ -n "$netmask" ] || netmask='255.255.255.0'
+	ssid="$(setting ssid)"; ssid5="$(setting ssid5)"
+	[ -n "$ssid" ] || ssid='Smart ap 2.4G'
+	[ -n "$ssid5" ] || ssid5="${ssid}-5G"
+	ch24="$(setting channel24)"; ch5="$(setting channel5)"
+	country24="$(setting country24)"; country5="$(setting country5)"
+	cc_all="$(setting country)"
+	[ -n "$country24" ] || country24="$cc_all"
+	[ -n "$country5" ] || country5="$cc_all"
+	country24="$(printf '%s' "$country24" | tr a-z A-Z)"
+	country5="$(printf '%s' "$country5" | tr a-z A-Z)"
+	vlan="$(setting vlan_id)"; mesh_id="$(setting mesh_id)"; wds_ssid="$(setting wds_ssid)"
+	hide="$(setting hide_ssid)"; security="$(setting security)"; key="$(setting wifi_key)"
+	pppoe_user="$(setting pppoe_user)"; pppoe_pass="$(setting pppoe_pass)"; pppoe_port="$(setting pppoe_port)"
+	[ -n "$pppoe_port" ] || pppoe_port='wan'
+	htmode24="$(setting htmode24)"; htmode5="$(setting htmode5)"
+	[ -n "$htmode24" ] || htmode24='HE20'
+	[ -n "$htmode5" ] || htmode5='HE80'
+	mesh_role="$(setting mesh_role)"; [ -n "$mesh_role" ] || mesh_role='sender'
+	security_enabled="$(uci -q get smartap.security.enabled 2>/dev/null)"; [ -n "$security_enabled" ] || security_enabled=1
+	[ "$security_enabled" = "1" ] && ignore_port_policy=0 || ignore_port_policy=1
+	reset_seconds="$(setting reset_seconds)"; [ -n "$reset_seconds" ] || reset_seconds=15
+	reset_mode="$(setting reset_mode)"
+	txp0="$(setting txpower_radio0)"; txp1="$(setting txpower_radio1)"
+	txp_all="$(setting txpower)"
+	[ -n "$txp0" ] || txp0="$txp_all"
+	[ -n "$txp1" ] || txp1="$txp_all"
+	[ -n "$txp0" ] || txp0="$(uci -q get wireless.radio0.txpower 2>/dev/null)"
+	[ -n "$txp1" ] || txp1="$(uci -q get wireless.radio1.txpower 2>/dev/null)"
+	[ -n "$txp0" ] || txp0=38
+	[ -n "$txp1" ] || txp1=38
+
+	hide="$(canonical_bool "$(setting hide_ssid)" 0)" || { log "invalid hide_ssid"; return 2; }
+	dhcp_server="$(canonical_bool "$(setting dhcp_server)" 0)" || { log "invalid dhcp_server"; return 2; }
+	firewall_enabled="$(canonical_bool "$(setting firewall_enabled)" 1)" || { log "invalid firewall_enabled"; return 2; }
+	reset_lock="$(canonical_bool "$(setting reset_lock)" 0)" || { log "invalid reset_lock"; return 2; }
+	reset_custom="$(canonical_bool "$(setting reset_custom)" 0)" || { log "invalid reset_custom"; return 2; }
+	clear_previous="$(canonical_bool "$(setting clear_previous)" 1)" || { log "invalid clear_previous"; return 2; }
+	fake_mesh="$(canonical_bool "$(setting fake_mesh)" 0)" || { log "invalid fake_mesh"; return 2; }
+	broadband_enabled="$(canonical_bool "$(setting broadband_enabled)" 0)" || { log "invalid broadband_enabled"; return 2; }
+	nat_enabled="$(canonical_bool "$(setting nat_enabled)" 0)" || { log "invalid nat_enabled"; return 2; }
+	watchcat_enabled="$(canonical_bool "$(setting watchcat_enabled)" 0)" || { log "invalid watchcat_enabled"; return 2; }
+	radio0_enabled="$(canonical_bool "$(setting radio0_enabled)" 1)" || { log "invalid radio0_enabled"; return 2; }
+	radio1_enabled="$(canonical_bool "$(setting radio1_enabled)" 1)" || { log "invalid radio1_enabled"; return 2; }
+	change_password="$(canonical_bool "$(setting change_password)" 0)" || { log "invalid change_password"; return 2; }
+	target_network='lan'
+
+	# Port and service policy is mode-owned, not a cosmetic UI toggle. WAN is
+	# reserved for PPPoE; AP-family modes rely on the upstream DHCP server.
+	if [ "$mode" = "pppoe" ]; then
+		pppoe_port='wan'
+		broadband_enabled='1'
+		dhcp_server='1'
+		nat_enabled='1'
+		firewall_enabled='1'
+	else
+		broadband_enabled='0'
+		dhcp_server='0'
+		nat_enabled='0'
+		[ "$security_enabled" = "1" ] && firewall_enabled='1'
+	fi
+	# Switching modes is deterministic: stale mode-specific state is always removed.
+	clear_previous='1'
+
+	# Full preflight: nothing below this block may clean up or write UCI.
+	case "$mode" in
+		ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receiver|wds_receiver_vlan|pppoe) ;;
+		*) log "unsupported mode rejected before apply: $mode"; return 2 ;;
+	esac
+	valid_management_host "$ip" "$netmask" || { log "invalid network, broadcast, or management IPv4 address rejected before apply"; return 2; }
+	if [ -n "$vlan" ] && ! valid_vlan "$vlan"; then log "invalid VLAN rejected before apply"; return 2; fi
+	case "$mode" in *_vlan) valid_vlan "$vlan" || { log "VLAN mode requires VLAN 2-4094"; return 2; } ;; esac
+	case "$mode" in mesh|mesh_vlan) [ -n "$mesh_id" ] || mesh_id='CR6608-Mesh' ;; esac
+	case "$mode" in wds_receiver|wds_receiver_vlan) [ -n "$wds_ssid" ] || wds_ssid="$ssid" ;; esac
+	case "$security" in
+		psk2) security='wpa2' ;;
+		sae) security='wpa3' ;;
+		sae-mixed) security='mixed' ;;
+		none|'') security='open' ;;
+		open|wpa2|wpa3|mixed) ;;
+		*) log "unsupported Wi-Fi security mode rejected before apply"; return 2 ;;
+	esac
+	valid_text "$ssid" 32 && [ -n "$ssid" ] || { log "invalid 2.4 GHz SSID"; return 2; }
+	valid_text "$ssid5" 32 && [ -n "$ssid5" ] || { log "invalid 5 GHz SSID"; return 2; }
+	valid_text "$mesh_id" 32 || { log "invalid mesh ID"; return 2; }
+	valid_text "$wds_ssid" 32 || { log "invalid WDS peer SSID"; return 2; }
+	valid_text "$pppoe_user" 64 || { log "invalid PPPoE username"; return 2; }
+	valid_text "$pppoe_pass" 64 || { log "invalid PPPoE password"; return 2; }
+	[ -z "$ch24" ] || valid_ch24 "$ch24" || { log "invalid 2.4 GHz channel"; return 2; }
+	[ -z "$ch5" ] || valid_ch5 "$ch5" || { log "invalid 5 GHz channel"; return 2; }
+	active_country24="$(uci -q get wireless.radio0.country 2>/dev/null | tr a-z A-Z)"
+	active_country5="$(uci -q get wireless.radio1.country 2>/dev/null | tr a-z A-Z)"
+	valid_country "$country24" && country_supported radio0 "$country24" || { log "unsupported 2.4 GHz country"; return 2; }
+	valid_country "$country5" && country_supported radio1 "$country5" || { log "unsupported 5 GHz country"; return 2; }
+	if [ -n "$active_country24" ] && [ "$country24" != "$active_country24" ] && [ "$ch24" != "auto" ]; then log "country change requires automatic 2.4 GHz channel"; return 2; fi
+	if [ -n "$active_country5" ] && [ "$country5" != "$active_country5" ] && [ "$ch5" != "auto" ]; then log "country change requires automatic 5 GHz channel"; return 2; fi
+	channel_supported radio0 "$ch24" || { log "unavailable or restricted 2.4 GHz channel"; return 2; }
+	channel_supported radio1 "$ch5" || { log "unavailable or restricted 5 GHz channel"; return 2; }
+	case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) log "invalid 2.4 GHz width"; return 2 ;; esac
+	case "$htmode5" in HE160|VHT160) htmode5='HE80' ;; HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) ;; *) log "invalid 5 GHz width"; return 2 ;; esac
+	case "$mesh_role" in sender|receiver) ;; *) log "invalid mesh role"; return 2 ;; esac
+	case "$pppoe_port" in wan) ;; *) log "PPPoE is reserved for the WAN port"; return 2 ;; esac
+	case "$reset_mode" in ''|factory|reboot|disabled) ;; *) log "invalid reset mode"; return 2 ;; esac
+	[ "$reset_mode" = "disabled" ] && reset_lock=1
+	case "$reset_seconds" in ''|*[!0-9]*) log "invalid reset duration"; return 2 ;; esac
+	[ "$reset_seconds" -ge 5 ] 2>/dev/null && [ "$reset_seconds" -le 1000 ] 2>/dev/null || { log "invalid reset duration"; return 2; }
+	valid_txpower "$txp0" && valid_txpower "$txp1" || { log "invalid TX power rejected before apply"; return 2; }
+	case "$security" in
+		wpa2|wpa3|mixed)
+			[ -n "$key" ] || key="$(uci -q get wireless.wifinet0.key 2>/dev/null)"
+			[ -n "$key" ] || key="$(uci -q get wireless.wifinet1.key 2>/dev/null)"
+			valid_wpa_key "$key" || { log "protected Wi-Fi rejected: key must be 8-63 characters or 64 hexadecimal digits"; return 2; }
+			;;
+		open) key='' ;;
+	esac
+	if [ "$mode" = "pppoe" ]; then
+		[ "$firewall_enabled" = "1" ] || { log "PPPoE mode requires the firewall service"; return 2; }
+		[ -n "$pppoe_user" ] || pppoe_user="$(uci -q get network.wan.username 2>/dev/null)"
+		[ -n "$pppoe_pass" ] || pppoe_pass="$(uci -q get network.wan.password 2>/dev/null)"
+		[ -n "$pppoe_user" ] || { log "PPPoE mode rejected without a username"; return 2; }
+		valid_text "$pppoe_user" 64 && valid_text "$pppoe_pass" 64 || { log "invalid stored PPPoE credentials"; return 2; }
+	fi
+
+	admin_password=''
+	if [ -n "$PASSWORD_FILE" ]; then
+		secure_temp_file "$PASSWORD_FILE" || { log "rejected insecure temporary password handoff"; return 2; }
+		pw_size="$(wc -c < "$PASSWORD_FILE" 2>/dev/null | tr -d ' ')"
+		case "$pw_size" in ''|*[!0-9]*) return 2 ;; esac
+		[ "$pw_size" -le 81 ] 2>/dev/null || { log "temporary admin password is too long"; return 2; }
+		admin_password="$(cat "$PASSWORD_FILE" 2>/dev/null)"
+		rm -f "$PASSWORD_FILE"; PASSWORD_FILE=''
+	fi
+	if [ "$change_password" = "1" ]; then
+		[ -n "$admin_password" ] && [ "${#admin_password}" -ge 8 ] 2>/dev/null && valid_text "$admin_password" 80 || {
+			log "password change rejected: secure 8-80 character handoff required"
+			return 2
+		}
+	fi
+
+	# Snapshot wireless/dhcp/firewall BEFORE any change so the reload below can be
+	# SCOPED: a 2.4G-only edit must never bounce 5G clients (and vice versa), and a
+	# pure network/security change must not bounce Wi-Fi or DNS at all.
+	pre_net="$(uci -q show network 2>/dev/null)"
+	pre_w0="$(uci -q show wireless.radio0 2>/dev/null; uci -q show wireless.wifinet0 2>/dev/null)"
+	pre_w1="$(uci -q show wireless.radio1 2>/dev/null; uci -q show wireless.wifinet1 2>/dev/null)"
+	pre_wx="$(uci -q show wireless 2>/dev/null | grep -Ev '^wireless\.(radio0|radio1|wifinet0|wifinet1)[.=]')"
+	pre_dhcp="$(uci -q show dhcp 2>/dev/null)"
+	pre_fw="$(uci -q show firewall 2>/dev/null)"
+	"$INITD_DIR/firewall" enabled >/dev/null 2>&1 && pre_firewall_enabled=1
+
+	transaction_begin || { log "could not create pre-change transaction backup"; return 4; }
+	wireless_backup="$TMP_DIR/cr6608-wireless-preapply.$$"
+	cp -f "$CONFIG_DIR/wireless" "$wireless_backup" 2>/dev/null || wireless_backup=""
+
+	# Persist only canonical, validated values. The admin password is never UCI data.
+	uci -q get "$CFG" >/dev/null 2>&1 || uci set "$CFG=quick"
+	uci set "$CFG.mode=$mode"
+	uci set "$CFG.lan_ipaddr=$ip"
+	uci set "$CFG.lan_netmask=$netmask"
+	uci set "$CFG.vlan_id=$vlan"
+	uci set "$CFG.ssid=$ssid"
+	uci set "$CFG.ssid5=$ssid5"
+	if [ -n "$ch24" ]; then uci set "$CFG.channel24=$ch24"; else uci -q delete "$CFG.channel24"; fi
+	if [ -n "$ch5" ]; then uci set "$CFG.channel5=$ch5"; else uci -q delete "$CFG.channel5"; fi
+	if [ -n "$country24" ]; then country24="$(printf '%s' "$country24" | tr a-z A-Z)"; uci set "$CFG.country24=$country24"; else uci -q delete "$CFG.country24"; fi
+	if [ -n "$country5" ]; then country5="$(printf '%s' "$country5" | tr a-z A-Z)"; uci set "$CFG.country5=$country5"; else uci -q delete "$CFG.country5"; fi
+	uci set "$CFG.htmode24=$htmode24"
+	uci set "$CFG.htmode5=$htmode5"
+	if [ -n "$mesh_id" ]; then uci set "$CFG.mesh_id=$mesh_id"; else uci -q delete "$CFG.mesh_id"; fi
+	uci set "$CFG.mesh_role=$mesh_role"
+	if [ -n "$wds_ssid" ]; then uci set "$CFG.wds_ssid=$wds_ssid"; else uci -q delete "$CFG.wds_ssid"; fi
+	uci set "$CFG.hide_ssid=$hide"
+	uci set "$CFG.security=$security"
+	if [ "$security" = "open" ]; then uci -q delete "$CFG.wifi_key"; else uci set "$CFG.wifi_key=$key"; fi
+	uci set "$CFG.pppoe_user=$pppoe_user"
+	uci set "$CFG.pppoe_pass=$pppoe_pass"
+	uci set "$CFG.pppoe_port=$pppoe_port"
+	uci set "$CFG.dhcp_server=$dhcp_server"
+	uci set "$CFG.firewall_enabled=$firewall_enabled"
+	uci set "$CFG.nat_enabled=$nat_enabled"
+	uci set "$CFG.broadband_enabled=$broadband_enabled"
+	uci set "$CFG.fake_mesh=$fake_mesh"
+	uci set "$CFG.watchcat_enabled=$watchcat_enabled"
+	uci set "$CFG.clear_previous=$clear_previous"
+	uci set "$CFG.reset_lock=$reset_lock"
+	uci set "$CFG.reset_custom=$reset_custom"
+	uci set "$CFG.reset_seconds=$reset_seconds"
+	if [ -n "$reset_mode" ]; then uci set "$CFG.reset_mode=$reset_mode"; else uci -q delete "$CFG.reset_mode"; fi
+	uci set "$CFG.radio0_enabled=$radio0_enabled"
+	uci set "$CFG.radio1_enabled=$radio1_enabled"
+	uci set "$CFG.txpower_radio0=$txp0"
+	uci set "$CFG.txpower_radio1=$txp1"
+	uci set "$CFG.txpower=$txp0"
+	uci set "$CFG.change_password=0"
+	uci -q delete "$CFG.admin_password"
+	uci -q delete "$CFG.access_ipaddr"
+
+	uci -q get smartap.quick >/dev/null 2>&1 || uci set smartap.quick='quicksettings'
+	pm="$mode"; [ "$pm" = "pppoe" ] && pm='pppoe_ap'
+	uci set "smartap.quick.program_mode=$pm"
+	uci set "smartap.quick.device_ip=$ip"
+	uci -q get smartap.management >/dev/null 2>&1 || uci set smartap.management='management'
+	uci set "smartap.management.ipaddr=$ip"
+	uci set "smartap.quick.vlan_id=$vlan"
+	uci set "smartap.quick.ssid=$ssid"
+	uci set "smartap.quick.ch24=$ch24"
+	uci set "smartap.quick.ch5=$ch5"
+	uci set "smartap.quick.country24=$country24"
+	uci set "smartap.quick.country5=$country5"
+	uci set "smartap.quick.htmode24=$htmode24"
+	uci set "smartap.quick.htmode5=$htmode5"
+	uci set "smartap.quick.mesh_id=$mesh_id"
+	uci set "smartap.quick.mesh_role=$mesh_role"
+	uci set "smartap.quick.wds_peer_ssid=$wds_ssid"
+	uci set "smartap.quick.hide_ssid=$hide"
+	uci set "smartap.quick.security=$security"
+	uci set "smartap.quick.nat_enabled=$nat_enabled"
+	uci set "smartap.quick.dhcp_server=$dhcp_server"
+	uci set "smartap.quick.firewall_enabled=$firewall_enabled"
+	uci set "smartap.quick.broadband_enabled=$broadband_enabled"
+	uci set "smartap.quick.fake_mesh=$fake_mesh"
+	uci set "smartap.quick.watchcat_enabled=$watchcat_enabled"
+	uci set "smartap.quick.radio0_enabled=$radio0_enabled"
+	uci set "smartap.quick.radio1_enabled=$radio1_enabled"
+	uci set "smartap.quick.txpower_radio0=$txp0"
+	uci set "smartap.quick.txpower_radio1=$txp1"
+	uci set "smartap.quick.txpower=$txp0"
+
+	cleanup_previous || MUTATION_FAILED=1
+
+	# Management contract: the validated selection replaces network.lan.ipaddr.
+	# A clean/reset image still starts at 192.168.1.1; quick apply creates no alias.
+	uci set network.lan.ipaddr="$ip"
+	uci set network.lan.netmask="$netmask"
+	uci set network.lan.delegate='0'
+	uci -q delete network.smartap_devip
+	uci -q delete network.smartap_devip_alias
+
+	case "$mode" in
+		pppoe) set_pppoe_wan "$pppoe_user" "$pppoe_pass" "$pppoe_port" ;;
+		*) set_ap_ports ;;
+	esac
+
+	case "$mode" in
+		ap_vlan|mesh_vlan|wds_sender_vlan|wds_receiver_vlan)
+			if set_vlan_target "$vlan" "$ignore_port_policy"; then
+				target_network='cr6608_vlan'
+			else
+				MUTATION_FAILED=1
+				log "VLAN staging failed; the transaction will be rolled back"
+			fi
+			;;
+		*)
+			clear_vlan || MUTATION_FAILED=1
+			# standalone per-port VLANs from the security page still apply in plain modes
+			if type cr6608_apply_port_vlans >/dev/null 2>&1; then
+				cr6608_apply_port_vlans "" "$ignore_port_policy" || MUTATION_FAILED=1
+				strip_wan_from_bridge
+			fi
+			;;
+	esac
+
+	ensure_wifi_iface wifinet0 radio0 "$ssid"
+	ensure_wifi_iface wifinet1 radio1 "$ssid5"
+	uci set wireless.wifinet0.network="$target_network"
+	uci set wireless.wifinet1.network="$target_network"
+	set_security wifinet0 "$security" "$key"
+	set_security wifinet1 "$security" "$key"
+
+	[ -n "$ch24" ] && uci set wireless.radio0.channel="$ch24"
+	[ -n "$ch5" ] && uci set wireless.radio1.channel="$ch5"
+	[ -n "$country24" ] && uci set wireless.radio0.country="$country24"
+	[ -n "$country5" ] && uci set wireless.radio1.country="$country5"
+	uci set wireless.radio0.htmode="$htmode24"
+	uci set wireless.radio1.htmode="$htmode5"
+	uci set wireless.radio0.legacy_rates='0'
+	uci set wireless.radio1.legacy_rates='0'
+	uci set wireless.radio0.airtime_mode='1'
+	uci set wireless.radio1.airtime_mode='1'
+	bool_on "${radio0_enabled:-1}" && uci set wireless.radio0.disabled='0' || uci set wireless.radio0.disabled='1'
+	bool_on "${radio1_enabled:-1}" && uci set wireless.radio1.disabled='0' || uci set wireless.radio1.disabled='1'
+	if type cr6608_txpower_apply_pair >/dev/null 2>&1; then
+		cr6608_txpower_apply_pair "$txp0" "$txp1" || MUTATION_FAILED=1
+	fi
+	uci set wireless.radio0.txpower="$txp0"
+	uci set wireless.radio1.txpower="$txp1"
+
+	# every apply rebuilds the backhaul from the unified store: drop stale backhaul
+	# ifaces from BOTH engines (wizard names smartap_*, this executor names cr6608_*)
+	# so switching modes or engines never leaves a leftover mesh/WDS iface behind
+	uci -q delete wireless.cr6608_mesh
+	uci -q delete wireless.cr6608_wds
+	uci -q delete wireless.smartap_mesh
+	uci -q delete wireless.smartap_wds
+	uci -q delete wireless.wifinet0.wds
+	uci -q delete wireless.wifinet1.wds
+
+	case "$mode" in
+		mesh|mesh_vlan)
+			[ -n "$mesh_id" ] || mesh_id='CR6608-Mesh'
+			uci set wireless.cr6608_mesh='wifi-iface'
+			uci set wireless.cr6608_mesh.device='radio1'
+			uci set wireless.cr6608_mesh.mode='mesh'
+			uci set wireless.cr6608_mesh.network="$target_network"
+			uci set wireless.cr6608_mesh.mesh_id="$mesh_id"
+			uci set wireless.cr6608_mesh.mesh_fwding='1'
+			set_security cr6608_mesh "$security" "$key"
+			# receiver: 5G AP off so radio1 can follow the sender's channel
+			if [ "$mesh_role" = "receiver" ]; then
+				uci set wireless.wifinet1.disabled='1'
+				uci set wireless.radio1.disabled='0'
+			fi
+			;;
+		wds_sender|wds_sender_vlan)
+			# Dashboard sender semantics: the normal client APs advertise 4addr/WDS.
+			uci set wireless.wifinet0.wds='1'
+			uci set wireless.wifinet1.wds='1'
+			;;
+		wds_receiver|wds_receiver_vlan)
+			# Dashboard receiver semantics: dedicate radio1 to a station backhaul.
+			[ -n "$wds_ssid" ] || wds_ssid="$ssid"
+			uci set wireless.wifinet1.disabled='1'
+			uci set wireless.radio1.disabled='0'
+			uci set wireless.cr6608_wds='wifi-iface'
+			uci set wireless.cr6608_wds.device='radio1'
+			uci set wireless.cr6608_wds.mode='sta'
+			uci set wireless.cr6608_wds.wds='1'
+			uci set wireless.cr6608_wds.network="$target_network"
+			uci set wireless.cr6608_wds.ssid="$wds_ssid"
+			uci set wireless.cr6608_wds.disabled='0'
+			set_security cr6608_wds "$security" "$key"
+			;;
+	esac
+
+	# DHCP: a real user toggle (dhcp_server), and PPPoE-client mode always forces it on.
+	if [ "$mode" = "pppoe" ] || bool_on "$dhcp_server"; then
+		uci -q get dhcp.lan >/dev/null 2>&1 || { uci set dhcp.lan=dhcp; uci set dhcp.lan.interface='lan'; uci set dhcp.lan.start='100'; uci set dhcp.lan.limit='150'; uci set dhcp.lan.leasetime='12h'; }
+		uci -q delete dhcp.lan.ignore; uci -q delete dhcp.lan.dhcpv4
+		uci -q set dhcp.lan.dhcpv6='disabled'; uci -q set dhcp.lan.ra='disabled'; uci -q set dhcp.lan.ndp='disabled'
+	else
+		uci -q delete dhcp.lan 2>/dev/null || true
+	fi
+
+	# NAT: real in both directions on the wan-named zone
+	for _z in $(uci show firewall 2>/dev/null | awk -F'[.=]' "/\\.name='wan'/{print \$2}"); do
+		bool_on "$nat_enabled" && uci set firewall."$_z".masq='1' || uci set firewall."$_z".masq='0'
+	done
+
+	# FAKE MESH (WDS/4addr) on both client APs when requested
+	if bool_on "$fake_mesh"; then
+		uci set wireless.wifinet0.wds='1'; uci set wireless.wifinet1.wds='1'
+	fi
+
+	# The requested IP is network.lan.ipaddr; do not create a secondary alias.
+	uci -q delete network.smartap_devip
+	uci -q delete network.smartap_devip_alias
+	strip_wan_from_bridge
+	wan_is_excluded || { log "WAN could not be excluded from the LAN bridge"; MUTATION_FAILED=1; }
+	if [ "$mode" = "pppoe" ]; then
+		strip_port_from_bridge "$pppoe_port" || MUTATION_FAILED=1
+		port_is_excluded "$pppoe_port" || { log "PPPoE port could not be excluded from the LAN bridge"; MUTATION_FAILED=1; }
+	fi
+	[ "$(qget network.lan.ipaddr)" = "$ip" ] || { log "management IP staging mismatch"; MUTATION_FAILED=1; }
+	[ -z "$(qget network.smartap_devip)" ] && [ -z "$(qget network.smartap_devip_alias)" ] || { log "secondary management alias survived cleanup"; MUTATION_FAILED=1; }
+	case "$security" in
+		open)
+			[ "$(qget wireless.wifinet0.encryption)" = "none" ] && [ "$(qget wireless.wifinet1.encryption)" = "none" ] || MUTATION_FAILED=1
+			[ -z "$(qget wireless.wifinet0.key)" ] && [ -z "$(qget wireless.wifinet1.key)" ] && [ -z "$(qget "$CFG.wifi_key")" ] || MUTATION_FAILED=1
+			;;
+		wpa2|wpa3|mixed)
+			[ "$(qget wireless.wifinet0.key)" = "$key" ] && [ "$(qget wireless.wifinet1.key)" = "$key" ] || MUTATION_FAILED=1
+			;;
+	esac
+	case "$mode" in
+		wds_receiver|wds_receiver_vlan)
+			[ "$(qget wireless.cr6608_wds.mode)" = "sta" ] && [ "$(qget wireless.cr6608_wds.wds)" = "1" ] && \
+				[ "$(qget wireless.cr6608_wds.ssid)" = "$wds_ssid" ] && [ "$(qget wireless.wifinet1.disabled)" = "1" ] && \
+				[ "$(qget wireless.radio1.disabled)" = "0" ] || { log "WDS receiver staging mismatch"; MUTATION_FAILED=1; }
+			;;
+	esac
+
+	if [ "$MUTATION_FAILED" != "0" ]; then
+		log "staging failed; rolling back all UCI packages"
+		transaction_rollback || true
+		[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+		wireless_backup=''
+		return 1
+	fi
+	if [ "$DRY_RUN" = "1" ]; then
+		transaction_rollback || return 4
+		[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+		wireless_backup=''
+		log "dry-run validation completed without persistent changes"
+		return 0
+	fi
+	# Arm the persistent rollback before the first on-flash commit. This closes
+	# the power-loss window between commit and rollback registration.
+	if ! safe_arm_transaction; then
+		log "could not arm persistent rollback before commit"
+		transaction_rollback || true
+		[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+		wireless_backup=''
+		return 4
+	fi
+
+	for pkg in $UCI_PACKAGES; do
+		if ! uci commit "$pkg"; then
+			log "commit failed for $pkg; rolling back all UCI packages"
+			transaction_rollback || true
+			[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+			wireless_backup=''
+			return 1
+		fi
+	done
+	log "committed mode=$mode target=$target_network txpower targets: radio0=$txp0 radio1=$txp1"
+
+	# Decide the reload SCOPE from what actually changed on disk.
+	post_w0="$(uci -q show wireless.radio0 2>/dev/null; uci -q show wireless.wifinet0 2>/dev/null)"
+	post_w1="$(uci -q show wireless.radio1 2>/dev/null; uci -q show wireless.wifinet1 2>/dev/null)"
+	post_wx="$(uci -q show wireless 2>/dev/null | grep -Ev '^wireless\.(radio0|radio1|wifinet0|wifinet1)[.=]')"
+	w0=0; w1=0
+	[ "$pre_w0" != "$post_w0" ] && w0=1
+	[ "$pre_w1" != "$post_w1" ] && w1=1
+	[ "$pre_wx" != "$post_wx" ] && { w0=1; w1=1; }	# mesh/WDS sections changed -> full pass
+
+	post_net="$(uci -q show network 2>/dev/null)"
+
+	if [ "$firewall_enabled" = "1" ]; then
+		"$INITD_DIR/firewall" enable >/dev/null 2>&1 || service_failed=1
+		"$INITD_DIR/firewall" start >/dev/null 2>&1 || service_failed=1
+	else
+		"$INITD_DIR/firewall" disable >/dev/null 2>&1 || service_failed=1
+		"$INITD_DIR/firewall" stop >/dev/null 2>&1 || service_failed=1
+	fi
+	if [ "$pre_net" != "$post_net" ]; then
+		network_changed=1
+		"$INITD_DIR/network" reload >/dev/null 2>&1 || service_failed=1
+		if [ "$service_failed" = "0" ] && [ -n "$TX_OLD_MANAGEMENT_IP" ] && [ "$TX_OLD_MANAGEMENT_IP" != "$(qget network.lan.ipaddr)" ]; then
+			management_device="$(qget network.lan.device)"; [ -n "$management_device" ] || management_device='br-lan'
+			"$CR6608_SBIN_DIR/cr6608-safe-apply" retain-ip "$TX_OLD_MANAGEMENT_IP" "$TX_OLD_MANAGEMENT_NETMASK" "$management_device" >/dev/null 2>&1 || service_failed=1
+		fi
+		if [ -x "$CR6608_SBIN_DIR/cr6608-security-apply" ]; then
+			"$CR6608_SBIN_DIR/cr6608-security-apply" boot >/dev/null 2>&1 || service_failed=1
+		fi
+	else
+		log "no network delta - network untouched"
+	fi
+	if [ "$w0" = "1" ] && [ "$w1" = "1" ]; then
+		if [ -x "$CR6608_SBIN_DIR/cr6608-safe-wifi-reload" ]; then
+			"$CR6608_SBIN_DIR/cr6608-safe-wifi-reload" 8 "$wireless_backup" >/dev/null 2>&1 || service_failed=1
+		else
+			"$WIFI_BIN" reload >/dev/null 2>&1 || service_failed=1
+		fi
+	elif [ "$w0" = "1" ]; then
+		log "scoped wifi reload: radio0 only (5G clients untouched)"
+		"$WIFI_BIN" up radio0 >/dev/null 2>&1 || service_failed=1
+	elif [ "$w1" = "1" ]; then
+		log "scoped wifi reload: radio1 only (2.4G clients untouched)"
+		"$WIFI_BIN" up radio1 >/dev/null 2>&1 || service_failed=1
+	else
+		log "no wireless delta - wifi untouched (zero client disruption)"
+	fi
+	# Re-pin the configured per-radio targets after wifi reload; does not force 38.
+	if [ -x "$CR6608_SBIN_DIR/cr6608-force-txpower38" ]; then
+		"$CR6608_SBIN_DIR/cr6608-force-txpower38" >/dev/null 2>&1 || service_failed=1
+	fi
+	# dnsmasq/firewall bounce ONLY when their config really changed
+	if [ "$pre_dhcp" != "$(uci -q show dhcp 2>/dev/null)" ]; then "$INITD_DIR/dnsmasq" restart >/dev/null 2>&1 || service_failed=1; fi
+	# fw4 resolves UCI network names to concrete devices. A mode transition can
+	# move LAN between br-lan and br-lan.1 without changing /etc/config/firewall;
+	# reload in either case so the management interface is never left rejected.
+	if [ "$firewall_enabled" = "1" ]; then
+		if [ "$network_changed" = "1" ] || [ "$pre_fw" != "$(uci -q show firewall 2>/dev/null)" ]; then
+			"$INITD_DIR/firewall" reload >/dev/null 2>&1 || service_failed=1
+		fi
+	fi
+	if [ "$service_failed" != "0" ]; then
+		log "service apply failed; restoring the complete pre-change transaction"
+		transaction_rollback || true
+		[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+		wireless_backup=''
+		return 3
+	fi
+
+	# Irreversible local side effects run only after every network service accepted the new config.
+	if [ "$change_password" = "1" ] && ! printf '%s\n%s\n' "$admin_password" "$admin_password" | "$PASSWD_BIN" root >/dev/null 2>&1; then
+		log "root password update failed after successful service apply"
+		post_rc=3
+	fi
+	admin_password=''
+	set_reset_button "$reset_lock" "$reset_custom" "$reset_seconds" "$reset_mode" || { log "reset-button update failed"; post_rc=3; }
+	if [ "$post_rc" != "0" ]; then
+		log "post-apply side effect failed; restoring the complete transaction"
+		transaction_rollback || true
+		[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+		wireless_backup=''
+		return "$post_rc"
+	fi
+	transaction_finish
+	[ -n "$wireless_backup" ] && rm -f "$wireless_backup"
+	wireless_backup=''
+	return "$post_rc"
+}
+
+case "$1" in
+	apply|'') apply_config ;;
+	*) echo "usage: $0 apply" >&2; exit 1 ;;
+esac
