@@ -44,10 +44,16 @@ ok "الحالة القديمة نُظّفت (kit + secrets القديمة حُ�
 
 say "[2/6] تثبيت أدوات البناء"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+# بعض السيرفرات فيها مستودعات PPA خارجية (مثل ondrej/php) تغيّر تسمياتها فتُفشل
+# apt update. نتقبّل تغيّر معلومات الإصدار، ولا نتوقف إن فشل مستودع خارجي — كل
+# الحزم المطلوبة من مستودعات Ubuntu الرسمية (main/universe) وهي متاحة أصلاً.
+apt-get update -y --allow-releaseinfo-change \
+  || apt-get update -y --allow-releaseinfo-change \
+  || printf '\033[1;33mتحذير: بعض مستودعات PPA الخارجية فشلت — نكمل بالمستودعات الرسمية.\033[0m\n' >&2
 apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
   gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev \
-  file wget aria2 subversion swig time libelf-dev signify-openbsd tar xz-utils perl which sudo
+  file wget aria2 subversion swig time libelf-dev signify-openbsd tar xz-utils perl which sudo \
+  || die "فشل تثبيت أدوات البناء — راجع مخرجات apt أعلاه (قد يلزم: apt --fix-broken install)."
 ok "الأدوات جاهزة"
 
 say "[3/6] مستخدم البناء + نسخ المصدر الطازج فوق أي قديم"
