@@ -315,16 +315,33 @@ restore_build_signing_keys() {
 		die "OpenWrt APK public key mode is not 644"
 }
 
-for signing_input in "${SRC_FW_SIGNING_KEY}" "${SRC_FW_SIGNING_PUB}" \
-	"${SRC_FW_SIGNING_CERT}" \
-	"${SRC_APK_SIGNING_KEY}" "${SRC_APK_SIGNING_PUB}"; do
-	[ -f "${signing_input}" ] && [ ! -L "${signing_input}" ] && \
-		[ -s "${signing_input}" ] || die "Required signing input missing: ${signing_input}"
-done
-[ "$(stat -c '%a' "${SRC_FW_SIGNING_KEY}")" = 600 ] || \
-	die "External firmware signing private key must have mode 600"
-[ "$(stat -c '%a' "${SRC_APK_SIGNING_KEY}")" = 600 ] || \
-	die "External APK signing private key must have mode 600"
+# --- Signing material -------------------------------------------------------
+# Default: OpenWrt auto-generates its own local build key during `make` (its
+# normal behaviour when CONFIG_SIGNED_PACKAGES=y and no key is pinned). That
+# yields a fully self-consistent, self-signed package/image set — exactly right
+# for a personal build, and the sysupgrade image boots/flashes identically.
+#
+# The reproducible OWNER-signing path (external secret keys) is used only when
+# explicitly opted in with CR6608_PIN_SIGNING=1. The private keys are secrets
+# and are never shipped in the source kit, so a fresh clone must not require
+# them — and we must not let a half-configured bootstrap install a mismatched
+# public/private pair (which would fail the post-build signing probe).
+if [ "${CR6608_PIN_SIGNING:-0}" = 1 ]; then
+	USE_EXTERNAL_SIGNING=1
+	for signing_input in "${SRC_FW_SIGNING_KEY}" "${SRC_FW_SIGNING_PUB}" \
+		"${SRC_FW_SIGNING_CERT}" \
+		"${SRC_APK_SIGNING_KEY}" "${SRC_APK_SIGNING_PUB}"; do
+		[ -f "${signing_input}" ] && [ ! -L "${signing_input}" ] && \
+			[ -s "${signing_input}" ] || die "Required signing input missing: ${signing_input}"
+	done
+	[ "$(stat -c '%a' "${SRC_FW_SIGNING_KEY}")" = 600 ] || \
+		die "External firmware signing private key must have mode 600"
+	[ "$(stat -c '%a' "${SRC_APK_SIGNING_KEY}")" = 600 ] || \
+		die "External APK signing private key must have mode 600"
+else
+	USE_EXTERNAL_SIGNING=0
+	printf '\033[1;33mNOTE:\033[0m no pinned signing keys requested (CR6608_PIN_SIGNING!=1) — OpenWrt will auto-generate a local self-signed build key. The firmware image is unaffected.\n' >&2
+fi
 
 for required_file in "${SRC_PATCH}" "${SRC_SERIAL_PATCH}" "${SRC_SEED}" "${INSPECTOR}" "${VLAN_TEST}" "${SAFE_APPLY_TEST}" "${SAFE_APPLY_RUNTIME_TEST}" "${QUICKSETTINGS_CONTRACT_TEST}" "${AUTH_LIFECYCLE_TEST}" "${UI_CONTRACT_TEST}" \
 	"${SRC_FILES}/www/cgi-bin/dashluci" \
@@ -469,7 +486,9 @@ git reset --hard "${OPENWRT_COMMIT}"
 # Keep the immutable download cache. Everything that can affect the image is
 # reset and rebuilt from the pinned source, patch, seed and overlay inputs.
 git clean -ffdx -e dl/
-restore_build_signing_keys
+if [ "${USE_EXTERNAL_SIGNING}" = 1 ]; then
+	restore_build_signing_keys
+fi
 assert_official_checkout
 [ -z "$(git status --porcelain --untracked-files=all)" ] || \
 	die "OpenWrt checkout is not clean after reset"
@@ -478,7 +497,11 @@ git apply "${SRC_SERIAL_PATCH}"
 git apply --check "${SRC_KERNEL_CONSOLE_PATCH}"
 git apply "${SRC_KERNEL_CONSOLE_PATCH}"
 verify_serial_console_patch
-ok "official origin, commit, and pinned signing keys verified"
+if [ "${USE_EXTERNAL_SIGNING}" = 1 ]; then
+	ok "official origin, commit, and pinned signing keys verified"
+else
+	ok "official origin and commit verified (OpenWrt self-signed build key)"
+fi
 
 say "[2/10] Updating and installing release feeds"
 ./scripts/feeds update -a
@@ -657,12 +680,21 @@ image_sha256="$(awk '{print $1}' "${PUBLISH_DIR}/${FINAL_IMAGE}.sha256")"
 	printf 'kernel_console_patch_sha256=%s\n' \
 		"$(sha256sum "${SRC_KERNEL_CONSOLE_PATCH}" | awk '{print $1}')"
 	printf 'serial_console=disabled\n'
-	printf 'firmware_pubkey_sha256=%s\n' \
-		"$(sha256sum "${SRC_FW_SIGNING_PUB}" | awk '{print $1}')"
-	printf 'firmware_ucert_sha256=%s\n' \
-		"$(sha256sum "${SRC_FW_SIGNING_CERT}" | awk '{print $1}')"
-	printf 'apk_pubkey_sha256=%s\n' \
-		"$(sha256sum "${SRC_APK_SIGNING_PUB}" | awk '{print $1}')"
+	if [ "${USE_EXTERNAL_SIGNING}" = 1 ]; then
+		printf 'firmware_signing=pinned_owner_key\n'
+		printf 'firmware_pubkey_sha256=%s\n' \
+			"$(sha256sum "${SRC_FW_SIGNING_PUB}" | awk '{print $1}')"
+		printf 'firmware_ucert_sha256=%s\n' \
+			"$(sha256sum "${SRC_FW_SIGNING_CERT}" | awk '{print $1}')"
+		printf 'apk_pubkey_sha256=%s\n' \
+			"$(sha256sum "${SRC_APK_SIGNING_PUB}" | awk '{print $1}')"
+	else
+		printf 'firmware_signing=openwrt_local_self_signed\n'
+		printf 'firmware_pubkey_sha256=%s\n' \
+			"$(sha256sum "${OPENWRT_DIR}/key-build.pub" 2>/dev/null | awk '{print $1}')"
+		printf 'apk_pubkey_sha256=%s\n' \
+			"$(sha256sum "${OPENWRT_DIR}/public-key.pem" 2>/dev/null | awk '{print $1}')"
+	fi
 	printf 'fwtool_signature=present_verified\n'
 	printf 'input_manifest=build-inputs.txt\n'
 	printf 'input_manifest_sha256=%s\n' \
