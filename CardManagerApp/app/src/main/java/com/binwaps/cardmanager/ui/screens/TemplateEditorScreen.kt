@@ -89,7 +89,10 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            Store.importBackground(uri)?.let { path -> template = template.copy(backgroundPath = path) }
+            Store.importBackground(uri)?.let { path ->
+                com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                template = template.copy(backgroundPath = path)
+            }
         }
     }
 
@@ -282,7 +285,10 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GhostButton("رفع خلفية من الجوال", icon = Icons.Filled.Image) { imagePicker.launch("image/*") }
                 if (template.backgroundPath.isNotBlank()) {
-                    GhostButton("إزالة", color = Danger) { template = template.copy(backgroundPath = "") }
+                    GhostButton("إزالة", color = Danger) {
+                        com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                        template = template.copy(backgroundPath = "")
+                    }
                 }
             }
 

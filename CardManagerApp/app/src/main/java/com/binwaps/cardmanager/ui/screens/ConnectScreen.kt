@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -86,6 +88,8 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var user by remember { mutableStateOf(current?.username ?: "admin") }
     var pass by remember { mutableStateOf(current?.password ?: "") }
 
+    var useSsl by remember { mutableStateOf(current?.useSsl ?: false) }
+    var timeout by remember { mutableStateOf((current?.timeoutSec ?: 12).toString()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -93,6 +97,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     LaunchedEffect(editingId) {
         routers.firstOrNull { it.id == editingId }?.let { r ->
             name = r.name; host = r.host; port = r.port.toString(); user = r.username; pass = r.password
+            useSsl = r.useSsl; timeout = r.timeoutSec.toString()
         }
     }
 
@@ -106,6 +111,8 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             port = port.toIntOrNull() ?: 8728,
             username = user.trim(),
             password = pass,
+            useSsl = useSsl,
+            timeoutSec = timeout.toIntOrNull() ?: 12,
         )
         scope.launch {
             val result = MikrotikClient.connect(profile)
@@ -215,13 +222,61 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             AppField(name, { name = it }, "اسم الراوتر", Modifier.fillMaxWidth(), leading = Icons.Filled.Router)
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(host, { host = it }, "عنوان IP", Modifier.weight(2f), leading = Icons.Filled.Dns)
+                AppField(host, { host = it }, "عنوان IP أو الدومين", Modifier.weight(2f), leading = Icons.Filled.Dns)
                 AppField(port, { port = it.filter { c -> c.isDigit() } }, "المنفذ", Modifier.weight(1f), numeric = true)
             }
             Spacer(Modifier.height(9.dp))
             AppField(user, { user = it }, "اسم المستخدم", Modifier.fillMaxWidth(), leading = Icons.Filled.Person)
             Spacer(Modifier.height(9.dp))
             AppField(pass, { pass = it }, "كلمة المرور", Modifier.fillMaxWidth(), password = true, leading = Icons.Filled.Lock)
+
+            Spacer(Modifier.height(11.dp))
+            // الاتصال عن بعد
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("اتصال مشفّر (api-ssl)", fontSize = 12.5.sp, color = TextHi)
+                    Text("للاتصال عن بعد عبر دومين أو IP Cloud", fontSize = 10.5.sp, color = TextLow)
+                }
+                Switch(
+                    checked = useSsl,
+                    onCheckedChange = {
+                        useSsl = it
+                        // المنفذ الافتراضي يتغير مع نوع الاتصال
+                        if (it && port == "8728") port = "8729"
+                        if (!it && port == "8729") port = "8728"
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = com.binwaps.cardmanager.ui.theme.Ink,
+                        checkedTrackColor = Neon,
+                        uncheckedThumbColor = TextLow,
+                        uncheckedTrackColor = com.binwaps.cardmanager.ui.theme.Panel,
+                    ),
+                )
+            }
+            Spacer(Modifier.height(7.dp))
+            AppField(
+                timeout, { timeout = it.filter { c -> c.isDigit() } },
+                "مهلة الاتصال بالثواني (زدها للاتصال البعيد)", Modifier.fillMaxWidth(), numeric = true,
+            )
+            Spacer(Modifier.height(7.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                listOf(
+                    "محلي" to Triple("192.168.88.1", "8728", false),
+                    "دومين/كلاود" to Triple("", "8729", true),
+                ).forEach { (label, cfg) ->
+                    Text(
+                        label, fontSize = 11.sp, color = Neon,
+                        modifier = Modifier
+                            .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+                            .clickable {
+                                if (cfg.first.isNotBlank()) host = cfg.first
+                                port = cfg.second; useSsl = cfg.third
+                                if (cfg.third) timeout = "25"
+                            }
+                            .padding(horizontal = 11.dp, vertical = 5.dp),
+                    )
+                }
+            }
 
             if (error != null) {
                 Spacer(Modifier.height(10.dp))
@@ -237,7 +292,11 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                         Text(error!!, fontSize = 11.sp, color = TextMid)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "تأكد أن خدمة API مفعّلة على الراوتر: IP → Services → api (منفذ 8728)، وأن جوالك على نفس الشبكة.",
+                            if (useSsl)
+                                "للاتصال عن بعد: فعّل api-ssl على الراوتر (IP → Services → api-ssl منفذ 8729) مع شهادة، " +
+                                    "وتأكد أن المنفذ مفتوح من الخارج أو استخدم IP Cloud DDNS."
+                            else
+                                "تأكد أن خدمة API مفعّلة: IP → Services → api (منفذ 8728)، وأن جوالك على نفس الشبكة.",
                             fontSize = 10.5.sp, color = TextLow,
                         )
                     }

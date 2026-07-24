@@ -30,24 +30,44 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Build debug APK
+      - name: Build both APKs
         working-directory: CardManagerApp
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle assembleSubscriberDebug assembleAdminDebug --no-daemon --stacktrace
 
-      - name: Rename APK
-        run: cp CardManagerApp/app/build/outputs/apk/debug/app-debug.apk CardManager.apk
+      - name: Collect APKs
+        run: |
+          cp CardManagerApp/app/build/outputs/apk/subscriber/debug/app-subscriber-debug.apk CardManager.apk
+          cp CardManagerApp/app/build/outputs/apk/admin/debug/app-admin-debug.apk CardManager-Admin.apk
+          ls -la *.apk
 
-      - name: Upload APK artifact
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CardManager-APK
-          path: CardManager.apk
+          name: CardManager-APKs
+          path: |
+            CardManager.apk
+            CardManager-Admin.apk
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: card-manager-latest
           name: "Card Manager APK (آخر إصدار)"
-          body: "أحدث نسخة من تطبيق مدير الكروت — حمّل CardManager.apk وثبّته على جوالك."
+          body: |
+            ## تطبيقان
+
+            - **CardManager.apk** — تطبيق المشترك (مدير الكروت). فترة تجريبية أسبوع ثم يطلب مفتاح ترخيص.
+            - **CardManager-Admin.apk** — لوحة التراخيص (خاصة بك أنت فقط). تصدر مفاتيح التفعيل للمشتركين.
+
+            ⚠️ لا تشارك ملف لوحة التراخيص مع أحد.
+
+            ### طريقة التفعيل
+            1. المشترك يفتح التطبيق ويرسل لك **رمز جهازه**.
+            2. تفتح لوحة التراخيص، تلصق الرمز، تختار المدة، وتضغط "إصدار المفتاح".
+            3. ترسل له المفتاح، يلصقه في تطبيقه ويضغط "تفعيل".
+
+            المفتاح يعمل على ذلك الجوال فقط.
           prerelease: true
-          files: CardManager.apk
+          files: |
+            CardManager.apk
+            CardManager-Admin.apk

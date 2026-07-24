@@ -24,6 +24,28 @@ import java.io.File
  */
 object CardRenderer {
 
+    /** ذاكرة مؤقتة لصورة الخلفية — تمنع فك ترميز الصورة لكل كرت (تسريع كبير للدفعات) */
+    private var bgPath: String? = null
+    private var bgBitmap: Bitmap? = null
+
+    @Synchronized
+    private fun background(path: String): Bitmap? {
+        if (path.isBlank()) return null
+        if (bgPath == path && bgBitmap?.isRecycled == false) return bgBitmap
+        bgBitmap?.recycle()
+        bgBitmap = if (File(path).exists()) BitmapFactory.decodeFile(path) else null
+        bgPath = path
+        return bgBitmap
+    }
+
+    /** تُستدعى عند تغيير خلفية القالب */
+    @Synchronized
+    fun clearCache() {
+        bgBitmap?.recycle()
+        bgBitmap = null
+        bgPath = null
+    }
+
     fun render(
         template: CardTemplate,
         user: UserEntry,
@@ -41,12 +63,8 @@ object CardRenderer {
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = template.backgroundColor.toInt() }
         canvas.drawRoundRect(rect, radius, radius, bgPaint)
 
-        if (template.backgroundPath.isNotBlank() && File(template.backgroundPath).exists()) {
-            val bg = BitmapFactory.decodeFile(template.backgroundPath)
-            if (bg != null) {
-                canvas.drawBitmap(bg, null, rect, Paint(Paint.FILTER_BITMAP_FLAG))
-                bg.recycle()
-            }
+        background(template.backgroundPath)?.let { bg ->
+            canvas.drawBitmap(bg, null, rect, Paint(Paint.FILTER_BITMAP_FLAG))
         }
 
         // الإطار

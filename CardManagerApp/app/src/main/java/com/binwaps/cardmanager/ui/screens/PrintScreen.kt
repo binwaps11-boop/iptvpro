@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Share
@@ -77,7 +78,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun PrintScreen() {
+fun PrintScreen(navController: androidx.navigation.NavController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val users by Store.users.collectAsState()
@@ -204,12 +205,32 @@ fun PrintScreen() {
                 colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
             )
         } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    settings.cutMarks, { Store.updateSettings(settings.copy(cutMarks = it)) },
-                    colors = CheckboxDefaults.colors(checkedColor = Neon, checkmarkColor = com.binwaps.cardmanager.ui.theme.Ink),
-                )
-                Text("علامات قص حول الكروت", fontSize = 12.5.sp, color = TextMid)
+            // ملخص التخطيط مع زر فتح شاشة التخطيط
+            val info = remember(template, settings.layout, users.size) {
+                template?.let { PdfExporter.computeLayout(it, settings, users.size) }
+            }
+            if (info != null) {
+                GlassCard(
+                    Modifier.fillMaxWidth().clickable { navController.navigate("layout/${template!!.id}") },
+                    glow = Violet.copy(alpha = 0.35f), padding = 13,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.GridView, null, tint = Violet, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${info.columns} × ${info.rows} = ${info.perPage} كرت في الصفحة",
+                                fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi,
+                            )
+                            Text(
+                                "${settings.layout.paper.labelAr} ${settings.layout.orientation.labelAr} • " +
+                                    "${info.pages} صفحة • مقاس الكرت ${info.cardWidthMm.toInt()}×${info.cardHeightMm.toInt()} مم",
+                                fontSize = 11.sp, color = TextLow,
+                            )
+                        }
+                        Text("تعديل", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
 
@@ -224,20 +245,24 @@ fun PrintScreen() {
 
         if (settings.paperType == PaperType.A4) {
             NeonButton("تصدير PDF ومشاركته", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = !busy) {
-                busy = true
+                busy = true; progress = 0 to users.size
                 scope.launch {
-                    val file = withContext(Dispatchers.IO) { PdfExporter.export(context, template!!, users, settings) }
-                    busy = false
+                    val file = withContext(Dispatchers.IO) {
+                        PdfExporter.export(context, template!!, users, settings) { d, t -> progress = d to t }
+                    }
+                    busy = false; progress = null
                     saveBatch()
                     PdfExporter.share(context, file)
                 }
             }
             Spacer(Modifier.height(9.dp))
             GhostButton("طباعة عبر النظام (WiFi/USB)", Modifier.fillMaxWidth(), Icons.Filled.Print, enabled = !busy) {
-                busy = true
+                busy = true; progress = 0 to users.size
                 scope.launch {
-                    val file = withContext(Dispatchers.IO) { PdfExporter.export(context, template!!, users, settings) }
-                    busy = false
+                    val file = withContext(Dispatchers.IO) {
+                        PdfExporter.export(context, template!!, users, settings) { d, t -> progress = d to t }
+                    }
+                    busy = false; progress = null
                     saveBatch()
                     PdfExporter.printViaSystem(context, file)
                 }

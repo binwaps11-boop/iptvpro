@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Text
@@ -35,6 +36,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
+import com.binwaps.cardmanager.license.LicenseManager
+import com.binwaps.cardmanager.license.LicenseState
 import com.binwaps.cardmanager.mikrotik.MikrotikClient
 import com.binwaps.cardmanager.ui.components.AppField
 import com.binwaps.cardmanager.ui.components.GhostButton
@@ -42,7 +45,9 @@ import com.binwaps.cardmanager.ui.components.SectionHeader
 import com.binwaps.cardmanager.ui.components.StatusPill
 import com.binwaps.cardmanager.ui.theme.Danger
 import com.binwaps.cardmanager.ui.theme.GlassCard
+import com.binwaps.cardmanager.ui.theme.Lime
 import com.binwaps.cardmanager.ui.theme.Neon
+import com.binwaps.cardmanager.ui.theme.Warn
 import com.binwaps.cardmanager.ui.theme.ScreenGradient
 import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
@@ -51,7 +56,7 @@ import com.binwaps.cardmanager.ui.theme.Violet
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen(onDisconnect: () -> Unit) {
+fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by Store.settings.collectAsState()
@@ -134,19 +139,6 @@ fun SettingsScreen(onDisconnect: () -> Unit) {
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AppField(
-                    settings.a4MarginMm.toString(),
-                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4MarginMm = v)) } },
-                    "هامش A4 (مم)", Modifier.weight(1f), numeric = true,
-                )
-                AppField(
-                    settings.a4SpacingMm.toString(),
-                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4SpacingMm = v)) } },
-                    "تباعد الكروت (مم)", Modifier.weight(1f), numeric = true,
-                )
-            }
-            Spacer(Modifier.height(9.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(
                     settings.thermalFeedMm.toString(),
                     { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalFeedMm = v)) } },
                     "تغذية الورق (مم)", Modifier.weight(1f), numeric = true,
@@ -179,8 +171,29 @@ fun SettingsScreen(onDisconnect: () -> Unit) {
             }
         }
 
+        // الترخيص
+        GlassCard(Modifier.fillMaxWidth(), glow = Lime.copy(alpha = 0.3f)) {
+            Text("الترخيص", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Spacer(Modifier.height(8.dp))
+            val ls by LicenseManager.state.collectAsState()
+            Text(
+                when (val s = ls) {
+                    is LicenseState.Trial -> "نسخة تجريبية — متبقٍ ${s.daysLeft} يوم"
+                    is LicenseState.Licensed ->
+                        if (s.lifetime) "مفعّل — ترخيص دائم" else "مفعّل — ${s.plan.labelAr}، متبقٍ ${s.daysLeft} يوم"
+                    LicenseState.TrialEnded -> "انتهت الفترة التجريبية"
+                    LicenseState.Expired -> "انتهى الاشتراك"
+                },
+                fontSize = 12.5.sp,
+                color = if (ls is LicenseState.Licensed) Lime else Warn,
+            )
+            Text("رمز الجهاز: ${LicenseManager.deviceCode()}", fontSize = 11.sp, color = TextLow)
+            Spacer(Modifier.height(10.dp))
+            GhostButton("إدارة الترخيص", icon = Icons.Filled.VerifiedUser, color = Lime) { onLicense() }
+        }
+
         Text(
-            "مدير الكروت — الإصدار 2.0",
+            "مدير الكروت — الإصدار 3.0",
             fontSize = 11.sp, color = TextLow,
         )
         Spacer(Modifier.height(24.dp))

@@ -165,10 +165,32 @@ fun DashboardScreen(navController: NavController) {
             }
         }
 
-        // إحصائيات
+        // إحصائيات الكروت على الراوتر
+        if (connected) {
+            Text("الكروت على الراوتر", fontSize = 13.sp, color = TextLow)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                StatTile("إجمالي الهوتسبوت", status.hotspotUsers.toString(), Modifier.weight(1f), Neon)
+                StatTile("اليوزر منجر", status.userManagerUsers.toString(), Modifier.weight(1f), Violet)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                StatTile("غير مستهلكة", status.unusedUsers.toString(), Modifier.weight(1f), Lime, "متاحة للبيع")
+                StatTile("مستهلكة", status.usedUsers.toString(), Modifier.weight(1f), Warn, "انتهى وقتها")
+            }
+            if (status.hotspotUsers > 0) {
+                Spacer(Modifier.height(2.dp))
+                NeonProgress(status.usedUsers.toFloat() / status.hotspotUsers)
+                Text(
+                    "استُهلك ${status.usedUsers} من ${status.hotspotUsers} كرت",
+                    fontSize = 11.sp, color = TextLow,
+                )
+            }
+        }
+
+        // إحصائيات التطبيق
+        Text("في التطبيق", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             StatTile("متصل الآن", actives.size.toString(), Modifier.weight(1f), Lime)
-            StatTile("كروت جاهزة", users.size.toString(), Modifier.weight(1f), Neon)
+            StatTile("كروت جاهزة", users.size.toString(), Modifier.weight(1f), Neon, "للطباعة")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             StatTile("مطبوع اليوم", todayCards.toString(), Modifier.weight(1f), Violet)

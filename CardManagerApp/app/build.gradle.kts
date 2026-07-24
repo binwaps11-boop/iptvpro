@@ -23,6 +23,22 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+
+    // تطبيقان من نفس الكود: تطبيق المشترك، وتطبيق الأدمن لإصدار التراخيص
+    flavorDimensions += "audience"
+    productFlavors {
+        create("subscriber") {
+            dimension = "audience"
+            applicationId = "com.binwaps.cardmanager"
+            resValue("string", "app_name", "مدير الكروت")
+        }
+        create("admin") {
+            dimension = "audience"
+            applicationId = "com.binwaps.cardmanager.admin"
+            versionNameSuffix = "-admin"
+            resValue("string", "app_name", "لوحة التراخيص")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

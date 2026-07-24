@@ -11,18 +11,17 @@ import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SpaceDashboard
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,9 +33,13 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.binwaps.cardmanager.data.Store
+import com.binwaps.cardmanager.license.LicenseManager
+import com.binwaps.cardmanager.license.LicenseState
 import com.binwaps.cardmanager.ui.screens.ConnectScreen
 import com.binwaps.cardmanager.ui.screens.DashboardScreen
 import com.binwaps.cardmanager.ui.screens.HistoryScreen
+import com.binwaps.cardmanager.ui.screens.LayoutScreen
+import com.binwaps.cardmanager.ui.screens.LicenseScreen
 import com.binwaps.cardmanager.ui.screens.PrintScreen
 import com.binwaps.cardmanager.ui.screens.ProfilesScreen
 import com.binwaps.cardmanager.ui.screens.SettingsScreen
@@ -44,10 +47,10 @@ import com.binwaps.cardmanager.ui.screens.TemplateEditorScreen
 import com.binwaps.cardmanager.ui.screens.TemplatesScreen
 import com.binwaps.cardmanager.ui.screens.UsersScreen
 import com.binwaps.cardmanager.ui.theme.CardManagerTheme
+import com.binwaps.cardmanager.ui.theme.Ink
 import com.binwaps.cardmanager.ui.theme.Neon
 import com.binwaps.cardmanager.ui.theme.Panel
 import com.binwaps.cardmanager.ui.theme.TextLow
-import com.binwaps.cardmanager.ui.theme.Ink
 
 private data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
 
@@ -62,17 +65,22 @@ private val tabs = listOf(
 )
 
 /** الشاشات التي تُخفى فيها قائمة التنقل السفلية */
-private val fullScreenRoutes = listOf("connect", "editor")
+private val fullScreenRoutes = listOf("connect", "editor", "layout", "license")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Store.init(this)
+        LicenseManager.init(this)
+
         setContent {
             CardManagerTheme {
                 val navController = rememberNavController()
                 val backStack by navController.currentBackStackEntryAsState()
                 val currentRoute = backStack?.destination?.route.orEmpty()
+                val licenseState by LicenseManager.state.collectAsState()
+
+                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 Scaffold(
@@ -107,9 +115,18 @@ class MainActivity : ComponentActivity() {
                 ) { padding ->
                     NavHost(
                         navController = navController,
-                        startDestination = "connect",
+                        startDestination = if (blocked) "license" else "connect",
                         modifier = Modifier.padding(padding).background(Ink),
                     ) {
+                        composable("license") {
+                            LicenseScreen(
+                                blocking = blocked,
+                                onActivated = {
+                                    navController.navigate("connect") { popUpTo("license") { inclusive = true } }
+                                },
+                                onBack = if (blocked) null else ({ navController.popBackStack(); Unit }),
+                            )
+                        }
                         composable("connect") {
                             ConnectScreen(
                                 onConnected = { navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } } },
@@ -128,12 +145,22 @@ class MainActivity : ComponentActivity() {
                                 onDone = { navController.popBackStack() },
                             )
                         }
-                        composable("print") { PrintScreen() }
+                        composable(
+                            "layout/{templateId}",
+                            arguments = listOf(navArgument("templateId") { type = NavType.LongType })
+                        ) { entry ->
+                            LayoutScreen(
+                                templateId = entry.arguments?.getLong("templateId") ?: 0L,
+                                onDone = { navController.popBackStack() },
+                            )
+                        }
+                        composable("print") { PrintScreen(navController) }
                         composable("profiles") { ProfilesScreen() }
                         composable("history") { HistoryScreen() }
                         composable("settings") {
                             SettingsScreen(
                                 onDisconnect = { navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } } },
+                                onLicense = { navController.navigate("license") },
                             )
                         }
                     }

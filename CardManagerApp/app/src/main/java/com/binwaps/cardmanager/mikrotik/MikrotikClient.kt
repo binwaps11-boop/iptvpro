@@ -14,12 +14,31 @@ import me.legrange.mikrotik.ApiConnection
  */
 object MikrotikClient {
 
+    /**
+     * يفتح اتصالاً بالراوتر — محلياً أو عن بعد عبر دومين/كلاود.
+     * عند تفعيل SSL يُستخدم api-ssl (المنفذ 8729 عادة) مع قبول شهادة الراوتر الذاتية.
+     */
     private fun open(r: RouterProfile): ApiConnection {
-        val con = ApiConnection.connect(
-            javax.net.SocketFactory.getDefault(), r.host, r.port, 8000
-        )
+        val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
+        val factory = if (r.useSsl) trustAllSocketFactory() else javax.net.SocketFactory.getDefault()
+        val con = ApiConnection.connect(factory, r.host.trim(), r.port, timeoutMs)
         con.login(r.username, r.password)
         return con
+    }
+
+    /**
+     * راوترات مايكروتك تستخدم شهادة موقّعة ذاتياً افتراضياً، فلا يمكن التحقق منها
+     * عبر سلسلة ثقة عامة. نقبلها لأن الاتصال موجّه لعنوان يحدده المستخدم بنفسه.
+     */
+    private fun trustAllSocketFactory(): javax.net.SocketFactory {
+        val trustAll = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
+            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+        })
+        val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+        ctx.init(null, trustAll, java.security.SecureRandom())
+        return ctx.socketFactory
     }
 
     private inline fun <T> ApiConnection.useCon(block: (ApiConnection) -> T): T {
@@ -37,7 +56,20 @@ object MikrotikClient {
                 val res = con.execute("/system/resource/print").firstOrNull() ?: emptyMap()
                 val identity = con.execute("/system/identity/print").firstOrNull()?.get("name") ?: ""
                 val active = runCatching { con.execute("/ip/hotspot/active/print").size }.getOrDefault(0)
-                val hs = runCatching { con.execute("/ip/hotspot/user/print").size }.getOrDefault(0)
+
+                val hotspotRows = runCatching { con.execute("/ip/hotspot/user/print") }.getOrDefault(emptyList())
+                val hs = hotspotRows.count { (it["name"] ?: "") != "default-trial" }
+                // مستخدم "مستهلك" = استهلك كامل الوقت المسموح
+                val used = hotspotRows.count { row ->
+                    val limit = row["limit-uptime"].orEmpty()
+                    val up = row["uptime"].orEmpty()
+                    limit.isNotBlank() && up.isNotBlank() &&
+                        parseUptime(limit) > 0 && parseUptime(up) >= parseUptime(limit)
+                }
+                val umRows = runCatching { con.execute("/user-manager/user/print") }
+                    .recoverCatching { con.execute("/tool/user-manager/user/print") }
+                    .getOrDefault(emptyList())
+
                 RouterStatus(
                     identity = identity,
                     version = res["version"] ?: "",
@@ -48,6 +80,8 @@ object MikrotikClient {
                     totalMemory = res["total-memory"] ?: "",
                     activeUsers = active,
                     hotspotUsers = hs,
+                    userManagerUsers = umRows.size,
+                    usedUsers = used,
                 )
             }
         }

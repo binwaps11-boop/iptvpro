@@ -1,0 +1,312 @@
+package com.binwaps.cardmanager
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.binwaps.cardmanager.license.LicenseCore
+import com.binwaps.cardmanager.ui.components.AppField
+import com.binwaps.cardmanager.ui.components.GhostButton
+import com.binwaps.cardmanager.ui.components.NeonButton
+import com.binwaps.cardmanager.ui.components.SectionHeader
+import com.binwaps.cardmanager.ui.theme.CardManagerTheme
+import com.binwaps.cardmanager.ui.theme.Danger
+import com.binwaps.cardmanager.ui.theme.GlassCard
+import com.binwaps.cardmanager.ui.theme.Ink
+import com.binwaps.cardmanager.ui.theme.Lime
+import com.binwaps.cardmanager.ui.theme.Neon
+import com.binwaps.cardmanager.ui.theme.Panel
+import com.binwaps.cardmanager.ui.theme.ScreenGradient
+import com.binwaps.cardmanager.ui.theme.Stroke
+import com.binwaps.cardmanager.ui.theme.TextHi
+import com.binwaps.cardmanager.ui.theme.TextLow
+import com.binwaps.cardmanager.ui.theme.TextMid
+import com.binwaps.cardmanager.ui.theme.Violet
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+
+/** ترخيص صادر — يُحفظ في سجل الأدمن */
+@Serializable
+data class IssuedLicense(
+    val customer: String,
+    val deviceCode: String,
+    val key: String,
+    val planCode: Int,
+    val issuedAt: Long,
+    val expiresAt: Long,
+)
+
+/** سجل التراخيص الصادرة */
+object AdminStore {
+    private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
+    private lateinit var ctx: Context
+    private var cache: List<IssuedLicense> = emptyList()
+
+    fun init(context: Context) {
+        ctx = context.applicationContext
+        cache = runCatching {
+            val f = File(ctx.filesDir, "issued.json")
+            if (f.exists()) json.decodeFromString<List<IssuedLicense>>(f.readText()) else emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun all(): List<IssuedLicense> = cache
+
+    fun add(l: IssuedLicense) {
+        cache = listOf(l) + cache
+        persist()
+    }
+
+    fun remove(key: String) {
+        cache = cache.filterNot { it.key == key }
+        persist()
+    }
+
+    private fun persist() = runCatching {
+        File(ctx.filesDir, "issued.json").writeText(json.encodeToString(cache))
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        AdminStore.init(this)
+        setContent { CardManagerTheme { AdminScreen() } }
+    }
+}
+
+@Composable
+private fun AdminScreen() {
+    val context = LocalContext.current
+    var customer by remember { mutableStateOf("") }
+    var deviceCode by remember { mutableStateOf("") }
+    var plan by remember { mutableStateOf(LicenseCore.Plan.MONTH) }
+    var generated by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var history by remember { mutableStateOf(AdminStore.all()) }
+
+    val fmt = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
+
+    fun clipboard() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+    fun expiryFor(p: LicenseCore.Plan): Long {
+        val cal = Calendar.getInstance()
+        when (p) {
+            LicenseCore.Plan.TRIAL -> cal.add(Calendar.DAY_OF_YEAR, 7)
+            LicenseCore.Plan.MONTH -> cal.add(Calendar.MONTH, 1)
+            LicenseCore.Plan.QUARTER -> cal.add(Calendar.MONTH, 3)
+            LicenseCore.Plan.YEAR -> cal.add(Calendar.YEAR, 1)
+            LicenseCore.Plan.LIFETIME -> cal.add(Calendar.YEAR, 50)
+        }
+        return cal.timeInMillis
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(ScreenGradient)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+    ) {
+        Spacer(Modifier.height(10.dp))
+        SectionHeader("لوحة التراخيص", "إصدار مفاتيح تفعيل للمشتركين", Icons.Filled.VpnKey)
+        Spacer(Modifier.height(16.dp))
+
+        GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 16) {
+            Text("ترخيص جديد", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Spacer(Modifier.height(11.dp))
+            AppField(customer, { customer = it }, "اسم المشترك", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(9.dp))
+            AppField(deviceCode, { deviceCode = it; error = null }, "رمز جهاز المشترك", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(7.dp))
+            GhostButton("لصق رمز الجهاز", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
+                val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                if (text.isBlank()) {
+                    Toast.makeText(context, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
+                } else {
+                    // نأخذ آخر سطر يحتوي على رمز
+                    deviceCode = text.trim().lines().last { it.isNotBlank() }.trim()
+                    error = null
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text("مدة الاشتراك", fontSize = 12.sp, color = TextLow)
+            Spacer(Modifier.height(7.dp))
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                LicenseCore.Plan.entries.forEach { p ->
+                    val on = plan == p
+                    Text(
+                        p.labelAr,
+                        fontSize = 11.5.sp,
+                        color = if (on) Neon else TextMid,
+                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .background(if (on) Neon.copy(alpha = 0.12f) else Panel, RoundedCornerShape(999.dp))
+                            .border(1.dp, if (on) Neon.copy(alpha = 0.5f) else Stroke, RoundedCornerShape(999.dp))
+                            .clickable { plan = p }
+                            .padding(horizontal = 13.dp, vertical = 7.dp),
+                    )
+                }
+            }
+
+            if (error != null) {
+                Spacer(Modifier.height(10.dp))
+                Text(error!!, fontSize = 12.sp, color = Danger)
+            }
+
+            Spacer(Modifier.height(14.dp))
+            NeonButton("إصدار المفتاح", Modifier.fillMaxWidth(), Icons.Filled.VpnKey, enabled = deviceCode.isNotBlank()) {
+                val expiry = expiryFor(plan)
+                val key = LicenseCore.generate(AdminKeys.PRIVATE_KEY_B64, deviceCode, expiry, plan)
+                if (key == null) {
+                    error = "رمز الجهاز غير صحيح — تأكد من نسخه كاملاً"
+                } else {
+                    generated = key
+                    AdminStore.add(
+                        IssuedLicense(
+                            customer = customer.ifBlank { "بدون اسم" },
+                            deviceCode = deviceCode.trim(),
+                            key = key,
+                            planCode = plan.code,
+                            issuedAt = System.currentTimeMillis(),
+                            expiresAt = expiry,
+                        )
+                    )
+                    history = AdminStore.all()
+                }
+            }
+        }
+
+        // المفتاح الناتج
+        generated?.let { key ->
+            Spacer(Modifier.height(14.dp))
+            GlassCard(Modifier.fillMaxWidth(), glow = Lime.copy(alpha = 0.45f), padding = 16) {
+                Text("المفتاح جاهز", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Lime)
+                Spacer(Modifier.height(9.dp))
+                Text(
+                    key,
+                    fontSize = 12.5.sp, color = TextHi, textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Ink.copy(alpha = 0.6f), RoundedCornerShape(11.dp))
+                        .border(1.dp, Stroke, RoundedCornerShape(11.dp))
+                        .padding(11.dp),
+                )
+                Spacer(Modifier.height(11.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    GhostButton("نسخ", Modifier.weight(1f), Icons.Filled.ContentCopy) {
+                        clipboard().setPrimaryClip(ClipData.newPlainText("license", key))
+                        Toast.makeText(context, "تم نسخ المفتاح", Toast.LENGTH_SHORT).show()
+                    }
+                    GhostButton("إرسال", Modifier.weight(1f), Icons.Filled.Share, color = Violet) {
+                        context.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        Intent.EXTRA_TEXT,
+                                        "مفتاح تفعيل مدير الكروت\nالمدة: ${plan.labelAr}\n\n$key",
+                                    )
+                                },
+                                "إرسال المفتاح",
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // السجل
+        Spacer(Modifier.height(20.dp))
+        Text("التراخيص الصادرة (${history.size})", fontSize = 13.sp, color = TextLow)
+        Spacer(Modifier.height(9.dp))
+        if (history.isEmpty()) {
+            Text("لم تصدر أي ترخيص بعد", fontSize = 12.sp, color = TextLow)
+        }
+        history.forEach { l ->
+            GlassCard(Modifier.fillMaxWidth().padding(bottom = 8.dp), padding = 12) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(l.customer, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                        Text("الجهاز: ${l.deviceCode}", fontSize = 11.sp, color = TextMid)
+                        Text(
+                            "${LicenseCore.Plan.of(l.planCode).labelAr} — ينتهي ${fmt.format(Date(l.expiresAt))}",
+                            fontSize = 11.sp, color = TextLow,
+                        )
+                    }
+                    IconButton(onClick = {
+                        clipboard().setPrimaryClip(ClipData.newPlainText("license", l.key))
+                        Toast.makeText(context, "تم نسخ المفتاح", Toast.LENGTH_SHORT).show()
+                    }) { Icon(Icons.Filled.ContentCopy, "نسخ", tint = Neon, modifier = Modifier.size(18.dp)) }
+                    IconButton(onClick = {
+                        AdminStore.remove(l.key); history = AdminStore.all()
+                    }) { Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(18.dp)) }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .background(Danger.copy(alpha = 0.08f), RoundedCornerShape(13.dp))
+                .border(1.dp, Danger.copy(alpha = 0.3f), RoundedCornerShape(13.dp))
+                .padding(13.dp)
+        ) {
+            Text(
+                "لا تشارك تطبيق لوحة التراخيص مع أحد — من يملكه يستطيع إصدار مفاتيح لأي جهاز.",
+                fontSize = 11.5.sp, color = Danger,
+            )
+        }
+        Spacer(Modifier.height(30.dp))
+    }
+}

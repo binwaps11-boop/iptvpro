@@ -75,15 +75,80 @@ enum class PaperType(val labelAr: String) {
     THERMAL_80("طابعة حرارية 80مم"),
 }
 
-/** راوتر محفوظ — يدعم التبديل بين عدة راوترات */
+/** مقاس الورق */
+@Serializable
+enum class PaperSize(val labelAr: String, val widthMm: Float, val heightMm: Float) {
+    A4("A4 — 210×297", 210f, 297f),
+    A5("A5 — 148×210", 148f, 210f),
+    A3("A3 — 297×420", 297f, 420f),
+    LETTER("Letter — 216×279", 215.9f, 279.4f),
+}
+
+@Serializable
+enum class PageOrientation(val labelAr: String) {
+    PORTRAIT("عمودي"),
+    LANDSCAPE("أفقي"),
+}
+
+@Serializable
+enum class CutMarkStyle(val labelAr: String) {
+    NONE("بدون"),
+    BORDER("إطار حول كل كرت"),
+    CORNERS("علامات زوايا"),
+    DASHED("خطوط قص متقطعة"),
+}
+
+/**
+ * تخطيط الصفحة — عدد الكروت في الصف والعمود، المسافات، الهوامش، والاتجاه.
+ * إذا كان autoFit مفعّلاً يُحسب عدد الأعمدة والصفوف تلقائياً من مقاس الكرت.
+ */
+@Serializable
+data class PageLayout(
+    val paper: PaperSize = PaperSize.A4,
+    val orientation: PageOrientation = PageOrientation.PORTRAIT,
+    val autoFit: Boolean = true,
+    val columns: Int = 2,
+    val rows: Int = 5,
+    val marginMm: Float = 8f,
+    val hSpacingMm: Float = 3f,
+    val vSpacingMm: Float = 3f,
+    val cutMarks: CutMarkStyle = CutMarkStyle.BORDER,
+    /** ملء الصفحة: يمدد الكروت لتملأ عرض الصفحة بالكامل */
+    val stretchToFit: Boolean = false,
+) {
+    val pageWidthMm: Float get() = if (orientation == PageOrientation.PORTRAIT) paper.widthMm else paper.heightMm
+    val pageHeightMm: Float get() = if (orientation == PageOrientation.PORTRAIT) paper.heightMm else paper.widthMm
+
+    /** عدد الأعمدة والصفوف الفعلي لمقاس كرت معيّن */
+    fun gridFor(cardWidthMm: Float, cardHeightMm: Float): Pair<Int, Int> {
+        if (!autoFit) return columns.coerceAtLeast(1) to rows.coerceAtLeast(1)
+        val usableW = pageWidthMm - 2 * marginMm
+        val usableH = pageHeightMm - 2 * marginMm
+        val c = ((usableW + hSpacingMm) / (cardWidthMm + hSpacingMm)).toInt().coerceAtLeast(1)
+        val r = ((usableH + vSpacingMm) / (cardHeightMm + vSpacingMm)).toInt().coerceAtLeast(1)
+        return c to r
+    }
+
+    fun perPage(cardWidthMm: Float, cardHeightMm: Float): Int {
+        val (c, r) = gridFor(cardWidthMm, cardHeightMm)
+        return c * r
+    }
+}
+
+/** راوتر محفوظ — محلي أو عن بعد عبر دومين/كلاود */
 @Serializable
 data class RouterProfile(
     val id: Long,
     val name: String = "الراوتر",
+    /** عنوان IP أو دومين مثل xxxxx.sn.mynetname.net */
     val host: String = "192.168.88.1",
     val port: Int = 8728,
     val username: String = "admin",
     val password: String = "",
+    /** اتصال مشفّر api-ssl (المنفذ 8729) — مهم للاتصال عن بعد */
+    val useSsl: Boolean = false,
+    /** مهلة الاتصال بالثواني — تُزاد للاتصال عن بعد البطيء */
+    val timeoutSec: Int = 12,
 )
 
 /** حالة الراوتر المقروءة مباشرة عبر الـ API */
@@ -97,8 +162,16 @@ data class RouterStatus(
     val freeMemory: String = "",
     val totalMemory: String = "",
     val activeUsers: Int = 0,
+    /** إجمالي كروت الهوتسبوت الموجودة على الراوتر */
     val hotspotUsers: Int = 0,
-)
+    /** إجمالي مستخدمي اليوزر منجر */
+    val userManagerUsers: Int = 0,
+    /** الكروت التي استهلكت كامل وقتها */
+    val usedUsers: Int = 0,
+) {
+    /** الكروت غير المستهلكة (المتبقية للبيع) */
+    val unusedUsers: Int get() = (hotspotUsers - usedUsers).coerceAtLeast(0)
+}
 
 /** مستخدم متصل الآن بالهوتسبوت */
 @Serializable
@@ -161,9 +234,8 @@ data class AppSettings(
     /** طابعة شبكة (TCP) اختيارية */
     val tcpPrinterIp: String = "",
     val tcpPrinterPort: Int = 9100,
-    val a4MarginMm: Float = 8f,
-    val a4SpacingMm: Float = 3f,
-    val cutMarks: Boolean = true,
+    /** تخطيط الصفحة للطباعة الورقية */
+    val layout: PageLayout = PageLayout(),
     /** معرّف الراوتر النشط حالياً */
     val activeRouterId: Long = 0,
 )
