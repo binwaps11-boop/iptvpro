@@ -61,7 +61,8 @@ object LicenseCore {
     fun fingerprintFromCode(code: String): ByteArray? {
         val clean = normalize(code)
         if (clean.length < 8) return null
-        return runCatching { base32Decode(clean).copyOf(5) }.getOrNull()
+        val decoded = runCatching { base32Decode(clean.take(8)) }.getOrNull() ?: return null
+        return if (decoded.size >= 5) decoded.copyOf(5) else null
     }
 
     // ===== بناء وقراءة الحمولة =====
@@ -105,25 +106,29 @@ object LicenseCore {
 
     // ===== التحقق (تطبيق المشترك) =====
 
-    fun verify(context: Context, licenseText: String): LicenseInfo? = runCatching {
-        val bytes = base32Decode(normalize(licenseText))
-        if (bytes.size < PAYLOAD_SIZE + 64) return null
-        val payload = bytes.copyOfRange(0, PAYLOAD_SIZE)
-        val raw = bytes.copyOfRange(PAYLOAD_SIZE, PAYLOAD_SIZE + 64)
+    fun verify(context: Context, licenseText: String): LicenseInfo? {
+        return runCatching {
+            val bytes = base32Decode(normalize(licenseText))
+            if (bytes.size < PAYLOAD_SIZE + 64) return@runCatching null
+            val payload = bytes.copyOfRange(0, PAYLOAD_SIZE)
+            val raw = bytes.copyOfRange(PAYLOAD_SIZE, PAYLOAD_SIZE + 64)
 
-        // البصمة يجب أن تطابق هذا الجهاز
-        val fp = deviceFingerprint(context)
-        for (i in 0 until 5) if (payload[i] != fp[i]) return null
+            // البصمة يجب أن تطابق هذا الجهاز
+            val fp = deviceFingerprint(context)
+            var matches = true
+            for (i in 0 until 5) if (payload[i] != fp[i]) matches = false
+            if (!matches) return@runCatching null
 
-        val keySpec = X509EncodedKeySpec(Base64.getDecoder().decode(PUBLIC_KEY_B64))
-        val key = KeyFactory.getInstance("EC").generatePublic(keySpec)
-        val verifier = Signature.getInstance("SHA256withECDSA")
-        verifier.initVerify(key)
-        verifier.update(payload)
-        if (!verifier.verify(rawToDer(raw))) return null
+            val keySpec = X509EncodedKeySpec(Base64.getDecoder().decode(PUBLIC_KEY_B64))
+            val key = KeyFactory.getInstance("EC").generatePublic(keySpec)
+            val verifier = Signature.getInstance("SHA256withECDSA")
+            verifier.initVerify(key)
+            verifier.update(payload)
+            if (!verifier.verify(rawToDer(raw))) return@runCatching null
 
-        readPayload(payload)
-    }.getOrNull()
+            readPayload(payload)
+        }.getOrNull()
+    }
 
     // ===== أدوات =====
 

@@ -67,9 +67,16 @@ object Store {
         if (!f.exists()) null else json.decodeFromString<T>(f.readText())
     }.getOrNull()
 
-    private inline fun <reified T> save(name: String, value: T) = runCatching {
-        File(appContext.filesDir, name).writeText(json.encodeToString(value))
+    /** يُسلسل فوراً (لالتقاط الحالة الصحيحة) ويكتب على القرص في خيط خلفي حتى لا تتجمد الواجهة */
+    private inline fun <reified T> save(name: String, value: T) {
+        val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return
+        io.execute {
+            runCatching { File(appContext.filesDir, name).writeText(text) }
+        }
     }
+
+    val io: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor()
 
     // ===== المستخدمون =====
     fun setUsers(list: List<UserEntry>) {

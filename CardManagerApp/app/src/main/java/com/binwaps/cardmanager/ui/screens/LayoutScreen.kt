@@ -34,7 +34,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -269,19 +271,25 @@ private fun Counter(label: String, value: Int, min: Int, max: Int, onChange: (In
     }
 }
 
+/**
+ * منزلق يحدّث القيمة محلياً أثناء السحب ولا يحفظ على القرص إلا عند رفع الإصبع،
+ * فلا يُكتب ملف الإعدادات عشرات المرات في الثانية.
+ */
 @Composable
 private fun LabeledSlider(
     label: String, value: Float, min: Float, max: Float, unit: String,
     onChange: (Float) -> Unit,
 ) {
+    var local by remember(value) { mutableFloatStateOf(value) }
     Column {
         Row {
             Text(label, fontSize = 12.sp, color = TextMid, modifier = Modifier.weight(1f))
-            Text("${"%.1f".format(value)} $unit", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.SemiBold)
+            Text("${"%.1f".format(local)} $unit", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.SemiBold)
         }
         Slider(
-            value = value,
-            onValueChange = onChange,
+            value = local,
+            onValueChange = { local = it },
+            onValueChangeFinished = { onChange(local) },
             valueRange = min..max,
             colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
         )
