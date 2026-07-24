@@ -38,16 +38,21 @@ object MikrotikClient {
         }
     }
 
-    /** جلب مستخدمي اليوزر منجر (RouterOS v7) */
+    /** جلب مستخدمي اليوزر منجر — يجرب مسار v7 ثم مسار v6 تلقائياً */
     suspend fun fetchUserManagerUsers(s: AppSettings): Result<List<UserEntry>> = withContext(Dispatchers.IO) {
         runCatching {
             open(s).use { con ->
-                con.execute("/user-manager/user/print").mapNotNull { row ->
-                    val name = row["name"] ?: return@mapNotNull null
+                val rows = try {
+                    con.execute("/user-manager/user/print")
+                } catch (e: Exception) {
+                    con.execute("/tool/user-manager/user/print")
+                }
+                rows.mapNotNull { row ->
+                    val name = row["name"] ?: row["username"] ?: return@mapNotNull null
                     UserEntry(
                         username = name,
                         password = row["password"] ?: "",
-                        profile = row["group"] ?: "",
+                        profile = row["group"] ?: row["actual-profile"] ?: "",
                         comment = row["comment"] ?: "",
                     )
                 }

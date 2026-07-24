@@ -7,8 +7,10 @@ import com.binwaps.cardmanager.model.PaperType
 import com.binwaps.cardmanager.model.UserEntry
 import com.binwaps.cardmanager.render.CardRenderer
 import com.dantsu.escposprinter.EscPosPrinter
+import com.dantsu.escposprinter.connection.DeviceConnection
 import com.dantsu.escposprinter.connection.bluetooth.BluetoothConnection
 import com.dantsu.escposprinter.connection.bluetooth.BluetoothPrintersConnections
+import com.dantsu.escposprinter.connection.tcp.TcpConnection
 import com.dantsu.escposprinter.textparser.PrinterTextParserImg
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -33,8 +35,11 @@ object ThermalPrinter {
         else -> 32
     }
 
+    /** اتصال طابعة شبكة TCP (المنفذ عادة 9100) */
+    fun tcpPrinter(ip: String, port: Int): DeviceConnection = TcpConnection(ip, port)
+
     suspend fun printCards(
-        connection: BluetoothConnection,
+        connection: DeviceConnection,
         template: CardTemplate,
         users: List<UserEntry>,
         settings: AppSettings,
@@ -44,6 +49,7 @@ object ThermalPrinter {
             val widthMm = printableWidthMm(settings.paperType)
             val printer = EscPosPrinter(connection, settings.thermalDpi, widthMm, charsPerLine(settings.paperType))
             try {
+                if (settings.escAsteriskMode) printer.useEscAsteriskCommand(true)
                 val dotsPerMm = settings.thermalDpi / 25.4f
                 val widthPx = (widthMm * dotsPerMm).toInt()
                 val heightPx = (settings.thermalCardHeightMm * dotsPerMm).toInt().coerceAtLeast(32)
@@ -57,7 +63,12 @@ object ThermalPrinter {
 
                     val text = buildImageText(printer, scaled)
                     scaled.recycle()
-                    printer.printFormattedText(text, settings.thermalFeedMm)
+                    val isLast = index == users.size - 1
+                    if (settings.autoCut && isLast) {
+                        printer.printFormattedTextAndCut(text, settings.thermalFeedMm)
+                    } else {
+                        printer.printFormattedText(text, settings.thermalFeedMm)
+                    }
                     onProgress(index + 1, users.size)
                 }
                 users.size

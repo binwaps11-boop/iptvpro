@@ -3,6 +3,7 @@ package com.binwaps.cardmanager.ui.screens
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudDownload
@@ -84,7 +86,10 @@ fun UsersScreen() {
             }
         }
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+        ) {
             OutlinedButton(enabled = !busy, onClick = {
                 busy = true
                 scope.launch {
@@ -99,6 +104,21 @@ fun UsersScreen() {
                 }
             }) {
                 Icon(Icons.Filled.CloudDownload, null); Spacer(Modifier.width(4.dp)); Text("جلب هوتسبوت")
+            }
+            OutlinedButton(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    val r = MikrotikClient.fetchUserManagerUsers(Store.settings.value)
+                    busy = false
+                    r.onSuccess {
+                        Store.addUsers(it)
+                        Toast.makeText(context, "تم جلب ${it.size} من اليوزر منجر", Toast.LENGTH_LONG).show()
+                    }.onFailure {
+                        Toast.makeText(context, "فشل الاتصال: ${it.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }) {
+                Icon(Icons.Filled.CloudDownload, null); Spacer(Modifier.width(4.dp)); Text("جلب يوزر منجر")
             }
             OutlinedButton(enabled = !busy && users.isNotEmpty(), onClick = {
                 busy = true

@@ -136,6 +136,32 @@ fun SettingsScreen() {
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
+                        value = settings.tcpPrinterIp,
+                        onValueChange = { Store.updateSettings(settings.copy(tcpPrinterIp = it.trim())) },
+                        label = { Text("طابعة شبكة IP (اختياري)") }, modifier = Modifier.weight(2f),
+                    )
+                    OutlinedTextField(
+                        value = settings.tcpPrinterPort.toString(),
+                        onValueChange = { it.toIntOrNull()?.let { p -> Store.updateSettings(settings.copy(tcpPrinterPort = p)) } },
+                        label = { Text("المنفذ") }, modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(
+                        checked = settings.escAsteriskMode,
+                        onCheckedChange = { Store.updateSettings(settings.copy(escAsteriskMode = it)) },
+                    )
+                    Text("وضع توافق الطابعات المقلدة (ESC *)", fontSize = 13.sp)
+                }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(
+                        checked = settings.autoCut,
+                        onCheckedChange = { Store.updateSettings(settings.copy(autoCut = it)) },
+                    )
+                    Text("قص الورق تلقائياً بعد الطباعة", fontSize = 13.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
                         value = settings.thermalFeedMm.toString(),
                         onValueChange = { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalFeedMm = v)) } },
                         label = { Text("تغذية الورق مم") }, modifier = Modifier.weight(1f),

@@ -88,6 +88,13 @@ data class AppSettings(
     /** تغذية الورق بعد كل كرت بالمليمتر */
     val thermalFeedMm: Float = 8f,
     val thermalDpi: Int = 203,
+    /** وضع توافق للطابعات المقلدة التي تشوه الصور (أمر ESC *) */
+    val escAsteriskMode: Boolean = false,
+    /** قص الورق تلقائياً بعد آخر كرت (للطابعات التي تدعم القص) */
+    val autoCut: Boolean = false,
+    /** طابعة شبكة (TCP) اختيارية — اتركه فارغاً لاستخدام البلوتوث */
+    val tcpPrinterIp: String = "",
+    val tcpPrinterPort: Int = 9100,
     val a4MarginMm: Float = 8f,
     val a4SpacingMm: Float = 3f,
     val cutMarks: Boolean = true,

@@ -184,7 +184,33 @@ fun PrintScreen() {
                 onClick = { openPrinterPicker() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Icon(Icons.Filled.Bluetooth, null); Spacer(Modifier.width(6.dp)); Text("طباعة على الطابعة الحرارية")
+                Icon(Icons.Filled.Bluetooth, null); Spacer(Modifier.width(6.dp)); Text("طباعة عبر البلوتوث")
+            }
+            if (settings.tcpPrinterIp.isNotBlank()) {
+                OutlinedButton(
+                    enabled = !busy && users.isNotEmpty() && template != null,
+                    onClick = {
+                        busy = true
+                        progress = 0 to users.size
+                        scope.launch {
+                            val conn = ThermalPrinter.tcpPrinter(settings.tcpPrinterIp, settings.tcpPrinterPort)
+                            val r = ThermalPrinter.printCards(conn, template!!, users, Store.settings.value) { done, total ->
+                                progress = done to total
+                            }
+                            busy = false
+                            progress = null
+                            r.onSuccess {
+                                Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show()
+                            }.onFailure {
+                                Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Filled.Print, null); Spacer(Modifier.width(6.dp))
+                    Text("طباعة عبر الشبكة (${settings.tcpPrinterIp})")
+                }
             }
         }
 

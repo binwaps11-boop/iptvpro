@@ -12,9 +12,9 @@ object CsvImporter {
 
     private val userKeys = listOf("username", "user", "login", "name", "اسم المستخدم", "المستخدم")
     private val passKeys = listOf("password", "pass", "pwd", "كلمة المرور", "الرمز")
-    private val profileKeys = listOf("profile", "group", "plan", "الباقة")
-    private val priceKeys = listOf("price", "cost", "amount", "السعر")
-    private val validityKeys = listOf("validity", "uptime", "limit-uptime", "uptime-limit", "time", "الصلاحية")
+    private val profileKeys = listOf("profile", "userprofname", "group", "tariff", "plan", "الباقة")
+    private val priceKeys = listOf("price", "moneypaid", "cost", "amount", "السعر")
+    private val validityKeys = listOf("validity", "profile-end-time", "userprofendtime", "end-time", "expiry", "uptime", "limit-uptime", "uptime-limit", "time", "الصلاحية")
     private val commentKeys = listOf("comment", "note", "ملاحظة")
 
     fun import(context: Context, uri: Uri): List<UserEntry> {
