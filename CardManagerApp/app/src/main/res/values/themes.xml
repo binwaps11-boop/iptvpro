@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.CardManager" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#0B5E4F</item>
+    </style>
+</resources>
