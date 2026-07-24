@@ -3,46 +3,66 @@ package com.binwaps.cardmanager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.CreditCard
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Style
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SpaceDashboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import androidx.navigation.NavType
 import com.binwaps.cardmanager.data.Store
-import com.binwaps.cardmanager.ui.screens.HomeScreen
+import com.binwaps.cardmanager.ui.screens.ConnectScreen
+import com.binwaps.cardmanager.ui.screens.DashboardScreen
+import com.binwaps.cardmanager.ui.screens.HistoryScreen
 import com.binwaps.cardmanager.ui.screens.PrintScreen
+import com.binwaps.cardmanager.ui.screens.ProfilesScreen
 import com.binwaps.cardmanager.ui.screens.SettingsScreen
 import com.binwaps.cardmanager.ui.screens.TemplateEditorScreen
 import com.binwaps.cardmanager.ui.screens.TemplatesScreen
 import com.binwaps.cardmanager.ui.screens.UsersScreen
 import com.binwaps.cardmanager.ui.theme.CardManagerTheme
+import com.binwaps.cardmanager.ui.theme.Neon
+import com.binwaps.cardmanager.ui.theme.Panel
+import com.binwaps.cardmanager.ui.theme.TextLow
+import com.binwaps.cardmanager.ui.theme.Ink
 
-data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
+private data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
 
-val tabs = listOf(
-    Tab("home", "الرئيسية", Icons.Filled.Home),
-    Tab("users", "المستخدمون", Icons.Filled.People),
-    Tab("templates", "القوالب", Icons.Filled.Style),
+private val tabs = listOf(
+    Tab("dashboard", "اللوحة", Icons.Filled.SpaceDashboard),
+    Tab("users", "الكروت", Icons.Filled.CreditCard),
+    Tab("templates", "القوالب", Icons.Filled.Layers),
     Tab("print", "الطباعة", Icons.Filled.Print),
+    Tab("profiles", "الباقات", Icons.Filled.Speed),
+    Tab("history", "التقارير", Icons.Filled.Analytics),
     Tab("settings", "الإعدادات", Icons.Filled.Settings),
 )
+
+/** الشاشات التي تُخفى فيها قائمة التنقل السفلية */
+private val fullScreenRoutes = listOf("connect", "editor")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,12 +72,14 @@ class MainActivity : ComponentActivity() {
             CardManagerTheme {
                 val navController = rememberNavController()
                 val backStack by navController.currentBackStackEntryAsState()
-                val currentRoute = backStack?.destination?.route
+                val currentRoute = backStack?.destination?.route.orEmpty()
+                val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 Scaffold(
+                    containerColor = Ink,
                     bottomBar = {
-                        if (currentRoute?.startsWith("editor") != true) {
-                            NavigationBar {
+                        if (showBar) {
+                            NavigationBar(containerColor = Panel, tonalElevation = 0.dp) {
                                 tabs.forEach { tab ->
                                     NavigationBarItem(
                                         selected = currentRoute == tab.route,
@@ -69,7 +91,14 @@ class MainActivity : ComponentActivity() {
                                             }
                                         },
                                         icon = { Icon(tab.icon, contentDescription = tab.labelAr) },
-                                        label = { Text(tab.labelAr) },
+                                        label = { Text(tab.labelAr, fontSize = 9.5.sp) },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = Ink,
+                                            selectedTextColor = Neon,
+                                            indicatorColor = Neon,
+                                            unselectedIconColor = TextLow,
+                                            unselectedTextColor = TextLow,
+                                        ),
                                     )
                                 }
                             }
@@ -78,10 +107,16 @@ class MainActivity : ComponentActivity() {
                 ) { padding ->
                     NavHost(
                         navController = navController,
-                        startDestination = "home",
-                        modifier = Modifier.padding(padding),
+                        startDestination = "connect",
+                        modifier = Modifier.padding(padding).background(Ink),
                     ) {
-                        composable("home") { HomeScreen(navController) }
+                        composable("connect") {
+                            ConnectScreen(
+                                onConnected = { navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } } },
+                                onSkip = { navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } } },
+                            )
+                        }
+                        composable("dashboard") { DashboardScreen(navController) }
                         composable("users") { UsersScreen() }
                         composable("templates") { TemplatesScreen(navController) }
                         composable(
@@ -94,7 +129,13 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         composable("print") { PrintScreen() }
-                        composable("settings") { SettingsScreen() }
+                        composable("profiles") { ProfilesScreen() }
+                        composable("history") { HistoryScreen() }
+                        composable("settings") {
+                            SettingsScreen(
+                                onDisconnect = { navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } } },
+                            )
+                        }
                     }
                 }
             }

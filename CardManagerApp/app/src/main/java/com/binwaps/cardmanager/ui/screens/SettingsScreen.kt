@@ -1,6 +1,7 @@
 package com.binwaps.cardmanager.ui.screens
 
 import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,9 +12,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -22,163 +28,176 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.mikrotik.MikrotikClient
+import com.binwaps.cardmanager.ui.components.AppField
+import com.binwaps.cardmanager.ui.components.GhostButton
+import com.binwaps.cardmanager.ui.components.SectionHeader
+import com.binwaps.cardmanager.ui.components.StatusPill
+import com.binwaps.cardmanager.ui.theme.Danger
+import com.binwaps.cardmanager.ui.theme.GlassCard
+import com.binwaps.cardmanager.ui.theme.Neon
+import com.binwaps.cardmanager.ui.theme.ScreenGradient
+import com.binwaps.cardmanager.ui.theme.TextHi
+import com.binwaps.cardmanager.ui.theme.TextLow
+import com.binwaps.cardmanager.ui.theme.TextMid
+import com.binwaps.cardmanager.ui.theme.Violet
 import kotlinx.coroutines.launch
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(onDisconnect: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings by Store.settings.collectAsState()
-    var testBusy by remember { mutableStateOf(false) }
+    val connected by Store.connected.collectAsState()
+    val status by Store.status.collectAsState()
+    var testing by remember { mutableStateOf(false) }
 
     Column(
         Modifier
             .fillMaxSize()
+            .background(ScreenGradient)
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Text("الإعدادات", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        SectionHeader("الإعدادات", null, Icons.Filled.Settings)
 
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("اتصال الراوتر (MikroTik API)", fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.mikrotikHost,
-                        onValueChange = { Store.updateSettings(settings.copy(mikrotikHost = it)) },
-                        label = { Text("عنوان الراوتر") }, modifier = Modifier.weight(2f),
-                    )
-                    OutlinedTextField(
-                        value = settings.mikrotikPort.toString(),
-                        onValueChange = { it.toIntOrNull()?.let { p -> Store.updateSettings(settings.copy(mikrotikPort = p)) } },
-                        label = { Text("المنفذ") }, modifier = Modifier.weight(1f),
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.mikrotikUser,
-                        onValueChange = { Store.updateSettings(settings.copy(mikrotikUser = it)) },
-                        label = { Text("المستخدم") }, modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = settings.mikrotikPassword,
-                        onValueChange = { Store.updateSettings(settings.copy(mikrotikPassword = it)) },
-                        label = { Text("كلمة المرور") }, modifier = Modifier.weight(1f),
-                        visualTransformation = PasswordVisualTransformation(),
-                    )
-                }
-                Button(enabled = !testBusy, onClick = {
-                    testBusy = true
+        // الراوتر
+        GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("الراوتر", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
+                StatusPill(connected, if (connected) "متصل" else "غير متصل")
+            }
+            Spacer(Modifier.height(9.dp))
+            val r = Store.activeRouter()
+            Text(
+                if (r == null) "لا يوجد راوتر محفوظ" else "${r.name} — ${r.host}:${r.port} (${r.username})",
+                fontSize = 12.5.sp, color = TextMid,
+            )
+            if (status.identity.isNotBlank()) {
+                Text("${status.identity} • ${status.board} • ${status.version}", fontSize = 11.sp, color = TextLow)
+            }
+            Spacer(Modifier.height(11.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton(if (testing) "جاري الفحص…" else "اختبار الاتصال", icon = Icons.Filled.Router, enabled = !testing && r != null) {
+                    testing = true
                     scope.launch {
-                        val r = MikrotikClient.fetchHotspotUsers(Store.settings.value)
-                        testBusy = false
-                        r.onSuccess {
-                            Toast.makeText(context, "نجح الاتصال ✓ (${it.size} مستخدم)", Toast.LENGTH_LONG).show()
-                        }.onFailure {
-                            Toast.makeText(context, "فشل الاتصال: ${it.message}", Toast.LENGTH_LONG).show()
-                        }
+                        MikrotikClient.connect(r!!)
+                            .onSuccess {
+                                Store.setStatus(it); Store.setConnected(true)
+                                Toast.makeText(context, "نجح الاتصال ✓", Toast.LENGTH_LONG).show()
+                            }
+                            .onFailure {
+                                Store.setConnected(false)
+                                Toast.makeText(context, "فشل: ${it.message}", Toast.LENGTH_LONG).show()
+                            }
+                        testing = false
                     }
-                }) { Text(if (testBusy) "جاري الفحص…" else "اختبار الاتصال") }
-            }
-        }
-
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("رمز QR والدخول التلقائي", fontWeight = FontWeight.Bold)
-                OutlinedTextField(
-                    value = settings.hotspotLoginUrl,
-                    onValueChange = { Store.updateSettings(settings.copy(hotspotLoginUrl = it)) },
-                    label = { Text("رابط صفحة دخول الهوتسبوت") }, modifier = Modifier.fillMaxWidth(),
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.wifiSsid,
-                        onValueChange = { Store.updateSettings(settings.copy(wifiSsid = it)) },
-                        label = { Text("اسم الشبكة SSID") }, modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = settings.wifiPassword,
-                        onValueChange = { Store.updateSettings(settings.copy(wifiPassword = it)) },
-                        label = { Text("كلمة مرور الواي فاي") }, modifier = Modifier.weight(1f),
-                    )
+                }
+                GhostButton("تغيير الراوتر", icon = Icons.Filled.Logout, color = Danger) {
+                    Store.setConnected(false)
+                    onDisconnect()
                 }
             }
         }
 
-        Card {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("الطباعة", fontWeight = FontWeight.Bold)
-                OutlinedTextField(
-                    value = settings.currency,
-                    onValueChange = { Store.updateSettings(settings.copy(currency = it)) },
-                    label = { Text("العملة") }, modifier = Modifier.fillMaxWidth(),
+        // QR والدخول التلقائي
+        GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.3f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("رمز QR والدخول التلقائي", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            }
+            Spacer(Modifier.height(10.dp))
+            AppField(
+                settings.hotspotLoginUrl,
+                { Store.updateSettings(settings.copy(hotspotLoginUrl = it)) },
+                "رابط صفحة دخول الهوتسبوت", Modifier.fillMaxWidth(), leading = Icons.Filled.QrCode2,
+            )
+            Spacer(Modifier.height(9.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppField(settings.wifiSsid, { Store.updateSettings(settings.copy(wifiSsid = it)) }, "اسم الشبكة SSID", Modifier.weight(1f))
+                AppField(settings.wifiPassword, { Store.updateSettings(settings.copy(wifiPassword = it)) }, "كلمة مرور الواي فاي", Modifier.weight(1f))
+            }
+        }
+
+        // الطباعة
+        GlassCard(Modifier.fillMaxWidth()) {
+            Text("الطباعة", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Spacer(Modifier.height(10.dp))
+            AppField(settings.currency, { Store.updateSettings(settings.copy(currency = it)) }, "العملة", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(9.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppField(
+                    settings.a4MarginMm.toString(),
+                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4MarginMm = v)) } },
+                    "هامش A4 (مم)", Modifier.weight(1f), numeric = true,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.a4MarginMm.toString(),
-                        onValueChange = { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4MarginMm = v)) } },
-                        label = { Text("هامش A4 مم") }, modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = settings.a4SpacingMm.toString(),
-                        onValueChange = { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4SpacingMm = v)) } },
-                        label = { Text("تباعد الكروت مم") }, modifier = Modifier.weight(1f),
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.tcpPrinterIp,
-                        onValueChange = { Store.updateSettings(settings.copy(tcpPrinterIp = it.trim())) },
-                        label = { Text("طابعة شبكة IP (اختياري)") }, modifier = Modifier.weight(2f),
-                    )
-                    OutlinedTextField(
-                        value = settings.tcpPrinterPort.toString(),
-                        onValueChange = { it.toIntOrNull()?.let { p -> Store.updateSettings(settings.copy(tcpPrinterPort = p)) } },
-                        label = { Text("المنفذ") }, modifier = Modifier.weight(1f),
-                    )
-                }
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    androidx.compose.material3.Checkbox(
-                        checked = settings.escAsteriskMode,
-                        onCheckedChange = { Store.updateSettings(settings.copy(escAsteriskMode = it)) },
-                    )
-                    Text("وضع توافق الطابعات المقلدة (ESC *)", fontSize = 13.sp)
-                }
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    androidx.compose.material3.Checkbox(
-                        checked = settings.autoCut,
-                        onCheckedChange = { Store.updateSettings(settings.copy(autoCut = it)) },
-                    )
-                    Text("قص الورق تلقائياً بعد الطباعة", fontSize = 13.sp)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = settings.thermalFeedMm.toString(),
-                        onValueChange = { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalFeedMm = v)) } },
-                        label = { Text("تغذية الورق مم") }, modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = settings.thermalDpi.toString(),
-                        onValueChange = { it.toIntOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalDpi = v)) } },
-                        label = { Text("دقة الطابعة DPI") }, modifier = Modifier.weight(1f),
-                    )
-                }
+                AppField(
+                    settings.a4SpacingMm.toString(),
+                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(a4SpacingMm = v)) } },
+                    "تباعد الكروت (مم)", Modifier.weight(1f), numeric = true,
+                )
+            }
+            Spacer(Modifier.height(9.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppField(
+                    settings.thermalFeedMm.toString(),
+                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalFeedMm = v)) } },
+                    "تغذية الورق (مم)", Modifier.weight(1f), numeric = true,
+                )
+                AppField(
+                    settings.thermalDpi.toString(),
+                    { it.toIntOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalDpi = v)) } },
+                    "دقة الطابعة DPI", Modifier.weight(1f), numeric = true,
+                )
+            }
+            Spacer(Modifier.height(9.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppField(
+                    settings.tcpPrinterIp,
+                    { Store.updateSettings(settings.copy(tcpPrinterIp = it.trim())) },
+                    "طابعة شبكة IP (اختياري)", Modifier.weight(2f), leading = Icons.Filled.Print,
+                )
+                AppField(
+                    settings.tcpPrinterPort.toString(),
+                    { it.toIntOrNull()?.let { v -> Store.updateSettings(settings.copy(tcpPrinterPort = v)) } },
+                    "المنفذ", Modifier.weight(1f), numeric = true,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            CheckRow("وضع توافق الطابعات المقلدة (ESC *)", settings.escAsteriskMode) {
+                Store.updateSettings(settings.copy(escAsteriskMode = it))
+            }
+            CheckRow("قص الورق تلقائياً بعد الطباعة", settings.autoCut) {
+                Store.updateSettings(settings.copy(autoCut = it))
             }
         }
 
         Text(
-            "مدير الكروت v1.0 — إنشاء وطباعة كروت اليوزر منجر والهوتسبوت",
-            fontSize = 12.sp,
+            "مدير الكروت — الإصدار 2.0",
+            fontSize = 11.sp, color = TextLow,
         )
-        Spacer(Modifier.height(30.dp))
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun CheckRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(
+            checked, onChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = Neon,
+                checkmarkColor = com.binwaps.cardmanager.ui.theme.Ink,
+                uncheckedColor = TextLow,
+            ),
+        )
+        Text(label, fontSize = 12.5.sp, color = TextMid)
     }
 }

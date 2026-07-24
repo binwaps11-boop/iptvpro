@@ -75,6 +75,72 @@ enum class PaperType(val labelAr: String) {
     THERMAL_80("طابعة حرارية 80مم"),
 }
 
+/** راوتر محفوظ — يدعم التبديل بين عدة راوترات */
+@Serializable
+data class RouterProfile(
+    val id: Long,
+    val name: String = "الراوتر",
+    val host: String = "192.168.88.1",
+    val port: Int = 8728,
+    val username: String = "admin",
+    val password: String = "",
+)
+
+/** حالة الراوتر المقروءة مباشرة عبر الـ API */
+@Serializable
+data class RouterStatus(
+    val identity: String = "",
+    val version: String = "",
+    val board: String = "",
+    val uptime: String = "",
+    val cpuLoad: String = "",
+    val freeMemory: String = "",
+    val totalMemory: String = "",
+    val activeUsers: Int = 0,
+    val hotspotUsers: Int = 0,
+)
+
+/** مستخدم متصل الآن بالهوتسبوت */
+@Serializable
+data class ActiveUser(
+    val id: String = "",
+    val username: String = "",
+    val address: String = "",
+    val macAddress: String = "",
+    val uptime: String = "",
+    val bytesIn: Long = 0,
+    val bytesOut: Long = 0,
+)
+
+/** باقة الهوتسبوت (بروفايل) */
+@Serializable
+data class HotspotProfile(
+    val id: String = "",
+    val name: String = "",
+    val rateLimit: String = "",
+    val sessionTimeout: String = "",
+    val sharedUsers: String = "1",
+    /** السعر يُحفظ محلياً في التطبيق لأن الراوتر لا يخزنه */
+    val price: String = "",
+)
+
+/** دفعة كروت مطبوعة — للسجل وإعادة الطباعة والتقارير */
+@Serializable
+data class PrintBatch(
+    val id: Long,
+    val createdAt: Long,
+    val templateId: Long,
+    val templateName: String = "",
+    val profile: String = "",
+    val unitPrice: String = "",
+    val paper: PaperType = PaperType.A4,
+    val users: List<UserEntry> = emptyList(),
+    val printCount: Int = 1,
+) {
+    val total: Double
+        get() = (unitPrice.toDoubleOrNull() ?: 0.0) * users.size
+}
+
 /** إعدادات عامة */
 @Serializable
 data class AppSettings(
@@ -90,16 +156,14 @@ data class AppSettings(
     val thermalDpi: Int = 203,
     /** وضع توافق للطابعات المقلدة التي تشوه الصور (أمر ESC *) */
     val escAsteriskMode: Boolean = false,
-    /** قص الورق تلقائياً بعد آخر كرت (للطابعات التي تدعم القص) */
+    /** قص الورق تلقائياً بعد آخر كرت */
     val autoCut: Boolean = false,
-    /** طابعة شبكة (TCP) اختيارية — اتركه فارغاً لاستخدام البلوتوث */
+    /** طابعة شبكة (TCP) اختيارية */
     val tcpPrinterIp: String = "",
     val tcpPrinterPort: Int = 9100,
     val a4MarginMm: Float = 8f,
     val a4SpacingMm: Float = 3f,
     val cutMarks: Boolean = true,
-    val mikrotikHost: String = "192.168.88.1",
-    val mikrotikPort: Int = 8728,
-    val mikrotikUser: String = "admin",
-    val mikrotikPassword: String = "",
+    /** معرّف الراوتر النشط حالياً */
+    val activeRouterId: Long = 0,
 )
