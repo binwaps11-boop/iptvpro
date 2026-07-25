@@ -28,8 +28,8 @@ import java.util.Locale
  * محرك الطباعة الصامد — الهدف: صفر فشل يعيدك من البداية.
  *
  * - يعمل في خلفية التطبيق: الخروج من شاشة الطباعة لا يوقف المهمة.
- * - PDF يُكتب قطعاً (30 صفحة لكل ملف): فشلُ قطعةٍ لا يضيع ما قبلها،
- *   والاستئناف يكمل من القطعة الفاشلة نفسها.
+ * - PDF ملف واحد دائماً مهما كان العدد. الرسم متجهي فالدفعات الضخمة
+ *   تكتمل في ثوانٍ، وأي فشل يعيد البناء تلقائياً بلا تدخل.
  * - الحرارية: إعادة محاولة لكل كرت (3 مرات بإعادة اتصال)، والاستئناف من
  *   الكرت الذي توقف عنده بالضبط.
  * - التقدم محفوظ على القرص: حتى لو أُغلق التطبيق كلياً، يعرض عند فتحه
@@ -38,8 +38,6 @@ import java.util.Locale
  */
 object PrintEngine {
 
-    /** كل ملف يضم حتى 30 صفحة — عند الفشل تُعاد هذه القطعة فقط */
-    private const val CHUNK_PAGES = 30
     private const val THERMAL_RETRIES = 3
 
     enum class Kind { PDF, THERMAL }
@@ -140,33 +138,28 @@ object PrintEngine {
         val p = plan ?: return
         val totalPages = p.pages.size
         job = scope.launch {
-            _state.value = State.Running(Kind.PDF, nextPage, totalPages, "تجهيز الملف…")
-            while (nextPage < totalPages && isActive) {
-                val end = (nextPage + CHUNK_PAGES).coerceAtMost(totalPages)
-                try {
-                    val file = PdfExporter.exportPages(
-                        appContext, t, settings, p, nextPage, end,
-                        printNo, dateText, timeText,
-                    ) { pageDone ->
-                        _state.value = State.Running(
-                            Kind.PDF, pageDone + 1, totalPages,
-                            "صفحة ${pageDone + 1} من $totalPages",
-                        )
-                    }
-                    files.add(file)
-                    nextPage = end
-                    persist(Kind.PDF)
-                } catch (e: Exception) {
-                    // القطع المكتملة محفوظة — الاستئناف يكمل من هذه القطعة فقط
-                    _state.value = State.Failed(
-                        Kind.PDF, nextPage, totalPages,
-                        friendly(e) + " — اكتمل $nextPage من $totalPages صفحة، اضغط استئناف للمتابعة من مكان التوقف",
+            _state.value = State.Running(Kind.PDF, 0, totalPages, "تجهيز الملف…")
+            try {
+                // ملف واحد دائماً — الرسم متجهي فحتى آلاف الكروت ثوانٍ معدودة
+                val file = PdfExporter.exportPages(
+                    appContext, t, settings, p, 0, totalPages,
+                    printNo, dateText, timeText,
+                ) { pageDone ->
+                    _state.value = State.Running(
+                        Kind.PDF, pageDone + 1, totalPages,
+                        "صفحة ${pageDone + 1} من $totalPages",
                     )
-                    persist(Kind.PDF)
-                    return@launch
                 }
+                files = mutableListOf(file)
+                nextPage = totalPages
+                finishJob(Kind.PDF, p.totalCards)
+            } catch (e: Exception) {
+                _state.value = State.Failed(
+                    Kind.PDF, 0, totalPages,
+                    friendly(e) + " — اضغط استئناف وسيُعاد بناء الملف في ثوانٍ",
+                )
+                persist(Kind.PDF)
             }
-            if (nextPage >= totalPages) finishJob(Kind.PDF, p.totalCards)
         }
     }
 
@@ -373,9 +366,9 @@ object PrintEngine {
         if (meta.kind == Kind.PDF.name) {
             // إعادة بناء الخطة من اللقطة المحفوظة
             plan = PdfExporter.plan(t, savedCards, settings.copy(printFrom = 0, printTo = 0, startCell = 1))
-            nextPage = meta.next.coerceIn(0, (plan?.pages?.size ?: 1))
+            nextPage = 0
             stampRun()
-            _state.value = State.Restorable(Kind.PDF, nextPage, plan?.pages?.size ?: 0)
+            _state.value = State.Restorable(Kind.PDF, meta.next, plan?.pages?.size ?: 0)
         } else {
             nextCard = meta.next.coerceIn(0, savedCards.size)
             stampRun()

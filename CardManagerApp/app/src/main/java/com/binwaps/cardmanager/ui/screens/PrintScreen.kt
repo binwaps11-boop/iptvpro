@@ -337,7 +337,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
         Spacer(Modifier.height(16.dp))
 
         if (settings.paperType == PaperType.A4) {
-            NeonButton("إنشاء PDF (لا يفشل — يستأنف)", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = canStart && template != null) {
+            NeonButton("إنشاء PDF — ملف واحد لكل الكروت", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = canStart && template != null) {
                 val t0 = template ?: return@NeonButton
                 val issues = PrintEngine.preflight(t0, users, settings, thermal = false)
                 if (issues.isNotEmpty()) {
@@ -348,8 +348,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             }
             Spacer(Modifier.height(5.dp))
             Text(
-                "الملف يُبنى قطعاً محفوظة: أي خطأ في المنتصف لا يعيدك من البداية، " +
-                    "بل تستأنف من مكان التوقف. عند الاكتمال: مشاركة أو طباعة عبر النظام.",
+                "ملف PDF واحد يضم كل الكروت مهما كان عددها — يكتمل في ثوانٍ، " +
+                    "وأي خطأ يُعالج بضغطة استئناف بلا إعادة من البداية.",
                 fontSize = 10.sp, color = TextLow,
             )
             Spacer(Modifier.height(9.dp))

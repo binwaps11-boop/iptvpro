@@ -34,6 +34,7 @@ import com.binwaps.cardmanager.license.LicenseManager
 import com.binwaps.cardmanager.license.LicenseState
 import com.binwaps.cardmanager.ui.screens.ConnectScreen
 import com.binwaps.cardmanager.ui.screens.DashboardScreen
+import com.binwaps.cardmanager.ui.screens.ExpressScreen
 import com.binwaps.cardmanager.ui.screens.HistoryScreen
 import com.binwaps.cardmanager.ui.screens.LayoutScreen
 import com.binwaps.cardmanager.ui.screens.LicenseScreen
@@ -175,6 +176,7 @@ class MainActivity : ComponentActivity() {
                         composable("active") { SessionsScreen() }
                         composable("sales") { SalesScreen() }
                         composable("reports") { ReportsScreen() }
+                        composable("express") { ExpressScreen() }
                         composable("router") { RouterAdminScreen() }
                         composable("settings") {
                             SettingsScreen(

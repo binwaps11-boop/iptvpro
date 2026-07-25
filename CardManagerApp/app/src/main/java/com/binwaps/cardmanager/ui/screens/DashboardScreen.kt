@@ -253,8 +253,8 @@ fun DashboardScreen(navController: NavController) {
         // عمليات الكروت، الإدارة والتقارير، النظام
         Text("عمليات الكروت", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("كروت جديدة", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
-                navController.navigate("users")
+            HomeTile("توليد وطباعة ⚡", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
+                navController.navigate("express")
             }
             HomeTile("الطباعة", Icons.Filled.Print, Violet, users.size.takeIf { it > 0 }, Modifier.weight(1f)) {
                 navController.navigate("print")

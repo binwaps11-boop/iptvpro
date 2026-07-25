@@ -177,10 +177,7 @@ object PdfExporter {
         }
 
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(
-            dir,
-            "cards_${System.currentTimeMillis()}_p${fromPage + 1}-${toPageExclusive.coerceAtMost(plan.pages.size)}.pdf",
-        )
+        val file = File(dir, "cards_${System.currentTimeMillis()}.pdf")
         FileOutputStream(file).use { doc.writeTo(it) }
         doc.close()
         return file

@@ -96,6 +96,63 @@ object MikrotikClient {
         }
     }
 
+    /**
+     * تنفيذ متدفق: يرسل كل الأوامر دفعة واحدة على نفس الاتصال ويجمع الردود
+     * وهي تتقاطر — بدل انتظار ردٍّ لكل أمر قبل إرسال التالي.
+     * عن بُعد (دومين/كلاود) هذا الفرق بين دقائق وثوانٍ للدفعات الكبيرة.
+     */
+    internal fun ApiConnection.pipeline(
+        cmds: List<String>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+        onDone: (index: Int, success: Boolean) -> Unit = { _, _ -> },
+    ): BulkResult {
+        if (cmds.isEmpty()) return BulkResult(0, 0)
+        firstPipelineError.set(null)
+        val ok = java.util.concurrent.atomic.AtomicInteger(0)
+        val failed = java.util.concurrent.atomic.AtomicInteger(0)
+        val done = java.util.concurrent.atomic.AtomicInteger(0)
+        val latch = java.util.concurrent.CountDownLatch(cmds.size)
+        // حدّ الأوامر المعلّقة حتى لا نغرق راوترات ضعيفة
+        val inFlight = java.util.concurrent.Semaphore(32)
+
+        cmds.forEachIndexed { index, cmd ->
+            inFlight.acquire()
+            val listener = object : me.legrange.mikrotik.ResultListener {
+                private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+                private fun finish(success: Boolean) {
+                    if (!finished.compareAndSet(false, true)) return
+                    if (success) ok.incrementAndGet() else failed.incrementAndGet()
+                    onDone(index, success)
+                    onProgress(done.incrementAndGet(), cmds.size)
+                    inFlight.release()
+                    latch.countDown()
+                }
+                override fun receive(result: Map<String, String>) {}
+                override fun error(ex: me.legrange.mikrotik.MikrotikApiException) {
+                    if (firstPipelineError.get() == null) firstPipelineError.set(ex)
+                    finish(false)
+                }
+                override fun completed() = finish(true)
+            }
+            runCatching { execute(cmd, listener) }.onFailure {
+                // فشل الإرسال نفسه — المستمع لن يُستدعى
+                if (firstPipelineError.get() == null) firstPipelineError.set(it)
+                failed.incrementAndGet()
+                onDone(index, false)
+                onProgress(done.incrementAndGet(), cmds.size)
+                inFlight.release()
+                latch.countDown()
+            }
+        }
+        // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد
+        latch.await(60_000L + cmds.size * 150L, java.util.concurrent.TimeUnit.MILLISECONDS)
+        return BulkResult(ok.get(), failed.get())
+    }
+
+    /** أول خطأ في آخر عملية متدفقة — لعرض سببٍ مفهوم عند فشل الكل */
+    internal val firstPipelineError =
+        java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+
     /** ينفّذ أمراً ويعيد قائمة فارغة بدل الانهيار إن لم يكن الأمر مدعوماً */
     internal fun ApiConnection.tryList(vararg commands: String): List<Map<String, String>> {
         for (cmd in commands) {
@@ -466,10 +523,10 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r) { con ->
-        var ok = 0
-        var firstError: Throwable? = null
-        users.forEachIndexed { i, u ->
-            val cmd = buildString {
+        // إرسال متدفق: كل أوامر الإنشاء تنطلق معاً وتُجمع الردود وهي تصل —
+        // على دومين بعيد هذا أسرع بعشرات المرات من أمرٍ بعد أمر
+        val cmds = users.map { u ->
+            buildString {
                 append("/ip/hotspot/user/add name=${q(u.username)}")
                 if (u.password.isNotBlank()) append(" password=${q(u.password)}")
                 if (u.profile.isNotBlank()) append(" profile=${q(u.profile)}")
@@ -477,16 +534,14 @@ object MikrotikClient {
                 val tag = u.batchTag.ifBlank { u.comment }
                 if (tag.isNotBlank()) append(" comment=${q(tag)}")
             }
-            runCatching { con.execute(cmd) }
-                .onSuccess { ok++; onCreated(u) }
-                .onFailure { if (firstError == null) firstError = it }
-            onProgress(i + 1, users.size)
         }
-        // كانت النسخة القديمة تُرجع نجاحاً حتى لو رفض الراوتر كل الكروت
-        if (ok == 0 && users.isNotEmpty()) {
-            throw Exception("رفض الراوتر إنشاء الكروت: ${firstError?.message ?: "سبب غير معروف"}")
+        val result = con.pipeline(cmds, onProgress) { index, success ->
+            if (success) onCreated(users[index])
         }
-        ok
+        if (result.ok == 0 && users.isNotEmpty()) {
+            throw Exception("رفض الراوتر إنشاء الكروت: ${firstPipelineError.get()?.message ?: "سبب غير معروف"}")
+        }
+        result.ok
     }
 
     /**
@@ -502,10 +557,10 @@ object MikrotikClient {
     ): Result<Int> = onRouter(r) { con ->
         val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
         val base = if (isV7) "/user-manager" else "/tool/user-manager"
-        var ok = 0
-        var firstError: Throwable? = null
-        users.forEachIndexed { i, u ->
-            val cmd = buildString {
+
+        // الموجة الأولى (متدفقة): إنشاء المستخدمين كلهم
+        val addCmds = users.map { u ->
+            buildString {
                 append("$base/user/add name=${q(u.username)}")
                 if (u.password.isNotBlank()) append(" password=${q(u.password)}")
                 if (isV7) {
@@ -515,35 +570,28 @@ object MikrotikClient {
                 }
                 if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
             }
-            val added = runCatching { con.execute(cmd) }
-                .onFailure { if (firstError == null) firstError = it }
-                .isSuccess
-            if (added) {
-                ok++
-                onCreated(u)
-                // ربط الباقة بالمستخدم ليكتسب الصلاحية
-                if (u.profile.isNotBlank()) {
-                    runCatching {
-                        if (isV7) {
-                            con.execute("$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}")
-                        } else {
-                            // v6: التفعيل بأمره الخاص — جدول user-profile غير موجود في v6
-                            con.execute(
-                                "$base/user/create-and-activate-profile customer=admin " +
-                                    "numbers=${q(u.username)} profile=${q(u.profile)}"
-                            )
-                        }
-                    }
-                }
-            }
-            onProgress(i + 1, users.size)
         }
-        if (ok == 0 && users.isNotEmpty()) {
+        val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
+        val addResult = con.pipeline(addCmds, { d, t -> onProgress(d, t) }) { index, success ->
+            if (success) {
+                created.add(users[index])
+                onCreated(users[index])
+            }
+        }
+        if (addResult.ok == 0 && users.isNotEmpty()) {
             throw Exception(
-                "تعذّر إنشاء أي مستخدم: ${firstError?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}"
+                "تعذّر إنشاء أي مستخدم: ${firstPipelineError.get()?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}"
             )
         }
-        ok
+
+        // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم
+        val linkCmds = created.filter { it.profile.isNotBlank() }.map { u ->
+            if (isV7) "$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}"
+            else "$base/user/create-and-activate-profile customer=admin " +
+                "numbers=${q(u.username)} profile=${q(u.profile)}"
+        }
+        if (linkCmds.isNotEmpty()) con.pipeline(linkCmds)
+        addResult.ok
     }
 
     /** تفعيل أو تعطيل كرت على الراوتر */
@@ -582,19 +630,16 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit,
         command: (UserEntry, String) -> String?,
     ): BulkResult {
-        var ok = 0
-        var failed = 0
         // نحسب مسار كل مصدر مرة واحدة بدل مرة لكل كرت
         val paths = cards.map { it.source }.distinct().associateWith { userPathFor(it) }
-        cards.forEachIndexed { i, u ->
-            val path = paths[u.source] ?: "/ip/hotspot/user"
-            val cmd = command(u, path)
-            if (cmd == null) { failed++ } else {
-                runCatching { execute(cmd) }.fold({ ok++ }, { failed++ })
-            }
-            onProgress(i + 1, cards.size)
+        var skipped = 0
+        val cmds = cards.mapNotNull { u ->
+            val cmd = command(u, paths[u.source] ?: "/ip/hotspot/user")
+            if (cmd == null) { skipped++; null } else cmd
         }
-        return BulkResult(ok, failed)
+        // إرسال متدفق — العمليات الجماعية على مئات الكروت تكتمل في ثوانٍ
+        val r = pipeline(cmds, { d, _ -> onProgress(skipped + d, cards.size) })
+        return BulkResult(r.ok, r.failed + skipped)
     }
 
     /** تفعيل أو تعطيل مجموعة كروت */
