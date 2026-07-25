@@ -47,16 +47,30 @@ object CardRenderer {
         bgPath = null
     }
 
+    /** نسخة آمنة لا تُسقط التطبيق أبداً — تعيد صورة بسيطة عند أي خطأ */
+    fun renderSafe(template: CardTemplate, user: UserEntry, settings: AppSettings, widthPx: Int): Bitmap =
+        runCatching { render(template, user, settings, widthPx) }.getOrElse {
+            val w = widthPx.coerceIn(16, 1200)
+            val h = (w * (template.heightMm.coerceAtLeast(1f)) / template.widthMm.coerceAtLeast(1f))
+                .toInt().coerceIn(16, 2000)
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xFFFFFFFF.toInt()) }
+        }
+
     fun render(
         template: CardTemplate,
         user: UserEntry,
         settings: AppSettings,
         widthPx: Int,
     ): Bitmap {
-        val heightPx = (widthPx * template.heightMm / template.widthMm).toInt().coerceAtLeast(1)
+        // حماية من قيم القالب غير الصالحة التي قد تُنتج أبعاداً ضخمة أو صفرية
+        val safeWidth = widthPx.coerceIn(16, 1600)
+        val wMm = template.widthMm.coerceAtLeast(1f)
+        val hMm = template.heightMm.coerceAtLeast(1f)
+        @Suppress("NAME_SHADOWING") val widthPx = safeWidth
+        val heightPx = (widthPx * hMm / wMm).toInt().coerceIn(16, 2400)
         val bmp = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        val pxPerMm = widthPx / template.widthMm
+        val pxPerMm = widthPx / wMm
         val radius = template.cornerRadiusMm * pxPerMm
         val rect = RectF(0f, 0f, widthPx.toFloat(), heightPx.toFloat())
 

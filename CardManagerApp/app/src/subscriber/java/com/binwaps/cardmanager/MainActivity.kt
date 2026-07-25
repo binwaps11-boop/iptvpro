@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.binwaps.cardmanager.data.CrashLogger.install(this)
         Store.init(this)
         LicenseManager.init(this)
         handleLink(intent)

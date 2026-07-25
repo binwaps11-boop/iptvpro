@@ -125,6 +125,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.binwaps.cardmanager.data.CrashLogger.install(this)
         AdminStore.init(this)
         handleLink(intent)
         setContent {

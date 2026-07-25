@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Checkbox
@@ -192,8 +193,36 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             GhostButton("إدارة الترخيص", icon = Icons.Filled.VerifiedUser, color = Lime) { onLicense() }
         }
 
+        // تقرير آخر انهيار — لإرساله للمطوّر
+        val crash = remember { com.binwaps.cardmanager.data.CrashLogger.lastCrash() }
+        if (crash != null) {
+            GlassCard(Modifier.fillMaxWidth(), glow = Danger.copy(alpha = 0.4f)) {
+                Text("تقرير آخر خروج للتطبيق", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Danger)
+                Text(
+                    crash.lineSequence().take(4).joinToString("\n"),
+                    fontSize = 10.5.sp, color = TextMid,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton("إرسال التقرير", icon = Icons.Filled.Send, color = Danger) {
+                        context.startActivity(
+                            android.content.Intent.createChooser(
+                                android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(android.content.Intent.EXTRA_TEXT, crash)
+                                },
+                                "إرسال تقرير الخطأ",
+                            )
+                        )
+                    }
+                    GhostButton("مسح") { com.binwaps.cardmanager.data.CrashLogger.clear() }
+                }
+            }
+        }
+
         Text(
-            "مدير الكروت — الإصدار 3.0",
+            "مدير الكروت — الإصدار 3.1",
             fontSize = 11.sp, color = TextLow,
         )
         Spacer(Modifier.height(24.dp))
