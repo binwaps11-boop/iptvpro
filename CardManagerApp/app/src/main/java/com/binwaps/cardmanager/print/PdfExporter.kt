@@ -68,15 +68,28 @@ object PdfExporter {
         return LayoutInfo(cols, rows, perPage, pages, cw, ch)
     }
 
+    /** يطبّق نطاق الطباعة المختار (من كرت … إلى كرت …) */
+    fun selectRange(users: List<UserEntry>, settings: AppSettings): List<UserEntry> {
+        if (users.isEmpty()) return users
+        val from = (if (settings.printFrom > 0) settings.printFrom else 1).coerceIn(1, users.size)
+        val to = (if (settings.printTo > 0) settings.printTo else users.size).coerceIn(from, users.size)
+        return users.subList(from - 1, to)
+    }
+
     fun export(
         context: Context,
         template: CardTemplate,
-        users: List<UserEntry>,
+        allUsers: List<UserEntry>,
         settings: AppSettings,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): File {
         val layout = settings.layout
-        val info = computeLayout(template, settings, users.size)
+        val selected = selectRange(allUsers, settings)
+        val info = computeLayout(template, settings, selected.size)
+
+        // البدء من خلية معيّنة: نترك خلايا فارغة في أول صفحة
+        val skip = (settings.startCell - 1).coerceIn(0, (info.perPage - 1).coerceAtLeast(0))
+        val users: List<UserEntry?> = List(skip) { null } + selected
 
         val pageW = (layout.pageWidthMm * MM_TO_PT).toInt()
         val pageH = (layout.pageHeightMm * MM_TO_PT).toInt()
@@ -89,8 +102,9 @@ object PdfExporter {
         // توسيط الشبكة أفقياً وعمودياً في الصفحة
         val gridW = info.columns * cardW + (info.columns - 1) * hGap
         val gridH = info.rows * cardH + (info.rows - 1) * vGap
-        val offsetX = ((pageW - gridW) / 2f).coerceAtLeast(margin)
-        val offsetY = ((pageH - gridH) / 2f).coerceAtLeast(margin)
+        // التوسيط + معايرة الطابعة
+        val offsetX = ((pageW - gridW) / 2f).coerceAtLeast(margin) + settings.offsetXMm * MM_TO_PT
+        val offsetY = ((pageH - gridH) / 2f).coerceAtLeast(margin) + settings.offsetYMm * MM_TO_PT
 
         val renderW = (info.cardWidthMm / 25.4f * RENDER_DPI).toInt().coerceIn(64, 2000)
 
@@ -106,26 +120,39 @@ object PdfExporter {
         }
 
         var done = 0
-        users.chunked(info.perPage).forEachIndexed { pageIndex, pageUsers ->
-            val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageIndex + 1).create())
-            val canvas = page.canvas
+        var pageNumber = 0
+        val copies = settings.copies.coerceIn(1, 20)
+        val pages = users.chunked(info.perPage)
 
-            pageUsers.forEachIndexed { i, user ->
-                val col = i % info.columns
-                val row = i / info.columns
-                val left = offsetX + col * (cardW + hGap)
-                val top = offsetY + row * (cardH + vGap)
-                val rect = RectF(left, top, left + cardW, top + cardH)
+        pages.forEach { pageUsers ->
+            repeat(copies) {
+                pageNumber++
+                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNumber).create())
+                val canvas = page.canvas
 
-                val bmp = CardRenderer.render(template, user, settings, renderW)
-                canvas.drawBitmap(bmp, null, rect, imagePaint)
-                bmp.recycle()
+                pageUsers.forEachIndexed { i, user ->
+                    val col = i % info.columns
+                    val row = i / info.columns
+                    val left = offsetX + col * (cardW + hGap)
+                    val top = offsetY + row * (cardH + vGap)
+                    val rect = RectF(left, top, left + cardW, top + cardH)
 
-                drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
-                done++
-                onProgress(done, users.size)
+                    // خلية متروكة عمداً (البدء من خلية لاحقة)
+                    if (user == null) {
+                        drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
+                        return@forEachIndexed
+                    }
+
+                    val bmp = CardRenderer.render(template, user, settings, renderW)
+                    canvas.drawBitmap(bmp, null, rect, imagePaint)
+                    bmp.recycle()
+
+                    drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
+                    done++
+                    onProgress(done, selected.size * copies)
+                }
+                doc.finishPage(page)
             }
-            doc.finishPage(page)
         }
 
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }

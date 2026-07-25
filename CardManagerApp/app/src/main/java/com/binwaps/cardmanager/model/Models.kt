@@ -5,9 +5,16 @@ import kotlinx.serialization.Serializable
 /** نوع الكرت — يحدد ما يُطبع عليه وكيف يُولَّد */
 @Serializable
 enum class CardMode(val labelAr: String, val hintAr: String) {
-    USERNAME_ONLY("اسم مستخدم فقط", "الدخول باسم المستخدم بدون كلمة مرور"),
-    USER_PASS("اسم مستخدم وكلمة مرور", "رمزان مختلفان على الكرت"),
-    SAME("متشابه (رمز واحد)", "اسم المستخدم = كلمة المرور"),
+    USERNAME_ONLY("رمز فقط", "رمز واحد بدون كلمة مرور إطلاقاً"),
+    SAME("متطابقتين", "اسم المستخدم = كلمة المرور، ويُطبع رمز واحد"),
+    USER_PASS("مختلفتين", "اسم مستخدم وكلمة مرور مختلفان يُطبعان معاً"),
+}
+
+/** أين تُرفع الكروت على الراوتر */
+@Serializable
+enum class UploadTarget(val labelAr: String) {
+    HOTSPOT("الهوتسبوت"),
+    USER_MANAGER("اليوزر منجر"),
 }
 
 /** حالة الكرت على الراوتر */
@@ -46,6 +53,11 @@ data class UserEntry(
     val uptime: String = "",
     val bytesUsed: Long = 0,
     val disabled: Boolean = false,
+    /** الحد المسموح — يُستخدم في تحديد الانتهاء */
+    val limitUptime: String = "",
+    val limitBytes: Long = 0,
+    /** تاريخ انتهاء الكرت كما يعرضه الراوتر أو كما كتبه MIKHMON في الملاحظة */
+    val expiryText: String = "",
 )
 
 /** جلسة — نشطة الآن أو من السجل */
@@ -290,6 +302,18 @@ data class AppSettings(
     val tcpPrinterPort: Int = 9100,
     /** تخطيط الصفحة للطباعة الورقية */
     val layout: PageLayout = PageLayout(),
+    /** أين تُرفع الكروت */
+    val uploadTarget: UploadTarget = UploadTarget.HOTSPOT,
+    /** نطاق الطباعة: من الكرت رقم … إلى الكرت رقم … (0 = من البداية / إلى النهاية) */
+    val printFrom: Int = 0,
+    val printTo: Int = 0,
+    /** عدد النسخ من كل صفحة */
+    val copies: Int = 1,
+    /** البدء من الخلية رقم كذا — لاستخدام ما تبقى من ورقة ملصقات */
+    val startCell: Int = 1,
+    /** معايرة الطابعة: إزاحة أفقية ورأسية بالمليمتر */
+    val offsetXMm: Float = 0f,
+    val offsetYMm: Float = 0f,
     /** معرّف الراوتر النشط حالياً */
     val activeRouterId: Long = 0,
 )

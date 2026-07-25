@@ -120,13 +120,20 @@ object MikrotikClient {
     // ===== تصنيف حالة الكرت =====
 
     /**
-     * الكرت "غير مستهلك" إذا لم يُستخدم إطلاقاً.
-     * يصبح "منتهياً" إذا استهلك كامل الوقت أو كامل الباقة المسموحة.
+     * تصنيف كرت الهوتسبوت — يدعم اصطلاح MIKHMON المنتشر إضافة للحدود الأصلية:
+     *
+     * - MIKHMON يضع `limit-uptime=1s` علامةً على الانتهاء
+     * - ويكتب في الملاحظة `vc-` أو `up-` للكرت الذي لم يُستخدم بعد
+     * - وعند أول دخول يستبدلها بتاريخ الانتهاء "25/Jul/2026 14:30:00"
      */
     fun classify(row: Map<String, String>): CardStatus {
         if (row["disabled"] == "true") return CardStatus.DISABLED
 
-        val limitUptime = parseUptime(row["limit-uptime"].orEmpty())
+        val limitUptimeRaw = row["limit-uptime"].orEmpty()
+        // علامة MIKHMON للكرت المنتهي
+        if (limitUptimeRaw.trim() == "1s") return CardStatus.EXPIRED
+
+        val limitUptime = parseUptime(limitUptimeRaw)
         val uptime = parseUptime(row["uptime"].orEmpty())
         if (limitUptime > 0 && uptime >= limitUptime) return CardStatus.EXPIRED
 
@@ -134,7 +141,28 @@ object MikrotikClient {
         val usedBytes = (row["bytes-in"]?.toLongOrNull() ?: 0) + (row["bytes-out"]?.toLongOrNull() ?: 0)
         if (limitBytes > 0 && usedBytes >= limitBytes) return CardStatus.EXPIRED
 
-        return if (uptime > 0 || usedBytes > 0) CardStatus.IN_USE else CardStatus.UNUSED
+        // ملاحظة MIKHMON: تاريخ انتهاء مكتوب عند أول دخول
+        val comment = row["comment"].orEmpty()
+        val expiry = parseCommentExpiry(comment)
+        if (expiry != null) {
+            return if (expiry < System.currentTimeMillis()) CardStatus.EXPIRED else CardStatus.IN_USE
+        }
+        val untouched = comment.startsWith("vc-") || comment.startsWith("up-")
+
+        return when {
+            uptime > 0 || usedBytes > 0 -> CardStatus.IN_USE
+            untouched || comment.isBlank() -> CardStatus.UNUSED
+            else -> CardStatus.UNUSED
+        }
+    }
+
+    /** تاريخ انتهاء بصيغة MIKHMON: 25/Jul/2026 14:30:00 */
+    fun parseCommentExpiry(comment: String): Long? {
+        if (comment.length < 11 || comment[2] != '/' || comment[6] != '/') return null
+        return runCatching {
+            java.text.SimpleDateFormat("dd/MMM/yyyy HH:mm:ss", java.util.Locale.ENGLISH)
+                .parse(comment.trim())?.time
+        }.getOrNull()
     }
 
     // ===== الكروت =====
@@ -160,25 +188,81 @@ object MikrotikClient {
         }
     }
 
-    /** مستخدمو اليوزر منجر — v7 ثم v6 */
-    suspend fun fetchUserManagerUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
+    /**
+     * مستخدمو اليوزر منجر — v7 ثم v6.
+     *
+     * في v7 لا توجد الصلاحية على سجل المستخدم، بل في جدول منفصل
+     * `/user-manager/user-profile` يحمل (user, profile, end-time, state).
+     * في v6 تكون العدادات على السجل نفسه (uptime-used, download-used…).
+     */
+    private fun readUserManager(con: ApiConnection): List<UserEntry> {
         val rows = con.tryList("/user-manager/user/print", "/tool/user-manager/user/print")
-        if (rows.isEmpty()) {
-            throw Exception("لم يُعثر على مستخدمين في اليوزر منجر — تأكد أن الحزمة مثبّتة ومفعّلة على الراوتر")
-        }
-        rows.mapNotNull { row ->
+        if (rows.isEmpty()) return emptyList()
+
+        // جدول الصلاحيات — v7 ثم v6
+        val userProfiles = con.tryList("/user-manager/user-profile/print", "/tool/user-manager/user-profile/print")
+            .associateBy { it["user"].orEmpty() }
+
+        return rows.mapNotNull { row ->
             val name = row["name"] ?: row["username"] ?: return@mapNotNull null
+            val up = userProfiles[name]
+            val endTime = up?.get("end-time").orEmpty()
+            val state = up?.get("state").orEmpty()
+
+            val usedUptime = row["uptime-used"].orEmpty()
+            val usedBytes = (row["download-used"]?.toLongOrNull() ?: 0) +
+                (row["upload-used"]?.toLongOrNull() ?: 0)
+
+            val status = when {
+                row["disabled"] == "true" -> CardStatus.DISABLED
+                state.equals("used", true) -> CardStatus.EXPIRED
+                endTime.isNotBlank() && endTime != "unlimited" &&
+                    parseRouterTime(endTime)?.let { it < System.currentTimeMillis() } == true -> CardStatus.EXPIRED
+                state.equals("running", true) -> CardStatus.IN_USE
+                usedUptime.isNotBlank() && parseUptime(usedUptime) > 0 -> CardStatus.IN_USE
+                usedBytes > 0 -> CardStatus.IN_USE
+                up == null || state.equals("waiting", true) -> CardStatus.UNUSED
+                else -> CardStatus.UNUSED
+            }
+
             UserEntry(
                 username = name,
                 password = row["password"].orEmpty(),
-                profile = row["group"] ?: row["actual-profile"] ?: row["profile"].orEmpty(),
+                profile = up?.get("profile") ?: row["group"] ?: row["actual-profile"] ?: row["profile"].orEmpty(),
                 comment = row["comment"].orEmpty(),
                 routerId = row[".id"].orEmpty(),
                 source = CardSource.USER_MANAGER,
-                status = if (row["disabled"] == "true") CardStatus.DISABLED else CardStatus.UNKNOWN,
+                status = status,
+                uptime = usedUptime,
+                bytesUsed = usedBytes,
                 disabled = row["disabled"] == "true",
+                expiryText = endTime,
             )
         }
+    }
+
+    suspend fun fetchUserManagerUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
+        val list = readUserManager(con)
+        if (list.isEmpty()) {
+            throw Exception("لم يُعثر على مستخدمين في اليوزر منجر — تأكد أن الحزمة مثبّتة ومفعّلة على الراوتر")
+        }
+        list
+    }
+
+    /** تحويل وقت الراوتر (jul/25/2026 14:30:00 أو 2026-07-25 14:30:00) إلى ميلي ثانية */
+    fun parseRouterTime(value: String): Long? {
+        val v = value.trim()
+        val formats = listOf(
+            "MMM/dd/yyyy HH:mm:ss", "dd/MMM/yyyy HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss",
+        )
+        for (f in formats) {
+            val t = runCatching {
+                java.text.SimpleDateFormat(f, java.util.Locale.ENGLISH).parse(v)?.time
+            }.getOrNull()
+            if (t != null) return t
+        }
+        return null
     }
 
     /** كل الكروت من المصدرين معاً */
@@ -346,6 +430,124 @@ object MikrotikClient {
         ok
     }
 
+    /**
+     * إنشاء المستخدمين في اليوزر منجر.
+     * v7: يُنشأ المستخدم ثم تُربط به الباقة في جدول user-profile.
+     * v6: أمر واحد create-and-activate-profile، وإلا إضافة عادية.
+     */
+    suspend fun createUserManagerUsers(
+        r: RouterProfile?,
+        users: List<UserEntry>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<Int> = onRouter(r) { con ->
+        val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+        val base = if (isV7) "/user-manager" else "/tool/user-manager"
+        var ok = 0
+        users.forEachIndexed { i, u ->
+            val cmd = buildString {
+                append("$base/user/add =name=${u.username}")
+                if (u.password.isNotBlank()) append(" =password=${u.password}")
+                if (isV7) {
+                    if (u.profile.isNotBlank()) append(" =group=${u.profile}")
+                } else {
+                    append(" =customer=admin")
+                }
+                if (u.comment.isNotBlank()) append(" =comment=${u.comment}")
+            }
+            val added = runCatching { con.execute(cmd) }.isSuccess
+            if (added) {
+                ok++
+                // ربط الباقة بالمستخدم ليكتسب الصلاحية
+                if (u.profile.isNotBlank()) {
+                    runCatching {
+                        con.execute("$base/user-profile/add =user=${u.username} =profile=${u.profile}")
+                    }
+                }
+            }
+            onProgress(i + 1, users.size)
+        }
+        if (ok == 0) throw Exception("تعذّر إنشاء أي مستخدم — تأكد من تثبيت حزمة اليوزر منجر ومن صلاحيات المستخدم")
+        ok
+    }
+
+    /** تفعيل أو تعطيل كرت على الراوتر */
+    suspend fun setUserEnabled(r: RouterProfile?, user: UserEntry, enabled: Boolean): Result<Unit> =
+        onRouter(r) { con ->
+            if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
+            val path = when (user.source) {
+                CardSource.USER_MANAGER ->
+                    if (runCatching { con.execute("/user-manager/user/print") }.isSuccess)
+                        "/user-manager/user" else "/tool/user-manager/user"
+                else -> "/ip/hotspot/user"
+            }
+            con.execute("$path/set =.id=${user.routerId} =disabled=${!enabled}")
+            Unit
+        }
+
+    /** تصفير عدادات كرت الهوتسبوت وإرجاعه غير مستهلك (يمسح علامات MIKHMON) */
+    suspend fun resetCard(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
+        if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
+        runCatching { con.execute("/ip/hotspot/user/reset-counters =.id=${user.routerId}") }
+        con.execute("/ip/hotspot/user/set =.id=${user.routerId} =limit-uptime=0 =comment=")
+        Unit
+    }
+
+    /** سجل الجلسات من سجل الراوتر (يحتاج تفعيل تسجيل الهوتسبوت) */
+    suspend fun fetchLogHistory(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
+        val rows = runCatching { con.execute("/log/print") }.getOrDefault(emptyList())
+        rows.filter { (it["topics"] ?: "").contains("hotspot") }
+            .mapNotNull { row ->
+                val msg = row["message"] ?: return@mapNotNull null
+                // "user1 (10.5.50.2): logged in" / "logged out: session-timeout, 1h2m3s, 45.6MiB, 12.3MiB"
+                val name = msg.substringBefore(" (").takeIf { it.isNotBlank() && !it.contains(":") }
+                    ?: return@mapNotNull null
+                SessionEntry(
+                    username = name,
+                    address = msg.substringAfter("(", "").substringBefore(")", ""),
+                    uptime = Regex("(\\d+[wdhms])+").find(msg.substringAfter("logged out", ""))?.value.orEmpty(),
+                    startedAt = row["time"].orEmpty(),
+                    endedAt = if (msg.contains("logged out")) row["time"].orEmpty() else "",
+                    active = false,
+                )
+            }
+            .reversed()
+    }
+
+    /** تفعيل حفظ سجل الهوتسبوت على الراوتر ليعمل سجل الجلسات */
+    suspend fun enableHotspotLogging(r: RouterProfile?): Result<Unit> = onRouter(r) { con ->
+        con.execute("/system/logging/add =topics=hotspot =action=disk")
+        Unit
+    }
+
+    /** الأجهزة المتصلة: عملاء الواي فاي وحجوزات DHCP */
+    suspend fun fetchConnectedDevices(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
+        val wireless = con.tryList(
+            "/interface/wireless/registration-table/print",
+            "/interface/wifi/registration-table/print",
+        ).map { row ->
+            SessionEntry(
+                id = row[".id"].orEmpty(),
+                username = row["interface"].orEmpty(),
+                macAddress = row["mac-address"].orEmpty(),
+                uptime = row["uptime"].orEmpty(),
+                bytesIn = row["bytes"]?.substringBefore(",")?.toLongOrNull() ?: 0,
+                startedAt = row["signal-strength"] ?: row["signal"].orEmpty(),
+                active = true,
+            )
+        }
+        val leases = con.tryList("/ip/dhcp-server/lease/print").map { row ->
+            SessionEntry(
+                id = row[".id"].orEmpty(),
+                username = row["host-name"] ?: row["comment"].orEmpty(),
+                address = row["address"].orEmpty(),
+                macAddress = row["mac-address"].orEmpty(),
+                startedAt = row["status"].orEmpty(),
+                active = row["status"] == "bound",
+            )
+        }
+        wireless + leases
+    }
+
     /** حذف الكروت المنتهية أو المعطّلة من الهوتسبوت */
     suspend fun removeExpiredUsers(r: RouterProfile?): Result<Int> = onRouter(r) { con ->
         var removed = 0
@@ -363,11 +565,22 @@ object MikrotikClient {
     suspend fun removeUser(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
         if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
         val path = if (user.source == CardSource.USER_MANAGER) {
-            if (runCatching { con.execute("/user-manager/user/print .proplist=.id") }.isSuccess)
+            if (runCatching { con.execute("/user-manager/user/print") }.isSuccess)
                 "/user-manager/user/remove" else "/tool/user-manager/user/remove"
         } else "/ip/hotspot/user/remove"
         con.execute("$path =.id=${user.routerId}")
         Unit
+    }
+
+    /** حذف دفعة كاملة حسب وسم الملاحظة الذي كُتب عند التوليد */
+    suspend fun removeBatchByComment(r: RouterProfile?, tag: String): Result<Int> = onRouter(r) { con ->
+        var removed = 0
+        for (row in con.execute("/ip/hotspot/user/print")) {
+            if ((row["comment"] ?: "") != tag) continue
+            val id = row[".id"] ?: continue
+            runCatching { con.execute("/ip/hotspot/user/remove =.id=$id") }.onSuccess { removed++ }
+        }
+        removed
     }
 
     /** تحويل صيغة مايكروتك للوقت (1w2d3h4m5s) إلى ثوانٍ */

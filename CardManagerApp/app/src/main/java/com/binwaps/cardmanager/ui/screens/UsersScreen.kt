@@ -53,6 +53,7 @@ import com.binwaps.cardmanager.mikrotik.MikrotikClient
 import com.binwaps.cardmanager.model.CardMode
 import com.binwaps.cardmanager.model.CardSource
 import com.binwaps.cardmanager.model.CardStatus
+import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import com.binwaps.cardmanager.ui.components.AppField
 import com.binwaps.cardmanager.ui.components.EmptyState
@@ -150,6 +151,15 @@ fun UsersScreen() {
         }
         Text(settings.cardMode.hintAr, fontSize = 10.5.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp))
 
+        Spacer(Modifier.height(10.dp))
+        Text("مكان الرفع على الراوتر", fontSize = 12.sp, color = TextLow)
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            UploadTarget.entries.forEach { t ->
+                Chip(t.labelAr, settings.uploadTarget == t) { Store.updateSettings(settings.copy(uploadTarget = t)) }
+            }
+        }
+
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp), modifier = Modifier.fillMaxWidth()) {
             Box(Modifier.weight(1f)) {
@@ -191,11 +201,21 @@ fun UsersScreen() {
                     }
                 }
             }
-            GhostButton("رفع للراوتر", icon = Icons.Filled.CloudUpload, color = Violet, enabled = !busy && users.isNotEmpty()) {
+            GhostButton(
+                "رفع إلى ${settings.uploadTarget.labelAr}",
+                icon = Icons.Filled.CloudUpload, color = Violet,
+                enabled = !busy && users.isNotEmpty(),
+            ) {
                 progress = 0 to users.size
-                run("جاري رفع الكروت إلى الراوتر…") {
-                    MikrotikClient.createHotspotUsers(Store.activeRouter(), users) { d, t -> progress = d to t }
-                        .map { "تم رفع $it كرت إلى الراوتر" }
+                val target = settings.uploadTarget
+                run("جاري الرفع إلى ${target.labelAr}…") {
+                    if (target == UploadTarget.USER_MANAGER) {
+                        MikrotikClient.createUserManagerUsers(Store.activeRouter(), users) { d, t -> progress = d to t }
+                            .map { "تم رفع $it مستخدم إلى اليوزر منجر" }
+                    } else {
+                        MikrotikClient.createHotspotUsers(Store.activeRouter(), users) { d, t -> progress = d to t }
+                            .map { "تم رفع $it كرت إلى الهوتسبوت" }
+                    }
                 }
             }
             GhostButton("حذف المنتهية", icon = Icons.Filled.Delete, color = Warn, enabled = !busy) {

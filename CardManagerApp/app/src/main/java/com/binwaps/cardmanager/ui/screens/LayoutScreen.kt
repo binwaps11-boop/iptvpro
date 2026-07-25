@@ -49,6 +49,7 @@ import com.binwaps.cardmanager.model.CutMarkStyle
 import com.binwaps.cardmanager.model.PageOrientation
 import com.binwaps.cardmanager.model.PaperSize
 import com.binwaps.cardmanager.print.PdfExporter
+import com.binwaps.cardmanager.ui.components.AppField
 import com.binwaps.cardmanager.ui.components.SectionHeader
 import com.binwaps.cardmanager.ui.components.StatTile
 import com.binwaps.cardmanager.ui.theme.GlassCard
@@ -243,6 +244,57 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             CutMarkStyle.entries.forEach { c ->
                 Chip(c.labelAr, layout.cutMarks == c) { update { it.copy(cutMarks = c) } }
+            }
+        }
+
+        // نطاق الطباعة والنسخ والمعايرة
+        Spacer(Modifier.height(14.dp))
+        GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.3f)) {
+            Text("نطاق الطباعة", fontSize = 13.5.sp, color = TextHi, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(9.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppField(
+                    if (settings.printFrom > 0) settings.printFrom.toString() else "",
+                    { Store.updateSettings(settings.copy(printFrom = it.toIntOrNull() ?: 0)) },
+                    "من الكرت رقم", Modifier.weight(1f), numeric = true,
+                )
+                AppField(
+                    if (settings.printTo > 0) settings.printTo.toString() else "",
+                    { Store.updateSettings(settings.copy(printTo = it.toIntOrNull() ?: 0)) },
+                    "إلى الكرت رقم", Modifier.weight(1f), numeric = true,
+                )
+            }
+            Text(
+                "اتركهما فارغين لطباعة كل الكروت (${users.size} كرت)",
+                fontSize = 10.5.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(11.dp))
+            Counter("عدد النسخ من كل صفحة", settings.copies, 1, 20) {
+                Store.updateSettings(settings.copy(copies = it))
+            }
+            Spacer(Modifier.height(9.dp))
+            Counter("البدء من الخلية رقم", settings.startCell, 1, (info?.perPage ?: 1).coerceAtLeast(1)) {
+                Store.updateSettings(settings.copy(startCell = it))
+            }
+            Text(
+                "لاستعمال ما تبقى من ورقة ملصقات مستخدَمة جزئياً",
+                fontSize = 10.5.sp, color = TextLow,
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+        GlassCard(Modifier.fillMaxWidth()) {
+            Text("معايرة الطابعة", fontSize = 13.5.sp, color = TextHi, fontWeight = FontWeight.SemiBold)
+            Text(
+                "إذا خرجت الطباعة مزاحة عن مكانها، صحّح الإزاحة من هنا",
+                fontSize = 10.5.sp, color = TextLow,
+            )
+            Spacer(Modifier.height(7.dp))
+            LabeledSlider("إزاحة أفقية", settings.offsetXMm, -10f, 10f, "مم") {
+                Store.updateSettings(settings.copy(offsetXMm = it))
+            }
+            LabeledSlider("إزاحة رأسية", settings.offsetYMm, -10f, 10f, "مم") {
+                Store.updateSettings(settings.copy(offsetYMm = it))
             }
         }
 
