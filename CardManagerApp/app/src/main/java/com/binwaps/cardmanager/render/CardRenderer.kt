@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import com.binwaps.cardmanager.model.AppSettings
 import com.binwaps.cardmanager.model.CardField
+import com.binwaps.cardmanager.model.CardFont
 import com.binwaps.cardmanager.model.CardMode
 import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.FieldType
@@ -24,6 +25,29 @@ import java.io.File
  * نفس المحرك يُستخدم للمعاينة وتصدير PDF والطباعة الحرارية.
  */
 object CardRenderer {
+
+    /** ذاكرة الخطوط المضمّنة — تُحمَّل مرة واحدة */
+    private val typefaces = mutableMapOf<String, Typeface>()
+    private var assets: android.content.res.AssetManager? = null
+
+    /** يُستدعى مرة عند بدء التطبيق حتى تتوفر الخطوط للرسم */
+    fun init(context: android.content.Context) {
+        assets = context.applicationContext.assets
+    }
+
+    @Synchronized
+    private fun typeface(font: CardFont, bold: Boolean): Typeface {
+        val path = (if (bold) font.boldAsset ?: font.asset else font.asset)
+            ?: return if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        typefaces[path]?.let { return it }
+        val am = assets ?: return if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        val tf = runCatching { Typeface.createFromAsset(am, path) }.getOrNull()
+            ?: return if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        // الخط العادي مع طلب عريض: نُثقّله برمجياً
+        val result = if (bold && font.boldAsset == null) Typeface.create(tf, Typeface.BOLD) else tf
+        typefaces[path] = result
+        return result
+    }
 
     /** ذاكرة مؤقتة لصورة الخلفية — تمنع فك ترميز الصورة لكل كرت (تسريع كبير للدفعات) */
     private var bgPath: String? = null
@@ -101,7 +125,7 @@ object CardRenderer {
             if (field.type == FieldType.QR_CODE) {
                 drawQr(canvas, field, template, user, settings, widthPx, heightPx)
             } else {
-                drawText(canvas, field, user, settings, widthPx, heightPx)
+                drawText(canvas, field, user, settings, widthPx, heightPx, template.font)
             }
         }
         return bmp
@@ -121,7 +145,9 @@ object CardRenderer {
         val value = when (field.type) {
             FieldType.USERNAME -> user.username
             FieldType.PASSWORD -> user.password
-            FieldType.PRICE -> if (user.price.isBlank()) "" else "${user.price} ${settings.currency}"
+            FieldType.PRICE ->
+                if (user.isFree) settings.freeRules.freeLabel
+                else if (user.price.isBlank()) "" else "${user.price} ${settings.currency}"
             FieldType.VALIDITY -> user.validity
             FieldType.PROFILE -> user.profile
             FieldType.SERIAL -> user.serial
@@ -133,7 +159,7 @@ object CardRenderer {
 
     private fun drawText(
         canvas: Canvas, field: CardField, user: UserEntry, settings: AppSettings,
-        widthPx: Int, heightPx: Int,
+        widthPx: Int, heightPx: Int, templateFont: CardFont,
     ) {
         val text = fieldValue(field, user, settings)
         if (text.isBlank()) return
@@ -141,7 +167,7 @@ object CardRenderer {
             color = field.color.toInt()
             textSize = field.sizeFrac * heightPx
             textAlign = Paint.Align.CENTER
-            typeface = if (field.bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            typeface = typeface(field.font ?: templateFont, field.bold)
         }
         // تصغير تلقائي إذا تجاوز النص عرض الكرت
         val maxWidth = widthPx * 0.94f

@@ -326,7 +326,28 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
             )
 
+            Spacer(Modifier.height(11.dp))
+            Text("خط الكرت", fontSize = 12.sp, color = TextLow)
             Spacer(Modifier.height(6.dp))
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                com.binwaps.cardmanager.model.CardFont.entries.forEach { f ->
+                    val on = template.font == f
+                    Text(
+                        f.labelAr, fontSize = 11.sp, color = if (on) Neon else TextMid,
+                        modifier = Modifier
+                            .background(if (on) Neon.copy(alpha = 0.12f) else Panel, RoundedCornerShape(999.dp))
+                            .border(1.dp, if (on) Neon.copy(alpha = 0.5f) else Stroke, RoundedCornerShape(999.dp))
+                            .clickable { template = template.copy(font = f) }
+                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            Text(
+                "الخطوط مضمّنة في التطبيق فتُطبع العربية بنفس الشكل على أي جهاز أو طابعة",
+                fontSize = 10.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp),
+            )
+
+            Spacer(Modifier.height(11.dp))
             Text("محتوى رمز QR", fontSize = 12.sp, color = TextLow)
             Spacer(Modifier.height(6.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

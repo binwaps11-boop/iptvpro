@@ -60,6 +60,8 @@ data class UserEntry(
     val expiryText: String = "",
     /** وسم الدفعة التي وُلّد فيها الكرت — يُكتب في ملاحظة الراوتر */
     val batchTag: String = "",
+    /** كرت مجاني — يُطبع بسعر "مجاناً" ولا يُحسب في الإيراد */
+    val isFree: Boolean = false,
 )
 
 /** جلسة — نشطة الآن أو من السجل */
@@ -90,6 +92,15 @@ enum class FieldType(val labelAr: String) {
     CUSTOM_TEXT("نص ثابت"),
 }
 
+/** خطوط الكرت — مضمّنة في التطبيق فتُطبع العربية بنفس الشكل على أي جهاز */
+@Serializable
+enum class CardFont(val labelAr: String, val asset: String?, val boldAsset: String?) {
+    CAIRO("القاهرة", "fonts/Cairo-Regular.ttf", "fonts/Cairo-Bold.ttf"),
+    KUFI("كوفي", "fonts/DroidKufi-Regular.ttf", "fonts/DroidKufi-Bold.ttf"),
+    NASKH("نسخ", "fonts/DroidNaskh-Regular.ttf", null),
+    SYSTEM("خط النظام", null, null),
+}
+
 @Serializable
 enum class QrContent(val labelAr: String) {
     LOGIN_URL("رابط دخول تلقائي"),
@@ -112,6 +123,8 @@ data class CardField(
     /** يظهر قبل القيمة، مثال: "المستخدم: " */
     val prefix: String = "",
     val visible: Boolean = true,
+    /** خط هذا الحقل — null يعني استخدام خط القالب */
+    val font: CardFont? = null,
 )
 
 /** قالب كرت */
@@ -129,6 +142,8 @@ data class CardTemplate(
     val cornerRadiusMm: Float = 2.5f,
     val fields: List<CardField> = emptyList(),
     val qrContent: QrContent = QrContent.LOGIN_URL,
+    /** خط القالب الافتراضي لكل الحقول */
+    val font: CardFont = CardFont.CAIRO,
 )
 
 @Serializable
@@ -282,6 +297,41 @@ data class PrintBatch(
         get() = (unitPrice.toDoubleOrNull() ?: 0.0) * users.size
 }
 
+/**
+ * قواعد الكروت المجانية — كما في برامج الكروت المعروفة:
+ * إما كل كرت رقم N مجاني، أو عدد عشوائي موزّع على الدفعة.
+ */
+@Serializable
+data class FreeCardRules(
+    /** كل كرت رقم N يكون مجانياً */
+    val everyNEnabled: Boolean = false,
+    val everyN: Int = 10,
+    /** عدد كروت مجانية عشوائية في الدفعة */
+    val randomEnabled: Boolean = false,
+    val randomCount: Int = 5,
+    /** توزيع العشوائية بالتساوي على الدفعة بدل تجمّعها */
+    val distributeEvenly: Boolean = true,
+    /** باقة مختلفة للكرت المجاني */
+    val useDifferentProfile: Boolean = false,
+    val freeProfile: String = "",
+    /** الكلمة التي تُطبع مكان السعر على الكرت المجاني */
+    val freeLabel: String = "مجاناً",
+) {
+    val enabled: Boolean get() = everyNEnabled || randomEnabled
+}
+
+/** إعدادات مولّد أكواد البونص */
+@Serializable
+data class BonusCodeRules(
+    val enabled: Boolean = false,
+    val count: Int = 10,
+    val length: Int = 8,
+    val prefix: String = "",
+    val suffix: String = "",
+    val profile: String = "",
+    val addToRouter: Boolean = true,
+)
+
 /** نوع الحركة المالية */
 @Serializable
 enum class SaleKind(val labelAr: String) {
@@ -336,6 +386,8 @@ data class AppSettings(
     val layout: PageLayout = PageLayout(),
     /** أين تُرفع الكروت */
     val uploadTarget: UploadTarget = UploadTarget.HOTSPOT,
+    /** قواعد الكروت المجانية */
+    val freeRules: FreeCardRules = FreeCardRules(),
     /** نطاق الطباعة: من الكرت رقم … إلى الكرت رقم … (0 = من البداية / إلى النهاية) */
     val printFrom: Int = 0,
     val printTo: Int = 0,

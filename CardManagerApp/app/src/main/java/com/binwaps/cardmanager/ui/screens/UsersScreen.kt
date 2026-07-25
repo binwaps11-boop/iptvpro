@@ -608,6 +608,11 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
     var profile by remember { mutableStateOf("") }
     var price by remember { mutableStateOf("") }
     var validity by remember { mutableStateOf("") }
+    var everyNOn by remember { mutableStateOf(settings.freeRules.everyNEnabled) }
+    var everyN by remember { mutableStateOf(settings.freeRules.everyN.toString()) }
+    var randomOn by remember { mutableStateOf(settings.freeRules.randomEnabled) }
+    var randomCount by remember { mutableStateOf(settings.freeRules.randomCount.toString()) }
+    var freeProfile by remember { mutableStateOf(settings.freeRules.freeProfile) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -648,6 +653,42 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     AppField(validity, { validity = it }, "الصلاحية (30d)", Modifier.weight(1f))
                 }
                 AppField(profile, { profile = it }, "الباقة / البروفايل", Modifier.fillMaxWidth())
+
+                // كروت مجانية
+                Text("كروت مجانية", fontSize = 12.sp, color = TextLow)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Chip(if (everyNOn) "كل رقم ✓" else "كل كرت رقم N", everyNOn) { everyNOn = !everyNOn }
+                    if (everyNOn) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(Modifier.width(90.dp)) {
+                            AppField(everyN, { everyN = it.filter { c -> c.isDigit() } }, "N", Modifier.fillMaxWidth(), numeric = true)
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Chip(if (randomOn) "عشوائي ✓" else "عدد عشوائي", randomOn) { randomOn = !randomOn }
+                    if (randomOn) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(Modifier.width(90.dp)) {
+                            AppField(randomCount, { randomCount = it.filter { c -> c.isDigit() } }, "العدد", Modifier.fillMaxWidth(), numeric = true)
+                        }
+                    }
+                }
+                if (everyNOn || randomOn) {
+                    AppField(freeProfile, { freeProfile = it }, "باقة الكرت المجاني (اختياري)", Modifier.fillMaxWidth())
+                    val n = count.toIntOrNull() ?: 0
+                    val preview = UserGenerator.freePositions(
+                        n,
+                        com.binwaps.cardmanager.model.FreeCardRules(
+                            everyNEnabled = everyNOn, everyN = everyN.toIntOrNull() ?: 10,
+                            randomEnabled = randomOn, randomCount = randomCount.toIntOrNull() ?: 0,
+                        ),
+                    )
+                    Text(
+                        "سيكون ${preview.size} كرت مجانياً من $n",
+                        fontSize = 11.5.sp, color = Lime, fontWeight = FontWeight.Bold,
+                    )
+                }
                 if (profiles.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         profiles.forEach { p ->
@@ -662,7 +703,15 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
         },
         confirmButton = {
             TextButton(onClick = {
-                Store.updateSettings(Store.settings.value.copy(cardMode = mode))
+                val rules = com.binwaps.cardmanager.model.FreeCardRules(
+                    everyNEnabled = everyNOn,
+                    everyN = everyN.toIntOrNull()?.coerceAtLeast(2) ?: 10,
+                    randomEnabled = randomOn,
+                    randomCount = randomCount.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                    useDifferentProfile = freeProfile.isNotBlank(),
+                    freeProfile = freeProfile,
+                )
+                Store.updateSettings(Store.settings.value.copy(cardMode = mode, freeRules = rules))
                 onGenerate(
                     UserGenerator.generate(
                         count = count.toIntOrNull()?.coerceIn(1, 5000) ?: 50,
@@ -677,6 +726,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                         serialStart = Store.users.value.size + 1,
                         batchTag = "vc-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
                             .format(java.util.Date()),
+                        freeRules = rules,
                     )
                 )
             }) { Text("توليد", color = Neon, fontWeight = FontWeight.Bold) }
