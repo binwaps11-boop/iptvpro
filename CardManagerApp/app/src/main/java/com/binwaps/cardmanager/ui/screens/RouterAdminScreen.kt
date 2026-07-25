@@ -98,32 +98,37 @@ fun RouterAdminScreen() {
     var macToAdd by remember { mutableStateOf("") }
     var macNote by remember { mutableStateOf("") }
 
+    // رقم جيل لكل تحديث — استجابة قديمة بطيئة لا تكتب فوق بيانات أحدث
+    var refreshGen by remember { mutableStateOf(0) }
+
     fun refresh() {
         if (router == null) {
             message = "لا يوجد راوتر — اتصل أولاً من شاشة الاتصال"
             return
         }
+        val gen = ++refreshGen
         busy = true
         message = ""
         scope.launch {
+            fun fresh() = gen == refreshGen
             when (tab) {
                 AdminTab.DEVICES -> MikrotikClient.fetchDhcpLeases(router)
-                    .onSuccess { leases = it }
-                    .onFailure { message = it.message.orEmpty() }
+                    .onSuccess { if (fresh()) leases = it }
+                    .onFailure { if (fresh()) message = it.message.orEmpty() }
                 AdminTab.INTERFACES -> MikrotikClient.fetchInterfaces(router)
-                    .onSuccess { interfaces = it.sortedByDescending { s -> s.rxBytes + s.txBytes } }
-                    .onFailure { message = it.message.orEmpty() }
+                    .onSuccess { if (fresh()) interfaces = it.sortedByDescending { s -> s.rxBytes + s.txBytes } }
+                    .onFailure { if (fresh()) message = it.message.orEmpty() }
                 AdminTab.BLOCKED -> MikrotikClient.fetchIpBindings(router)
-                    .onSuccess { bindings = it }
-                    .onFailure { message = it.message.orEmpty() }
+                    .onSuccess { if (fresh()) bindings = it }
+                    .onFailure { if (fresh()) message = it.message.orEmpty() }
                 AdminTab.SYSTEM -> {
                     MikrotikClient.fetchServices(router)
-                        .onSuccess { services = it }
-                        .onFailure { message = it.message.orEmpty() }
-                    MikrotikClient.isBindFirstDeviceOn(router).onSuccess { bindOn = it }
+                        .onSuccess { if (fresh()) services = it }
+                        .onFailure { if (fresh()) message = it.message.orEmpty() }
+                    MikrotikClient.isBindFirstDeviceOn(router).onSuccess { if (fresh()) bindOn = it }
                 }
             }
-            busy = false
+            if (fresh()) busy = false
         }
     }
 

@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.model.CardStatus
 import com.binwaps.cardmanager.model.SaleKind
+import com.binwaps.cardmanager.util.toMoneyOrNull
 import com.binwaps.cardmanager.ui.components.GhostButton
 import com.binwaps.cardmanager.ui.components.SectionHeader
 import com.binwaps.cardmanager.ui.theme.Danger
@@ -69,6 +70,8 @@ private data class ReportRow(
     val money: Double = 0.0,
     val extraLabel: String = "",
     val extra: String = "",
+    /** دين حقيقي متبقٍ — للتلوين */
+    val debt: Double = 0.0,
 )
 
 /**
@@ -94,18 +97,21 @@ fun ReportsScreen() {
         ReportTab.PROFILE -> users.groupBy { it.profile.ifBlank { "بدون باقة" } }
             .map { (profile, list) ->
                 val p = profiles.firstOrNull { it.name == profile }
-                val unit = p?.price?.toDoubleOrNull() ?: list.firstNotNullOfOrNull { it.price.toDoubleOrNull() } ?: 0.0
-                val cost = p?.cost?.toDoubleOrNull() ?: 0.0
-                val paid = list.count { !it.isFree }
+                val unit = p?.price?.toMoneyOrNull() ?: list.firstNotNullOfOrNull { it.price.toMoneyOrNull() } ?: 0.0
+                val cost = p?.cost?.toMoneyOrNull() ?: 0.0
+                // الإيراد من سعر كل كرت وقت توليده — لا من سعر الباقة الحالي بأثر رجعي
+                val money = list.filter { !it.isFree }.sumOf { it.price.toMoneyOrNull() ?: unit }
+                // التكلفة على كل الكروت — المجاني يكلفك وإن لم يُدرّ إيراداً
+                val profit = money - cost * list.size
                 ReportRow(
                     title = profile,
                     subtitle = "غير مستهلك ${list.count { it.status == CardStatus.UNUSED }}" +
                         "  •  قيد الاستخدام ${list.count { it.status == CardStatus.IN_USE }}" +
                         "  •  منتهي ${list.count { it.status == CardStatus.EXPIRED }}",
                     count = list.size,
-                    money = unit * paid,
+                    money = money,
                     extraLabel = "الربح",
-                    extra = fmt((unit - cost) * paid) + " " + cur,
+                    extra = fmt(profit) + " " + cur,
                 )
             }.sortedByDescending { it.count }
 
@@ -133,7 +139,7 @@ fun ReportsScreen() {
             )
         }
 
-        // الجهاز = عنوان MAC. الأجهزة المتصلة الآن أولاً، ثم الكروت التي استُهلكت
+        // الجهاز = عنوان MAC — الأجهزة المتصلة الآن فقط
         ReportTab.DEVICE -> activeUsers.groupBy { it.macAddress.ifBlank { "غير معروف" } }
             .map { (mac, list) ->
                 ReportRow(
@@ -146,18 +152,24 @@ fun ReportsScreen() {
                 )
             }.sortedByDescending { it.count }
 
-        ReportTab.CUSTOMER -> sales.filter { it.kind == SaleKind.SALE }
-            .groupBy { it.customer.ifBlank { "زبون نقدي" } }
-            .map { (customer, list) ->
-                ReportRow(
-                    title = customer,
-                    subtitle = "${list.size} عملية  •  آخرها ${dayFmt.format(java.util.Date(list.maxOf { it.at }))}",
-                    count = list.sumOf { it.quantity },
-                    money = list.sumOf { it.total },
-                    extraLabel = "دين متبقٍ",
-                    extra = fmt(list.sumOf { it.debt }) + " " + cur,
-                )
-            }.sortedByDescending { it.money }
+        ReportTab.CUSTOMER -> {
+            // دين كل زبون بعد سداداته — نفس صيغة شاشة المبيعات والرئيسية
+            val debts = com.binwaps.cardmanager.util.Ledger.perCustomerDebt(sales)
+            sales.filter { it.kind == SaleKind.SALE }
+                .groupBy { it.customer.ifBlank { "زبون نقدي" } }
+                .map { (customer, list) ->
+                    val remaining = debts[customer] ?: 0.0
+                    ReportRow(
+                        title = customer,
+                        subtitle = "${list.size} عملية  •  آخرها ${dayFmt.format(java.util.Date(list.maxOf { it.at }))}",
+                        count = list.sumOf { it.quantity },
+                        money = list.sumOf { it.total },
+                        extraLabel = "دين متبقٍ",
+                        extra = fmt(remaining) + " " + cur,
+                        debt = remaining,
+                    )
+                }.sortedByDescending { it.money }
+        }
     }
 
     Column(
@@ -191,6 +203,10 @@ fun ReportsScreen() {
                         .padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
+        }
+        if (tab == ReportTab.DEVICE) {
+            Spacer(Modifier.height(8.dp))
+            Text("يعرض الأجهزة المتصلة الآن فقط — ليس سجلاً تاريخياً", fontSize = 10.5.sp, color = TextLow)
         }
         Spacer(Modifier.height(12.dp))
 
@@ -234,7 +250,7 @@ fun ReportsScreen() {
                                     Text(
                                         "${r.extraLabel}: ${r.extra}",
                                         fontSize = 10.sp,
-                                        color = if (r.extraLabel == "دين متبقٍ" && r.extra.startsWith("0").not()) Danger else TextMid,
+                                        color = if (r.debt > 0.005) Danger else TextMid,
                                     )
                                 }
                             }

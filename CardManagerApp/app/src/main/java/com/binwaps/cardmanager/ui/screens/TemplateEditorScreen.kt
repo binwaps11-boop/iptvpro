@@ -61,6 +61,7 @@ import com.binwaps.cardmanager.model.CellAlign
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.QrContent
 import com.binwaps.cardmanager.ui.components.AppField
+import com.binwaps.cardmanager.util.toMoneyOrNull
 import com.binwaps.cardmanager.ui.components.CardPreview
 import com.binwaps.cardmanager.ui.components.GhostButton
 import com.binwaps.cardmanager.ui.components.NeonButton
@@ -337,12 +338,12 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AppField(
                     template.widthMm.toString(),
-                    { it.toFloatOrNull()?.let { v -> template = template.copy(widthMm = v.coerceIn(20f, 210f)) } },
+                    { it.toMoneyOrNull()?.toFloat()?.let { v -> template = template.copy(widthMm = v.coerceIn(20f, 210f)) } },
                     "العرض (مم)", Modifier.weight(1f), numeric = true,
                 )
                 AppField(
                     template.heightMm.toString(),
-                    { it.toFloatOrNull()?.let { v -> template = template.copy(heightMm = v.coerceIn(20f, 297f)) } },
+                    { it.toMoneyOrNull()?.toFloat()?.let { v -> template = template.copy(heightMm = v.coerceIn(20f, 297f)) } },
                     "الارتفاع (مم)", Modifier.weight(1f), numeric = true,
                 )
             }
@@ -400,14 +401,14 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
 
             if (template.layoutMode == CardLayoutMode.TABLE) {
                 Spacer(Modifier.height(11.dp))
-                Text("سُمك خطوط الجدول: ${"%.2f".format(template.gridWidthMm)} مم", fontSize = 12.sp, color = TextMid)
+                Text("سُمك خطوط الجدول: ${"%.2f".format(java.util.Locale.US, template.gridWidthMm)} مم", fontSize = 12.sp, color = TextMid)
                 Slider(
                     value = template.gridWidthMm,
                     onValueChange = { template = template.copy(gridWidthMm = it) },
                     valueRange = 0.05f..1f,
                     colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
                 )
-                Text("الهامش الداخلي: ${"%.1f".format(template.tablePaddingMm)} مم", fontSize = 12.sp, color = TextMid)
+                Text("الهامش الداخلي: ${"%.1f".format(java.util.Locale.US, template.tablePaddingMm)} مم", fontSize = 12.sp, color = TextMid)
                 Slider(
                     value = template.tablePaddingMm,
                     onValueChange = { template = template.copy(tablePaddingMm = it) },
@@ -424,14 +425,14 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             }
 
             Spacer(Modifier.height(11.dp))
-            Text("سُمك الإطار: ${"%.1f".format(template.borderWidthMm)} مم", fontSize = 12.sp, color = TextMid)
+            Text("سُمك الإطار: ${"%.1f".format(java.util.Locale.US, template.borderWidthMm)} مم", fontSize = 12.sp, color = TextMid)
             Slider(
                 value = template.borderWidthMm,
                 onValueChange = { template = template.copy(borderWidthMm = it) },
                 valueRange = 0f..3f,
                 colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
             )
-            Text("استدارة الزوايا: ${"%.1f".format(template.cornerRadiusMm)} مم", fontSize = 12.sp, color = TextMid)
+            Text("استدارة الزوايا: ${"%.1f".format(java.util.Locale.US, template.cornerRadiusMm)} مم", fontSize = 12.sp, color = TextMid)
             Slider(
                 value = template.cornerRadiusMm,
                 onValueChange = { template = template.copy(cornerRadiusMm = it) },
@@ -538,7 +539,7 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("صفوف الكرت", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
             Text(
-                "مجموع الارتفاع ${"%.1f".format(template.rowsHeightMm)} من ${"%.1f".format(template.heightMm)} مم",
+                "مجموع الارتفاع ${"%.1f".format(java.util.Locale.US, template.rowsHeightMm)} من ${"%.1f".format(java.util.Locale.US, template.heightMm)} مم",
                 fontSize = 10.5.sp,
                 color = if (template.rowsHeightMm > template.heightMm) Danger else TextLow,
             )
@@ -558,8 +559,8 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                     Spacer(Modifier.width(9.dp))
                     Box(Modifier.width(96.dp)) {
                         AppField(
-                            "%.2f".format(row.heightMm),
-                            { v -> v.toFloatOrNull()?.let { setRows(template.rows.map { r -> if (r.id == row.id) r.copy(heightMm = it.coerceIn(1f, 100f)) else r }) } },
+                            "%.2f".format(java.util.Locale.US, row.heightMm),
+                            { v -> v.toMoneyOrNull()?.toFloat()?.let { setRows(template.rows.map { r -> if (r.id == row.id) r.copy(heightMm = it.coerceIn(1f, 100f)) else r }) } },
                             "ارتفاع مم", numeric = true,
                         )
                     }
@@ -637,13 +638,13 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                         Spacer(Modifier.height(7.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             AppField(
-                                "%.2f".format(cell.weight),
-                                { v -> v.toFloatOrNull()?.let { updateCell(row.id, cell.copy(weight = it.coerceIn(0.05f, 20f))) } },
+                                "%.2f".format(java.util.Locale.US, cell.weight),
+                                { v -> v.toMoneyOrNull()?.toFloat()?.let { updateCell(row.id, cell.copy(weight = it.coerceIn(0.05f, 20f))) } },
                                 "عرض نسبي", Modifier.weight(1f), numeric = true,
                             )
                             AppField(
-                                "%.1f".format(cell.fontSizePt),
-                                { v -> v.toFloatOrNull()?.let { updateCell(row.id, cell.copy(fontSizePt = it.coerceIn(3f, 72f))) } },
+                                "%.1f".format(java.util.Locale.US, cell.fontSizePt),
+                                { v -> v.toMoneyOrNull()?.toFloat()?.let { updateCell(row.id, cell.copy(fontSizePt = it.coerceIn(3f, 72f))) } },
                                 "حجم الخط pt", Modifier.weight(1f), numeric = true,
                             )
                         }

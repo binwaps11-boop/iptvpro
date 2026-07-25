@@ -263,8 +263,8 @@ fun EmptyState(icon: ImageVector, title: String, hint: String) {
 
 /** تنسيق البايتات */
 fun formatBytes(bytes: Long): String = when {
-    bytes >= 1_073_741_824 -> String.format("%.2f ج.ب", bytes / 1_073_741_824.0)
-    bytes >= 1_048_576 -> String.format("%.1f م.ب", bytes / 1_048_576.0)
-    bytes >= 1024 -> String.format("%.0f ك.ب", bytes / 1024.0)
+    bytes >= 1_073_741_824 -> String.format(java.util.Locale.US, "%.2f ج.ب", bytes / 1_073_741_824.0)
+    bytes >= 1_048_576 -> String.format(java.util.Locale.US, "%.1f م.ب", bytes / 1_048_576.0)
+    bytes >= 1024 -> String.format(java.util.Locale.US, "%.0f ك.ب", bytes / 1024.0)
     else -> "$bytes بايت"
 }

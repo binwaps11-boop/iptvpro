@@ -396,7 +396,7 @@ private fun LabeledSlider(
     Column {
         Row {
             Text(label, fontSize = 12.sp, color = TextMid, modifier = Modifier.weight(1f))
-            Text("${"%.1f".format(local)} $unit", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.SemiBold)
+            Text("${"%.1f".format(java.util.Locale.US, local)} $unit", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.SemiBold)
         }
         Slider(
             value = local,

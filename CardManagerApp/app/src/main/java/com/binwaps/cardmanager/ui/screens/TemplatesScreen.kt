@@ -109,7 +109,7 @@ fun TemplatesScreen(navController: NavController) {
                             val shape = if (t.layoutMode == com.binwaps.cardmanager.model.CardLayoutMode.TABLE)
                                 "جدول ${t.rows.size} صفوف" else "${t.fields.size} حقل"
                             Text(
-                                "${"%.1f".format(t.widthMm)}×${"%.1f".format(t.heightMm)} مم  •  $shape" +
+                                "${"%.1f".format(java.util.Locale.US, t.widthMm)}×${"%.1f".format(java.util.Locale.US, t.heightMm)} مم  •  $shape" +
                                     if (t.backgroundPath.isNotBlank()) "  •  خلفية مخصصة" else "",
                                 fontSize = 11.sp, color = TextLow,
                             )

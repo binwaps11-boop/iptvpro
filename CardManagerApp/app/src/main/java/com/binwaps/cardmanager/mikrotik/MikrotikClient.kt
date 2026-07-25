@@ -81,6 +81,21 @@ object MikrotikClient {
         }
     }
 
+    /**
+     * يلفّ القيمة بعلامتي تنصيص — محلّل المكتبة يقطع القيمة عند المسافة أو
+     * الرموز (= ! < > ،) إن لم تكن مقتبسة، فباقة اسمها "شهري 10 جيجا" كانت
+     * تتحول إلى ثلاث كلمات يرفضها الراوتر. القيمة الفارغة تخرج "" فتُقبل.
+     */
+    internal fun q(v: String): String {
+        val clean = v.replace('\n', ' ').replace('\r', ' ')
+        return when {
+            !clean.contains('"') -> "\"$clean\""
+            !clean.contains('\'') -> "'$clean'"
+            // لا يمكن تمثيل قيمة فيها النوعان معاً — نحذف المزدوجة
+            else -> "\"${clean.replace("\"", "")}\""
+        }
+    }
+
     /** ينفّذ أمراً ويعيد قائمة فارغة بدل الانهيار إن لم يكن الأمر مدعوماً */
     internal fun ApiConnection.tryList(vararg commands: String): List<Map<String, String>> {
         for (cmd in commands) {
@@ -231,7 +246,7 @@ object MikrotikClient {
      */
     private fun readUserManager(con: ApiConnection): List<UserEntry> {
         val rows = con.tryPrintLight(
-            ".id,name,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
+            ".id,name,username,customer,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
             "/user-manager/user", "/tool/user-manager/user",
         )
         if (rows.isEmpty()) return emptyList()
@@ -306,8 +321,8 @@ object MikrotikClient {
 
     /** كل الكروت من المصدرين معاً */
     suspend fun fetchAllCards(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
-        val hotspot = runCatching { con.printLight("/ip/hotspot/user", HOTSPOT_PROPS) }
-            .getOrDefault(emptyList())
+        // فشل الهوتسبوت خطأ حقيقي يظهر للمستخدم — كان يتحول إلى "0 كرت" بنجاح زائف
+        val hotspot = con.printLight("/ip/hotspot/user", HOTSPOT_PROPS)
             .filter { (it["name"] ?: "") != "default-trial" }
             .mapNotNull { row ->
                 val name = row["name"] ?: return@mapNotNull null
@@ -386,7 +401,7 @@ object MikrotikClient {
     }
 
     suspend fun disconnectActive(r: RouterProfile?, id: String): Result<Unit> = onRouter(r) { con ->
-        con.execute("/ip/hotspot/active/remove =.id=$id")
+        con.execute("/ip/hotspot/active/remove .id=$id")
         Unit
     }
 
@@ -434,10 +449,10 @@ object MikrotikClient {
 
     suspend fun createProfile(r: RouterProfile?, p: HotspotProfile): Result<Unit> = onRouter(r) { con ->
         val cmd = buildString {
-            append("/ip/hotspot/user/profile/add =name=${p.name}")
-            if (p.rateLimit.isNotBlank()) append(" =rate-limit=${p.rateLimit}")
-            if (p.sessionTimeout.isNotBlank()) append(" =session-timeout=${p.sessionTimeout}")
-            if (p.sharedUsers.isNotBlank()) append(" =shared-users=${p.sharedUsers}")
+            append("/ip/hotspot/user/profile/add name=${q(p.name)}")
+            if (p.rateLimit.isNotBlank()) append(" rate-limit=${q(p.rateLimit)}")
+            if (p.sessionTimeout.isNotBlank()) append(" session-timeout=${q(p.sessionTimeout)}")
+            if (p.sharedUsers.isNotBlank()) append(" shared-users=${q(p.sharedUsers)}")
         }
         con.execute(cmd)
         Unit
@@ -449,19 +464,27 @@ object MikrotikClient {
         r: RouterProfile?,
         users: List<UserEntry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
+        onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r) { con ->
         var ok = 0
+        var firstError: Throwable? = null
         users.forEachIndexed { i, u ->
             val cmd = buildString {
-                append("/ip/hotspot/user/add =name=${u.username}")
-                if (u.password.isNotBlank()) append(" =password=${u.password}")
-                if (u.profile.isNotBlank()) append(" =profile=${u.profile}")
-                if (u.validity.isNotBlank()) append(" =limit-uptime=${u.validity}")
+                append("/ip/hotspot/user/add name=${q(u.username)}")
+                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
+                if (u.profile.isNotBlank()) append(" profile=${q(u.profile)}")
+                if (u.validity.isNotBlank()) append(" limit-uptime=${q(u.validity)}")
                 val tag = u.batchTag.ifBlank { u.comment }
-                if (tag.isNotBlank()) append(" =comment=$tag")
+                if (tag.isNotBlank()) append(" comment=${q(tag)}")
             }
-            runCatching { con.execute(cmd) }.onSuccess { ok++ }
+            runCatching { con.execute(cmd) }
+                .onSuccess { ok++; onCreated(u) }
+                .onFailure { if (firstError == null) firstError = it }
             onProgress(i + 1, users.size)
+        }
+        // كانت النسخة القديمة تُرجع نجاحاً حتى لو رفض الراوتر كل الكروت
+        if (ok == 0 && users.isNotEmpty()) {
+            throw Exception("رفض الراوتر إنشاء الكروت: ${firstError?.message ?: "سبب غير معروف"}")
         }
         ok
     }
@@ -475,34 +498,51 @@ object MikrotikClient {
         r: RouterProfile?,
         users: List<UserEntry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
+        onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r) { con ->
         val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
         val base = if (isV7) "/user-manager" else "/tool/user-manager"
         var ok = 0
+        var firstError: Throwable? = null
         users.forEachIndexed { i, u ->
             val cmd = buildString {
-                append("$base/user/add =name=${u.username}")
-                if (u.password.isNotBlank()) append(" =password=${u.password}")
+                append("$base/user/add name=${q(u.username)}")
+                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
                 if (isV7) {
-                    if (u.profile.isNotBlank()) append(" =group=${u.profile}")
+                    if (u.profile.isNotBlank()) append(" group=${q(u.profile)}")
                 } else {
-                    append(" =customer=admin")
+                    append(" customer=admin")
                 }
-                if (u.comment.isNotBlank()) append(" =comment=${u.comment}")
+                if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
             }
-            val added = runCatching { con.execute(cmd) }.isSuccess
+            val added = runCatching { con.execute(cmd) }
+                .onFailure { if (firstError == null) firstError = it }
+                .isSuccess
             if (added) {
                 ok++
+                onCreated(u)
                 // ربط الباقة بالمستخدم ليكتسب الصلاحية
                 if (u.profile.isNotBlank()) {
                     runCatching {
-                        con.execute("$base/user-profile/add =user=${u.username} =profile=${u.profile}")
+                        if (isV7) {
+                            con.execute("$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}")
+                        } else {
+                            // v6: التفعيل بأمره الخاص — جدول user-profile غير موجود في v6
+                            con.execute(
+                                "$base/user/create-and-activate-profile customer=admin " +
+                                    "numbers=${q(u.username)} profile=${q(u.profile)}"
+                            )
+                        }
                     }
                 }
             }
             onProgress(i + 1, users.size)
         }
-        if (ok == 0) throw Exception("تعذّر إنشاء أي مستخدم — تأكد من تثبيت حزمة اليوزر منجر ومن صلاحيات المستخدم")
+        if (ok == 0 && users.isNotEmpty()) {
+            throw Exception(
+                "تعذّر إنشاء أي مستخدم: ${firstError?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}"
+            )
+        }
         ok
     }
 
@@ -516,7 +556,7 @@ object MikrotikClient {
                         "/user-manager/user" else "/tool/user-manager/user"
                 else -> "/ip/hotspot/user"
             }
-            con.execute("$path/set =.id=${user.routerId} =disabled=${!enabled}")
+            con.execute("$path/set .id=${user.routerId} disabled=${!enabled}")
             Unit
         }
 
@@ -563,7 +603,7 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<BulkResult> = onRouter(r) { con ->
         con.bulk(cards, onProgress) { u, path ->
-            if (u.routerId.isBlank()) null else "$path/set =.id=${u.routerId} =disabled=${!enabled}"
+            if (u.routerId.isBlank()) null else "$path/set .id=${u.routerId} disabled=${!enabled}"
         }
     }
 
@@ -577,11 +617,11 @@ object MikrotikClient {
             con.printLight("/ip/hotspot/active", ".id,user")
                 .filter { it["user"] in names }
                 .forEach { row ->
-                    row[".id"]?.let { runCatching { con.execute("/ip/hotspot/active/remove =.id=$it") } }
+                    row[".id"]?.let { runCatching { con.execute("/ip/hotspot/active/remove .id=$it") } }
                 }
         }
         con.bulk(cards, onProgress) { u, path ->
-            if (u.routerId.isBlank()) null else "$path/remove =.id=${u.routerId}"
+            if (u.routerId.isBlank()) null else "$path/remove .id=${u.routerId}"
         }
     }
 
@@ -590,11 +630,43 @@ object MikrotikClient {
         r: RouterProfile?, cards: List<UserEntry>, profile: String,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<BulkResult> = onRouter(r) { con ->
-        con.bulk(cards, onProgress) { u, path ->
-            if (u.routerId.isBlank()) null
-            else if (u.source == CardSource.USER_MANAGER) "$path/set =.id=${u.routerId} =group=$profile"
-            else "$path/set =.id=${u.routerId} =profile=$profile"
+        val (um, hotspot) = cards.partition { it.source == CardSource.USER_MANAGER }
+        var ok = 0
+        var failed = 0
+        var done = 0
+        hotspot.forEach { u ->
+            if (u.routerId.isBlank()) failed++
+            else runCatching {
+                con.execute("/ip/hotspot/user/set .id=${u.routerId} profile=${q(profile)}")
+            }.fold({ ok++ }, { failed++ })
+            onProgress(++done, cards.size)
         }
+        if (um.isNotEmpty()) {
+            val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+            // صفوف الصلاحيات الحالية مرة واحدة — إعادة الربط تحتاج حذف القديم.
+            // مجرد set group لا يغيّر الباقة الفعلية في v7
+            val existing = if (isV7) {
+                runCatching { con.printLight("/user-manager/user-profile", ".id,user") }.getOrDefault(emptyList())
+            } else emptyList()
+            um.forEach { u ->
+                runCatching {
+                    if (isV7) {
+                        con.execute("/user-manager/user/set .id=${u.routerId} group=${q(profile)}")
+                        existing.filter { it["user"] == u.username }.forEach { row ->
+                            row[".id"]?.let { con.execute("/user-manager/user-profile/remove .id=$it") }
+                        }
+                        con.execute("/user-manager/user-profile/add user=${q(u.username)} profile=${q(profile)}")
+                    } else {
+                        con.execute(
+                            "/tool/user-manager/user/create-and-activate-profile customer=admin " +
+                                "numbers=${q(u.username)} profile=${q(profile)}"
+                        )
+                    }
+                }.fold({ ok++ }, { failed++ })
+                onProgress(++done, cards.size)
+            }
+        }
+        BulkResult(ok, failed)
     }
 
     /** تصفير عدادات مجموعة كروت */
@@ -603,7 +675,7 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<BulkResult> = onRouter(r) { con ->
         con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
-            if (u.routerId.isBlank()) null else "/ip/hotspot/user/reset-counters =.id=${u.routerId}"
+            if (u.routerId.isBlank()) null else "/ip/hotspot/user/reset-counters .id=${u.routerId}"
         }
     }
 
@@ -619,18 +691,18 @@ object MikrotikClient {
         runCatching {
             con.printLight("/ip/hotspot/cookie", ".id,user")
                 .filter { it["user"] in names }
-                .forEach { row -> row[".id"]?.let { runCatching { con.execute("/ip/hotspot/cookie/remove =.id=$it") } } }
+                .forEach { row -> row[".id"]?.let { runCatching { con.execute("/ip/hotspot/cookie/remove .id=$it") } } }
         }
         con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
             if (u.routerId.isBlank()) return@bulk null
-            runCatching { con.execute("/ip/hotspot/user/reset-counters =.id=${u.routerId}") }
+            runCatching { con.execute("/ip/hotspot/user/reset-counters .id=${u.routerId}") }
             // نُعيد الصلاحية المطلوبة: المحددة، أو الأصلية للكرت إن لم تكن علامة انتهاء
             val validity = restoreValidity.ifBlank {
                 u.limitUptime.takeIf { it.isNotBlank() && it.trim() != "1s" } ?: ""
             }
             buildString {
-                append("/ip/hotspot/user/set =.id=${u.routerId} =comment=")
-                if (validity.isNotBlank()) append(" =limit-uptime=$validity")
+                append("/ip/hotspot/user/set .id=${u.routerId} comment=\"\"")
+                if (validity.isNotBlank()) append(" limit-uptime=${q(validity)}")
             }
         }
     }
@@ -641,7 +713,7 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<BulkResult> = onRouter(r) { con ->
         con.bulk(cards, onProgress) { u, path ->
-            if (u.routerId.isBlank()) null else "$path/set =.id=${u.routerId} =password=${password(u)}"
+            if (u.routerId.isBlank()) null else "$path/set .id=${u.routerId} password=${q(password(u))}"
         }
     }
 
@@ -654,7 +726,7 @@ object MikrotikClient {
             if (u.routerId.isBlank()) null else {
                 val current = parseUptime(u.limitUptime.takeIf { it.trim() != "1s" }.orEmpty())
                 val next = formatUptime(current + addSeconds)
-                "/ip/hotspot/user/set =.id=${u.routerId} =limit-uptime=$next"
+                "/ip/hotspot/user/set .id=${u.routerId} limit-uptime=${q(next)}"
             }
         }
     }
@@ -676,7 +748,9 @@ object MikrotikClient {
 
     /** تصفير عدادات كرت واحد وإرجاعه غير مستهلك */
     suspend fun resetCard(r: RouterProfile?, user: UserEntry): Result<Unit> =
-        bulkResetToUnused(r, listOf(user), "").map { }
+        bulkResetToUnused(r, listOf(user), "").mapCatching {
+            if (it.failed > 0) error("رفض الراوتر إرجاع الكرت")
+        }
 
     /** سجل الجلسات من سجل الراوتر (يحتاج تفعيل تسجيل الهوتسبوت) */
     suspend fun fetchLogHistory(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
@@ -701,7 +775,7 @@ object MikrotikClient {
 
     /** تفعيل حفظ سجل الهوتسبوت على الراوتر ليعمل سجل الجلسات */
     suspend fun enableHotspotLogging(r: RouterProfile?): Result<Unit> = onRouter(r) { con ->
-        con.execute("/system/logging/add =topics=hotspot =action=disk")
+        con.execute("/system/logging/add topics=hotspot action=disk")
         Unit
     }
 
@@ -741,7 +815,7 @@ object MikrotikClient {
             val id = row[".id"] ?: continue
             if ((row["name"] ?: "") == "default-trial") continue
             if (classify(row) == CardStatus.EXPIRED) {
-                runCatching { con.execute("/ip/hotspot/user/remove =.id=$id") }.onSuccess { removed++ }
+                runCatching { con.execute("/ip/hotspot/user/remove .id=$id") }.onSuccess { removed++ }
             }
         }
         removed
@@ -754,7 +828,7 @@ object MikrotikClient {
             if (runCatching { con.execute("/user-manager/user/print") }.isSuccess)
                 "/user-manager/user/remove" else "/tool/user-manager/user/remove"
         } else "/ip/hotspot/user/remove"
-        con.execute("$path =.id=${user.routerId}")
+        con.execute("$path .id=${user.routerId}")
         Unit
     }
 
@@ -764,7 +838,7 @@ object MikrotikClient {
         for (row in con.execute("/ip/hotspot/user/print")) {
             if ((row["comment"] ?: "") != tag) continue
             val id = row[".id"] ?: continue
-            runCatching { con.execute("/ip/hotspot/user/remove =.id=$id") }.onSuccess { removed++ }
+            runCatching { con.execute("/ip/hotspot/user/remove .id=$id") }.onSuccess { removed++ }
         }
         removed
     }
@@ -816,22 +890,41 @@ object MikrotikClient {
         limitUptime: String? = null,
     ): Result<Unit> = onRouter(r) { con ->
         if (user.routerId.isBlank()) error("لا يمكن تعديل هذا الكرت — لم يُجلب من الراوتر")
-        val sets = buildString {
-            password?.let { append(" password=$it") }
-            profile?.let { append(" profile=$it") }
-            comment?.let { append(" comment=$it") }
-            limitUptime?.let { append(" limit-uptime=$it") }
+        if (user.source == CardSource.USER_MANAGER) {
+            // اليوزر منجر: الحقول تختلف — group بدل profile، ولا يوجد limit-uptime
+            val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+            val path = if (isV7) "/user-manager/user" else "/tool/user-manager/user"
+            val sets = buildString {
+                password?.let { append(" password=${q(it)}") }
+                comment?.let { append(" comment=${q(it)}") }
+                if (isV7) profile?.takeIf { it.isNotBlank() }?.let { append(" group=${q(it)}") }
+            }
+            if (sets.isNotBlank()) con.execute("$path/set .id=${user.routerId}$sets")
+            // تغيير الباقة الفعلية
+            profile?.takeIf { it.isNotBlank() }?.let { p ->
+                runCatching {
+                    if (isV7) {
+                        con.printLight("/user-manager/user-profile", ".id,user")
+                            .filter { it["user"] == user.username }
+                            .forEach { row -> row[".id"]?.let { con.execute("/user-manager/user-profile/remove .id=$it") } }
+                        con.execute("/user-manager/user-profile/add user=${q(user.username)} profile=${q(p)}")
+                    } else {
+                        con.execute(
+                            "/tool/user-manager/user/create-and-activate-profile customer=admin " +
+                                "numbers=${q(user.username)} profile=${q(p)}"
+                        )
+                    }
+                }
+            }
+        } else {
+            val sets = buildString {
+                password?.let { append(" password=${q(it)}") }
+                profile?.let { append(" profile=${q(it)}") }
+                comment?.let { append(" comment=${q(it)}") }
+                limitUptime?.let { append(" limit-uptime=${q(it)}") }
+            }
+            if (sets.isNotBlank()) con.execute("/ip/hotspot/user/set .id=${user.routerId}$sets")
         }
-        if (sets.isBlank()) return@onRouter
-        val paths = when (user.source) {
-            CardSource.USER_MANAGER -> listOf("/user-manager/user", "/tool/user-manager/user")
-            else -> listOf("/ip/hotspot/user")
-        }
-        var ok = false
-        for (p in paths) {
-            if (runCatching { con.execute("$p/set .id=${user.routerId}$sets") }.isSuccess) { ok = true; break }
-        }
-        if (!ok) error("تعذّر تعديل الكرت على الراوتر")
     }
 
     /** قائمة عناوين DHCP الممنوحة — تكشف الأجهزة الموجودة على الشبكة */
@@ -889,15 +982,15 @@ object MikrotikClient {
 
     /** حجب جهاز عن الشبكة بعنوانه الفيزيائي */
     suspend fun blockMac(r: RouterProfile?, mac: String, note: String = ""): Result<Unit> = onRouter(r) { con ->
-        val comment = if (note.isBlank()) "" else " comment=$note"
-        con.execute("/ip/hotspot/ip-binding/add mac-address=$mac type=blocked$comment")
+        val comment = if (note.isBlank()) "" else " comment=${q(note)}"
+        con.execute("/ip/hotspot/ip-binding/add mac-address=${q(mac)} type=blocked$comment")
         Unit
     }
 
     /** السماح لجهاز بالمرور بدون كرت */
     suspend fun bypassMac(r: RouterProfile?, mac: String, note: String = ""): Result<Unit> = onRouter(r) { con ->
-        val comment = if (note.isBlank()) "" else " comment=$note"
-        con.execute("/ip/hotspot/ip-binding/add mac-address=$mac type=bypassed$comment")
+        val comment = if (note.isBlank()) "" else " comment=${q(note)}"
+        con.execute("/ip/hotspot/ip-binding/add mac-address=${q(mac)} type=bypassed$comment")
         Unit
     }
 
@@ -908,7 +1001,7 @@ object MikrotikClient {
 
     /** حفظ نسخة احتياطية على ذاكرة الراوتر */
     suspend fun backupRouter(r: RouterProfile?, name: String): Result<String> = onRouter(r) { con ->
-        con.execute("/system/backup/save name=$name")
+        con.execute("/system/backup/save name=${q(name)}")
         "$name.backup"
     }
 
@@ -995,7 +1088,7 @@ object MikrotikClient {
         cards.forEachIndexed { i, c ->
             if (c.routerId.isNotBlank()) {
                 val done = runCatching {
-                    con.execute("/ip/hotspot/user/set .id=${c.routerId} mac-address=")
+                    con.execute("/ip/hotspot/user/set .id=${c.routerId} mac-address=\"\"")
                 }.isSuccess
                 if (done) ok++
             }
@@ -1024,14 +1117,19 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<Int> {
         if (cards.isEmpty()) return Result.success(0)
+        val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
         val create = when (to) {
-            UploadTarget.HOTSPOT -> createHotspotUsers(r, cards) { d, t -> onProgress(d, t) }
-            UploadTarget.USER_MANAGER -> createUserManagerUsers(r, cards) { d, t -> onProgress(d, t) }
+            UploadTarget.HOTSPOT ->
+                createHotspotUsers(r, cards, { d, t -> onProgress(d, t) }) { created.add(it) }
+            UploadTarget.USER_MANAGER ->
+                createUserManagerUsers(r, cards, { d, t -> onProgress(d, t) }) { created.add(it) }
         }
         create.onFailure { return Result.failure(it) }
-        if (!deleteFromSource) return Result.success(cards.size)
+        // لا نحذف من المصدر إلا ما نجح إنشاؤه فعلاً في الوجهة —
+        // النسخة القديمة كانت تحذف الكل حتى الكروت التي فشل نقلها
+        if (!deleteFromSource) return Result.success(created.size)
         var removed = 0
-        cards.forEach { c -> if (removeUser(r, c).isSuccess) removed++ }
+        created.forEach { c -> if (removeUser(r, c).isSuccess) removed++ }
         return Result.success(removed)
     }
 }

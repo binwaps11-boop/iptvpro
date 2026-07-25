@@ -66,7 +66,7 @@ object ThermalPrinter {
                 users.forEachIndexed { index, user ->
                     val rendered = CardRenderer.renderSafe(template, user, settings, widthPx, thermalInfo(index))
                     // مط الكرت إلى الارتفاع المطلوب من الإعدادات
-                    val scaled = if (rendered.height != heightPx) {
+                    val scaled = if (rendered.width != widthPx || rendered.height != heightPx) {
                         Bitmap.createScaledBitmap(rendered, widthPx, heightPx, true).also { rendered.recycle() }
                     } else rendered
 

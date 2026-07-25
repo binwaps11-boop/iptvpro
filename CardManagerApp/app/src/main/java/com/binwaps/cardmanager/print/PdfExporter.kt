@@ -108,6 +108,9 @@ object PdfExporter {
         val offsetY = ((pageH - gridH) / 2f).coerceAtLeast(margin) + settings.offsetYMm * MM_TO_PT
 
         val renderW = (info.cardWidthMm / 25.4f * RENDER_DPI).toInt().coerceIn(64, 2000)
+        // نظام إحداثيات الرسم الداخلي — الرسم متجهي مباشرة على صفحة الـ PDF:
+        // نص حاد بأي تكبير، وملف بالكيلوبايتات بدل عشرات الميغابايتات، وسرعة أضعاف
+        val (cellW, cellH) = CardRenderer.renderSize(template, renderW)
 
         // بيانات لحظة الطباعة: رقم الطباعة والتاريخ والوقت تُثبَّت لكل الورقة
         val printNo = com.binwaps.cardmanager.data.Store.nextPrintNo()
@@ -116,7 +119,6 @@ object PdfExporter {
         val timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now)
 
         val doc = PdfDocument()
-        val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG)
         val markPaint = Paint().apply {
             style = Paint.Style.STROKE
             strokeWidth = 0.5f
@@ -127,16 +129,19 @@ object PdfExporter {
         }
 
         var done = 0
-        var pageNumber = 0
+        var pdfPageNo = 0
+        var cardsBefore = 0   // عدد الكروت المرسومة في الصفحات السابقة — لتسلسل الكرت
         val copies = settings.copies.coerceIn(1, 20)
         val pages = users.chunked(info.perPage)
 
-        pages.forEach { pageUsers ->
+        pages.forEachIndexed { pageIndex, pageUsers ->
+            // النسخ المتكررة من نفس الورقة تحمل نفس رقم الصفحة ونفس تسلسل الكروت
             repeat(copies) {
-                pageNumber++
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNumber).create())
+                pdfPageNo++
+                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pdfPageNo).create())
                 val canvas = page.canvas
 
+                var localCard = 0
                 pageUsers.forEachIndexed { i, user ->
                     val col = i % info.columns
                     val row = i / info.columns
@@ -150,18 +155,21 @@ object PdfExporter {
                         return@forEachIndexed
                     }
 
-                    val bmp = CardRenderer.renderSafe(
-                        template, user, settings, renderW,
-                        RenderInfo(
-                            pageNumber = pageNumber,
-                            cardNumber = done + 1,
-                            printNo = printNo,
-                            dateText = dateText,
-                            timeText = timeText,
-                        ),
+                    localCard++
+                    val ri = RenderInfo(
+                        pageNumber = pageIndex + 1,
+                        cardNumber = cardsBefore + localCard,
+                        printNo = printNo,
+                        dateText = dateText,
+                        timeText = timeText,
                     )
-                    canvas.drawBitmap(bmp, null, rect, imagePaint)
-                    bmp.recycle()
+                    canvas.save()
+                    canvas.translate(rect.left, rect.top)
+                    canvas.scale(rect.width() / cellW.toFloat(), rect.height() / cellH.toFloat())
+                    runCatching {
+                        CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri)
+                    }
+                    canvas.restore()
 
                     drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
                     done++
@@ -169,6 +177,7 @@ object PdfExporter {
                 }
                 doc.finishPage(page)
             }
+            cardsBefore += pageUsers.count { it != null }
         }
 
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }

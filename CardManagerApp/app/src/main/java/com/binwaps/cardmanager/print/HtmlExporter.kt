@@ -35,7 +35,7 @@ object HtmlExporter {
         val now = Date()
         val dateText = SimpleDateFormat("yyyy/MM/dd", Locale.US).format(now)
         val timeText = SimpleDateFormat("HH:mm", Locale.US).format(now)
-        val printNo = settings.printCounter + 1
+        val printNo = com.binwaps.cardmanager.data.Store.nextPrintNo()
 
         val sb = StringBuilder()
         sb.append("<!DOCTYPE html>\n<html dir=\"rtl\" lang=\"ar\">\n<head>\n")

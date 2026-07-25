@@ -97,16 +97,18 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
 
     fun saveBatch() {
         val t = template ?: return
+        // نسجّل ما طُبع فعلاً — بعد تطبيق نطاق "من كرت … إلى كرت …"
+        val printed = PdfExporter.selectRange(users, Store.settings.value)
         Store.addBatch(
             PrintBatch(
                 id = Store.newId(),
                 createdAt = System.currentTimeMillis(),
                 templateId = t.id,
                 templateName = t.name,
-                profile = users.firstOrNull()?.profile ?: "",
-                unitPrice = users.firstOrNull()?.price ?: "",
+                profile = printed.firstOrNull()?.profile ?: "",
+                unitPrice = printed.firstOrNull()?.price ?: "",
                 paper = Store.settings.value.paperType,
-                users = users,
+                users = printed,
             )
         )
     }
@@ -251,12 +253,17 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 val t0 = template ?: return@NeonButton
                 busy = true; progress = 0 to users.size
                 scope.launch {
-                    val file = withContext(Dispatchers.IO) {
-                        PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
+                    try {
+                        val file = withContext(Dispatchers.IO) {
+                            PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
+                        }
+                        saveBatch()
+                        PdfExporter.share(context, file)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        busy = false; progress = null
                     }
-                    busy = false; progress = null
-                    saveBatch()
-                    PdfExporter.share(context, file)
                 }
             }
             Spacer(Modifier.height(9.dp))
@@ -264,12 +271,17 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 val t0 = template ?: return@GhostButton
                 busy = true; progress = 0 to users.size
                 scope.launch {
-                    val file = withContext(Dispatchers.IO) {
-                        PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
+                    try {
+                        val file = withContext(Dispatchers.IO) {
+                            PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
+                        }
+                        saveBatch()
+                        PdfExporter.printViaSystem(context, file)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        busy = false; progress = null
                     }
-                    busy = false; progress = null
-                    saveBatch()
-                    PdfExporter.printViaSystem(context, file)
                 }
             }
             Spacer(Modifier.height(9.dp))
@@ -277,12 +289,17 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 val t0 = template ?: return@GhostButton
                 busy = true
                 scope.launch {
-                    val file = withContext(Dispatchers.IO) {
-                        com.binwaps.cardmanager.print.HtmlExporter.export(context, t0, users, settings)
+                    try {
+                        val file = withContext(Dispatchers.IO) {
+                            com.binwaps.cardmanager.print.HtmlExporter.export(context, t0, users, settings)
+                        }
+                        saveBatch()
+                        com.binwaps.cardmanager.print.HtmlExporter.open(context, file)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        busy = false
                     }
-                    busy = false
-                    saveBatch()
-                    com.binwaps.cardmanager.print.HtmlExporter.open(context, file)
                 }
             }
             Spacer(Modifier.height(5.dp))
@@ -305,7 +322,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     busy = true; progress = 0 to users.size
                     scope.launch {
                         val conn = ThermalPrinter.tcpPrinter(settings.tcpPrinterIp, settings.tcpPrinterPort)
-                        ThermalPrinter.printCards(conn, t0, users, Store.settings.value) { d, t -> progress = d to t }
+                        val toPrint = PdfExporter.selectRange(users, Store.settings.value)
+                        ThermalPrinter.printCards(conn, t0, toPrint, Store.settings.value) { d, t -> progress = d to t }
                             .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
                             .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
                         busy = false; progress = null
@@ -338,11 +356,13 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 .fillMaxWidth()
                                 .background(Neon.copy(alpha = 0.07f), RoundedCornerShape(11.dp))
                                 .clickable {
+                                    if (busy) return@clickable   // منع طباعة مزدوجة بلمستين سريعتين
                                     val t0 = template ?: return@clickable
                                     showPrinterPicker = false
                                     busy = true; progress = 0 to users.size
                                     scope.launch {
-                                        ThermalPrinter.printCards(p, t0, users, Store.settings.value) { d, t -> progress = d to t }
+                                        val toPrint = PdfExporter.selectRange(users, Store.settings.value)
+                                        ThermalPrinter.printCards(p, t0, toPrint, Store.settings.value) { d, t -> progress = d to t }
                                             .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
                                             .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
                                         busy = false; progress = null

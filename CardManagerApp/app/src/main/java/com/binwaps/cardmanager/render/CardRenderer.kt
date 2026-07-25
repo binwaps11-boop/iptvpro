@@ -88,6 +88,15 @@ object CardRenderer {
             Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xFFFFFFFF.toInt()) }
         }
 
+    /** أبعاد الرسم الداخلية لقالبٍ ما عند عرض معيّن — تستخدمها كل مسارات الرسم */
+    fun renderSize(template: CardTemplate, widthPx: Int): Pair<Int, Int> {
+        val w = widthPx.coerceIn(16, 1600)
+        val wMm = template.widthMm.coerceAtLeast(1f)
+        val hMm = template.heightMm.coerceAtLeast(1f)
+        val h = (w * hMm / wMm).toInt().coerceIn(16, 2400)
+        return w to h
+    }
+
     fun render(
         template: CardTemplate,
         user: UserEntry,
@@ -95,14 +104,26 @@ object CardRenderer {
         widthPx: Int,
         info: RenderInfo = RenderInfo(),
     ): Bitmap {
-        // حماية من قيم القالب غير الصالحة التي قد تُنتج أبعاداً ضخمة أو صفرية
-        val safeWidth = widthPx.coerceIn(16, 1600)
+        val (w, h) = renderSize(template, widthPx)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        drawCard(Canvas(bmp), template, user, settings, w, h, info)
+        return bmp
+    }
+
+    /**
+     * يرسم الكرت على أي Canvas — على صورة للمعاينة والحرارية، أو مباشرة على
+     * صفحة PDF فيخرج النص متجهياً حاداً والملف صغيراً (أسرع بكثير للدفعات).
+     */
+    fun drawCard(
+        canvas: Canvas,
+        template: CardTemplate,
+        user: UserEntry,
+        settings: AppSettings,
+        widthPx: Int,
+        heightPx: Int,
+        info: RenderInfo = RenderInfo(),
+    ) {
         val wMm = template.widthMm.coerceAtLeast(1f)
-        val hMm = template.heightMm.coerceAtLeast(1f)
-        @Suppress("NAME_SHADOWING") val widthPx = safeWidth
-        val heightPx = (widthPx * hMm / wMm).toInt().coerceIn(16, 2400)
-        val bmp = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
         val pxPerMm = widthPx / wMm
         val radius = template.cornerRadiusMm * pxPerMm
         val rect = RectF(0f, 0f, widthPx.toFloat(), heightPx.toFloat())
@@ -129,7 +150,7 @@ object CardRenderer {
 
         if (template.layoutMode == CardLayoutMode.TABLE) {
             drawTable(canvas, template, user, settings, widthPx, heightPx, pxPerMm, info)
-            return bmp
+            return
         }
 
         // الحقول — مع احترام نوع الكرت المختار
@@ -142,7 +163,6 @@ object CardRenderer {
                 drawText(canvas, field, user, settings, widthPx, heightPx, template.font, info)
             }
         }
-        return bmp
     }
 
     /**
@@ -261,7 +281,8 @@ object CardRenderer {
         }
         val inset = r.width() * 0.04f
         val maxW = (r.width() - 2 * inset).coerceAtLeast(1f)
-        while (paint.measureText(text) > maxW && paint.textSize > 3f) paint.textSize *= 0.94f
+        val measured = paint.measureText(text)
+        if (measured > maxW) paint.textSize = (paint.textSize * maxW / measured).coerceAtLeast(3f)
 
         val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2f
         val x = when (cell.align) {
@@ -278,9 +299,8 @@ object CardRenderer {
         val content = qrText(template.qrContent, user, settings)
         if (content.isBlank()) return
         val side = (minOf(r.width(), r.height()) * 0.92f).toInt().coerceAtLeast(16)
-        val qr = encodeQr(content, side) ?: return
+        val qr = cachedQr(content, side) ?: return
         canvas.drawBitmap(qr, r.centerX() - side / 2f, r.centerY() - side / 2f, null)
-        qr.recycle()
     }
 
     private const val PT_MM = 0.352778f
@@ -314,10 +334,11 @@ object CardRenderer {
             textAlign = Paint.Align.CENTER
             typeface = typeface(field.font ?: templateFont, field.bold)
         }
-        // تصغير تلقائي إذا تجاوز النص عرض الكرت
+        // تصغير تلقائي بخطوة واحدة إذا تجاوز النص عرض الكرت
         val maxWidth = widthPx * 0.94f
-        while (paint.measureText(text) > maxWidth && paint.textSize > 4f) {
-            paint.textSize *= 0.94f
+        val measured = paint.measureText(text)
+        if (measured > maxWidth) {
+            paint.textSize = (paint.textSize * maxWidth / measured).coerceAtLeast(4f)
         }
         val x = field.xFrac * widthPx
         val y = field.yFrac * heightPx - (paint.ascent() + paint.descent()) / 2f
@@ -331,11 +352,10 @@ object CardRenderer {
         val content = qrText(template.qrContent, user, settings)
         if (content.isBlank()) return
         val side = (field.sizeFrac * heightPx).toInt().coerceAtLeast(16)
-        val qr = encodeQr(content, side) ?: return
+        val qr = cachedQr(content, side) ?: return
         val left = field.xFrac * widthPx - side / 2f
         val top = field.yFrac * heightPx - side / 2f
         canvas.drawBitmap(qr, left, top, null)
-        qr.recycle()
     }
 
     fun qrText(kind: QrContent, user: UserEntry, settings: AppSettings): String {
@@ -360,12 +380,30 @@ object CardRenderer {
     fun encodeQr(content: String, sidePx: Int): Bitmap? = runCatching {
         val hints = mapOf(EncodeHintType.MARGIN to 1)
         val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, sidePx, sidePx, hints)
-        val bmp = Bitmap.createBitmap(sidePx, sidePx, Bitmap.Config.ARGB_8888)
-        for (x in 0 until sidePx) {
-            for (y in 0 until sidePx) {
-                bmp.setPixel(x, y, if (matrix.get(x, y)) Color.BLACK else Color.WHITE)
+        // ملء دفعة واحدة — setPixel نقطة نقطة كان أبطأ بعشرات المرات
+        val pixels = IntArray(sidePx * sidePx)
+        for (y in 0 until sidePx) {
+            val off = y * sidePx
+            for (x in 0 until sidePx) {
+                pixels[off + x] = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
             }
         }
-        bmp
+        Bitmap.createBitmap(sidePx, sidePx, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(pixels, 0, sidePx, 0, 0, sidePx, sidePx)
+        }
     }.getOrNull()
+
+    // ذاكرة آخر رمز QR — عندما يكون المحتوى واحداً لكل الكروت (واي فاي مثلاً)
+    // يُرمَّز مرة واحدة للدفعة كلها بدل 500 مرة
+    private var qrKey: String? = null
+    private var qrBitmap: Bitmap? = null
+
+    @Synchronized
+    private fun cachedQr(content: String, sidePx: Int): Bitmap? {
+        val key = "$sidePx|$content"
+        if (qrKey == key && qrBitmap?.isRecycled == false) return qrBitmap
+        qrBitmap = encodeQr(content, sidePx)
+        qrKey = key
+        return qrBitmap
+    }
 }

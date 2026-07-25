@@ -228,10 +228,10 @@ fun UsersScreen() {
                 val target = settings.uploadTarget
                 run("جاري الرفع إلى ${target.labelAr}…") {
                     if (target == UploadTarget.USER_MANAGER) {
-                        MikrotikClient.createUserManagerUsers(Store.activeRouter(), users) { d, t -> progress = d to t }
+                        MikrotikClient.createUserManagerUsers(Store.activeRouter(), users, onProgress = { d, t -> progress = d to t })
                             .map { "تم رفع $it مستخدم إلى اليوزر منجر" }
                     } else {
-                        MikrotikClient.createHotspotUsers(Store.activeRouter(), users) { d, t -> progress = d to t }
+                        MikrotikClient.createHotspotUsers(Store.activeRouter(), users, onProgress = { d, t -> progress = d to t })
                             .map { "تم رفع $it كرت إلى الهوتسبوت" }
                     }
                 }
@@ -549,7 +549,7 @@ fun UsersScreen() {
                         password = pw, profile = prof, validity = validity,
                         price = price, comment = note,
                     )
-                    Store.setUsers(users.map { if (it.username == card.username) updated else it })
+                    Store.setUsers(users.map { if (it.username == card.username && it.source == card.source) updated else it })
                     editCard = null
                     if (onRouter) {
                         run("حفظ التعديل على الراوتر") {

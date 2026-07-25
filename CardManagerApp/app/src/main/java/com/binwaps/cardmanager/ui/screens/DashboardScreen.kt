@@ -121,11 +121,11 @@ fun DashboardScreen(navController: NavController) {
         }
     }
 
-    val todayStart = remember {
-        java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0)
-        }.timeInMillis
-    }
+    // يُحسب في كل إعادة تركيب — remember كان يترك "اليوم" على يوم أمس بعد منتصف الليل
+    val todayStart = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+    }.timeInMillis
     val sales by Store.sales.collectAsState()
     val todayRevenue = sales.filter { it.at >= todayStart && it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.total }
 
@@ -213,7 +213,7 @@ fun DashboardScreen(navController: NavController) {
                 Neon, Modifier.weight(1f),
             )
             MiniStat("مستهلكة", n(status.usedUsers), Warn, Modifier.weight(1f))
-            MiniStat("مبيعات اليوم", todayRevenue.toLong().toString(), Violet, Modifier.weight(1f))
+            MiniStat("مبيعات اليوم", com.binwaps.cardmanager.util.Ledger.money(todayRevenue), Violet, Modifier.weight(1f))
         }
 
         // تنبيهات — باقات على وشك النفاد، وديون معلّقة
@@ -224,8 +224,8 @@ fun DashboardScreen(navController: NavController) {
                 .groupingBy { it.profile }.eachCount()
                 .filter { it.value <= threshold }
                 .toList().sortedBy { it.second }
-            val openDebt = sales.filter { it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.debt } -
-                sales.filter { it.kind == com.binwaps.cardmanager.model.SaleKind.DEBT_PAID }.sumOf { it.total }
+            // لكل زبون على حدة — الدفعة الزائدة لزبون لا تُخفي دين زبون آخر
+            val openDebt = com.binwaps.cardmanager.util.Ledger.totalDebt(sales)
             if (lowProfiles.isNotEmpty() || openDebt > 0) {
                 GlassCard(Modifier.fillMaxWidth(), glow = Warn.copy(alpha = 0.3f), padding = 12) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -241,7 +241,7 @@ fun DashboardScreen(navController: NavController) {
                     }
                     if (openDebt > 0) {
                         Text(
-                            "ديون غير مسدّدة: ${openDebt.toLong()} ${settings.currency}",
+                            "ديون غير مسدّدة: ${com.binwaps.cardmanager.util.Ledger.money(openDebt)} ${settings.currency}",
                             fontSize = 11.5.sp, color = Danger, modifier = Modifier.padding(top = 5.dp),
                         )
                     }

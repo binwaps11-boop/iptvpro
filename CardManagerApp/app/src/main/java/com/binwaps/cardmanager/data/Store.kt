@@ -86,16 +86,33 @@ object Store {
         save("sales.json", _sales.value)
     }
 
-    private inline fun <reified T> load(name: String): T? = runCatching {
+    private inline fun <reified T> load(name: String): T? {
         val f = File(appContext.filesDir, name)
-        if (!f.exists()) null else json.decodeFromString<T>(f.readText())
-    }.getOrNull()
+        if (!f.exists()) return null
+        val parsed = runCatching { json.decodeFromString<T>(f.readText()) }.getOrNull()
+        if (parsed == null) {
+            // ملف تالف — نحفظه جانباً بدل تجاهله، فالكتابة التالية كانت ستمحو التاريخ كله
+            runCatching { f.copyTo(File(appContext.filesDir, "$name.bak"), overwrite = true) }
+        }
+        return parsed
+    }
 
-    /** يُسلسل فوراً (لالتقاط الحالة الصحيحة) ويكتب على القرص في خيط خلفي حتى لا تتجمد الواجهة */
+    /**
+     * يُسلسل فوراً (لالتقاط الحالة الصحيحة) ويكتب على القرص في خيط خلفي.
+     * الكتابة ذرّية: ملف مؤقت ثم إعادة تسمية — انقطاع الحفظ في منتصفه
+     * كان يترك ملفاً نصفياً يمسح كل السجل عند التشغيل التالي.
+     */
     private inline fun <reified T> save(name: String, value: T) {
         val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return
         io.execute {
-            runCatching { File(appContext.filesDir, name).writeText(text) }
+            runCatching {
+                val tmp = File(appContext.filesDir, "$name.tmp")
+                tmp.writeText(text)
+                if (!tmp.renameTo(File(appContext.filesDir, name))) {
+                    File(appContext.filesDir, name).writeText(text)
+                    tmp.delete()
+                }
+            }
         }
     }
 
@@ -229,13 +246,19 @@ object Store {
         out.absolutePath
     }.getOrNull()
 
-    fun newId(): Long = System.currentTimeMillis() + (0..999).random()
+    // معرّفات تصاعدية لا تتكرر — العشوائية القديمة كانت تسمح بتصادمٍ يجعل
+    // حذف عملية بيع واحدة يحذف عمليتين تشتركان في نفس المعرّف
+    private val idCounter = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
-    /** يزيد عدّاد الطباعة ويعيد الرقم الجديد — يُطبع على الكرت إن أُضيف حقل "رقم الطباعة" */
+    fun newId(): Long = idCounter.updateAndGet { maxOf(it + 1, System.currentTimeMillis()) }
+
+    /** يزيد عدّاد الطباعة ويعيد الرقم الجديد — قراءةٌ وكتابة ذرّيتان لأن الطباعة تعمل من خيوط خلفية */
+    @Synchronized
     fun nextPrintNo(): Int {
-        val next = _settings.value.printCounter + 1
-        updateSettings(_settings.value.copy(printCounter = next))
-        return next
+        val next = _settings.value.copy(printCounter = _settings.value.printCounter + 1)
+        _settings.value = next
+        save("settings.json", next)
+        return next.printCounter
     }
 
     fun defaultTemplate(): CardTemplate = CardTemplate(

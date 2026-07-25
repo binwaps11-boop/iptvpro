@@ -368,7 +368,7 @@ data class PrintBatch(
     val printCount: Int = 1,
 ) {
     val total: Double
-        get() = (unitPrice.toDoubleOrNull() ?: 0.0) * users.size
+        get() = (unitPrice.toDoubleOrNull() ?: 0.0) * users.count { !it.isFree }
 }
 
 /**

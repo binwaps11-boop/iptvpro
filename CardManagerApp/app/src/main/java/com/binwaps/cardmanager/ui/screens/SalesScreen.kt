@@ -46,6 +46,9 @@ import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.model.SaleEntry
 import com.binwaps.cardmanager.model.SaleKind
+import com.binwaps.cardmanager.util.Ledger
+import com.binwaps.cardmanager.util.toCountOrNull
+import com.binwaps.cardmanager.util.toMoneyOrNull
 import com.binwaps.cardmanager.ui.components.AppField
 import com.binwaps.cardmanager.ui.components.EmptyState
 import com.binwaps.cardmanager.ui.components.GhostButton
@@ -85,9 +88,11 @@ fun SalesScreen() {
     val fmt = remember { SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US) }
     val cur = settings.currency
 
-    val from = remember(period) {
+    // يُحسب في كل إعادة تركيب حتى لا تبقى "اليوم" على يوم أمس بعد منتصف الليل
+    val from = run {
         val c = Calendar.getInstance()
-        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0)
+        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
+        c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
         when (period) {
             Period.DAY -> c.timeInMillis
             Period.WEEK -> c.timeInMillis - 6L * 86_400_000L
@@ -99,16 +104,18 @@ fun SalesScreen() {
     val inPeriod = sales.filter { it.at >= from }
     val revenue = inPeriod.filter { it.kind == SaleKind.SALE }.sumOf { it.total }
     val collected = inPeriod.filter { it.kind == SaleKind.SALE }.sumOf { it.paid } +
-        inPeriod.filter { it.kind == SaleKind.DEBT_PAID }.sumOf { it.total }
+        inPeriod.filter { it.kind == SaleKind.DEBT_PAID }.sumOf { it.total } +
+        inPeriod.filter { it.kind == SaleKind.DEPOSIT }.sumOf { it.total }
     val expenses = inPeriod.filter { it.kind == SaleKind.EXPENSE }.sumOf { it.total }
     val cardsSold = inPeriod.filter { it.kind == SaleKind.SALE }.sumOf { it.quantity }
     // تكلفة ما بيع، من أسعار التكلفة المسجّلة على الباقات
     val costByProfile = profiles.associate { it.name to (it.cost.toDoubleOrNull() ?: 0.0) }
     val profitCost = inPeriod.filter { it.kind == SaleKind.SALE }
         .sumOf { (costByProfile[it.profile] ?: 0.0) * it.quantity }
-    // إجمالي الديون المتراكمة (كل الفترات)
-    val totalDebt = sales.filter { it.kind == SaleKind.SALE }.sumOf { it.debt } -
-        sales.filter { it.kind == SaleKind.DEBT_PAID }.sumOf { it.total }
+    // إجمالي الديون المتراكمة (كل الفترات) — لكل زبون على حدة، والسداد الزائد
+    // لزبونٍ لا يلغي دين زبونٍ آخر
+    val debtByCustomer = Ledger.perCustomerDebt(sales)
+    val totalDebt = debtByCustomer.values.sum()
 
     // الأكثر مبيعاً
     val byProfile = inPeriod.filter { it.kind == SaleKind.SALE && it.profile.isNotBlank() }
@@ -116,14 +123,10 @@ fun SalesScreen() {
         .map { (n, l) -> n to l.sumOf { it.quantity } }
         .sortedByDescending { it.second }
         .take(6)
-    val maxSold = byProfile.maxOfOrNull { it.second } ?: 1
+    val maxSold = (byProfile.maxOfOrNull { it.second } ?: 1).coerceAtLeast(1)
 
-    // الديون حسب الزبون
-    val debtors = sales.filter { it.kind == SaleKind.SALE && it.debt > 0 && it.customer.isNotBlank() }
-        .groupBy { it.customer }
-        .map { (n, l) -> n to l.sumOf { it.debt } }
-        .filter { it.second > 0 }
-        .sortedByDescending { it.second }
+    // الديون حسب الزبون — بعد خصم سداد كل زبون
+    val debtors = debtByCustomer.toList().sortedByDescending { it.second }
 
     Column(
         Modifier
@@ -159,7 +162,7 @@ fun SalesScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("إجمالي المبيعات", fontSize = 11.sp, color = TextLow)
                     Text(
-                        "${revenue.toLong()} $cur",
+                        "${Ledger.money(revenue)} $cur",
                         fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Lime,
                     )
                 }
@@ -186,6 +189,7 @@ fun SalesScreen() {
             }
             GhostButton("مصروف", color = Danger) { addKind = SaleKind.EXPENSE; showAdd = true }
             GhostButton("سداد دين", color = Warn) { addKind = SaleKind.DEBT_PAID; showAdd = true }
+            GhostButton("إيداع", color = Neon) { addKind = SaleKind.DEPOSIT; showAdd = true }
         }
 
         // الأكثر مبيعاً
@@ -224,7 +228,7 @@ fun SalesScreen() {
                 GlassCard(Modifier.fillMaxWidth().padding(bottom = 6.dp), glow = Warn.copy(alpha = 0.3f), padding = 11) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(name, fontSize = 13.5.sp, color = TextHi, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text("${amount.toLong()} $cur", fontSize = 14.sp, color = Warn, fontWeight = FontWeight.Bold)
+                        Text("${Ledger.money(amount)} $cur", fontSize = 14.sp, color = Warn, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -243,15 +247,15 @@ fun SalesScreen() {
                 GhostButton("مشاركة التقرير", icon = Icons.Filled.Share) {
                     val report = buildString {
                         appendLine("تقرير المبيعات — ${period.labelAr}")
-                        appendLine("إجمالي المبيعات: ${revenue.toLong()} $cur")
-                        appendLine("المحصّل: ${collected.toLong()} $cur")
-                        appendLine("المصروفات: ${expenses.toLong()} $cur")
-                        appendLine("الصافي: ${(collected - expenses).toLong()} $cur")
+                        appendLine("إجمالي المبيعات: ${Ledger.money(revenue)} $cur")
+                        appendLine("المحصّل: ${Ledger.money(collected)} $cur")
+                        appendLine("المصروفات: ${Ledger.money(expenses)} $cur")
+                        appendLine("الصافي: ${Ledger.money(collected - expenses)} $cur")
                         appendLine("عدد الكروت المباعة: $cardsSold")
-                        if (totalDebt > 0) appendLine("الديون المستحقة: ${totalDebt.toLong()} $cur")
+                        if (totalDebt > 0.005) appendLine("الديون المستحقة: ${Ledger.money(totalDebt)} $cur")
                         appendLine()
                         inPeriod.take(100).forEach {
-                            appendLine("${fmt.format(Date(it.at))} — ${it.kind.labelAr} — ${it.customer} — ${it.total.toLong()} $cur")
+                            appendLine("${fmt.format(Date(it.at))} — ${it.kind.labelAr} — ${it.customer} — ${Ledger.money(it.total)} $cur")
                         }
                     }
                     context.startActivity(
@@ -294,13 +298,13 @@ fun SalesScreen() {
                                     add(fmt.format(Date(s.at)))
                                     if (s.quantity > 0) add("${s.quantity} كرت")
                                     if (s.profile.isNotBlank()) add(s.profile)
-                                    if (s.debt > 0) add("دين ${s.debt.toLong()}")
+                                    if (s.debt > 0) add("دين ${Ledger.money(s.debt)}")
                                     if (s.note.isNotBlank()) add(s.note)
                                 }.joinToString("  •  "),
                                 fontSize = 10.5.sp, color = TextLow,
                             )
                         }
-                        Text("${s.total.toLong()} $cur", fontSize = 14.sp, color = color, fontWeight = FontWeight.Bold)
+                        Text("${Ledger.money(s.total)} $cur", fontSize = 14.sp, color = color, fontWeight = FontWeight.Bold)
                         IconButton(onClick = { Store.deleteSale(s.id) }) {
                             Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(16.dp))
                         }
@@ -326,7 +330,7 @@ fun SalesScreen() {
 private fun MoneyRow(label: String, value: Double, currency: String, color: Color) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Text(label, fontSize = 12.5.sp, color = TextMid, modifier = Modifier.weight(1f))
-        Text("${value.toLong()} $currency", fontSize = 12.5.sp, color = color, fontWeight = FontWeight.SemiBold)
+        Text("${Ledger.money(value)} $currency", fontSize = 12.5.sp, color = color, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -345,8 +349,8 @@ private fun AddSaleDialog(
     var paid by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
 
-    val qty = quantity.toIntOrNull() ?: 1
-    val price = unitPrice.toDoubleOrNull() ?: 0.0
+    val qty = (quantity.toCountOrNull() ?: 1).coerceAtLeast(1)
+    val price = unitPrice.toMoneyOrNull() ?: 0.0
     val total = if (kind == SaleKind.SALE) qty * price else price
 
     AlertDialog(
@@ -387,7 +391,7 @@ private fun AddSaleDialog(
                         AppField(quantity, { quantity = it.filter { c -> c.isDigit() } }, "عدد الكروت", Modifier.weight(1f), numeric = true)
                         AppField(unitPrice, { unitPrice = it }, "سعر الكرت", Modifier.weight(1f), numeric = true)
                     }
-                    Text("الإجمالي: ${total.toLong()} $currency", fontSize = 13.sp, color = Neon, fontWeight = FontWeight.Bold)
+                    Text("الإجمالي: ${Ledger.money(total)} $currency", fontSize = 13.sp, color = Neon, fontWeight = FontWeight.Bold)
                     AppField(paid, { paid = it }, "المدفوع (اتركه فارغاً = دفع كامل)", Modifier.fillMaxWidth(), numeric = true)
                 } else {
                     AppField(unitPrice, { unitPrice = it }, "المبلغ", Modifier.fillMaxWidth(), numeric = true)
@@ -406,7 +410,7 @@ private fun AddSaleDialog(
                         profile = profile,
                         quantity = if (kind == SaleKind.SALE) qty else 0,
                         unitPrice = price,
-                        paid = if (kind == SaleKind.SALE) (paid.toDoubleOrNull() ?: total) else price,
+                        paid = if (kind == SaleKind.SALE) (paid.toMoneyOrNull() ?: total) else price,
                         note = note,
                     )
                 )
