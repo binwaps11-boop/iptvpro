@@ -54,6 +54,18 @@ object CsvExporter {
         return write(context, "sales_${System.currentTimeMillis()}.csv", sb.toString())
     }
 
+    /** تقرير عام: صفوف جاهزة من شاشة التقارير */
+    fun exportReport(
+        context: Context,
+        header: List<String>,
+        rows: List<List<String>>,
+    ): File {
+        val sb = StringBuilder()
+        sb.appendLine(header.joinToString(",") { escape(it) })
+        rows.forEach { r -> sb.appendLine(r.joinToString(",") { escape(it) }) }
+        return write(context, "report_${System.currentTimeMillis()}.csv", sb.toString())
+    }
+
     fun share(context: Context, file: File, title: String) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         context.startActivity(

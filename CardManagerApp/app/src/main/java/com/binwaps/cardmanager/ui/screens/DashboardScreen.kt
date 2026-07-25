@@ -23,12 +23,14 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Icon
@@ -234,16 +236,24 @@ fun DashboardScreen(navController: NavController) {
             HomeTile("الباقات", Icons.Filled.Speed, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("profiles")
             }
-            HomeTile("التقارير", Icons.Filled.Analytics, Warn, batches.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("history")
+            HomeTile("التقارير", Icons.Filled.Analytics, Warn, null, Modifier.weight(1f)) {
+                navController.navigate("reports")
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("المبيعات", Icons.Filled.Payments, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("sales")
             }
+            HomeTile("سجل الدفعات", Icons.Filled.History, Violet, batches.size.takeIf { it > 0 }, Modifier.weight(1f)) {
+                navController.navigate("history")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("license")
+            }
+            HomeTile("الإعدادات", Icons.Filled.Settings, TextMid, null, Modifier.weight(1f)) {
+                navController.navigate("settings")
             }
         }
         Spacer(Modifier.height(20.dp))
