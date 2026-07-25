@@ -137,6 +137,12 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             Text("الطباعة", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
             Spacer(Modifier.height(10.dp))
             AppField(settings.currency, { Store.updateSettings(settings.copy(currency = it)) }, "العملة", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            AppField(
+                settings.lowStockThreshold.toString(),
+                { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { Store.updateSettings(settings.copy(lowStockThreshold = it.coerceIn(0, 100000))) } },
+                "تنبيه نفاد الكروت عند بقاء (عدد)", Modifier.fillMaxWidth(), numeric = true,
+            )
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AppField(

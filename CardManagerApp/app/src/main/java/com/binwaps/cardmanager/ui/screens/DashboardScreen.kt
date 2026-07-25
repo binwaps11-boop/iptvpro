@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -58,6 +59,7 @@ import com.binwaps.cardmanager.ui.components.InfoRow
 import com.binwaps.cardmanager.ui.components.NeonProgress
 import com.binwaps.cardmanager.ui.components.StatusPill
 import com.binwaps.cardmanager.ui.components.formatBytes
+import com.binwaps.cardmanager.ui.theme.Danger
 import com.binwaps.cardmanager.ui.theme.GlassCard
 import com.binwaps.cardmanager.ui.theme.Lime
 import com.binwaps.cardmanager.ui.theme.Neon
@@ -212,6 +214,39 @@ fun DashboardScreen(navController: NavController) {
             )
             MiniStat("مستهلكة", n(status.usedUsers), Warn, Modifier.weight(1f))
             MiniStat("مبيعات اليوم", todayRevenue.toLong().toString(), Violet, Modifier.weight(1f))
+        }
+
+        // تنبيهات — باقات على وشك النفاد، وديون معلّقة
+        run {
+            val threshold = settings.lowStockThreshold
+            val lowProfiles = users
+                .filter { it.status == com.binwaps.cardmanager.model.CardStatus.UNUSED && it.profile.isNotBlank() }
+                .groupingBy { it.profile }.eachCount()
+                .filter { it.value <= threshold }
+                .toList().sortedBy { it.second }
+            val openDebt = sales.filter { it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.debt } -
+                sales.filter { it.kind == com.binwaps.cardmanager.model.SaleKind.DEBT_PAID }.sumOf { it.total }
+            if (lowProfiles.isNotEmpty() || openDebt > 0) {
+                GlassCard(Modifier.fillMaxWidth(), glow = Warn.copy(alpha = 0.3f), padding = 12) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Warning, null, tint = Warn, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("تنبيهات", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                    }
+                    lowProfiles.take(4).forEach { (profile, count) ->
+                        Text(
+                            "الباقة $profile — بقي منها $count كرت غير مستهلك",
+                            fontSize = 11.5.sp, color = Warn, modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
+                    if (openDebt > 0) {
+                        Text(
+                            "ديون غير مسدّدة: ${openDebt.toLong()} ${settings.currency}",
+                            fontSize = 11.5.sp, color = Danger, modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
+                }
+            }
         }
 
         // شبكة الأقسام

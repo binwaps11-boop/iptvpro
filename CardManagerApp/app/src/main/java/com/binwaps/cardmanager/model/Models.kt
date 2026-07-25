@@ -476,4 +476,6 @@ data class AppSettings(
     val activeRouterId: Long = 0,
     /** عدّاد الطباعة — يزيد مع كل عملية تصدير ويُطبع على الكرت إن أُضيف حقله */
     val printCounter: Int = 0,
+    /** تنبيه نفاد الكروت: يُنبَّه عندما يبقى من الباقة هذا العدد أو أقل */
+    val lowStockThreshold: Int = 10,
 )
