@@ -6,21 +6,28 @@ import kotlinx.coroutines.flow.StateFlow
 
 /** حالة الترخيص الحالية للتطبيق */
 sealed interface LicenseState {
+    /** تجربة مفعّلة بمفتاح تجريبي صادر من لوحة التراخيص */
     data class Trial(val daysLeft: Int) : LicenseState
     data class Licensed(val plan: LicenseCore.Plan, val daysLeft: Int, val lifetime: Boolean) : LicenseState
     data object Expired : LicenseState
+    /** لا مفتاح — يطلب تجربة أو اشتراكاً من مزوّد الخدمة */
     data object TrialEnded : LicenseState
 }
 
 /**
- * يدير الفترة التجريبية (أسبوع) وحفظ الترخيص والتحقق منه عند كل تشغيل.
+ * يدير الترخيص والتحقق منه عند كل تشغيل.
+ *
+ * التجربة المجانية لم تعد ذاتية داخل التطبيق: كانت تتجدد بحذف التطبيق
+ * وإعادة تثبيته. صارت مفتاحاً تجريبياً يصدر من لوحة التراخيص مقفولاً على
+ * بصمة الجهاز — والبصمة لا تتغير بإعادة التثبيت، ولوحة التراخيص تسجّل كل
+ * جهاز أخذ تجربة فلا يحصل عليها مرتين.
  */
 object LicenseManager {
     private const val PREFS = "license_store"
-    private const val KEY_TRIAL_START = "trial_start"
     private const val KEY_LAST_SEEN = "last_seen"
     private const val KEY_LICENSE = "license_key"
     private const val KEY_NAME = "customer_name"
+    private const val KEY_PHONE = "customer_phone"
 
     const val TRIAL_DAYS = 7
     private const val DAY_MS = 86_400_000L
@@ -48,6 +55,12 @@ object LicenseManager {
         prefs().edit().putString(KEY_NAME, value).apply()
     }
 
+    fun customerPhone(): String = prefs().getString(KEY_PHONE, "").orEmpty()
+
+    fun setCustomerPhone(value: String) {
+        prefs().edit().putString(KEY_PHONE, value).apply()
+    }
+
     /**
      * وقت موثوق نسبياً: يمنع إرجاع ساعة الجهاز للخلف لتمديد التجربة.
      * نحفظ آخر وقت شوهد ونستخدم الأكبر بين الوقت الحالي وآخر وقت.
@@ -58,16 +71,6 @@ object LicenseManager {
         val trusted = maxOf(now, lastSeen)
         prefs().edit().putLong(KEY_LAST_SEEN, trusted).apply()
         return trusted
-    }
-
-    private fun trialStart(): Long {
-        val saved = prefs().getLong(KEY_TRIAL_START, 0)
-        if (saved > 0) return saved
-        val installTime = runCatching {
-            appContext.packageManager.getPackageInfo(appContext.packageName, 0).firstInstallTime
-        }.getOrDefault(System.currentTimeMillis())
-        prefs().edit().putLong(KEY_TRIAL_START, installTime).apply()
-        return installTime
     }
 
     /** إعادة حساب الحالة */
@@ -83,10 +86,10 @@ object LicenseManager {
                     return
                 }
                 val daysLeft = ((info.expiryMillis - now) / DAY_MS).toInt()
-                _state.value = if (daysLeft >= 0) {
-                    LicenseState.Licensed(info.plan, daysLeft, false)
-                } else {
-                    LicenseState.Expired
+                _state.value = when {
+                    daysLeft < 0 -> LicenseState.Expired
+                    info.plan == LicenseCore.Plan.TRIAL -> LicenseState.Trial(daysLeft)
+                    else -> LicenseState.Licensed(info.plan, daysLeft, false)
                 }
                 return
             }
@@ -94,9 +97,8 @@ object LicenseManager {
             prefs().edit().remove(KEY_LICENSE).apply()
         }
 
-        val elapsedDays = ((now - trialStart()) / DAY_MS).toInt()
-        val left = TRIAL_DAYS - elapsedDays
-        _state.value = if (left > 0) LicenseState.Trial(left) else LicenseState.TrialEnded
+        // لا مفتاح إطلاقاً — التجربة تُطلب من مزوّد الخدمة، لا تبدأ من نفسها
+        _state.value = LicenseState.TrialEnded
     }
 
     /** محاولة تفعيل ترخيص. يعيد رسالة الخطأ أو null عند النجاح */

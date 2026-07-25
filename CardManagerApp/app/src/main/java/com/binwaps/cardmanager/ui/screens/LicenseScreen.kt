@@ -78,6 +78,7 @@ fun LicenseScreen(
     val deviceCode = remember { LicenseManager.deviceCode() }
     var key by remember { mutableStateOf(LicenseManager.savedLicense()) }
     var name by remember { mutableStateOf(LicenseManager.customerName()) }
+    var phone by remember { mutableStateOf(LicenseManager.customerPhone()) }
     var error by remember { mutableStateOf<String?>(null) }
     var success by remember { mutableStateOf<String?>(null) }
 
@@ -144,8 +145,12 @@ fun LicenseScreen(
                 )
             }
             LicenseState.TrialEnded -> {
-                Text("انتهت الفترة التجريبية", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
-                Text("اطلب التفعيل من مزوّد الخدمة لمتابعة الاستخدام", fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center)
+                Text("فعّل التطبيق", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text(
+                    "اطلب تجربة مجانية 7 أيام أو اشتراكاً من مزوّد الخدمة — " +
+                        "التجربة مربوطة بجهازك ولا تتكرر بإعادة تثبيت التطبيق",
+                    fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
+                )
             }
             LicenseState.Expired -> {
                 Text("انتهى الاشتراك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Danger)
@@ -163,6 +168,8 @@ fun LicenseScreen(
             )
             Spacer(Modifier.height(9.dp))
             AppField(name, { name = it; LicenseManager.setCustomerName(it) }, "اسمك (يظهر لمزوّد الخدمة)", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            AppField(phone, { phone = it; LicenseManager.setCustomerPhone(it) }, "رقم جوالك", Modifier.fillMaxWidth(), numeric = true)
             Spacer(Modifier.height(11.dp))
 
             Text("رمز جهازك", fontSize = 11.5.sp, color = TextLow)
@@ -173,22 +180,34 @@ fun LicenseScreen(
             )
             Spacer(Modifier.height(11.dp))
 
-            NeonButton(
-                if (isRenewal) "إرسال طلب التجديد" else "إرسال طلب التفعيل",
-                Modifier.fillMaxWidth(), Icons.Filled.Send,
-            ) {
+            fun sendRequest(wantTrial: Boolean) {
+                val label = if (wantTrial) "تجربة مجانية 7 أيام" else if (isRenewal) "تجديد الاشتراك" else "اشتراك"
+                val body = LicenseLink.requestMessage(deviceCode, name, isRenewal) +
+                    "\nالطلب: $label" +
+                    (if (phone.isNotBlank()) "\nالجوال: $phone" else "")
                 context.startActivity(
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(
-                                Intent.EXTRA_TEXT,
-                                LicenseLink.requestMessage(deviceCode, name, isRenewal),
-                            )
+                            putExtra(Intent.EXTRA_TEXT, body)
                         },
                         "إرسال الطلب لمزوّد الخدمة",
                     )
                 )
+            }
+            if (state is LicenseState.TrialEnded) {
+                NeonButton("طلب تجربة مجانية 7 أيام", Modifier.fillMaxWidth(), Icons.Filled.Send) {
+                    sendRequest(wantTrial = true)
+                }
+                Spacer(Modifier.height(8.dp))
+                GhostButton("طلب اشتراك مدفوع", Modifier.fillMaxWidth(), Icons.Filled.Send) {
+                    sendRequest(wantTrial = false)
+                }
+            } else {
+                NeonButton(
+                    if (isRenewal) "إرسال طلب التجديد" else "إرسال طلب التفعيل",
+                    Modifier.fillMaxWidth(), Icons.Filled.Send,
+                ) { sendRequest(wantTrial = false) }
             }
             Spacer(Modifier.height(7.dp))
             Text(
