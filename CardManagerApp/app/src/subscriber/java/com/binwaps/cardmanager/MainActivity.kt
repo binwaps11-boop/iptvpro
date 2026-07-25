@@ -68,10 +68,15 @@ private val tabs = listOf(
 private val fullScreenRoutes = listOf("connect", "editor", "layout", "license")
 
 class MainActivity : ComponentActivity() {
+
+    /** مفتاح وصل عبر رابط تفعيل من لوحة التراخيص */
+    private val incomingKey = androidx.compose.runtime.mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Store.init(this)
         LicenseManager.init(this)
+        handleLink(intent)
 
         setContent {
             CardManagerTheme {
@@ -82,6 +87,13 @@ class MainActivity : ComponentActivity() {
 
                 val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
+
+                // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً
+                androidx.compose.runtime.LaunchedEffect(incomingKey.value) {
+                    if (incomingKey.value != null && currentRoute != "license") {
+                        navController.navigate("license")
+                    }
+                }
 
                 Scaffold(
                     containerColor = Ink,
@@ -121,6 +133,8 @@ class MainActivity : ComponentActivity() {
                         composable("license") {
                             LicenseScreen(
                                 blocking = blocked,
+                                incomingKey = incomingKey.value,
+                                onIncomingConsumed = { incomingKey.value = null },
                                 onActivated = {
                                     navController.navigate("connect") { popUpTo("license") { inclusive = true } }
                                 },
@@ -167,5 +181,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLink(intent)
+    }
+
+    /** يلتقط رابط التفعيل cardmanager://activate?k=... */
+    private fun handleLink(intent: android.content.Intent?) {
+        val key = com.binwaps.cardmanager.license.LicenseLink.parseActivation(intent?.data)
+        if (key != null) incomingKey.value = key
     }
 }

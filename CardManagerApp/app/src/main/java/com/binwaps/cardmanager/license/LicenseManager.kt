@@ -20,6 +20,7 @@ object LicenseManager {
     private const val KEY_TRIAL_START = "trial_start"
     private const val KEY_LAST_SEEN = "last_seen"
     private const val KEY_LICENSE = "license_key"
+    private const val KEY_NAME = "customer_name"
 
     const val TRIAL_DAYS = 7
     private const val DAY_MS = 86_400_000L
@@ -39,6 +40,13 @@ object LicenseManager {
     fun deviceCode(): String = LicenseCore.deviceCode(appContext)
 
     fun savedLicense(): String = prefs().getString(KEY_LICENSE, "").orEmpty()
+
+    /** اسم المشترك — يُرسل مع طلب التفعيل ليظهر في لوحة التراخيص */
+    fun customerName(): String = prefs().getString(KEY_NAME, "").orEmpty()
+
+    fun setCustomerName(value: String) {
+        prefs().edit().putString(KEY_NAME, value).apply()
+    }
 
     /**
      * وقت موثوق نسبياً: يمنع إرجاع ساعة الجهاز للخلف لتمديد التجربة.
