@@ -123,6 +123,7 @@ fun ExpressScreen() {
                     onCreated = { created.add(it) },
                 )
             }
+            Store.markUploaded(created.map { it.username })
             upload = result.fold(
                 onSuccess = { ok ->
                     if (ok >= cards.size) UploadState.Done(ok, cards.size)

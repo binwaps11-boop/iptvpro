@@ -219,21 +219,32 @@ fun UsersScreen() {
                     }
                 }
             }
+            // يرفع الكروت المحلية غير المرفوعة فقط — رفع الكل كان يكرر الموجود على الراوتر
+            val pendingUpload = users.filter { it.routerId.isBlank() && !it.uploaded }
             GhostButton(
-                "رفع إلى ${settings.uploadTarget.labelAr}",
+                "رفع الجديد (${pendingUpload.size}) إلى ${settings.uploadTarget.labelAr}",
                 icon = Icons.Filled.CloudUpload, color = Violet,
-                enabled = !busy && users.isNotEmpty(),
+                enabled = !busy && pendingUpload.isNotEmpty(),
             ) {
-                progress = 0 to users.size
+                progress = 0 to pendingUpload.size
                 val target = settings.uploadTarget
-                run("جاري الرفع إلى ${target.labelAr}…") {
-                    if (target == UploadTarget.USER_MANAGER) {
-                        MikrotikClient.createUserManagerUsers(Store.activeRouter(), users, onProgress = { d, t -> progress = d to t })
-                            .map { "تم رفع $it مستخدم إلى اليوزر منجر" }
+                run("جاري رفع ${pendingUpload.size} كرت إلى ${target.labelAr}…") {
+                    val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+                    val res = if (target == UploadTarget.USER_MANAGER) {
+                        MikrotikClient.createUserManagerUsers(
+                            Store.activeRouter(), pendingUpload,
+                            onProgress = { d, t -> progress = d to t },
+                            onCreated = { created.add(it.username) },
+                        )
                     } else {
-                        MikrotikClient.createHotspotUsers(Store.activeRouter(), users, onProgress = { d, t -> progress = d to t })
-                            .map { "تم رفع $it كرت إلى الهوتسبوت" }
+                        MikrotikClient.createHotspotUsers(
+                            Store.activeRouter(), pendingUpload,
+                            onProgress = { d, t -> progress = d to t },
+                            onCreated = { created.add(it.username) },
+                        )
                     }
+                    Store.markUploaded(created)
+                    res.map { "تم رفع $it كرت إلى ${target.labelAr}" }
                 }
             }
             GhostButton("حذف المنتهية", icon = Icons.Filled.Delete, color = Warn, enabled = !busy) {
@@ -670,7 +681,31 @@ fun UsersScreen() {
         GenerateDialog(onDismiss = { showGenerate = false }) { generated ->
             Store.addUsers(generated)
             showGenerate = false
-            message = "تم توليد ${generated.size} كرت" to false
+            // الرفع التلقائي الفوري — التوليد وحده كان يترك الكروت محلية فلا تعمل على الشبكة
+            val router = Store.activeRouter()
+            if (router == null) {
+                message = "تم توليد ${generated.size} كرت — لا يوجد راوتر محفوظ، سترفع بزر «رفع الجديد» بعد الاتصال" to false
+            } else {
+                progress = 0 to generated.size
+                val target = settings.uploadTarget
+                run("تم توليد ${generated.size} كرت — جاري رفعها تلقائياً إلى ${target.labelAr}…") {
+                    val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+                    val res = if (target == UploadTarget.USER_MANAGER)
+                        MikrotikClient.createUserManagerUsers(
+                            router, generated,
+                            onProgress = { d, t -> progress = d to t },
+                            onCreated = { created.add(it.username) },
+                        )
+                    else
+                        MikrotikClient.createHotspotUsers(
+                            router, generated,
+                            onProgress = { d, t -> progress = d to t },
+                            onCreated = { created.add(it.username) },
+                        )
+                    Store.markUploaded(created)
+                    res.map { ok -> "تم توليد ${generated.size} كرت ورفع $ok إلى ${target.labelAr} تلقائياً" }
+                }
+            }
         }
     }
 }

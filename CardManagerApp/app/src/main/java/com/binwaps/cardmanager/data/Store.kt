@@ -133,6 +133,15 @@ object Store {
     fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
     fun clearUsers() = setUsers(emptyList())
 
+    /** وسم الكروت المحلية التي نجح رفعها للراوتر — حتى لا تُرفع مرتين */
+    fun markUploaded(usernames: Collection<String>) {
+        if (usernames.isEmpty()) return
+        val set = usernames.toHashSet()
+        setUsers(_users.value.map {
+            if (it.username in set && it.routerId.isBlank() && !it.uploaded) it.copy(uploaded = true) else it
+        })
+    }
+
     // ===== القوالب =====
     fun upsertTemplate(t: CardTemplate) {
         val cur = _templates.value

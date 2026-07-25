@@ -138,6 +138,35 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
         }
     }
 
+    var uploadNote by remember { mutableStateOf<String?>(null) }
+
+    /**
+     * رفع تلقائي بالخلفية لأي كروت لم تصل الراوتر بعد — يعمل موازياً للطباعة
+     * فلا ينتظر أحدهما الآخر. كرت مطبوع دون رفع لا يعمل على الشبكة.
+     */
+    fun autoUploadPending() {
+        val router = Store.activeRouter() ?: return
+        val pendingCards = Store.users.value.filter { it.routerId.isBlank() && !it.uploaded }
+        if (pendingCards.isEmpty()) return
+        uploadNote = "جاري رفع ${pendingCards.size} كرت إلى الراوتر بالخلفية…"
+        scope.launch {
+            val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+            val res = if (Store.settings.value.uploadTarget == com.binwaps.cardmanager.model.UploadTarget.USER_MANAGER)
+                com.binwaps.cardmanager.mikrotik.MikrotikClient.createUserManagerUsers(
+                    router, pendingCards, onCreated = { created.add(it.username) },
+                )
+            else
+                com.binwaps.cardmanager.mikrotik.MikrotikClient.createHotspotUsers(
+                    router, pendingCards, onCreated = { created.add(it.username) },
+                )
+            Store.markUploaded(created)
+            uploadNote = res.fold(
+                onSuccess = { "✓ رُفع $it كرت إلى الراوتر تلقائياً" },
+                onFailure = { "تعذر الرفع التلقائي: ${it.message ?: ""} — ارفعها من قسم الكروت بزر «رفع الجديد»" },
+            )
+        }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -146,6 +175,10 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             .padding(16.dp),
     ) {
         SectionHeader("الطباعة والتصدير", "${users.size} كرت جاهز للطباعة", Icons.Filled.Print)
+        uploadNote?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, fontSize = 11.5.sp, color = if (it.startsWith("✓")) com.binwaps.cardmanager.ui.theme.Lime else TextMid)
+        }
         Spacer(Modifier.height(14.dp))
 
         if (users.isEmpty()) {
@@ -344,6 +377,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Toast.makeText(context, issues.first(), Toast.LENGTH_LONG).show()
                     return@NeonButton
                 }
+                autoUploadPending()
                 PrintEngine.startPdf(context, t0, users, settings)
             }
             Spacer(Modifier.height(5.dp))
@@ -356,6 +390,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             GhostButton("صفحة HTML للطباعة من المتصفح", Modifier.fillMaxWidth(), enabled = !busy && !htmlBusy && template != null) {
                 val t0 = template ?: return@GhostButton
                 htmlBusy = true
+                autoUploadPending()
                 scope.launch {
                     try {
                         val file = withContext(Dispatchers.IO) {
@@ -384,6 +419,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     return@NeonButton
                 }
                 thermalResumeMode = false
+                autoUploadPending()
                 openPrinterPicker()
             }
             Spacer(Modifier.height(5.dp))
@@ -406,6 +442,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     }
                     val ip = settings.tcpPrinterIp
                     val port = settings.tcpPrinterPort
+                    autoUploadPending()
                     PrintEngine.startThermal(context, t0, users, settings) {
                         ThermalPrinter.tcpPrinter(ip, port)
                     }

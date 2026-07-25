@@ -62,6 +62,8 @@ data class UserEntry(
     val batchTag: String = "",
     /** كرت مجاني — يُطبع بسعر "مجاناً" ولا يُحسب في الإيراد */
     val isFree: Boolean = false,
+    /** رُفع فعلياً إلى الراوتر — يمنع الرفع المكرر للكروت المحلية */
+    val uploaded: Boolean = false,
 )
 
 /** جلسة — نشطة الآن أو من السجل */
