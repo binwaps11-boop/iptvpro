@@ -6,13 +6,10 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.CreditCard
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SpaceDashboard
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -42,6 +39,7 @@ import com.binwaps.cardmanager.ui.screens.LayoutScreen
 import com.binwaps.cardmanager.ui.screens.LicenseScreen
 import com.binwaps.cardmanager.ui.screens.PrintScreen
 import com.binwaps.cardmanager.ui.screens.ProfilesScreen
+import com.binwaps.cardmanager.ui.screens.SessionsScreen
 import com.binwaps.cardmanager.ui.screens.SettingsScreen
 import com.binwaps.cardmanager.ui.screens.TemplateEditorScreen
 import com.binwaps.cardmanager.ui.screens.TemplatesScreen
@@ -54,13 +52,11 @@ import com.binwaps.cardmanager.ui.theme.TextLow
 
 private data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
 
+// أربعة تبويبات فقط — بقية الأقسام تفتح من شبكة الرئيسية
 private val tabs = listOf(
-    Tab("dashboard", "اللوحة", Icons.Filled.SpaceDashboard),
+    Tab("dashboard", "الرئيسية", Icons.Filled.SpaceDashboard),
     Tab("users", "الكروت", Icons.Filled.CreditCard),
-    Tab("templates", "القوالب", Icons.Filled.Layers),
-    Tab("print", "الطباعة", Icons.Filled.Print),
-    Tab("profiles", "الباقات", Icons.Filled.Speed),
-    Tab("history", "التقارير", Icons.Filled.Analytics),
+    Tab("active", "المتصلون", Icons.Filled.People),
     Tab("settings", "الإعدادات", Icons.Filled.Settings),
 )
 
@@ -171,6 +167,7 @@ class MainActivity : ComponentActivity() {
                         composable("print") { PrintScreen(navController) }
                         composable("profiles") { ProfilesScreen() }
                         composable("history") { HistoryScreen() }
+                        composable("active") { SessionsScreen() }
                         composable("settings") {
                             SettingsScreen(
                                 onDisconnect = { navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } } },
