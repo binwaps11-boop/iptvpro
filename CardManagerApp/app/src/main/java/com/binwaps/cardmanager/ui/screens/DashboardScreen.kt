@@ -249,8 +249,9 @@ fun DashboardScreen(navController: NavController) {
             }
         }
 
-        // شبكة الأقسام
-        Text("الأقسام", fontSize = 13.sp, color = TextLow)
+        // الأقسام مجمّعة على طريقة سمارت كريتور V5:
+        // عمليات الكروت، الإدارة والتقارير، النظام
+        Text("عمليات الكروت", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("كروت جديدة", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
                 navController.navigate("users")
@@ -267,6 +268,9 @@ fun DashboardScreen(navController: NavController) {
                 navController.navigate("templates")
             }
         }
+
+        Spacer(Modifier.height(6.dp))
+        Text("الإدارة والتقارير", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("الباقات", Icons.Filled.Speed, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("profiles")
@@ -283,17 +287,20 @@ fun DashboardScreen(navController: NavController) {
                 navController.navigate("history")
             }
         }
+
+        Spacer(Modifier.height(6.dp))
+        Text("النظام", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
-                navController.navigate("license")
-            }
             HomeTile("إدارة الراوتر", Icons.Filled.Router, Neon, null, Modifier.weight(1f)) {
                 navController.navigate("router")
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("الإعدادات", Icons.Filled.Settings, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("settings")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
+                navController.navigate("license")
             }
             Box(Modifier.weight(1f))
         }

@@ -77,6 +77,115 @@ object PdfExporter {
         return users.subList(from - 1, to)
     }
 
+    /** خطة الطباعة: الصفحات جاهزة للتقسيم والاستئناف */
+    data class PagePlan(
+        val info: LayoutInfo,
+        val pages: List<List<UserEntry?>>,
+        val copies: Int,
+        val totalCards: Int,
+    )
+
+    fun plan(template: CardTemplate, allUsers: List<UserEntry>, settings: AppSettings): PagePlan {
+        val selected = selectRange(allUsers, settings)
+        val info = computeLayout(template, settings, selected.size)
+        val skip = (settings.startCell - 1).coerceIn(0, (info.perPage - 1).coerceAtLeast(0))
+        val users: List<UserEntry?> = List(skip) { null } + selected
+        return PagePlan(info, users.chunked(info.perPage), settings.copies.coerceIn(1, 20), selected.size)
+    }
+
+    /**
+     * يكتب نطاقاً من صفحات الخطة إلى ملف واحد — أساس الاستئناف:
+     * الفشل في وسط دفعة ضخمة لا يعيدك من البداية، بل من هذه القطعة فقط.
+     */
+    fun exportPages(
+        context: Context,
+        template: CardTemplate,
+        settings: AppSettings,
+        plan: PagePlan,
+        fromPage: Int,
+        toPageExclusive: Int,
+        printNo: Int,
+        dateText: String,
+        timeText: String,
+        onPageDone: (Int) -> Unit = { },
+    ): File {
+        val layout = settings.layout
+        val info = plan.info
+        val pageW = (layout.pageWidthMm * MM_TO_PT).toInt()
+        val pageH = (layout.pageHeightMm * MM_TO_PT).toInt()
+        val margin = layout.marginMm * MM_TO_PT
+        val hGap = layout.hSpacingMm * MM_TO_PT
+        val vGap = layout.vSpacingMm * MM_TO_PT
+        val cardW = info.cardWidthMm * MM_TO_PT
+        val cardH = info.cardHeightMm * MM_TO_PT
+        val gridW = info.columns * cardW + (info.columns - 1) * hGap
+        val gridH = info.rows * cardH + (info.rows - 1) * vGap
+        val offsetX = ((pageW - gridW) / 2f).coerceAtLeast(margin) + settings.offsetXMm * MM_TO_PT
+        val offsetY = ((pageH - gridH) / 2f).coerceAtLeast(margin) + settings.offsetYMm * MM_TO_PT
+        val renderW = (info.cardWidthMm / 25.4f * RENDER_DPI).toInt().coerceIn(64, 2000)
+        val (cellW, cellH) = CardRenderer.renderSize(template, renderW)
+
+        val doc = PdfDocument()
+        val markPaint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 0.5f
+            color = 0xFF9E9E9E.toInt()
+        }
+        val dashPaint = Paint(markPaint).apply {
+            pathEffect = android.graphics.DashPathEffect(floatArrayOf(4f, 4f), 0f)
+        }
+
+        var pdfPageNo = 0
+        var cardsBefore = plan.pages.take(fromPage).sumOf { pg -> pg.count { it != null } }
+
+        for (pageIndex in fromPage until toPageExclusive.coerceAtMost(plan.pages.size)) {
+            val pageUsers = plan.pages[pageIndex]
+            repeat(plan.copies) {
+                pdfPageNo++
+                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pdfPageNo).create())
+                val canvas = page.canvas
+                var localCard = 0
+                pageUsers.forEachIndexed { i, user ->
+                    val col = i % info.columns
+                    val row = i / info.columns
+                    val left = offsetX + col * (cardW + hGap)
+                    val top = offsetY + row * (cardH + vGap)
+                    val rect = RectF(left, top, left + cardW, top + cardH)
+                    if (user == null) {
+                        drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
+                        return@forEachIndexed
+                    }
+                    localCard++
+                    val ri = RenderInfo(
+                        pageNumber = pageIndex + 1,
+                        cardNumber = cardsBefore + localCard,
+                        printNo = printNo,
+                        dateText = dateText,
+                        timeText = timeText,
+                    )
+                    canvas.save()
+                    canvas.translate(rect.left, rect.top)
+                    canvas.scale(rect.width() / cellW.toFloat(), rect.height() / cellH.toFloat())
+                    runCatching { CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri) }
+                    canvas.restore()
+                    drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
+                }
+                doc.finishPage(page)
+            }
+            cardsBefore += pageUsers.count { it != null }
+            onPageDone(pageIndex)
+        }
+
+        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val file = File(
+            dir,
+            "cards_${System.currentTimeMillis()}_p${fromPage + 1}-${toPageExclusive.coerceAtMost(plan.pages.size)}.pdf",
+        )
+        FileOutputStream(file).use { doc.writeTo(it) }
+        doc.close()
+        return file
+    }
+
     fun export(
         context: Context,
         template: CardTemplate,
@@ -266,6 +375,25 @@ object PdfExporter {
         }
         cardBmp.recycle()
         return bmp
+    }
+
+    /** مشاركة عدة ملفات دفعة واحدة — تظهر عند تقسيم الدفعات الضخمة */
+    fun shareAll(context: Context, files: List<File>) {
+        if (files.isEmpty()) return
+        if (files.size == 1) return share(context, files.first())
+        val uris = ArrayList(files.map {
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", it)
+        })
+        context.startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "application/pdf"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                },
+                "مشاركة ملفات الكروت",
+            )
+        )
     }
 
     fun share(context: Context, file: File) {

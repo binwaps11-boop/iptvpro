@@ -56,6 +56,7 @@ import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.model.PaperType
 import com.binwaps.cardmanager.model.PrintBatch
 import com.binwaps.cardmanager.print.PdfExporter
+import com.binwaps.cardmanager.print.PrintEngine
 import com.binwaps.cardmanager.print.ThermalPrinter
 import com.binwaps.cardmanager.ui.components.CardPreview
 import com.binwaps.cardmanager.ui.components.sampleUser
@@ -89,11 +90,17 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
     var selectedTemplateId by remember { mutableStateOf(templates.firstOrNull()?.id) }
     val template = templates.firstOrNull { it.id == selectedTemplateId } ?: templates.firstOrNull()
 
-    var busy by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // محرك الطباعة الصامد — يعمل في الخلفية ويستأنف من نقطة التوقف عند أي فشل
+    val engineState by PrintEngine.state.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(Unit) { PrintEngine.restoreIfAny() }
+    val busy = engineState is PrintEngine.State.Running
+    val canStart = engineState is PrintEngine.State.Idle || engineState is PrintEngine.State.Done
     var showPrinterPicker by remember { mutableStateOf(false) }
     var printers by remember { mutableStateOf<List<BluetoothConnection>>(emptyList()) }
     var heightMm by remember { mutableFloatStateOf(settings.thermalCardHeightMm) }
+    /** الاختيار القادم للطابعة هو استئناف لمهمة محفوظة، لا بداية جديدة */
+    var thermalResumeMode by remember { mutableStateOf(false) }
+    var htmlBusy by remember { mutableStateOf(false) }
 
     fun saveBatch() {
         val t = template ?: return
@@ -239,55 +246,116 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             }
         }
 
-        progress?.let { (done, total) ->
-            Spacer(Modifier.height(10.dp))
-            NeonProgress(done.toFloat() / total.coerceAtLeast(1))
-            Spacer(Modifier.height(4.dp))
-            Text("جاري الطباعة: $done من $total", fontSize = 12.sp, color = Neon)
+        // بطاقة حالة المحرك — التقدم، الفشل القابل للاستئناف، الاكتمال
+        when (val es = engineState) {
+            is PrintEngine.State.Running -> {
+                Spacer(Modifier.height(10.dp))
+                GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.4f), padding = 12) {
+                    Text(es.label, fontSize = 12.5.sp, color = TextHi, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(7.dp))
+                    NeonProgress(es.done.toFloat() / es.total.coerceAtLeast(1))
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "يمكنك مغادرة الشاشة — الطباعة تستمر في الخلفية",
+                            fontSize = 10.5.sp, color = TextLow, modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            "إيقاف",
+                            fontSize = 12.sp, color = com.binwaps.cardmanager.ui.theme.Danger,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable { PrintEngine.cancel() }.padding(6.dp),
+                        )
+                    }
+                }
+            }
+            is PrintEngine.State.Failed -> {
+                Spacer(Modifier.height(10.dp))
+                GlassCard(Modifier.fillMaxWidth(), glow = com.binwaps.cardmanager.ui.theme.Danger.copy(alpha = 0.5f), padding = 12) {
+                    Text("توقفت الطباعة — ولم يضِع شيء", fontSize = 13.sp, color = TextHi, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(5.dp))
+                    Text(es.error, fontSize = 11.5.sp, color = TextMid)
+                    Spacer(Modifier.height(9.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NeonButton("استئناف من نقطة التوقف") {
+                            if (es.kind == PrintEngine.Kind.THERMAL) {
+                                // الاتصال القديم قد يكون مقطوعاً — نعيد اختيار الطابعة
+                                thermalResumeMode = true
+                                openPrinterPicker()
+                            } else {
+                                PrintEngine.resume(context)
+                            }
+                        }
+                        GhostButton("إلغاء المهمة", color = com.binwaps.cardmanager.ui.theme.Danger) {
+                            PrintEngine.cancel()
+                        }
+                    }
+                }
+            }
+            is PrintEngine.State.Restorable -> {
+                Spacer(Modifier.height(10.dp))
+                GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.5f), padding = 12) {
+                    Text("لديك طباعة غير مكتملة من جلسة سابقة", fontSize = 13.sp, color = TextHi, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(5.dp))
+                    Text("اكتمل ${es.done} من ${es.total} — يمكن المتابعة من مكان التوقف", fontSize = 11.5.sp, color = TextMid)
+                    Spacer(Modifier.height(9.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        NeonButton("استئناف") {
+                            if (es.kind == PrintEngine.Kind.THERMAL) {
+                                thermalResumeMode = true
+                                openPrinterPicker()
+                            } else {
+                                PrintEngine.resumeRestored(context)
+                            }
+                        }
+                        GhostButton("تجاهل") { PrintEngine.dismissRestored() }
+                    }
+                }
+            }
+            is PrintEngine.State.Done -> {
+                Spacer(Modifier.height(10.dp))
+                GlassCard(Modifier.fillMaxWidth(), glow = com.binwaps.cardmanager.ui.theme.Lime.copy(alpha = 0.5f), padding = 12) {
+                    Text("✓ اكتملت الطباعة — ${es.total} كرت", fontSize = 13.sp, color = com.binwaps.cardmanager.ui.theme.Lime, fontWeight = FontWeight.Bold)
+                    if (es.files.isNotEmpty()) {
+                        Spacer(Modifier.height(9.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NeonButton("مشاركة الملف") { PdfExporter.shareAll(context, es.files) }
+                            GhostButton("طباعة عبر النظام") {
+                                es.files.forEach { PdfExporter.printViaSystem(context, it) }
+                            }
+                            GhostButton("تم") { PrintEngine.acknowledge() }
+                        }
+                    } else {
+                        Spacer(Modifier.height(7.dp))
+                        GhostButton("تم") { PrintEngine.acknowledge() }
+                    }
+                }
+            }
+            else -> {}
         }
 
         Spacer(Modifier.height(16.dp))
 
         if (settings.paperType == PaperType.A4) {
-            NeonButton("تصدير PDF ومشاركته", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = !busy && template != null) {
+            NeonButton("إنشاء PDF (لا يفشل — يستأنف)", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = canStart && template != null) {
                 val t0 = template ?: return@NeonButton
-                busy = true; progress = 0 to users.size
-                scope.launch {
-                    try {
-                        val file = withContext(Dispatchers.IO) {
-                            PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
-                        }
-                        saveBatch()
-                        PdfExporter.share(context, file)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
-                    } finally {
-                        busy = false; progress = null
-                    }
+                val issues = PrintEngine.preflight(t0, users, settings, thermal = false)
+                if (issues.isNotEmpty()) {
+                    Toast.makeText(context, issues.first(), Toast.LENGTH_LONG).show()
+                    return@NeonButton
                 }
+                PrintEngine.startPdf(context, t0, users, settings)
             }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "الملف يُبنى قطعاً محفوظة: أي خطأ في المنتصف لا يعيدك من البداية، " +
+                    "بل تستأنف من مكان التوقف. عند الاكتمال: مشاركة أو طباعة عبر النظام.",
+                fontSize = 10.sp, color = TextLow,
+            )
             Spacer(Modifier.height(9.dp))
-            GhostButton("طباعة عبر النظام (WiFi/USB)", Modifier.fillMaxWidth(), Icons.Filled.Print, enabled = !busy && template != null) {
+            GhostButton("صفحة HTML للطباعة من المتصفح", Modifier.fillMaxWidth(), enabled = !busy && !htmlBusy && template != null) {
                 val t0 = template ?: return@GhostButton
-                busy = true; progress = 0 to users.size
-                scope.launch {
-                    try {
-                        val file = withContext(Dispatchers.IO) {
-                            PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
-                        }
-                        saveBatch()
-                        PdfExporter.printViaSystem(context, file)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
-                    } finally {
-                        busy = false; progress = null
-                    }
-                }
-            }
-            Spacer(Modifier.height(9.dp))
-            GhostButton("صفحة HTML للطباعة من المتصفح", Modifier.fillMaxWidth(), enabled = !busy && template != null) {
-                val t0 = template ?: return@GhostButton
-                busy = true
+                htmlBusy = true
                 scope.launch {
                     try {
                         val file = withContext(Dispatchers.IO) {
@@ -298,7 +366,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     } catch (e: Exception) {
                         Toast.makeText(context, "فشل التصدير: ${e.message}", Toast.LENGTH_LONG).show()
                     } finally {
-                        busy = false
+                        htmlBusy = false
                     }
                 }
             }
@@ -309,9 +377,21 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 fontSize = 10.sp, color = TextLow,
             )
         } else {
-            NeonButton("طباعة عبر البلوتوث", Modifier.fillMaxWidth(), Icons.Filled.Bluetooth, enabled = !busy) {
+            NeonButton("طباعة عبر البلوتوث", Modifier.fillMaxWidth(), Icons.Filled.Bluetooth, enabled = canStart) {
+                val issues = PrintEngine.preflight(template, users, settings, thermal = true)
+                if (issues.isNotEmpty()) {
+                    Toast.makeText(context, issues.first(), Toast.LENGTH_LONG).show()
+                    return@NeonButton
+                }
+                thermalResumeMode = false
                 openPrinterPicker()
             }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "كل كرت له ثلاث محاولات بإعادة اتصال تلقائية — انقطاع البلوتوث لا يفشل الدفعة، " +
+                    "وعند التوقف تستأنف من الكرت نفسه.",
+                fontSize = 10.sp, color = TextLow,
+            )
             if (settings.tcpPrinterIp.isNotBlank()) {
                 Spacer(Modifier.height(9.dp))
                 GhostButton(
@@ -319,14 +399,15 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Modifier.fillMaxWidth(), Icons.Filled.Lan, color = Violet, enabled = !busy,
                 ) {
                     val t0 = template ?: return@GhostButton
-                    busy = true; progress = 0 to users.size
-                    scope.launch {
-                        val conn = ThermalPrinter.tcpPrinter(settings.tcpPrinterIp, settings.tcpPrinterPort)
-                        val toPrint = PdfExporter.selectRange(users, Store.settings.value)
-                        ThermalPrinter.printCards(conn, t0, toPrint, Store.settings.value) { d, t -> progress = d to t }
-                            .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
-                            .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
-                        busy = false; progress = null
+                    val issues = PrintEngine.preflight(t0, users, settings, thermal = true)
+                    if (issues.isNotEmpty()) {
+                        Toast.makeText(context, issues.first(), Toast.LENGTH_LONG).show()
+                        return@GhostButton
+                    }
+                    val ip = settings.tcpPrinterIp
+                    val port = settings.tcpPrinterPort
+                    PrintEngine.startThermal(context, t0, users, settings) {
+                        ThermalPrinter.tcpPrinter(ip, port)
                     }
                 }
             }
@@ -359,13 +440,11 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                     if (busy) return@clickable   // منع طباعة مزدوجة بلمستين سريعتين
                                     val t0 = template ?: return@clickable
                                     showPrinterPicker = false
-                                    busy = true; progress = 0 to users.size
-                                    scope.launch {
-                                        val toPrint = PdfExporter.selectRange(users, Store.settings.value)
-                                        ThermalPrinter.printCards(p, t0, toPrint, Store.settings.value) { d, t -> progress = d to t }
-                                            .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
-                                            .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
-                                        busy = false; progress = null
+                                    if (thermalResumeMode) {
+                                        thermalResumeMode = false
+                                        PrintEngine.resumeThermalWith(context) { p }
+                                    } else {
+                                        PrintEngine.startThermal(context, t0, users, Store.settings.value) { p }
                                     }
                                 }
                                 .padding(13.dp),

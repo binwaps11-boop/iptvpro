@@ -252,6 +252,33 @@ object Store {
 
     fun newId(): Long = idCounter.updateAndGet { maxOf(it + 1, System.currentTimeMillis()) }
 
+    // ===== مهمة الطباعة غير المكتملة — تنجو حتى من إغلاق التطبيق =====
+
+    @kotlinx.serialization.Serializable
+    data class PrintJobMeta(
+        val kind: String,
+        val templateId: Long,
+        val next: Int,
+        val total: Int,
+        val createdAt: Long,
+    )
+
+    fun savePrintJob(meta: PrintJobMeta, cards: List<UserEntry>) {
+        save("print_job.json", meta)
+        save("print_job_cards.json", cards)
+    }
+
+    fun loadPrintJobMeta(): PrintJobMeta? = load("print_job.json")
+
+    fun loadPrintJobCards(): List<UserEntry> = load("print_job_cards.json") ?: emptyList()
+
+    fun clearPrintJob() {
+        io.execute {
+            runCatching { File(appContext.filesDir, "print_job.json").delete() }
+            runCatching { File(appContext.filesDir, "print_job_cards.json").delete() }
+        }
+    }
+
     /** يزيد عدّاد الطباعة ويعيد الرقم الجديد — قراءةٌ وكتابة ذرّيتان لأن الطباعة تعمل من خيوط خلفية */
     @Synchronized
     fun nextPrintNo(): Int {

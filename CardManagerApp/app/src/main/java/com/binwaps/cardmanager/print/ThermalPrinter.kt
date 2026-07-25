@@ -25,12 +25,12 @@ object ThermalPrinter {
     fun pairedPrinters(): List<BluetoothConnection> =
         runCatching { BluetoothPrintersConnections().list?.toList() ?: emptyList() }.getOrDefault(emptyList())
 
-    private fun printableWidthMm(paper: PaperType): Float = when (paper) {
+    internal fun printableWidthMm(paper: PaperType): Float = when (paper) {
         PaperType.THERMAL_80 -> 72f
         else -> 48f
     }
 
-    private fun charsPerLine(paper: PaperType): Int = when (paper) {
+    internal fun charsPerLine(paper: PaperType): Int = when (paper) {
         PaperType.THERMAL_80 -> 48
         else -> 32
     }
@@ -91,7 +91,7 @@ object ThermalPrinter {
      * تحويل صورة الكرت إلى أوامر طباعة. الطابعات الحرارية تحدّ ارتفاع الصورة
      * الواحدة بـ 256 نقطة، لذلك نقسم الكرت إلى شرائح.
      */
-    private fun buildImageText(printer: EscPosPrinter, bitmap: Bitmap): String {
+    internal fun buildImageText(printer: EscPosPrinter, bitmap: Bitmap): String {
         val sb = StringBuilder()
         var y = 0
         while (y < bitmap.height) {
