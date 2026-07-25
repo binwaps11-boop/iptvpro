@@ -43,6 +43,9 @@ object Store {
     private val _profiles = MutableStateFlow<List<HotspotProfile>>(emptyList())
     val profiles: StateFlow<List<HotspotProfile>> get() = _profiles
 
+    private val _sales = MutableStateFlow<List<com.binwaps.cardmanager.model.SaleEntry>>(emptyList())
+    val sales: StateFlow<List<com.binwaps.cardmanager.model.SaleEntry>> get() = _sales
+
     /** حالة الجلسة الحالية (لا تُحفظ على القرص) */
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> get() = _connected
@@ -61,6 +64,23 @@ object Store {
         _routers.value = load("routers.json") ?: emptyList()
         _batches.value = load("batches.json") ?: emptyList()
         _profiles.value = load("profiles.json") ?: emptyList()
+        _sales.value = load("sales.json") ?: emptyList()
+    }
+
+    // ===== المبيعات والصندوق =====
+    fun addSale(s: com.binwaps.cardmanager.model.SaleEntry) {
+        _sales.value = listOf(s) + _sales.value
+        save("sales.json", _sales.value)
+    }
+
+    fun deleteSale(id: Long) {
+        _sales.value = _sales.value.filterNot { it.id == id }
+        save("sales.json", _sales.value)
+    }
+
+    fun updateSale(s: com.binwaps.cardmanager.model.SaleEntry) {
+        _sales.value = _sales.value.map { if (it.id == s.id) s else it }
+        save("sales.json", _sales.value)
     }
 
     private inline fun <reified T> load(name: String): T? = runCatching {

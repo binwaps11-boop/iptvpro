@@ -278,6 +278,34 @@ data class PrintBatch(
         get() = (unitPrice.toDoubleOrNull() ?: 0.0) * users.size
 }
 
+/** نوع الحركة المالية */
+@Serializable
+enum class SaleKind(val labelAr: String) {
+    SALE("بيع كروت"),
+    EXPENSE("مصروف"),
+    DEPOSIT("إيداع"),
+    DEBT_PAID("سداد دين"),
+}
+
+/** حركة مالية واحدة — بيع أو مصروف أو سداد */
+@Serializable
+data class SaleEntry(
+    val id: Long,
+    val at: Long,
+    val kind: SaleKind = SaleKind.SALE,
+    /** اسم الزبون أو الوكيل */
+    val customer: String = "",
+    val profile: String = "",
+    val quantity: Int = 0,
+    val unitPrice: Double = 0.0,
+    /** المبلغ المدفوع فعلاً — الفرق عن الإجمالي يصبح ديناً */
+    val paid: Double = 0.0,
+    val note: String = "",
+) {
+    val total: Double get() = if (kind == SaleKind.SALE) unitPrice * quantity else unitPrice
+    val debt: Double get() = if (kind == SaleKind.SALE) (total - paid).coerceAtLeast(0.0) else 0.0
+}
+
 /** إعدادات عامة */
 @Serializable
 data class AppSettings(

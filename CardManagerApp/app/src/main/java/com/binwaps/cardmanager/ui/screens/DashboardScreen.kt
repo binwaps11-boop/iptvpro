@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
@@ -121,7 +122,8 @@ fun DashboardScreen(navController: NavController) {
             set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0)
         }.timeInMillis
     }
-    val todayRevenue = batches.filter { it.createdAt >= todayStart }.sumOf { it.total }
+    val sales by Store.sales.collectAsState()
+    val todayRevenue = sales.filter { it.at >= todayStart && it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.total }
 
     fun n(v: Int) = if (v < 0) "…" else v.toString()
 
@@ -237,8 +239,8 @@ fun DashboardScreen(navController: NavController) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("المتصلون", Icons.Filled.People, Lime, actives.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("active")
+            HomeTile("المبيعات", Icons.Filled.Payments, Lime, null, Modifier.weight(1f)) {
+                navController.navigate("sales")
             }
             HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("license")
