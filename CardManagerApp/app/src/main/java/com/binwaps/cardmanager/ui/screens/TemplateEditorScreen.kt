@@ -66,6 +66,7 @@ import com.binwaps.cardmanager.ui.theme.Stroke
 import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
 import com.binwaps.cardmanager.ui.theme.TextMid
+import com.binwaps.cardmanager.ui.theme.Violet
 import kotlin.math.abs
 
 private val textColors = listOf(
@@ -207,6 +208,52 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 } else if (selected.type != FieldType.QR_CODE) {
                     AppField(selected.prefix, { updateField(selected.copy(prefix = it)) }, "نص قبل القيمة (مثل: المستخدم:)", Modifier.fillMaxWidth())
                 }
+                Spacer(Modifier.height(8.dp))
+                // مكان العنصر في الكرت — إدخال رقمي دقيق بجانب السحب
+                Text("مكان العنصر في الكرت (%)", fontSize = 12.sp, color = TextLow)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppField(
+                        (selected.xFrac * 100).toInt().toString(),
+                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(xFrac = (it / 100f).coerceIn(0f, 1f))) } },
+                        "أفقي X", Modifier.weight(1f), numeric = true,
+                    )
+                    AppField(
+                        (selected.yFrac * 100).toInt().toString(),
+                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(yFrac = (it / 100f).coerceIn(0f, 1f))) } },
+                        "رأسي Y", Modifier.weight(1f), numeric = true,
+                    )
+                    AppField(
+                        (selected.sizeFrac * 100).toInt().toString(),
+                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(sizeFrac = (it / 100f).coerceIn(0.02f, 0.95f))) } },
+                        "الحجم", Modifier.weight(1f), numeric = true,
+                    )
+                }
+                Spacer(Modifier.height(7.dp))
+                // محاذاة سريعة
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "يمين" to 0.85f, "وسط أفقي" to 0.5f, "يسار" to 0.15f,
+                    ).forEach { (label, x) ->
+                        Text(
+                            label, fontSize = 11.sp, color = Neon,
+                            modifier = Modifier
+                                .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+                                .clickable { updateField(selected.copy(xFrac = x)) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                    listOf("أعلى" to 0.15f, "وسط رأسي" to 0.5f, "أسفل" to 0.85f).forEach { (label, y) ->
+                        Text(
+                            label, fontSize = 11.sp, color = Violet,
+                            modifier = Modifier
+                                .background(Violet.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+                                .clickable { updateField(selected.copy(yFrac = y)) }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(6.dp))
                 Text("الحجم", fontSize = 12.sp, color = TextLow)
                 Slider(
