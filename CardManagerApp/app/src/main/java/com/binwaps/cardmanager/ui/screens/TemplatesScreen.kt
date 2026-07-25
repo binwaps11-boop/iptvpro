@@ -2,6 +2,7 @@ package com.binwaps.cardmanager.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -65,7 +67,32 @@ fun TemplatesScreen(navController: NavController) {
                 navController.navigate("editor/${t.id}")
             }
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(10.dp))
+
+        // قوالب جاهزة — لمسة واحدة تُنشئ قالباً مضبوطاً ثم افتحه للتعديل
+        Text("قوالب جاهزة", fontSize = 12.sp, color = TextLow)
+        Spacer(Modifier.height(6.dp))
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Store.presets().forEach { (label, build) ->
+                Text(
+                    label,
+                    fontSize = 11.sp,
+                    color = Neon,
+                    modifier = Modifier
+                        .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+                        .clickable {
+                            val t = build(Store.newId())
+                            Store.upsertTemplate(t)
+                            navController.navigate("editor/${t.id}")
+                        }
+                        .padding(horizontal = 11.dp, vertical = 6.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(templates.size) { i ->
@@ -79,8 +106,10 @@ fun TemplatesScreen(navController: NavController) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(t.name, fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                            val shape = if (t.layoutMode == com.binwaps.cardmanager.model.CardLayoutMode.TABLE)
+                                "جدول ${t.rows.size} صفوف" else "${t.fields.size} حقل"
                             Text(
-                                "${t.widthMm.toInt()}×${t.heightMm.toInt()} مم  •  ${t.fields.size} حقل" +
+                                "${"%.1f".format(t.widthMm)}×${"%.1f".format(t.heightMm)} مم  •  $shape" +
                                     if (t.backgroundPath.isNotBlank()) "  •  خلفية مخصصة" else "",
                                 fontSize = 11.sp, color = TextLow,
                             )

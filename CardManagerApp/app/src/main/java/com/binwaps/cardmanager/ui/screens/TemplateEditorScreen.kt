@@ -27,6 +27,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -50,7 +52,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
+import com.binwaps.cardmanager.model.CardCell
 import com.binwaps.cardmanager.model.CardField
+import com.binwaps.cardmanager.model.CardLayoutMode
+import com.binwaps.cardmanager.model.CardRow
+import com.binwaps.cardmanager.model.CardTemplate
+import com.binwaps.cardmanager.model.CellAlign
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.QrContent
 import com.binwaps.cardmanager.ui.components.AppField
@@ -122,13 +129,40 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
 
         AppField(template.name, { template = template.copy(name = it) }, "اسم القالب", Modifier.fillMaxWidth())
 
+        // طريقة بناء الكرت
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CardLayoutMode.entries.forEach { m ->
+                val on = template.layoutMode == m
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .background(if (on) Neon.copy(alpha = 0.12f) else Panel, RoundedCornerShape(14.dp))
+                        .border(1.dp, if (on) Neon.copy(alpha = 0.55f) else Stroke, RoundedCornerShape(14.dp))
+                        .clickable {
+                            template = if (m == CardLayoutMode.TABLE && template.rows.isEmpty()) {
+                                // أول مرة: ابدأ بجدول جاهز حتى لا تكون الشاشة فارغة
+                                val seed = Store.smartTableTemplate(Store.newId())
+                                template.copy(layoutMode = m, rows = seed.rows, tablePaddingMm = seed.tablePaddingMm)
+                            } else {
+                                template.copy(layoutMode = m)
+                            }
+                        }
+                        .padding(horizontal = 11.dp, vertical = 9.dp),
+                ) {
+                    Text(m.labelAr, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (on) Neon else TextMid)
+                    Text(m.hintAr, fontSize = 10.sp, color = TextLow)
+                }
+            }
+        }
+
         // المعاينة الحية مع السحب
         GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 10) {
             Box(
                 Modifier
                     .fillMaxWidth()
                     .onSizeChanged { previewSize = it }
-                    .pointerInput(template.id, previewSize) {
+                    .pointerInput(template.id, previewSize, template.layoutMode) {
+                        if (template.layoutMode == CardLayoutMode.TABLE) return@pointerInput
                         detectDragGestures(
                             onDragStart = { offset ->
                                 if (previewSize.width == 0) return@detectDragGestures
@@ -161,6 +195,11 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 CardPreview(template = template, modifier = Modifier.fillMaxWidth())
             }
         }
+        if (template.layoutMode == CardLayoutMode.TABLE) {
+            TableBuilder(template) { template = it }
+        }
+
+        if (template.layoutMode == CardLayoutMode.FREE) {
         Text("اضغط على الحقل ثم اسحبه لتحريكه على الكرت", fontSize = 11.5.sp, color = TextLow)
 
         // شريط الحقول
@@ -289,6 +328,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 }
             }
         }
+        } // نهاية النمط الحر
 
         // إعدادات الكرت
         GlassCard(Modifier.fillMaxWidth()) {
@@ -311,6 +351,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(
+                    "3 في الصف 69×18" to (69.38f to 17.64f),
                     "كرت بنكي 85×54" to (85.6f to 54f),
                     "تذكرة 63×33" to (63f to 33f),
                     "صغير 63×27" to (63f to 27f),
@@ -354,6 +395,31 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 textColors.forEach { c ->
                     ColorDot(c, template.borderColor == c) { template = template.copy(borderColor = c) }
+                }
+            }
+
+            if (template.layoutMode == CardLayoutMode.TABLE) {
+                Spacer(Modifier.height(11.dp))
+                Text("سُمك خطوط الجدول: ${"%.2f".format(template.gridWidthMm)} مم", fontSize = 12.sp, color = TextMid)
+                Slider(
+                    value = template.gridWidthMm,
+                    onValueChange = { template = template.copy(gridWidthMm = it) },
+                    valueRange = 0.05f..1f,
+                    colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
+                )
+                Text("الهامش الداخلي: ${"%.1f".format(template.tablePaddingMm)} مم", fontSize = 12.sp, color = TextMid)
+                Slider(
+                    value = template.tablePaddingMm,
+                    onValueChange = { template = template.copy(tablePaddingMm = it) },
+                    valueRange = 0f..5f,
+                    colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
+                )
+                Text("لون خطوط الجدول", fontSize = 12.sp, color = TextLow)
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    textColors.forEach { c ->
+                        ColorDot(c, template.gridColor == c) { template = template.copy(gridColor = c) }
+                    }
                 }
             }
 
@@ -449,6 +515,251 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             dismissButton = { TextButton(onClick = { showAddField = false }) { Text("إلغاء", color = TextLow) } },
         )
     }
+}
+
+/**
+ * بانِي الجدول — يبني الكرت صفوفاً وخلايا مثل طباعة سمارت كريتور،
+ * لكن هنا كل شيء قابل للتعديل: ارتفاع الصف، عدد الخلايا، عرض كل خلية، محتواها، خطها وإطارها.
+ */
+@Composable
+private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Unit) {
+    var selectedCellId by remember { mutableStateOf<Long?>(null) }
+    var addCellToRow by remember { mutableStateOf<Long?>(null) }
+
+    fun setRows(rows: List<CardRow>) = onChange(template.copy(rows = rows))
+
+    fun updateCell(rowId: Long, cell: CardCell) = setRows(
+        template.rows.map { r ->
+            if (r.id != rowId) r else r.copy(cells = r.cells.map { if (it.id == cell.id) cell else it })
+        }
+    )
+
+    GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.3f)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("صفوف الكرت", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
+            Text(
+                "مجموع الارتفاع ${"%.1f".format(template.rowsHeightMm)} من ${"%.1f".format(template.heightMm)} مم",
+                fontSize = 10.5.sp,
+                color = if (template.rowsHeightMm > template.heightMm) Danger else TextLow,
+            )
+        }
+        Spacer(Modifier.height(9.dp))
+
+        template.rows.forEachIndexed { index, row ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Panel, RoundedCornerShape(14.dp))
+                    .border(1.dp, Stroke, RoundedCornerShape(14.dp))
+                    .padding(9.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("صف ${index + 1}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Neon)
+                    Spacer(Modifier.width(9.dp))
+                    Box(Modifier.width(96.dp)) {
+                        AppField(
+                            "%.2f".format(row.heightMm),
+                            { v -> v.toFloatOrNull()?.let { setRows(template.rows.map { r -> if (r.id == row.id) r.copy(heightMm = it.coerceIn(1f, 100f)) else r }) } },
+                            "ارتفاع مم", numeric = true,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (index > 0) IconButton(onClick = {
+                        val l = template.rows.toMutableList(); l.add(index - 1, l.removeAt(index)); setRows(l)
+                    }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Filled.KeyboardArrowUp, "أعلى", tint = TextMid, modifier = Modifier.size(19.dp))
+                    }
+                    if (index < template.rows.lastIndex) IconButton(onClick = {
+                        val l = template.rows.toMutableList(); l.add(index + 1, l.removeAt(index)); setRows(l)
+                    }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Filled.KeyboardArrowDown, "أسفل", tint = TextMid, modifier = Modifier.size(19.dp))
+                    }
+                    IconButton(onClick = { setRows(template.rows.filterNot { it.id == row.id }) }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Filled.Delete, "حذف الصف", tint = Danger, modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                Spacer(Modifier.height(7.dp))
+                // خلايا الصف — من اليمين لليسار كما تُطبع
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    row.cells.forEach { c ->
+                        val on = c.id == selectedCellId
+                        Text(
+                            cellChipLabel(c),
+                            fontSize = 11.sp,
+                            color = if (on) Neon else TextMid,
+                            fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier
+                                .background(if (on) Neon.copy(alpha = 0.13f) else ScreenPanelChip, RoundedCornerShape(999.dp))
+                                .border(1.dp, if (on) Neon.copy(alpha = 0.5f) else Stroke, RoundedCornerShape(999.dp))
+                                .clickable { selectedCellId = if (on) null else c.id }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                    Row(
+                        Modifier
+                            .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+                            .clickable { addCellToRow = row.id }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Add, null, tint = Neon, modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("خلية", fontSize = 11.sp, color = Neon)
+                    }
+                }
+
+                // خصائص الخلية المحددة داخل هذا الصف
+                val cell = row.cells.firstOrNull { it.id == selectedCellId }
+                if (cell != null) {
+                    Spacer(Modifier.height(9.dp))
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Neon.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+                            .padding(9.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("الخلية: ${cell.type.labelAr}", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
+                            IconButton(onClick = {
+                                setRows(template.rows.map { r -> if (r.id == row.id) r.copy(cells = r.cells.filterNot { it.id == cell.id }) else r })
+                                selectedCellId = null
+                            }, modifier = Modifier.size(30.dp)) {
+                                Icon(Icons.Filled.Delete, "حذف الخلية", tint = Danger, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        if (cell.type == FieldType.CUSTOM_TEXT) {
+                            AppField(cell.customText, { updateCell(row.id, cell.copy(customText = it)) }, "النص", Modifier.fillMaxWidth())
+                        } else if (cell.type != FieldType.QR_CODE) {
+                            AppField(cell.prefix, { updateCell(row.id, cell.copy(prefix = it)) }, "نص قبل القيمة", Modifier.fillMaxWidth())
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AppField(
+                                "%.2f".format(cell.weight),
+                                { v -> v.toFloatOrNull()?.let { updateCell(row.id, cell.copy(weight = it.coerceIn(0.05f, 20f))) } },
+                                "عرض نسبي", Modifier.weight(1f), numeric = true,
+                            )
+                            AppField(
+                                "%.1f".format(cell.fontSizePt),
+                                { v -> v.toFloatOrNull()?.let { updateCell(row.id, cell.copy(fontSizePt = it.coerceIn(3f, 72f))) } },
+                                "حجم الخط pt", Modifier.weight(1f), numeric = true,
+                            )
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            CellAlign.entries.forEach { a ->
+                                Chip(a.labelAr, cell.align == a) { updateCell(row.id, cell.copy(align = a)) }
+                            }
+                            Chip(if (cell.bold) "عريض ✓" else "عريض", cell.bold) { updateCell(row.id, cell.copy(bold = !cell.bold)) }
+                            Chip(if (cell.border) "إطار ✓" else "إطار", cell.border) { updateCell(row.id, cell.copy(border = !cell.border)) }
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        Text("نوع المحتوى", fontSize = 11.5.sp, color = TextLow)
+                        Spacer(Modifier.height(5.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldType.entries.forEach { t ->
+                                Chip(t.labelAr, cell.type == t) { updateCell(row.id, cell.copy(type = t)) }
+                            }
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        Text("لون النص", fontSize = 11.5.sp, color = TextLow)
+                        Spacer(Modifier.height(5.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            textColors.forEach { c ->
+                                ColorDot(c, cell.color == c) { updateCell(row.id, cell.copy(color = c)) }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GhostButton("إضافة صف", icon = Icons.Filled.Add) {
+                val id = Store.newId()
+                setRows(
+                    template.rows + CardRow(
+                        id = id,
+                        heightMm = 4.94f,
+                        cells = listOf(CardCell(id = id + 1, type = FieldType.CUSTOM_TEXT, customText = "نص جديد")),
+                    )
+                )
+            }
+            GhostButton("توزيع الارتفاع بالتساوي") {
+                if (template.rows.isNotEmpty()) {
+                    val usable = (template.heightMm - 2 * template.tablePaddingMm).coerceAtLeast(1f)
+                    val each = usable / template.rows.size
+                    setRows(template.rows.map { it.copy(heightMm = each) })
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "الخلية الأولى في كل صف تُطبع على اليمين. العرض النسبي يعني: خليتان بـ1 و1 تتقاسمان الصف بالتساوي، وبـ2 و1 تأخذ الأولى الثلثين.",
+            fontSize = 10.sp, color = TextLow,
+        )
+    }
+
+    if (addCellToRow != null) {
+        val rowId = addCellToRow!!
+        AlertDialog(
+            onDismissRequest = { addCellToRow = null },
+            containerColor = Panel,
+            titleContentColor = TextHi,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("إضافة خلية", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    FieldType.entries.forEach { type ->
+                        Text(
+                            type.labelAr, fontSize = 14.sp, color = TextHi,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val c = CardCell(
+                                        id = Store.newId(),
+                                        type = type,
+                                        customText = if (type == FieldType.CUSTOM_TEXT) "نص جديد" else "",
+                                    )
+                                    setRows(template.rows.map { r -> if (r.id == rowId) r.copy(cells = r.cells + c) else r })
+                                    selectedCellId = c.id
+                                    addCellToRow = null
+                                }
+                                .padding(vertical = 11.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { addCellToRow = null }) { Text("إلغاء", color = TextLow) } },
+        )
+    }
+}
+
+private fun cellChipLabel(c: CardCell): String = when {
+    c.type == FieldType.CUSTOM_TEXT && c.customText.isNotBlank() -> c.customText.take(12)
+    c.type == FieldType.CUSTOM_TEXT -> "نص فارغ"
+    else -> c.type.labelAr
+}
+
+private val ScreenPanelChip = Color(0xFF141A26)
+
+@Composable
+private fun Chip(label: String, on: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        fontSize = 11.sp,
+        color = if (on) Neon else TextMid,
+        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier
+            .background(if (on) Neon.copy(alpha = 0.13f) else ScreenPanelChip, RoundedCornerShape(999.dp))
+            .border(1.dp, if (on) Neon.copy(alpha = 0.5f) else Stroke, RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
 }
 
 @Composable

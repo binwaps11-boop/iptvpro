@@ -29,7 +29,7 @@ import java.io.FileOutputStream
 object PdfExporter {
 
     private const val MM_TO_PT = 72f / 25.4f
-    private const val RENDER_DPI = 240
+    private const val RENDER_DPI = 300
 
     /** معلومات التخطيط لعرضها للمستخدم قبل الطباعة */
     data class LayoutInfo(
@@ -143,7 +143,7 @@ object PdfExporter {
                         return@forEachIndexed
                     }
 
-                    val bmp = CardRenderer.render(template, user, settings, renderW)
+                    val bmp = CardRenderer.renderSafe(template, user, settings, renderW)
                     canvas.drawBitmap(bmp, null, rect, imagePaint)
                     bmp.recycle()
 
@@ -214,7 +214,7 @@ object PdfExporter {
 
         val cardRenderW = cardW.toInt().coerceIn(40, 600)
         val sample = users.firstOrNull() ?: UserEntry("user1234", "8642", price = "500", validity = "30d")
-        val cardBmp = CardRenderer.render(template, sample, settings, cardRenderW)
+        val cardBmp = CardRenderer.renderSafe(template, sample, settings, cardRenderW)
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         val markPaint = Paint().apply {
             style = Paint.Style.STROKE; strokeWidth = 1f; color = 0xFFBDBDBD.toInt()

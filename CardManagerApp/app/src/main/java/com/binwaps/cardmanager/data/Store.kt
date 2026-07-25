@@ -4,7 +4,10 @@ import android.content.Context
 import android.net.Uri
 import com.binwaps.cardmanager.model.ActiveUser
 import com.binwaps.cardmanager.model.AppSettings
+import com.binwaps.cardmanager.model.CardCell
 import com.binwaps.cardmanager.model.CardField
+import com.binwaps.cardmanager.model.CardLayoutMode
+import com.binwaps.cardmanager.model.CardRow
 import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.HotspotProfile
@@ -238,5 +241,99 @@ object Store {
             CardField(id = 4, type = FieldType.PRICE, xFrac = 0.16f, yFrac = 0.84f, sizeFrac = 0.10f, color = 0xFFB71C1C),
             CardField(id = 5, type = FieldType.VALIDITY, xFrac = 0.80f, yFrac = 0.84f, sizeFrac = 0.08f),
         ),
+    )
+
+    // ==================== قوالب جاهزة ====================
+
+    /**
+     * قالب بنمط الجدول بنفس مقاسات سمارت كريتور بالضبط:
+     * الكرت 69.38×17.64مم (196.67×50 نقطة)، ثلاثة كروت في الصف على A4،
+     * صفّان بعرض كامل بارتفاع 14 نقطة، والصف الأخير مقسوم إلى خليتين 16 نقطة.
+     */
+    fun smartTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول كلاسيكي (3 في الصف)",
+        widthMm = 69.38f,
+        heightMm = 17.64f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 4.94f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "شبكة لاسلكية", bold = true),
+            )),
+            CardRow(id = id + 2, heightMm = 4.94f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.PRICE, prefix = "السعر : "),
+            )),
+            CardRow(id = id + 3, heightMm = 5.64f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.CUSTOM_TEXT, customText = "اسم المستخدم", fontSizePt = 9f),
+                CardCell(id = id + 32, type = FieldType.USERNAME, bold = true),
+            )),
+        ),
+    )
+
+    /** جدول أربعة صفوف: العنوان، المستخدم، كلمة المرور، السعر مع الصلاحية */
+    fun fullTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول كامل (مستخدم وكلمة مرور)",
+        widthMm = 69.38f,
+        heightMm = 25f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "كرت انترنت", bold = true, fontSizePt = 11f),
+            )),
+            CardRow(id = id + 2, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.CUSTOM_TEXT, customText = "المستخدم", fontSizePt = 9f, weight = 0.85f),
+                CardCell(id = id + 22, type = FieldType.USERNAME, bold = true, weight = 1.15f),
+            )),
+            CardRow(id = id + 3, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.CUSTOM_TEXT, customText = "كلمة المرور", fontSizePt = 9f, weight = 0.85f),
+                CardCell(id = id + 32, type = FieldType.PASSWORD, bold = true, weight = 1.15f),
+            )),
+            CardRow(id = id + 4, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 41, type = FieldType.PRICE, fontSizePt = 9f),
+                CardCell(id = id + 42, type = FieldType.VALIDITY, fontSizePt = 9f),
+            )),
+        ),
+    )
+
+    /** جدول مع رمز QR على اليسار وثلاثة صفوف معلومات على اليمين */
+    fun qrTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول مع رمز QR",
+        widthMm = 80f,
+        heightMm = 26f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "كرت انترنت", bold = true, fontSizePt = 11f, weight = 2.2f),
+                CardCell(id = id + 12, type = FieldType.QR_CODE, weight = 1f, border = false),
+            )),
+            CardRow(id = id + 2, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.USERNAME, prefix = "المستخدم : ", bold = true, weight = 2.2f),
+                CardCell(id = id + 22, type = FieldType.CUSTOM_TEXT, customText = "", border = false, weight = 1f),
+            )),
+            CardRow(id = id + 3, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.PRICE, fontSizePt = 9f, weight = 1.1f),
+                CardCell(id = id + 32, type = FieldType.VALIDITY, fontSizePt = 9f, weight = 1.1f),
+                CardCell(id = id + 33, type = FieldType.CUSTOM_TEXT, customText = "", border = false, weight = 1f),
+            )),
+        ),
+    )
+
+    /** كل القوالب الجاهزة — تُعرض في شاشة القوالب لإضافتها بلمسة */
+    fun presets(): List<Pair<String, (Long) -> CardTemplate>> = listOf(
+        "جدول كلاسيكي (3 في الصف)" to { id: Long -> smartTableTemplate(id) },
+        "جدول كامل (مستخدم وكلمة مرور)" to { id: Long -> fullTableTemplate(id) },
+        "جدول مع رمز QR" to { id: Long -> qrTableTemplate(id) },
+        "حر — سحب العناصر" to { id: Long -> defaultTemplate().copy(id = id, name = "قالب حر") },
     )
 }

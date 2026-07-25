@@ -127,6 +127,49 @@ data class CardField(
     val font: CardFont? = null,
 )
 
+/** طريقة بناء الكرت */
+@Serializable
+enum class CardLayoutMode(val labelAr: String, val hintAr: String) {
+    FREE("حر", "اسحب كل عنصر إلى المكان الذي تريده"),
+    TABLE("جدول", "صفوف وخلايا بإطارات — مثل طباعة سمارت كريتور"),
+}
+
+/** محاذاة النص داخل الخلية */
+@Serializable
+enum class CellAlign(val labelAr: String) {
+    START("يمين"),
+    CENTER("وسط"),
+    END("يسار"),
+}
+
+/**
+ * خلية واحدة في صف. العرض نسبي (weight) فتتقاسم الخلايا عرض الصف.
+ * حجم الخط بالنقاط (pt) مثل سمارت كريتور — 10pt هو المقاس الافتراضي هناك.
+ */
+@Serializable
+data class CardCell(
+    val id: Long,
+    val type: FieldType,
+    val customText: String = "",
+    val prefix: String = "",
+    val weight: Float = 1f,
+    val fontSizePt: Float = 10f,
+    val bold: Boolean = false,
+    val color: Long = 0xFF000000,
+    val fillColor: Long = 0x00FFFFFF,
+    val font: CardFont? = null,
+    val border: Boolean = true,
+    val align: CellAlign = CellAlign.CENTER,
+)
+
+/** صف واحد في الكرت — ارتفاعه بالمليمتر وخلاياه تتقاسم العرض */
+@Serializable
+data class CardRow(
+    val id: Long,
+    val heightMm: Float = 4.94f,
+    val cells: List<CardCell> = emptyList(),
+)
+
 /** قالب كرت */
 @Serializable
 data class CardTemplate(
@@ -144,7 +187,19 @@ data class CardTemplate(
     val qrContent: QrContent = QrContent.LOGIN_URL,
     /** خط القالب الافتراضي لكل الحقول */
     val font: CardFont = CardFont.CAIRO,
-)
+    /** حر (سحب) أو جدول (صفوف وخلايا) */
+    val layoutMode: CardLayoutMode = CardLayoutMode.FREE,
+    /** صفوف الجدول — تُستخدم فقط في نمط الجدول */
+    val rows: List<CardRow> = emptyList(),
+    /** هامش داخلي حول الجدول بالمليمتر (سمارت كريتور يستخدم ≈0.88مم) */
+    val tablePaddingMm: Float = 0.88f,
+    /** سماكة خطوط الجدول بالمليمتر */
+    val gridWidthMm: Float = 0.18f,
+    val gridColor: Long = 0xFF000000,
+) {
+    /** مجموع ارتفاعات الصفوف — يُستخدم لتوزيع الارتفاع المتاح */
+    val rowsHeightMm: Float get() = rows.sumOf { it.heightMm.toDouble() }.toFloat()
+}
 
 @Serializable
 enum class PaperType(val labelAr: String) {

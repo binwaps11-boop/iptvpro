@@ -8,10 +8,14 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import com.binwaps.cardmanager.model.AppSettings
+import com.binwaps.cardmanager.model.CardCell
 import com.binwaps.cardmanager.model.CardField
 import com.binwaps.cardmanager.model.CardFont
+import com.binwaps.cardmanager.model.CardLayoutMode
 import com.binwaps.cardmanager.model.CardMode
+import com.binwaps.cardmanager.model.CardRow
 import com.binwaps.cardmanager.model.CardTemplate
+import com.binwaps.cardmanager.model.CellAlign
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.QrContent
 import com.binwaps.cardmanager.model.UserEntry
@@ -118,6 +122,11 @@ object CardRenderer {
             canvas.drawRoundRect(RectF(inset, inset, widthPx - inset, heightPx - inset), radius, radius, borderPaint)
         }
 
+        if (template.layoutMode == CardLayoutMode.TABLE) {
+            drawTable(canvas, template, user, settings, widthPx, heightPx, pxPerMm)
+            return bmp
+        }
+
         // الحقول — مع احترام نوع الكرت المختار
         for (field in template.fields) {
             if (!field.visible) continue
@@ -140,6 +149,124 @@ object CardRenderer {
         FieldType.PASSWORD -> mode == CardMode.USER_PASS
         else -> true
     }
+
+    // ==================== نمط الجدول ====================
+    // يُحاكي طريقة طباعة سمارت كريتور: صفوف بإطارات، كل صف مقسوم إلى خلايا،
+    // والنص في وسط الخلية. الفرق أن كل شيء هنا قابل للتعديل من التطبيق.
+
+    /** هل يُطبع هذا الصف مع نوع الكرت المختار؟ صف كلمة المرور يُحذف كاملاً إن لم تكن مطلوبة */
+    private fun rowApplies(row: CardRow, mode: CardMode): Boolean {
+        val dataCells = row.cells.filter { it.type != FieldType.CUSTOM_TEXT }
+        if (dataCells.isEmpty()) return true
+        return dataCells.any { fieldAppliesTo(it.type, mode) }
+    }
+
+    fun cellValue(cell: CardCell, user: UserEntry, settings: AppSettings): String {
+        val value = when (cell.type) {
+            FieldType.USERNAME -> user.username
+            FieldType.PASSWORD -> user.password
+            FieldType.PRICE ->
+                if (user.isFree) settings.freeRules.freeLabel
+                else if (user.price.isBlank()) "" else "${user.price} ${settings.currency}"
+            FieldType.VALIDITY -> user.validity
+            FieldType.PROFILE -> user.profile
+            FieldType.SERIAL -> user.serial
+            FieldType.CUSTOM_TEXT -> cell.customText
+            FieldType.QR_CODE -> ""
+        }
+        if (value.isBlank() && cell.type != FieldType.CUSTOM_TEXT) return ""
+        return cell.prefix + value
+    }
+
+    private fun drawTable(
+        canvas: Canvas, template: CardTemplate, user: UserEntry, settings: AppSettings,
+        widthPx: Int, heightPx: Int, pxPerMm: Float,
+    ) {
+        val rows = template.rows.filter { rowApplies(it, settings.cardMode) && it.cells.isNotEmpty() }
+        if (rows.isEmpty()) return
+
+        val pad = (template.tablePaddingMm * pxPerMm).coerceAtLeast(0f)
+        val left = pad
+        val right = widthPx - pad
+        val availW = (right - left).coerceAtLeast(1f)
+        val availH = (heightPx - 2 * pad).coerceAtLeast(1f)
+
+        // ارتفاعات الصفوف بالمليمتر — تُصغَّر بالتناسب إن تجاوزت المساحة
+        val wanted = rows.sumOf { it.heightMm.toDouble() }.toFloat() * pxPerMm
+        val scale = if (wanted > availH && wanted > 0f) availH / wanted else 1f
+        val totalH = wanted * scale
+        var top = pad + (availH - totalH) / 2f   // الجدول في وسط الكرت رأسياً
+
+        val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (template.gridWidthMm * pxPerMm).coerceAtLeast(0.6f)
+            color = template.gridColor.toInt()
+        }
+
+        for (row in rows) {
+            val rowH = row.heightMm * pxPerMm * scale
+            val weightSum = row.cells.sumOf { it.weight.toDouble().coerceAtLeast(0.01) }.toFloat()
+            // الخلية الأولى في اليمين — الكرت عربي فالترتيب من اليمين لليسار
+            var x = right
+            for (cell in row.cells) {
+                val cellW = availW * (cell.weight.coerceAtLeast(0.01f) / weightSum)
+                val cellRect = RectF(x - cellW, top, x, top + rowH)
+
+                if (cell.fillColor.toInt() != 0 && (cell.fillColor ushr 24) != 0L) {
+                    canvas.drawRect(cellRect, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = cell.fillColor.toInt()
+                    })
+                }
+                if (cell.border) canvas.drawRect(cellRect, grid)
+
+                if (cell.type == FieldType.QR_CODE) {
+                    drawCellQr(canvas, cellRect, template, user, settings)
+                } else if (fieldAppliesTo(cell.type, settings.cardMode)) {
+                    drawCellText(canvas, cellRect, cell, user, settings, template.font, pxPerMm)
+                }
+                x -= cellW
+            }
+            top += rowH
+        }
+    }
+
+    private fun drawCellText(
+        canvas: Canvas, r: RectF, cell: CardCell, user: UserEntry, settings: AppSettings,
+        templateFont: CardFont, pxPerMm: Float,
+    ) {
+        val text = cellValue(cell, user, settings)
+        if (text.isBlank()) return
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = cell.color.toInt()
+            // النقطة الطباعية = 0.352778 مم
+            textSize = (cell.fontSizePt * PT_MM * pxPerMm).coerceAtLeast(3f)
+            typeface = typeface(cell.font ?: templateFont, cell.bold)
+        }
+        val inset = r.width() * 0.04f
+        val maxW = (r.width() - 2 * inset).coerceAtLeast(1f)
+        while (paint.measureText(text) > maxW && paint.textSize > 3f) paint.textSize *= 0.94f
+
+        val baseline = r.centerY() - (paint.ascent() + paint.descent()) / 2f
+        val x = when (cell.align) {
+            CellAlign.CENTER -> { paint.textAlign = Paint.Align.CENTER; r.centerX() }
+            CellAlign.START -> { paint.textAlign = Paint.Align.RIGHT; r.right - inset }
+            CellAlign.END -> { paint.textAlign = Paint.Align.LEFT; r.left + inset }
+        }
+        canvas.drawText(text, x, baseline, paint)
+    }
+
+    private fun drawCellQr(
+        canvas: Canvas, r: RectF, template: CardTemplate, user: UserEntry, settings: AppSettings,
+    ) {
+        val content = qrText(template.qrContent, user, settings)
+        if (content.isBlank()) return
+        val side = (minOf(r.width(), r.height()) * 0.92f).toInt().coerceAtLeast(16)
+        val qr = encodeQr(content, side) ?: return
+        canvas.drawBitmap(qr, r.centerX() - side / 2f, r.centerY() - side / 2f, null)
+        qr.recycle()
+    }
+
+    private const val PT_MM = 0.352778f
 
     fun fieldValue(field: CardField, user: UserEntry, settings: AppSettings): String {
         val value = when (field.type) {

@@ -314,6 +314,30 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
             }
         }
 
+        Spacer(Modifier.height(12.dp))
+        Text("ورقة كاملة بلا فواصل — أقصى عدد كروت في الصفحة", fontSize = 12.sp, color = TextLow)
+        Spacer(Modifier.height(7.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // 3×16 = 48 كرت على A4 بمقاس 69.38×17.64مم — نفس ورقة سمارت كريتور بالضبط
+            listOf(
+                Triple("A4 — 3×16 (48 كرت)", 3, 16),
+                Triple("A4 — 3×12 (36 كرت)", 3, 12),
+                Triple("A4 — 2×10 (20 كرت)", 2, 10),
+            ).forEach { (label, c, r) ->
+                val on = !layout.autoFit && layout.columns == c && layout.rows == r &&
+                    layout.hSpacingMm == 0f && layout.vSpacingMm == 0f
+                Chip(label, on) {
+                    update {
+                        it.copy(
+                            autoFit = false, columns = c, rows = r,
+                            marginMm = 1.8f, hSpacingMm = 0f, vSpacingMm = 0f,
+                            cutMarks = com.binwaps.cardmanager.model.CutMarkStyle.BORDER,
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(34.dp))
     }
 }
