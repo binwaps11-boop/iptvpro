@@ -24,6 +24,7 @@ object UserGenerator {
         price: String,
         validity: String,
         serialStart: Int = 1,
+        batchTag: String = "",
     ): List<UserEntry> {
         val used = mutableSetOf<String>()
         return (0 until count).map { i ->
@@ -44,6 +45,8 @@ object UserGenerator {
                 price = price,
                 validity = validity,
                 serial = (serialStart + i).toString().padStart(4, '0'),
+                batchTag = batchTag,
+                comment = batchTag,
             )
         }
     }

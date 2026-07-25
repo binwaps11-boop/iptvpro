@@ -179,12 +179,24 @@ object Store {
     fun setProfiles(list: List<HotspotProfile>) {
         // نحافظ على الأسعار المحفوظة محلياً عند تحديث القائمة من الراوتر
         val prices = _profiles.value.associate { it.name to it.price }
-        _profiles.value = list.map { p -> if (p.price.isBlank()) p.copy(price = prices[p.name] ?: "") else p }
+        val costs = _profiles.value.associate { it.name to it.cost }
+        _profiles.value = list.map { p ->
+            p.copy(
+                price = p.price.ifBlank { prices[p.name].orEmpty() },
+                cost = p.cost.ifBlank { costs[p.name].orEmpty() },
+            )
+        }
         save("profiles.json", _profiles.value)
     }
 
     fun updateProfilePrice(name: String, price: String) {
         _profiles.value = _profiles.value.map { if (it.name == name) it.copy(price = price) else it }
+        save("profiles.json", _profiles.value)
+    }
+
+    /** سعر البيع وتكلفة الكرت معاً */
+    fun updateProfilePricing(name: String, price: String, cost: String) {
+        _profiles.value = _profiles.value.map { if (it.name == name) it.copy(price = price, cost = cost) else it }
         save("profiles.json", _profiles.value)
     }
 

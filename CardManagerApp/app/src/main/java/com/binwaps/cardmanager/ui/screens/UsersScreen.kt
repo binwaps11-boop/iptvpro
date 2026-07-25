@@ -143,7 +143,8 @@ fun UsersScreen() {
         val q = query.trim()
         if (q.isBlank()) base
         else base.filter {
-            it.username.contains(q, true) || it.profile.contains(q, true) || it.comment.contains(q, true)
+            it.username.contains(q, true) || it.profile.contains(q, true) ||
+                it.comment.contains(q, true) || it.batchTag.contains(q, true)
         }
     }
 
@@ -319,6 +320,10 @@ fun UsersScreen() {
                     }
                     GhostButton("تغيير الباقة", enabled = !busy, color = Violet) { bulkDialog = "profile" }
                     GhostButton("تمديد الصلاحية", enabled = !busy, color = Violet) { bulkDialog = "extend" }
+                    GhostButton("تصدير CSV", enabled = !busy) {
+                        val f = com.binwaps.cardmanager.util.CsvExporter.exportCards(context, chosen)
+                        com.binwaps.cardmanager.util.CsvExporter.share(context, f, "تصدير الكروت")
+                    }
                     GhostButton("حذف", enabled = !busy, color = Danger) { bulkDialog = "delete" }
                 }
             }
@@ -341,6 +346,20 @@ fun UsersScreen() {
                     }
                     if (count > 0 || f == CardFilter.ALL) {
                         Chip("${f.labelAr} ($count)", filter == f) { filter = f }
+                    }
+                }
+            }
+            // الدفعات
+            val batches = remember(users) {
+                users.mapNotNull { it.batchTag.takeIf { t -> t.isNotBlank() } }.distinct().sortedDescending()
+            }
+            if (batches.isNotEmpty()) {
+                Spacer(Modifier.height(7.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("الدفعات:", fontSize = 11.sp, color = TextLow, modifier = Modifier.padding(top = 7.dp))
+                    batches.take(12).forEach { tag ->
+                        val n = users.count { it.batchTag == tag }
+                        Chip("$tag ($n)", query == tag) { query = if (query == tag) "" else tag }
                     }
                 }
             }
@@ -656,6 +675,8 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                         price = price,
                         validity = validity,
                         serialStart = Store.users.value.size + 1,
+                        batchTag = "vc-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+                            .format(java.util.Date()),
                     )
                 )
             }) { Text("توليد", color = Neon, fontWeight = FontWeight.Bold) }

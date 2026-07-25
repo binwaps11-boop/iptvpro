@@ -58,6 +58,8 @@ data class UserEntry(
     val limitBytes: Long = 0,
     /** تاريخ انتهاء الكرت كما يعرضه الراوتر أو كما كتبه MIKHMON في الملاحظة */
     val expiryText: String = "",
+    /** وسم الدفعة التي وُلّد فيها الكرت — يُكتب في ملاحظة الراوتر */
+    val batchTag: String = "",
 )
 
 /** جلسة — نشطة الآن أو من السجل */
@@ -259,6 +261,8 @@ data class HotspotProfile(
     val source: CardSource = CardSource.HOTSPOT,
     /** عدد الكروت المرتبطة بهذه الباقة */
     val userCount: Int = 0,
+    /** تكلفة الكرت عليك — لحساب الربح */
+    val cost: String = "",
 )
 
 /** دفعة كروت مطبوعة — للسجل وإعادة الطباعة والتقارير */

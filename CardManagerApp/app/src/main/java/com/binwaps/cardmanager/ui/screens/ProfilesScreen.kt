@@ -174,8 +174,11 @@ fun ProfilesScreen() {
                                     fontWeight = FontWeight.Bold,
                                     color = if (p.price.isBlank()) TextLow else Warn,
                                 )
+                                if (p.cost.isNotBlank()) {
+                                    Text("تكلفة ${p.cost}", fontSize = 10.sp, color = TextLow)
+                                }
                                 TextButton(onClick = { priceEditing = p }) {
-                                    Text("تعديل السعر", fontSize = 11.sp, color = Neon)
+                                    Text("تعديل الأسعار", fontSize = 11.sp, color = Neon)
                                 }
                             }
                         }
@@ -189,16 +192,31 @@ fun ProfilesScreen() {
 
     priceEditing?.let { p ->
         var price by remember(p.name) { mutableStateOf(p.price) }
+        var cost by remember(p.name) { mutableStateOf(p.cost) }
         AlertDialog(
             onDismissRequest = { priceEditing = null },
             containerColor = Panel,
             titleContentColor = TextHi,
             shape = RoundedCornerShape(20.dp),
-            title = { Text("سعر باقة ${p.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = { AppField(price, { price = it }, "السعر بـ ${settings.currency}", Modifier.fillMaxWidth(), numeric = true) },
+            title = { Text("أسعار باقة ${p.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    AppField(price, { price = it }, "سعر البيع بـ ${settings.currency}", Modifier.fillMaxWidth(), numeric = true)
+                    AppField(cost, { cost = it }, "تكلفة الكرت عليك (لحساب الربح)", Modifier.fillMaxWidth(), numeric = true)
+                    val margin = (price.toDoubleOrNull() ?: 0.0) - (cost.toDoubleOrNull() ?: 0.0)
+                    if (cost.isNotBlank()) {
+                        Text(
+                            "ربح الكرت الواحد: ${margin.toLong()} ${settings.currency}",
+                            fontSize = 12.5.sp,
+                            color = if (margin >= 0) Lime else Danger,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    Store.updateProfilePrice(p.name, price)
+                    Store.updateProfilePricing(p.name, price, cost)
                     priceEditing = null
                 }) { Text("حفظ", color = Neon, fontWeight = FontWeight.Bold) }
             },

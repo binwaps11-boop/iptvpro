@@ -102,6 +102,10 @@ fun SalesScreen() {
         inPeriod.filter { it.kind == SaleKind.DEBT_PAID }.sumOf { it.total }
     val expenses = inPeriod.filter { it.kind == SaleKind.EXPENSE }.sumOf { it.total }
     val cardsSold = inPeriod.filter { it.kind == SaleKind.SALE }.sumOf { it.quantity }
+    // تكلفة ما بيع، من أسعار التكلفة المسجّلة على الباقات
+    val costByProfile = profiles.associate { it.name to (it.cost.toDoubleOrNull() ?: 0.0) }
+    val profitCost = inPeriod.filter { it.kind == SaleKind.SALE }
+        .sumOf { (costByProfile[it.profile] ?: 0.0) * it.quantity }
     // إجمالي الديون المتراكمة (كل الفترات)
     val totalDebt = sales.filter { it.kind == SaleKind.SALE }.sumOf { it.debt } -
         sales.filter { it.kind == SaleKind.DEBT_PAID }.sumOf { it.total }
@@ -168,6 +172,10 @@ fun SalesScreen() {
             MoneyRow("المحصّل نقداً", collected, cur, Lime)
             MoneyRow("المصروفات", expenses, cur, Danger)
             MoneyRow("الصافي", collected - expenses, cur, if (collected - expenses >= 0) Lime else Danger)
+            if (profitCost > 0) {
+                MoneyRow("تكلفة الكروت المباعة", profitCost, cur, TextMid)
+                MoneyRow("الربح", revenue - profitCost, cur, if (revenue - profitCost >= 0) Lime else Danger)
+            }
             if (totalDebt > 0) MoneyRow("الديون المستحقة", totalDebt, cur, Warn)
         }
 
@@ -227,6 +235,11 @@ fun SalesScreen() {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("سجل الحركات (${inPeriod.size})", fontSize = 13.sp, color = TextLow, modifier = Modifier.weight(1f))
             if (inPeriod.isNotEmpty()) {
+                GhostButton("تصدير CSV") {
+                    val f = com.binwaps.cardmanager.util.CsvExporter.exportSales(context, inPeriod, cur)
+                    com.binwaps.cardmanager.util.CsvExporter.share(context, f, "تصدير المبيعات")
+                }
+                Spacer(Modifier.width(6.dp))
                 GhostButton("مشاركة التقرير", icon = Icons.Filled.Share) {
                     val report = buildString {
                         appendLine("تقرير المبيعات — ${period.labelAr}")

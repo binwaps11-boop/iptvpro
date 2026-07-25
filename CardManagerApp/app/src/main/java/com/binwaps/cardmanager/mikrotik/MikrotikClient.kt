@@ -323,6 +323,7 @@ object MikrotikClient {
                     bytesUsed = (row["bytes-in"]?.toLongOrNull() ?: 0) + (row["bytes-out"]?.toLongOrNull() ?: 0),
                     disabled = row["disabled"] == "true",
                     limitUptime = row["limit-uptime"].orEmpty(),
+                    batchTag = row["comment"].orEmpty().takeIf { it.startsWith("vc-") || it.startsWith("b-") }.orEmpty(),
                     limitBytes = row["limit-bytes-total"]?.toLongOrNull() ?: 0,
                     expiryText = parseCommentExpiry(row["comment"].orEmpty())
                         ?.let { java.text.SimpleDateFormat("yyyy/MM/dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) }
@@ -455,7 +456,8 @@ object MikrotikClient {
                 if (u.password.isNotBlank()) append(" =password=${u.password}")
                 if (u.profile.isNotBlank()) append(" =profile=${u.profile}")
                 if (u.validity.isNotBlank()) append(" =limit-uptime=${u.validity}")
-                if (u.comment.isNotBlank()) append(" =comment=${u.comment}")
+                val tag = u.batchTag.ifBlank { u.comment }
+                if (tag.isNotBlank()) append(" =comment=$tag")
             }
             runCatching { con.execute(cmd) }.onSuccess { ok++ }
             onProgress(i + 1, users.size)
