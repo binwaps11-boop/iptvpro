@@ -20,7 +20,8 @@ import java.io.File
 
 /** تخزين بملفات JSON داخل مجلد التطبيق */
 object Store {
-    private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
+    // JSON مضغوط — الكتابة المنسّقة كانت تضاعف حجم ملفات القوائم الكبيرة
+    private val json = Json { ignoreUnknownKeys = true }
 
     private lateinit var appContext: Context
 
@@ -79,9 +80,14 @@ object Store {
         java.util.concurrent.Executors.newSingleThreadExecutor()
 
     // ===== المستخدمون =====
+    /**
+     * يُحفظ على القرص الكروت المحلية فقط. الكروت المجلوبة من الراوتر
+     * تبقى في الذاكرة — قد تكون بعشرات الآلاف وكتابتها تجمّد الجهاز،
+     * وجلبها من جديد أصبح سريعاً.
+     */
     fun setUsers(list: List<UserEntry>) {
         _users.value = list
-        save("users.json", list)
+        save("users.json", list.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
     }
 
     fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
@@ -129,7 +135,24 @@ object Store {
 
     // ===== حالة الاتصال =====
     fun setConnected(value: Boolean) { _connected.value = value }
-    fun setStatus(s: RouterStatus) { _status.value = s }
+
+    /** دمج الحالة: التحديث الخفيف لا يحمل عدادات الكروت (-1) فنبقي القديمة */
+    fun setStatus(s: RouterStatus) {
+        val prev = _status.value
+        _status.value = s.copy(
+            activeUsers = if (s.activeUsers >= 0) s.activeUsers else prev.activeUsers,
+            hotspotUsers = if (s.hotspotUsers >= 0) s.hotspotUsers else prev.hotspotUsers,
+            userManagerUsers = if (s.userManagerUsers >= 0) s.userManagerUsers else prev.userManagerUsers,
+            usedUsers = if (s.usedUsers >= 0) s.usedUsers else prev.usedUsers,
+            identity = s.identity.ifBlank { prev.identity },
+            version = s.version.ifBlank { prev.version },
+            board = s.board.ifBlank { prev.board },
+            uptime = s.uptime.ifBlank { prev.uptime },
+            cpuLoad = s.cpuLoad.ifBlank { prev.cpuLoad },
+            freeMemory = s.freeMemory.ifBlank { prev.freeMemory },
+            totalMemory = s.totalMemory.ifBlank { prev.totalMemory },
+        )
+    }
     fun setActiveUsers(list: List<ActiveUser>) { _activeUsers.value = list }
 
     // ===== الباقات =====

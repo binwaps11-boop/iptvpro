@@ -89,18 +89,33 @@ object MikrotikClient {
         return emptyList()
     }
 
+    /**
+     * جلب خفيف: يطلب الحقول المطلوبة فقط بدل كل شيء —
+     * الفرق هائل مع قوائم بعشرات آلاف المستخدمين على شبكة بطيئة.
+     */
+    private fun ApiConnection.printLight(path: String, props: String): List<Map<String, String>> =
+        runCatching { execute("$path/print return $props") }
+            .getOrElse { execute("$path/print") }
+
+    private fun ApiConnection.tryPrintLight(props: String, vararg paths: String): List<Map<String, String>> {
+        for (p in paths) {
+            val r = runCatching { printLight(p, props) }.getOrNull()
+            if (r != null) return r
+        }
+        return emptyList()
+    }
+
     // ===== الحالة =====
 
+    /**
+     * اتصال سريع: حالة النظام وعدد المتصلين فقط.
+     * لا يمسح قوائم المستخدمين — تلك تُجلب عند الطلب عبر [fetchCardStats].
+     */
     suspend fun connect(r: RouterProfile): Result<RouterStatus> = onRouter(r) { con ->
         val res = con.execute("/system/resource/print").firstOrNull() ?: emptyMap()
         val identity = runCatching { con.execute("/system/identity/print").firstOrNull()?.get("name") }
             .getOrNull().orEmpty()
-        val active = con.tryList("/ip/hotspot/active/print").size
-
-        val hotspotRows = con.tryList("/ip/hotspot/user/print")
-            .filter { (it["name"] ?: "") != "default-trial" }
-        val used = hotspotRows.count { classify(it) != CardStatus.UNUSED }
-        val umRows = con.tryList("/user-manager/user/print", "/tool/user-manager/user/print")
+        val active = con.tryPrintLight(".id", "/ip/hotspot/active").size
 
         RouterStatus(
             identity = identity,
@@ -111,8 +126,23 @@ object MikrotikClient {
             freeMemory = res["free-memory"].orEmpty(),
             totalMemory = res["total-memory"].orEmpty(),
             activeUsers = active,
+            hotspotUsers = -1,
+            userManagerUsers = -1,
+            usedUsers = -1,
+        )
+    }
+
+    /** عدادات الكروت — تُجلب بحقول مختصرة وعند الطلب فقط */
+    suspend fun fetchCardStats(r: RouterProfile?): Result<RouterStatus> = onRouter(r) { con ->
+        val hotspotRows = con
+            .printLight("/ip/hotspot/user", "name,limit-uptime,uptime,limit-bytes-total,bytes-in,bytes-out,disabled,comment")
+            .filter { (it["name"] ?: "") != "default-trial" }
+        val used = hotspotRows.count { classify(it) != CardStatus.UNUSED }
+        val umCount = con.tryPrintLight("name", "/user-manager/user", "/tool/user-manager/user").size
+        RouterStatus(
+            activeUsers = -1,
             hotspotUsers = hotspotRows.size,
-            userManagerUsers = umRows.size,
+            userManagerUsers = umCount,
             usedUsers = used,
         )
     }
@@ -167,9 +197,12 @@ object MikrotikClient {
 
     // ===== الكروت =====
 
+    private const val HOTSPOT_PROPS =
+        ".id,name,password,profile,limit-uptime,uptime,limit-bytes-total,bytes-in,bytes-out,disabled,comment"
+
     /** كروت الهوتسبوت مع حالتها */
     suspend fun fetchHotspotUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
-        con.execute("/ip/hotspot/user/print").mapNotNull { row ->
+        con.printLight("/ip/hotspot/user", HOTSPOT_PROPS).mapNotNull { row ->
             val name = row["name"] ?: return@mapNotNull null
             if (name == "default-trial") return@mapNotNull null
             UserEntry(
@@ -196,12 +229,17 @@ object MikrotikClient {
      * في v6 تكون العدادات على السجل نفسه (uptime-used, download-used…).
      */
     private fun readUserManager(con: ApiConnection): List<UserEntry> {
-        val rows = con.tryList("/user-manager/user/print", "/tool/user-manager/user/print")
+        val rows = con.tryPrintLight(
+            ".id,name,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
+            "/user-manager/user", "/tool/user-manager/user",
+        )
         if (rows.isEmpty()) return emptyList()
 
         // جدول الصلاحيات — v7 ثم v6
-        val userProfiles = con.tryList("/user-manager/user-profile/print", "/tool/user-manager/user-profile/print")
-            .associateBy { it["user"].orEmpty() }
+        val userProfiles = con.tryPrintLight(
+            "user,profile,end-time,state",
+            "/user-manager/user-profile", "/tool/user-manager/user-profile",
+        ).associateBy { it["user"].orEmpty() }
 
         return rows.mapNotNull { row ->
             val name = row["name"] ?: row["username"] ?: return@mapNotNull null
@@ -267,7 +305,8 @@ object MikrotikClient {
 
     /** كل الكروت من المصدرين معاً */
     suspend fun fetchAllCards(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
-        val hotspot = con.tryList("/ip/hotspot/user/print")
+        val hotspot = runCatching { con.printLight("/ip/hotspot/user", HOTSPOT_PROPS) }
+            .getOrDefault(emptyList())
             .filter { (it["name"] ?: "") != "default-trial" }
             .mapNotNull { row ->
                 val name = row["name"] ?: return@mapNotNull null
@@ -285,20 +324,7 @@ object MikrotikClient {
                     disabled = row["disabled"] == "true",
                 )
             }
-        val um = con.tryList("/user-manager/user/print", "/tool/user-manager/user/print")
-            .mapNotNull { row ->
-                val name = row["name"] ?: row["username"] ?: return@mapNotNull null
-                UserEntry(
-                    username = name,
-                    password = row["password"].orEmpty(),
-                    profile = row["group"] ?: row["actual-profile"] ?: row["profile"].orEmpty(),
-                    comment = row["comment"].orEmpty(),
-                    routerId = row[".id"].orEmpty(),
-                    source = CardSource.USER_MANAGER,
-                    status = if (row["disabled"] == "true") CardStatus.DISABLED else CardStatus.UNKNOWN,
-                    disabled = row["disabled"] == "true",
-                )
-            }
+        val um = runCatching { readUserManager(con) }.getOrDefault(emptyList())
         hotspot + um
     }
 
@@ -361,8 +387,10 @@ object MikrotikClient {
 
     /** باقات الهوتسبوت واليوزر منجر معاً، مع عدد الكروت في كل باقة */
     suspend fun fetchProfiles(r: RouterProfile?): Result<List<HotspotProfile>> = onRouter(r) { con ->
-        val hotspotUsers = con.tryList("/ip/hotspot/user/print")
-        val umUsers = con.tryList("/user-manager/user/print", "/tool/user-manager/user/print")
+        // حقل واحد فقط للعدّ — وليس كل بيانات المستخدمين
+        val hotspotUsers = runCatching { con.printLight("/ip/hotspot/user", "profile") }
+            .getOrDefault(emptyList())
+        val umUsers = con.tryPrintLight("group,actual-profile,profile", "/user-manager/user", "/tool/user-manager/user")
 
         val hotspotProfiles = con.tryList("/ip/hotspot/user/profile/print").map { row ->
             val name = row["name"].orEmpty()

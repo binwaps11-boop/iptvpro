@@ -101,6 +101,9 @@ fun UsersScreen() {
     var progress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) } // النص، هل هو خطأ
     var filter by remember { mutableStateOf(CardFilter.ALL) }
+    var query by remember { mutableStateOf("") }
+    // عرض تدريجي — القوائم الكبيرة (عشرات الآلاف) تُعرض على دفعات
+    var showLimit by remember(filter, query) { mutableStateOf(300) }
 
     val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -120,8 +123,8 @@ fun UsersScreen() {
         }
     }
 
-    val shown = remember(users, filter) {
-        when (filter) {
+    val shown = remember(users, filter, query) {
+        val base = when (filter) {
             CardFilter.ALL -> users
             CardFilter.UNUSED -> users.filter { it.status == CardStatus.UNUSED }
             CardFilter.IN_USE -> users.filter { it.status == CardStatus.IN_USE }
@@ -129,6 +132,11 @@ fun UsersScreen() {
             CardFilter.HOTSPOT -> users.filter { it.source == CardSource.HOTSPOT }
             CardFilter.USER_MANAGER -> users.filter { it.source == CardSource.USER_MANAGER }
             CardFilter.LOCAL -> users.filter { it.source == CardSource.LOCAL }
+        }
+        val q = query.trim()
+        if (q.isBlank()) base
+        else base.filter {
+            it.username.contains(q, true) || it.profile.contains(q, true) || it.comment.contains(q, true)
         }
     }
 
@@ -247,6 +255,8 @@ fun UsersScreen() {
         Spacer(Modifier.height(12.dp))
 
         if (users.isNotEmpty()) {
+            AppField(query, { query = it }, "بحث باسم المستخدم أو الباقة", Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 CardFilter.entries.forEach { f ->
                     val count = when (f) {
@@ -281,9 +291,10 @@ fun UsersScreen() {
                 if (users.isEmpty()) "ولّد دفعة، أو استورد CSV، أو اجلب الكروت الموجودة من الراوتر" else "جرّب تصنيفاً آخر",
             )
         } else {
+            val visible = if (shown.size > showLimit) shown.subList(0, showLimit) else shown
             LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                items(shown.size) { i ->
-                    val u = shown[i]
+                items(visible.size) { i ->
+                    val u = visible[i]
                     GlassCard(Modifier.fillMaxWidth(), padding = 11) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
@@ -336,6 +347,20 @@ fun UsersScreen() {
                                 Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(17.dp))
                             }
                         }
+                    }
+                }
+                if (shown.size > showLimit) {
+                    item {
+                        Text(
+                            "عرض المزيد (${shown.size - showLimit} كرت متبقٍ)",
+                            fontSize = 13.sp, color = Neon, fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Neon.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                                .clickable { showLimit += 500 }
+                                .padding(vertical = 12.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        )
                     }
                 }
             }

@@ -84,10 +84,24 @@ fun DashboardScreen(navController: NavController) {
     var historyBusy by remember { mutableStateOf(false) }
     var historyError by remember { mutableStateOf<String?>(null) }
 
+    var statsBusy by remember { mutableStateOf(false) }
+
+    /** جلب عدادات الكروت — عملية ثقيلة تُطلب يدوياً أو مرة عند الدخول */
+    fun refreshStats() {
+        if (statsBusy) return
+        statsBusy = true
+        scope.launch {
+            MikrotikClient.fetchCardStats(Store.activeRouter())
+                .onSuccess { Store.setStatus(it) }
+            statsBusy = false
+        }
+    }
+
     fun refresh() {
         val router = Store.activeRouter() ?: return
         refreshing = true
         scope.launch {
+            // تحديث خفيف: حالة النظام والمتصلون فقط — لا مسح لقوائم المستخدمين
             MikrotikClient.connect(router).onSuccess { Store.setStatus(it); Store.setConnected(true) }
                 .onFailure { Store.setConnected(false) }
             MikrotikClient.fetchActiveUsers(router).onSuccess { Store.setActiveUsers(it) }
@@ -95,8 +109,9 @@ fun DashboardScreen(navController: NavController) {
         }
     }
 
-    // تحديث تلقائي كل 20 ثانية
+    // تحديث تلقائي خفيف كل 20 ثانية + جلب العدادات مرة واحدة
     LaunchedEffect(connected) {
+        if (connected && status.hotspotUsers < 0) refreshStats()
         while (connected) {
             refresh()
             delay(20_000)
@@ -170,16 +185,28 @@ fun DashboardScreen(navController: NavController) {
 
         // إحصائيات الكروت على الراوتر
         if (connected) {
-            Text("الكروت على الراوتر", fontSize = 13.sp, color = TextLow)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                StatTile("إجمالي الهوتسبوت", status.hotspotUsers.toString(), Modifier.weight(1f), Neon)
-                StatTile("اليوزر منجر", status.userManagerUsers.toString(), Modifier.weight(1f), Violet)
+            fun n(v: Int) = if (v < 0) "…" else v.toString()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("الكروت على الراوتر", fontSize = 13.sp, color = TextLow, modifier = Modifier.weight(1f))
+                Text(
+                    if (statsBusy) "جاري العدّ…" else "تحديث العدادات",
+                    fontSize = 11.5.sp, color = if (statsBusy) TextLow else Neon,
+                    modifier = Modifier.clickable(enabled = !statsBusy) { refreshStats() }.padding(4.dp),
+                )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                StatTile("غير مستهلكة", status.unusedUsers.toString(), Modifier.weight(1f), Lime, "متاحة للبيع")
-                StatTile("مستهلكة", status.usedUsers.toString(), Modifier.weight(1f), Warn, "انتهى وقتها")
+                StatTile("إجمالي الهوتسبوت", n(status.hotspotUsers), Modifier.weight(1f), Neon)
+                StatTile("اليوزر منجر", n(status.userManagerUsers), Modifier.weight(1f), Violet)
             }
-            if (status.hotspotUsers > 0) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                StatTile(
+                    "غير مستهلكة",
+                    if (status.hotspotUsers < 0) "…" else status.unusedUsers.toString(),
+                    Modifier.weight(1f), Lime, "متاحة للبيع",
+                )
+                StatTile("مستهلكة", n(status.usedUsers), Modifier.weight(1f), Warn, "انتهى وقتها")
+            }
+            if (status.hotspotUsers > 0 && status.usedUsers >= 0) {
                 Spacer(Modifier.height(2.dp))
                 NeonProgress(status.usedUsers.toFloat() / status.hotspotUsers)
                 Text(
