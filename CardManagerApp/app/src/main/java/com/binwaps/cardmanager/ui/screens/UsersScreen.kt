@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -110,6 +111,7 @@ fun UsersScreen() {
     var showLimit by remember(filter, query) { mutableStateOf(300) }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var bulkDialog by remember { mutableStateOf<String?>(null) }
+    var editCard by remember { mutableStateOf<UserEntry?>(null) }
     val selecting = selected.isNotEmpty()
 
     val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -319,6 +321,26 @@ fun UsersScreen() {
                         }
                     }
                     GhostButton("تغيير الباقة", enabled = !busy, color = Violet) { bulkDialog = "profile" }
+                    GhostButton("نقل إلى اليوزر منجر", enabled = !busy, color = Neon) {
+                        progress = 0 to chosen.size
+                        run("جاري النقل إلى اليوزر منجر…") {
+                            MikrotikClient.moveCards(
+                                Store.activeRouter(), chosen,
+                                com.binwaps.cardmanager.model.UploadTarget.USER_MANAGER,
+                                deleteFromSource = false,
+                            ) { d, t -> progress = d to t }.map { "تم نقل $it كرت إلى اليوزر منجر" }
+                        }
+                    }
+                    GhostButton("نقل إلى الهوتسبوت", enabled = !busy, color = Neon) {
+                        progress = 0 to chosen.size
+                        run("جاري النقل إلى الهوتسبوت…") {
+                            MikrotikClient.moveCards(
+                                Store.activeRouter(), chosen,
+                                com.binwaps.cardmanager.model.UploadTarget.HOTSPOT,
+                                deleteFromSource = false,
+                            ) { d, t -> progress = d to t }.map { "تم نقل $it كرت إلى الهوتسبوت" }
+                        }
+                    }
                     GhostButton("تمديد الصلاحية", enabled = !busy, color = Violet) { bulkDialog = "extend" }
                     GhostButton("تصدير CSV", enabled = !busy) {
                         val f = com.binwaps.cardmanager.util.CsvExporter.exportCards(context, chosen)
@@ -454,6 +476,9 @@ fun UsersScreen() {
                                 }
                                 Text(u.source.labelAr, fontSize = 9.sp, color = TextLow, modifier = Modifier.padding(top = 3.dp))
                             }
+                            IconButton(onClick = { editCard = u }) {
+                                Icon(Icons.Filled.Edit, "تعديل", tint = Neon, modifier = Modifier.size(17.dp))
+                            }
                             IconButton(onClick = { Store.setUsers(users - u) }) {
                                 Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(17.dp))
                             }
@@ -476,6 +501,64 @@ fun UsersScreen() {
                 }
             }
         }
+    }
+
+    // تعديل كرت واحد — محلياً وعلى الراوتر معاً
+    editCard?.let { card ->
+        var pw by remember(card.username) { mutableStateOf(card.password) }
+        var prof by remember(card.username) { mutableStateOf(card.profile) }
+        var validity by remember(card.username) { mutableStateOf(card.validity.ifBlank { card.limitUptime }) }
+        var price by remember(card.username) { mutableStateOf(card.price) }
+        var note by remember(card.username) { mutableStateOf(card.comment) }
+        val onRouter = card.routerId.isNotBlank()
+        AlertDialog(
+            onDismissRequest = { editCard = null },
+            containerColor = Panel,
+            titleContentColor = TextHi,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("تعديل الكرت ${card.username}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    AppField(pw, { pw = it }, "كلمة المرور", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    AppField(prof, { prof = it }, "الباقة", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    AppField(validity, { validity = it }, "الصلاحية (مثل 30d أو 12h)", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    AppField(price, { price = it }, "السعر", Modifier.fillMaxWidth(), numeric = true)
+                    Spacer(Modifier.height(8.dp))
+                    AppField(note, { note = it }, "ملاحظة", Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(9.dp))
+                    Text(
+                        if (onRouter) "سيُعدّل الكرت على الراوتر أيضاً"
+                        else "هذا الكرت محلي — سيُحفظ التعديل في التطبيق فقط",
+                        fontSize = 10.5.sp, color = TextLow,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val updated = card.copy(
+                        password = pw, profile = prof, validity = validity,
+                        price = price, comment = note,
+                    )
+                    Store.setUsers(users.map { if (it.username == card.username) updated else it })
+                    editCard = null
+                    if (onRouter) {
+                        run("حفظ التعديل على الراوتر") {
+                            MikrotikClient.updateCard(
+                                Store.activeRouter(), card,
+                                password = pw.ifBlank { null },
+                                profile = prof.ifBlank { null },
+                                comment = note.ifBlank { null },
+                                limitUptime = validity.ifBlank { null },
+                            ).map { "تم تعديل الكرت على الراوتر" }
+                        }
+                    }
+                }) { Text("حفظ", color = Neon, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { editCard = null }) { Text("إلغاء", color = TextLow) } },
+        )
     }
 
     // حوارات العمليات الجماعية
