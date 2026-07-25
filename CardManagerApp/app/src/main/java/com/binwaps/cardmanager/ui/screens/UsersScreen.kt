@@ -24,6 +24,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreditCard
@@ -89,6 +92,7 @@ private enum class CardFilter(val labelAr: String) {
     LOCAL("محلي"),
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun UsersScreen() {
     val context = LocalContext.current
@@ -104,6 +108,9 @@ fun UsersScreen() {
     var query by remember { mutableStateOf("") }
     // عرض تدريجي — القوائم الكبيرة (عشرات الآلاف) تُعرض على دفعات
     var showLimit by remember(filter, query) { mutableStateOf(300) }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var bulkDialog by remember { mutableStateOf<String?>(null) }
+    val selecting = selected.isNotEmpty()
 
     val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -254,6 +261,70 @@ fun UsersScreen() {
 
         Spacer(Modifier.height(12.dp))
 
+        // شريط العمليات الجماعية
+        if (selecting) {
+            val chosen = users.filter { it.username in selected }
+            GlassCard(Modifier.fillMaxWidth(), glow = Neon, padding = 11) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "محدد: ${selected.size}",
+                        fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Neon,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "تحديد الكل",
+                        fontSize = 11.5.sp, color = TextMid,
+                        modifier = Modifier
+                            .clickable { selected = shown.map { it.username }.toSet() }
+                            .padding(6.dp),
+                    )
+                    Text(
+                        "إلغاء",
+                        fontSize = 11.5.sp, color = Danger,
+                        modifier = Modifier.clickable { selected = emptySet() }.padding(6.dp),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    GhostButton("تعطيل", enabled = !busy, color = Warn) {
+                        progress = 0 to chosen.size
+                        run("جاري تعطيل ${chosen.size} كرت…") {
+                            MikrotikClient.bulkSetEnabled(Store.activeRouter(), chosen, false) { d, t -> progress = d to t }
+                                .map { "تم تعطيل ${it.ok} كرت" + if (it.failed > 0) " — فشل ${it.failed}" else "" }
+                        }
+                    }
+                    GhostButton("تفعيل", enabled = !busy, color = Lime) {
+                        progress = 0 to chosen.size
+                        run("جاري تفعيل ${chosen.size} كرت…") {
+                            MikrotikClient.bulkSetEnabled(Store.activeRouter(), chosen, true) { d, t -> progress = d to t }
+                                .map { "تم تفعيل ${it.ok} كرت" + if (it.failed > 0) " — فشل ${it.failed}" else "" }
+                        }
+                    }
+                    GhostButton("تصفير العدادات", enabled = !busy) {
+                        progress = 0 to chosen.size
+                        run("جاري التصفير…") {
+                            MikrotikClient.bulkResetCounters(Store.activeRouter(), chosen) { d, t -> progress = d to t }
+                                .map { "تم تصفير ${it.ok} كرت" }
+                        }
+                    }
+                    GhostButton("إرجاع غير مستهلك", enabled = !busy, color = Lime) {
+                        progress = 0 to chosen.size
+                        run("جاري الإرجاع…") {
+                            MikrotikClient.bulkResetToUnused(Store.activeRouter(), chosen, "") { d, t -> progress = d to t }
+                                .map { "تم إرجاع ${it.ok} كرت غير مستهلك" }
+                        }
+                    }
+                    GhostButton("تغيير الباقة", enabled = !busy, color = Violet) { bulkDialog = "profile" }
+                    GhostButton("تمديد الصلاحية", enabled = !busy, color = Violet) { bulkDialog = "extend" }
+                    GhostButton("حذف", enabled = !busy, color = Danger) { bulkDialog = "delete" }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
         if (users.isNotEmpty()) {
             AppField(query, { query = it }, "بحث باسم المستخدم أو الباقة", Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
@@ -295,19 +366,40 @@ fun UsersScreen() {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 items(visible.size) { i ->
                     val u = visible[i]
-                    GlassCard(Modifier.fillMaxWidth(), padding = 11) {
+                    val isSel = u.username in selected
+                    GlassCard(
+                        Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = {
+                                    if (selecting) {
+                                        selected = if (isSel) selected - u.username else selected + u.username
+                                    }
+                                },
+                                onLongClick = { selected = selected + u.username },
+                            ),
+                        glow = if (isSel) Neon else Stroke,
+                        padding = 11,
+                    ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 Modifier
                                     .size(34.dp)
-                                    .background(statusColor(u.status).copy(alpha = 0.12f), RoundedCornerShape(9.dp))
-                                    .border(1.dp, Stroke, RoundedCornerShape(9.dp)),
+                                    .background(
+                                        (if (isSel) Neon else statusColor(u.status)).copy(alpha = 0.15f),
+                                        RoundedCornerShape(9.dp),
+                                    )
+                                    .border(1.dp, if (isSel) Neon else Stroke, RoundedCornerShape(9.dp)),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Text(
-                                    u.serial.ifBlank { (i + 1).toString() },
-                                    fontSize = 10.5.sp, color = statusColor(u.status), fontWeight = FontWeight.Bold,
-                                )
+                                if (isSel) {
+                                    Icon(Icons.Filled.Check, null, tint = Neon, modifier = Modifier.size(18.dp))
+                                } else {
+                                    Text(
+                                        u.serial.ifBlank { (i + 1).toString() },
+                                        fontSize = 10.5.sp, color = statusColor(u.status), fontWeight = FontWeight.Bold,
+                                    )
+                                }
                             }
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
@@ -365,6 +457,91 @@ fun UsersScreen() {
                 }
             }
         }
+    }
+
+    // حوارات العمليات الجماعية
+    bulkDialog?.let { kind ->
+        val chosen = users.filter { it.username in selected }
+        var value by remember(kind) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { bulkDialog = null },
+            containerColor = Panel,
+            titleContentColor = TextHi,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(
+                    when (kind) {
+                        "delete" -> "حذف ${chosen.size} كرت من الراوتر"
+                        "profile" -> "تغيير باقة ${chosen.size} كرت"
+                        else -> "تمديد صلاحية ${chosen.size} كرت"
+                    },
+                    fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    when (kind) {
+                        "delete" -> Text(
+                            "سيُحذف ${chosen.size} كرت نهائياً من الراوتر، وتُفصل جلساتهم النشطة. لا يمكن التراجع.",
+                            fontSize = 13.sp, color = Danger,
+                        )
+                        "profile" -> {
+                            AppField(value, { value = it }, "اسم الباقة الجديدة", Modifier.fillMaxWidth())
+                            val profiles = Store.profiles.value
+                            if (profiles.isNotEmpty()) {
+                                Row(
+                                    Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) { profiles.forEach { p -> Chip(p.name, value == p.name) { value = p.name } } }
+                            }
+                        }
+                        else -> {
+                            Text("أضف مدة إلى الصلاحية الحالية لكل كرت", fontSize = 12.sp, color = TextMid)
+                            Row(
+                                Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                listOf("1h" to "ساعة", "1d" to "يوم", "7d" to "أسبوع", "30d" to "شهر")
+                                    .forEach { (v, label) -> Chip(label, value == v) { value = v } }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = chosen
+                    bulkDialog = null
+                    progress = 0 to target.size
+                    when (kind) {
+                        "delete" -> run("جاري حذف ${target.size} كرت…") {
+                            MikrotikClient.bulkDelete(Store.activeRouter(), target) { d, t -> progress = d to t }
+                                .map {
+                                    Store.setUsers(Store.users.value - target.toSet())
+                                    selected = emptySet()
+                                    "تم حذف ${it.ok} كرت" + if (it.failed > 0) " — فشل ${it.failed}" else ""
+                                }
+                        }
+                        "profile" -> run("جاري تغيير الباقة…") {
+                            MikrotikClient.bulkSetProfile(Store.activeRouter(), target, value) { d, t -> progress = d to t }
+                                .map { "تم تغيير باقة ${it.ok} كرت إلى $value" }
+                        }
+                        else -> run("جاري تمديد الصلاحية…") {
+                            val secs = MikrotikClient.parseUptime(value)
+                            MikrotikClient.bulkExtendValidity(Store.activeRouter(), target, secs) { d, t -> progress = d to t }
+                                .map { "تم تمديد ${it.ok} كرت" }
+                        }
+                    }
+                }) {
+                    Text(
+                        if (kind == "delete") "حذف نهائي" else "تنفيذ",
+                        color = if (kind == "delete") Danger else Neon,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            },
+            dismissButton = { TextButton(onClick = { bulkDialog = null }) { Text("إلغاء", color = TextLow) } },
+        )
     }
 
     if (showGenerate) {

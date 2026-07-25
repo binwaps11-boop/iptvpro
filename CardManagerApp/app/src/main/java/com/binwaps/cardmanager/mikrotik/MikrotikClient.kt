@@ -52,7 +52,7 @@ object MikrotikClient {
     }
 
     /** ينفّذ عملية على الراوتر ويحوّل الأخطاء إلى رسائل عربية مفهومة */
-    private suspend fun <T> onRouter(r: RouterProfile?, block: (ApiConnection) -> T): Result<T> =
+    internal suspend fun <T> onRouter(r: RouterProfile?, block: (ApiConnection) -> T): Result<T> =
         withContext(Dispatchers.IO) {
             if (r == null) return@withContext Result.failure(Exception("لا يوجد راوتر محفوظ — اتصل أولاً"))
             runCatching { open(r).useCon(block) }.recoverCatching { throw Exception(arabicError(it), it) }
@@ -81,7 +81,7 @@ object MikrotikClient {
     }
 
     /** ينفّذ أمراً ويعيد قائمة فارغة بدل الانهيار إن لم يكن الأمر مدعوماً */
-    private fun ApiConnection.tryList(vararg commands: String): List<Map<String, String>> {
+    internal fun ApiConnection.tryList(vararg commands: String): List<Map<String, String>> {
         for (cmd in commands) {
             val result = runCatching { execute(cmd) }.getOrNull()
             if (result != null) return result
@@ -93,11 +93,11 @@ object MikrotikClient {
      * جلب خفيف: يطلب الحقول المطلوبة فقط بدل كل شيء —
      * الفرق هائل مع قوائم بعشرات آلاف المستخدمين على شبكة بطيئة.
      */
-    private fun ApiConnection.printLight(path: String, props: String): List<Map<String, String>> =
+    internal fun ApiConnection.printLight(path: String, props: String): List<Map<String, String>> =
         runCatching { execute("$path/print return $props") }
             .getOrElse { execute("$path/print") }
 
-    private fun ApiConnection.tryPrintLight(props: String, vararg paths: String): List<Map<String, String>> {
+    internal fun ApiConnection.tryPrintLight(props: String, vararg paths: String): List<Map<String, String>> {
         for (p in paths) {
             val r = runCatching { printLight(p, props) }.getOrNull()
             if (r != null) return r
@@ -322,6 +322,11 @@ object MikrotikClient {
                     uptime = row["uptime"].orEmpty(),
                     bytesUsed = (row["bytes-in"]?.toLongOrNull() ?: 0) + (row["bytes-out"]?.toLongOrNull() ?: 0),
                     disabled = row["disabled"] == "true",
+                    limitUptime = row["limit-uptime"].orEmpty(),
+                    limitBytes = row["limit-bytes-total"]?.toLongOrNull() ?: 0,
+                    expiryText = parseCommentExpiry(row["comment"].orEmpty())
+                        ?.let { java.text.SimpleDateFormat("yyyy/MM/dd HH:mm", java.util.Locale.US).format(java.util.Date(it)) }
+                        .orEmpty(),
                 )
             }
         val um = runCatching { readUserManager(con) }.getOrDefault(emptyList())
@@ -512,13 +517,163 @@ object MikrotikClient {
             Unit
         }
 
-    /** تصفير عدادات كرت الهوتسبوت وإرجاعه غير مستهلك (يمسح علامات MIKHMON) */
-    suspend fun resetCard(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
-        if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
-        runCatching { con.execute("/ip/hotspot/user/reset-counters =.id=${user.routerId}") }
-        con.execute("/ip/hotspot/user/set =.id=${user.routerId} =limit-uptime=0 =comment=")
-        Unit
+    // ===== العمليات الجماعية =====
+
+    /** نتيجة عملية جماعية */
+    data class BulkResult(val ok: Int, val failed: Int) {
+        val total: Int get() = ok + failed
     }
+
+    private fun ApiConnection.hotspotPath() = "/ip/hotspot/user"
+
+    private fun ApiConnection.userPathFor(source: CardSource): String = when (source) {
+        CardSource.USER_MANAGER ->
+            if (runCatching { execute("/user-manager/user/print") }.isSuccess) "/user-manager/user"
+            else "/tool/user-manager/user"
+        else -> "/ip/hotspot/user"
+    }
+
+    /** تنفيذ أمر على مجموعة كروت مع تقرير تقدم */
+    private fun ApiConnection.bulk(
+        cards: List<UserEntry>,
+        onProgress: (Int, Int) -> Unit,
+        command: (UserEntry, String) -> String?,
+    ): BulkResult {
+        var ok = 0
+        var failed = 0
+        // نحسب مسار كل مصدر مرة واحدة بدل مرة لكل كرت
+        val paths = cards.map { it.source }.distinct().associateWith { userPathFor(it) }
+        cards.forEachIndexed { i, u ->
+            val path = paths[u.source] ?: "/ip/hotspot/user"
+            val cmd = command(u, path)
+            if (cmd == null) { failed++ } else {
+                runCatching { execute(cmd) }.fold({ ok++ }, { failed++ })
+            }
+            onProgress(i + 1, cards.size)
+        }
+        return BulkResult(ok, failed)
+    }
+
+    /** تفعيل أو تعطيل مجموعة كروت */
+    suspend fun bulkSetEnabled(
+        r: RouterProfile?, cards: List<UserEntry>, enabled: Boolean,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        con.bulk(cards, onProgress) { u, path ->
+            if (u.routerId.isBlank()) null else "$path/set =.id=${u.routerId} =disabled=${!enabled}"
+        }
+    }
+
+    /** حذف مجموعة كروت — يفصل جلساتها النشطة أولاً */
+    suspend fun bulkDelete(
+        r: RouterProfile?, cards: List<UserEntry>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        val names = cards.map { it.username }.toSet()
+        runCatching {
+            con.printLight("/ip/hotspot/active", ".id,user")
+                .filter { it["user"] in names }
+                .forEach { row ->
+                    row[".id"]?.let { runCatching { con.execute("/ip/hotspot/active/remove =.id=$it") } }
+                }
+        }
+        con.bulk(cards, onProgress) { u, path ->
+            if (u.routerId.isBlank()) null else "$path/remove =.id=${u.routerId}"
+        }
+    }
+
+    /** تغيير باقة مجموعة كروت */
+    suspend fun bulkSetProfile(
+        r: RouterProfile?, cards: List<UserEntry>, profile: String,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        con.bulk(cards, onProgress) { u, path ->
+            if (u.routerId.isBlank()) null
+            else if (u.source == CardSource.USER_MANAGER) "$path/set =.id=${u.routerId} =group=$profile"
+            else "$path/set =.id=${u.routerId} =profile=$profile"
+        }
+    }
+
+    /** تصفير عدادات مجموعة كروت */
+    suspend fun bulkResetCounters(
+        r: RouterProfile?, cards: List<UserEntry>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
+            if (u.routerId.isBlank()) null else "/ip/hotspot/user/reset-counters =.id=${u.routerId}"
+        }
+    }
+
+    /**
+     * إرجاع الكروت غير مستهلكة: تصفير العدادات، ومسح علامة MIKHMON،
+     * وإعادة الصلاحية الأصلية بدل صفر، وحذف الكوكيز حتى لا يعود الجهاز بجلسته القديمة.
+     */
+    suspend fun bulkResetToUnused(
+        r: RouterProfile?, cards: List<UserEntry>, restoreValidity: String,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        val names = cards.map { it.username }.toSet()
+        runCatching {
+            con.printLight("/ip/hotspot/cookie", ".id,user")
+                .filter { it["user"] in names }
+                .forEach { row -> row[".id"]?.let { runCatching { con.execute("/ip/hotspot/cookie/remove =.id=$it") } } }
+        }
+        con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
+            if (u.routerId.isBlank()) return@bulk null
+            runCatching { con.execute("/ip/hotspot/user/reset-counters =.id=${u.routerId}") }
+            // نُعيد الصلاحية المطلوبة: المحددة، أو الأصلية للكرت إن لم تكن علامة انتهاء
+            val validity = restoreValidity.ifBlank {
+                u.limitUptime.takeIf { it.isNotBlank() && it.trim() != "1s" } ?: ""
+            }
+            buildString {
+                append("/ip/hotspot/user/set =.id=${u.routerId} =comment=")
+                if (validity.isNotBlank()) append(" =limit-uptime=$validity")
+            }
+        }
+    }
+
+    /** تغيير كلمة المرور لمجموعة كروت */
+    suspend fun bulkSetPassword(
+        r: RouterProfile?, cards: List<UserEntry>, password: (UserEntry) -> String,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        con.bulk(cards, onProgress) { u, path ->
+            if (u.routerId.isBlank()) null else "$path/set =.id=${u.routerId} =password=${password(u)}"
+        }
+    }
+
+    /** تمديد صلاحية مجموعة كروت بإضافة مدة إلى الحد الحالي */
+    suspend fun bulkExtendValidity(
+        r: RouterProfile?, cards: List<UserEntry>, addSeconds: Long,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<BulkResult> = onRouter(r) { con ->
+        con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
+            if (u.routerId.isBlank()) null else {
+                val current = parseUptime(u.limitUptime.takeIf { it.trim() != "1s" }.orEmpty())
+                val next = formatUptime(current + addSeconds)
+                "/ip/hotspot/user/set =.id=${u.routerId} =limit-uptime=$next"
+            }
+        }
+    }
+
+    /** تحويل ثوانٍ إلى صيغة مايكروتك 1d2h3m4s */
+    fun formatUptime(seconds: Long): String {
+        if (seconds <= 0) return "0s"
+        val d = seconds / 86400
+        val h = (seconds % 86400) / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return buildString {
+            if (d > 0) append("${d}d")
+            if (h > 0) append("${h}h")
+            if (m > 0) append("${m}m")
+            if (s > 0 || isEmpty()) append("${s}s")
+        }
+    }
+
+    /** تصفير عدادات كرت واحد وإرجاعه غير مستهلك */
+    suspend fun resetCard(r: RouterProfile?, user: UserEntry): Result<Unit> =
+        bulkResetToUnused(r, listOf(user), "").map { }
 
     /** سجل الجلسات من سجل الراوتر (يحتاج تفعيل تسجيل الهوتسبوت) */
     suspend fun fetchLogHistory(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
