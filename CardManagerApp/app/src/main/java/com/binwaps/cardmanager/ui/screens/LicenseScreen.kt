@@ -111,10 +111,31 @@ fun LicenseScreen(
     val isRenewal = state is LicenseState.Expired ||
         (state as? LicenseState.Licensed)?.let { !it.lifetime && it.daysLeft <= 7 } == true
 
-    /** يفتح واتساب مزوّد الخدمة برسالة الطلب جاهزة (وإن غاب واتساب يشارك نصياً) */
-    fun requestViaWhatsApp() {
+    val cloudReady by com.binwaps.cardmanager.data.Backend.ready.collectAsState()
+    var requestSent by remember { mutableStateOf(false) }
+    val accountId = remember(email) {
+        if (email.isBlank()) "" else com.binwaps.cardmanager.data.Backend.accountId(email, deviceCode)
+    }
+
+    // استماع حي لحساب المشترك — يُفعَّل تلقائياً فور موافقة الأدمن
+    androidx.compose.runtime.DisposableEffect(accountId, cloudReady) {
+        val reg = if (accountId.isNotBlank() && cloudReady)
+            com.binwaps.cardmanager.data.Backend.listenAccount(accountId) { acc ->
+                if (acc != null && acc.approved) activate(acc.key)
+            } else null
+        onDispose { reg?.remove() }
+    }
+
+    /** يرسل الطلب: سحابياً إن كان مُهيّأً (فوري ومع دردشة)، وإلا عبر واتساب */
+    fun sendRequest() {
         LicenseManager.setCustomerName(name)
         LicenseManager.setCustomerPhone(phone)
+        if (cloudReady) {
+            com.binwaps.cardmanager.data.Backend.submitRequest(email, name, phone, deviceCode, isRenewal) { ok, _ ->
+                requestSent = ok
+            }
+            return
+        }
         val message = LicenseLink.requestMessage(deviceCode, name, isRenewal, email, phone)
         val wa = Intent(Intent.ACTION_VIEW, Uri.parse(LicenseLink.whatsappLink(message)))
         val opened = runCatching { context.startActivity(wa); true }.getOrDefault(false)
@@ -211,7 +232,13 @@ fun LicenseScreen(
                 NeonButton("ابدأ التجربة المجانية", Modifier.fillMaxWidth(), Icons.Filled.PersonAdd) {
                     LicenseManager.setCustomerPhone(phone)
                     val msg = LicenseManager.register(email, name)
-                    if (msg != null) error = msg else onActivated()
+                    if (msg != null) {
+                        error = msg
+                    } else {
+                        // يظهر للأدمن كحساب في التجربة فور التسجيل
+                        if (cloudReady) com.binwaps.cardmanager.data.Backend.registerAccount(email, name, phone, deviceCode)
+                        onActivated()
+                    }
                 }
                 Spacer(Modifier.height(7.dp))
                 Text(
@@ -241,15 +268,31 @@ fun LicenseScreen(
                 Spacer(Modifier.height(13.dp))
 
                 NeonButton(
-                    if (isRenewal) "طلب التجديد عبر واتساب" else "طلب الترخيص عبر واتساب",
-                    Modifier.fillMaxWidth(), Icons.Filled.Chat,
-                ) { requestViaWhatsApp() }
+                    when {
+                        requestSent -> "أُرسل الطلب ✓ — بانتظار الموافقة"
+                        cloudReady && isRenewal -> "طلب التجديد"
+                        cloudReady -> "طلب الترخيص"
+                        isRenewal -> "طلب التجديد عبر واتساب"
+                        else -> "طلب الترخيص عبر واتساب"
+                    },
+                    Modifier.fillMaxWidth(), Icons.Filled.Chat, enabled = !requestSent,
+                ) { sendRequest() }
                 Spacer(Modifier.height(7.dp))
                 Text(
-                    "يفتح محادثة واتساب مع مزوّد الخدمة ورسالة الطلب جاهزة — أرسلها فقط، " +
-                        "وسيصلك مفتاح التفعيل لتضغطه فيُفعَّل التطبيق تلقائياً.",
+                    if (cloudReady)
+                        "طلبك يصل مزوّد الخدمة لحظياً، ويمكنك مراسلته بالأسفل. " +
+                            "فور الموافقة يُفعَّل التطبيق تلقائياً دون أي خطوة منك."
+                    else
+                        "يفتح محادثة واتساب مع مزوّد الخدمة ورسالة الطلب جاهزة — أرسلها فقط، " +
+                            "وسيصلك مفتاح التفعيل لتضغطه فيُفعَّل التطبيق تلقائياً.",
                     fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
                 )
+            }
+
+            // الدردشة الحية مع مزوّد الخدمة — تظهر عند تفعيل الربط السحابي
+            if (cloudReady && accountId.isNotBlank()) {
+                Spacer(Modifier.height(14.dp))
+                ChatPanel(accountId = accountId, asAdmin = false)
             }
 
             Spacer(Modifier.height(14.dp))

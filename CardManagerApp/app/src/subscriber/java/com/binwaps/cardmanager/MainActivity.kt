@@ -76,8 +76,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         com.binwaps.cardmanager.data.CrashLogger.install(this)
         com.binwaps.cardmanager.render.CardRenderer.init(this)
+        com.binwaps.cardmanager.data.Backend.init(this)
         Store.init(this)
         LicenseManager.init(this)
+        startCloudAutoActivate()
         handleLink(intent)
 
         setContent {
@@ -200,5 +202,28 @@ class MainActivity : ComponentActivity() {
     private fun handleLink(intent: android.content.Intent?) {
         val key = com.binwaps.cardmanager.license.LicenseLink.parseActivation(intent?.data)
         if (key != null) incomingKey.value = key
+    }
+
+    private var cloudReg: com.google.firebase.firestore.ListenerRegistration? = null
+
+    /**
+     * يستمع لحساب المشترك في السحابة: بمجرد أن يوافق الأدمن ويُصدر المفتاح
+     * يُفعَّل التطبيق تلقائياً دون أي خطوة من المشترك.
+     */
+    private fun startCloudAutoActivate() {
+        val email = LicenseManager.customerEmail()
+        if (email.isBlank()) return
+        val id = com.binwaps.cardmanager.data.Backend.accountId(email, LicenseManager.deviceCode())
+        cloudReg?.remove()
+        cloudReg = com.binwaps.cardmanager.data.Backend.listenAccount(id) { acc ->
+            if (acc != null && acc.approved && acc.key != LicenseManager.savedLicense()) {
+                LicenseManager.activate(acc.key)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        cloudReg?.remove()
+        super.onDestroy()
     }
 }

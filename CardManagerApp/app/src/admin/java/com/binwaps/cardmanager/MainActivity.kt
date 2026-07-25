@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -201,6 +202,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         com.binwaps.cardmanager.data.CrashLogger.install(this)
         com.binwaps.cardmanager.render.CardRenderer.init(this)
+        com.binwaps.cardmanager.data.Backend.init(this)
         AdminStore.init(this)
         handleLink(intent)
         setContent {
@@ -244,7 +246,7 @@ private fun AdminScreen(
     val context = LocalContext.current
     val fmt = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
 
-    var accounts by remember { mutableStateOf(AdminStore.all()) }
+    var localAccounts by remember { mutableStateOf(AdminStore.all()) }
     var editing by remember { mutableStateOf<Account?>(null) }   // الحساب المفتوح للإصدار
     var plan by remember { mutableStateOf(LicenseCore.Plan.MONTH) }
     var override by remember { mutableStateOf(false) }
@@ -253,7 +255,32 @@ private fun AdminScreen(
     var manualDevice by remember { mutableStateOf("") }
     var manualEmail by remember { mutableStateOf("") }
 
-    fun reload() { accounts = AdminStore.all() }
+    // الربط السحابي الحي — الطلبات تصل لحظياً دون رابط
+    val cloudReady by com.binwaps.cardmanager.data.Backend.ready.collectAsState()
+    var cloudAccounts by remember { mutableStateOf<List<com.binwaps.cardmanager.data.CloudAccount>>(emptyList()) }
+    androidx.compose.runtime.DisposableEffect(cloudReady) {
+        val reg = if (cloudReady)
+            com.binwaps.cardmanager.data.Backend.listenAccounts { cloudAccounts = it } else null
+        onDispose { reg?.remove() }
+    }
+
+    fun cloudToAccount(c: com.binwaps.cardmanager.data.CloudAccount) = Account(
+        email = c.email.ifBlank { "device:${c.deviceCode}" },
+        customer = c.name, phone = c.phone, deviceCode = c.deviceCode,
+        boundDevice = c.boundDevice, key = c.key, planCode = c.planCode,
+        issuedAt = c.issuedAt, expiresAt = c.expiresAt,
+        pending = c.status == "pending", requestedAt = c.requestedAt, renewal = c.renewal,
+    )
+
+    // المصدر الحي إن توفر السحاب، وإلا المحلي
+    val accounts = if (cloudReady) cloudAccounts.map { cloudToAccount(it) } else localAccounts
+
+    fun reload() { localAccounts = AdminStore.all() }
+
+    fun accIdOf(acc: Account) =
+        com.binwaps.cardmanager.data.Backend.accountId(
+            acc.email.removePrefix("device:").let { if (it == acc.deviceCode) "" else acc.email }, acc.deviceCode,
+        )
 
     // طلب وصل عبر رابط ← افتحه للإصدار
     androidx.compose.runtime.LaunchedEffect(incoming) {
@@ -268,10 +295,13 @@ private fun AdminScreen(
     fun clipboard() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
     fun issue(acc: Account) {
-        // قاعدة «حساب واحد لجوال واحد»: إن كان البريد مفعّلاً على جهاز آخر، امنع
-        val otherDevice = AdminStore.boundToOtherDevice(acc.email, acc.deviceCode)
-        if (otherDevice != null && !override) {
-            error = "⚠ هذا الحساب (${acc.email}) مربوط بجهاز آخر: $otherDevice — " +
+        // قاعدة «حساب واحد لجوال واحد» — نفحص في السحاب إن توفّر، وإلا محلياً
+        val bound = if (cloudReady)
+            cloudAccounts.firstOrNull { it.email.equals(acc.email, true) && it.approved && it.boundDevice.isNotBlank() }
+                ?.boundDevice?.takeIf { it.trim().uppercase() != acc.deviceCode.trim().uppercase() }
+        else AdminStore.boundToOtherDevice(acc.email, acc.deviceCode)
+        if (bound != null && !override) {
+            error = "⚠ هذا الحساب (${acc.email}) مربوط بجهاز آخر: $bound — " +
                 "لن يعمل على جوالين. اضغط مرة أخرى للنقل إلى الجهاز الجديد رغم ذلك."
             override = true
             return
@@ -289,6 +319,10 @@ private fun AdminScreen(
         )
         AdminStore.upsert(updated)
         reload()
+        // يصل المشترك لحظياً فيُفعَّل تطبيقه تلقائياً
+        if (cloudReady) com.binwaps.cardmanager.data.Backend.issue(
+            accIdOf(acc), key, plan.code, expiry, acc.deviceCode.trim(),
+        )
         generated = updated
         editing = updated
         error = null
@@ -298,7 +332,11 @@ private fun AdminScreen(
         Modifier.fillMaxSize().background(ScreenGradient).verticalScroll(rememberScrollState()).padding(16.dp),
     ) {
         Spacer(Modifier.height(10.dp))
-        SectionHeader("لوحة التراخيص", "الموافقة على الحسابات وإصدار المفاتيح", Icons.Filled.VpnKey)
+        SectionHeader(
+            "لوحة التراخيص",
+            if (cloudReady) "متصل بالسحابة — الطلبات تصل لحظياً" else "الموافقة على الحسابات وإصدار المفاتيح",
+            Icons.Filled.VpnKey,
+        )
         Spacer(Modifier.height(14.dp))
 
         val pending = accounts.filter { it.pending }.sortedByDescending { it.requestedAt }
@@ -309,7 +347,11 @@ private fun AdminScreen(
         Text("طلبات جديدة (${pending.size})", fontSize = 13.sp, color = TextLow)
         Spacer(Modifier.height(8.dp))
         if (pending.isEmpty()) {
-            Text("لا توجد طلبات — تصل تلقائياً عند ضغط المشترك رابط الطلب", fontSize = 11.5.sp, color = TextLow)
+            Text(
+                if (cloudReady) "لا توجد طلبات — ستصل هنا لحظياً فور إرسال المشترك"
+                else "لا توجد طلبات — فعّل الربط السحابي أو استقبلها عبر الرابط",
+                fontSize = 11.5.sp, color = TextLow,
+            )
         }
         pending.forEach { acc ->
             GlassCard(Modifier.fillMaxWidth().padding(bottom = 8.dp), glow = Warn.copy(alpha = 0.35f), padding = 12) {
@@ -331,7 +373,7 @@ private fun AdminScreen(
                             .clickable { editing = acc; plan = LicenseCore.Plan.of(acc.planCode); generated = null; error = null; override = false }
                             .padding(horizontal = 13.dp, vertical = 7.dp),
                     )
-                    IconButton(onClick = { AdminStore.removeByEmail(acc.email); reload() }) {
+                    IconButton(onClick = { AdminStore.removeByEmail(acc.email); if (cloudReady) com.binwaps.cardmanager.data.Backend.deleteAccount(accIdOf(acc)); reload() }) {
                         Icon(Icons.Filled.Delete, "حذف الطلب", tint = TextLow, modifier = Modifier.size(17.dp))
                     }
                 }
@@ -381,6 +423,11 @@ private fun AdminScreen(
                     }
                     GhostButton("إلغاء") { editing = null; error = null; generated = null }
                 }
+            }
+            // دردشة حية مع المشترك عن هذا الحساب
+            if (cloudReady) {
+                Spacer(Modifier.height(12.dp))
+                com.binwaps.cardmanager.ui.screens.ChatPanel(accountId = accIdOf(acc), asAdmin = true)
             }
         }
 
@@ -493,7 +540,7 @@ private fun AdminScreen(
                                 clipboard().setPrimaryClip(ClipData.newPlainText("license", acc.key))
                                 Toast.makeText(context, "تم نسخ المفتاح", Toast.LENGTH_SHORT).show()
                             }) { Icon(Icons.Filled.ContentCopy, "نسخ", tint = Neon, modifier = Modifier.size(17.dp)) }
-                            IconButton(onClick = { AdminStore.removeByEmail(acc.email); reload() }) {
+                            IconButton(onClick = { AdminStore.removeByEmail(acc.email); if (cloudReady) com.binwaps.cardmanager.data.Backend.deleteAccount(accIdOf(acc)); reload() }) {
                                 Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(17.dp))
                             }
                         }

@@ -72,4 +72,8 @@ dependencies {
     implementation("me.legrange:mikrotik:3.0.7")
     // Image loading for template backgrounds
     implementation("io.coil-kt:coil-compose:2.5.0")
+    // Firebase — المزامنة الحية والدردشة بين الأدمن والمشتركين (تهيئة يدوية بلا google-services)
+    implementation(platform("com.google.firebase:firebase-bom:32.7.4"))
+    implementation("com.google.firebase:firebase-firestore-ktx")
+    implementation("com.google.firebase:firebase-auth-ktx")
 }
