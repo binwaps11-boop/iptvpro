@@ -272,6 +272,25 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     PdfExporter.printViaSystem(context, file)
                 }
             }
+            Spacer(Modifier.height(9.dp))
+            GhostButton("صفحة HTML للطباعة من المتصفح", Modifier.fillMaxWidth(), enabled = !busy && template != null) {
+                val t0 = template ?: return@GhostButton
+                busy = true
+                scope.launch {
+                    val file = withContext(Dispatchers.IO) {
+                        com.binwaps.cardmanager.print.HtmlExporter.export(context, t0, users, settings)
+                    }
+                    busy = false
+                    saveBatch()
+                    com.binwaps.cardmanager.print.HtmlExporter.open(context, file)
+                }
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "صفحة HTML تُفتح في أي متصفح على الجوال أو الكمبيوتر وتُطبع منه بنفس المقاسات — " +
+                    "مفيدة لإرسال الكروت لشخص آخر ليطبعها. رمز QR يظهر في PDF فقط.",
+                fontSize = 10.sp, color = TextLow,
+            )
         } else {
             NeonButton("طباعة عبر البلوتوث", Modifier.fillMaxWidth(), Icons.Filled.Bluetooth, enabled = !busy) {
                 openPrinterPicker()
