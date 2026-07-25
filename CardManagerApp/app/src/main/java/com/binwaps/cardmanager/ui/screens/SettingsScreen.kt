@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.QrCode2
@@ -228,8 +229,33 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             }
         }
 
+        // عن التطبيق — المهندس والمصمم ورقم التواصل
+        GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.28f)) {
+            Text("عن التطبيق", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Spacer(Modifier.height(9.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("تطوير وتصميم", fontSize = 12.5.sp, color = TextMid, modifier = Modifier.weight(1f))
+                Text("المهندس علي واقص", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Neon)
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("للتواصل والدعم", fontSize = 12.5.sp, color = TextMid, modifier = Modifier.weight(1f))
+                Text("776831921", fontSize = 13.sp, color = TextHi)
+            }
+            Spacer(Modifier.height(11.dp))
+            GhostButton("تواصل عبر واتساب", Modifier.fillMaxWidth(), Icons.Filled.Chat, color = Lime) {
+                val msg = "السلام عليكم، بخصوص تطبيق مدير الكروت"
+                val wa = android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://wa.me/967776831921?text=" + android.net.Uri.encode(msg)),
+                )
+                runCatching { context.startActivity(wa) }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+
         Text(
-            "مدير الكروت — الإصدار 3.1",
+            "مدير الكروت — الإصدار 3.1  •  المهندس علي واقص",
             fontSize = 11.sp, color = TextLow,
         )
         Spacer(Modifier.height(24.dp))
