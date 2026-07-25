@@ -247,11 +247,12 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
         Spacer(Modifier.height(16.dp))
 
         if (settings.paperType == PaperType.A4) {
-            NeonButton("تصدير PDF ومشاركته", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = !busy) {
+            NeonButton("تصدير PDF ومشاركته", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = !busy && template != null) {
+                val t0 = template ?: return@NeonButton
                 busy = true; progress = 0 to users.size
                 scope.launch {
                     val file = withContext(Dispatchers.IO) {
-                        PdfExporter.export(context, template ?: return@launch, users, settings) { d, t -> progress = d to t }
+                        PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
                     }
                     busy = false; progress = null
                     saveBatch()
@@ -259,11 +260,12 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 }
             }
             Spacer(Modifier.height(9.dp))
-            GhostButton("طباعة عبر النظام (WiFi/USB)", Modifier.fillMaxWidth(), Icons.Filled.Print, enabled = !busy) {
+            GhostButton("طباعة عبر النظام (WiFi/USB)", Modifier.fillMaxWidth(), Icons.Filled.Print, enabled = !busy && template != null) {
+                val t0 = template ?: return@GhostButton
                 busy = true; progress = 0 to users.size
                 scope.launch {
                     val file = withContext(Dispatchers.IO) {
-                        PdfExporter.export(context, template ?: return@launch, users, settings) { d, t -> progress = d to t }
+                        PdfExporter.export(context, t0, users, settings) { d, t -> progress = d to t }
                     }
                     busy = false; progress = null
                     saveBatch()
@@ -280,10 +282,11 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     "طباعة عبر الشبكة (${settings.tcpPrinterIp})",
                     Modifier.fillMaxWidth(), Icons.Filled.Lan, color = Violet, enabled = !busy,
                 ) {
+                    val t0 = template ?: return@GhostButton
                     busy = true; progress = 0 to users.size
                     scope.launch {
                         val conn = ThermalPrinter.tcpPrinter(settings.tcpPrinterIp, settings.tcpPrinterPort)
-                        ThermalPrinter.printCards(conn, template ?: return@launch, users, Store.settings.value) { d, t -> progress = d to t }
+                        ThermalPrinter.printCards(conn, t0, users, Store.settings.value) { d, t -> progress = d to t }
                             .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
                             .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
                         busy = false; progress = null
@@ -316,10 +319,11 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 .fillMaxWidth()
                                 .background(Neon.copy(alpha = 0.07f), RoundedCornerShape(11.dp))
                                 .clickable {
+                                    val t0 = template ?: return@clickable
                                     showPrinterPicker = false
                                     busy = true; progress = 0 to users.size
                                     scope.launch {
-                                        ThermalPrinter.printCards(p, template ?: return@launch, users, Store.settings.value) { d, t -> progress = d to t }
+                                        ThermalPrinter.printCards(p, t0, users, Store.settings.value) { d, t -> progress = d to t }
                                             .onSuccess { saveBatch(); Toast.makeText(context, "تمت طباعة $it كرت", Toast.LENGTH_LONG).show() }
                                             .onFailure { Toast.makeText(context, "فشل الطباعة: ${it.message}", Toast.LENGTH_LONG).show() }
                                         busy = false; progress = null
