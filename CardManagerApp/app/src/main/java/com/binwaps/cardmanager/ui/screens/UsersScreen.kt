@@ -703,6 +703,12 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
     var randomOn by remember { mutableStateOf(settings.freeRules.randomEnabled) }
     var randomCount by remember { mutableStateOf(settings.freeRules.randomCount.toString()) }
     var freeProfile by remember { mutableStateOf(settings.freeRules.freeProfile) }
+    var bonusOn by remember { mutableStateOf(false) }
+    var bonusCount by remember { mutableStateOf("10") }
+    var bonusLength by remember { mutableStateOf("8") }
+    var bonusPrefix by remember { mutableStateOf("B") }
+    var bonusSuffix by remember { mutableStateOf("") }
+    var bonusProfile by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -789,6 +795,25 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                         }
                     }
                 }
+
+                // أكواد بونص — دفعة إضافية برموز أطول وباقة خاصة، للهدايا والمسابقات
+                Text("أكواد بونص", fontSize = 12.sp, color = TextLow)
+                Chip(if (bonusOn) "مع الدفعة ✓" else "إضافة أكواد بونص", bonusOn) { bonusOn = !bonusOn }
+                if (bonusOn) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AppField(bonusCount, { bonusCount = it.filter { c -> c.isDigit() } }, "العدد", Modifier.weight(1f), numeric = true)
+                        AppField(bonusLength, { bonusLength = it.filter { c -> c.isDigit() } }, "طول الرمز", Modifier.weight(1f), numeric = true)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AppField(bonusPrefix, { bonusPrefix = it }, "بادئة", Modifier.weight(1f))
+                        AppField(bonusSuffix, { bonusSuffix = it }, "لاحقة", Modifier.weight(1f))
+                    }
+                    AppField(bonusProfile, { bonusProfile = it }, "باقة البونص (اختياري)", Modifier.fillMaxWidth())
+                    Text(
+                        "تُضاف ${bonusCount.toIntOrNull() ?: 0} كرت بونص بعد الدفعة، بوسم منفصل حتى تميّزها في التقارير",
+                        fontSize = 10.5.sp, color = Lime,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -802,23 +827,37 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     freeProfile = freeProfile,
                 )
                 Store.updateSettings(Store.settings.value.copy(cardMode = mode, freeRules = rules))
-                onGenerate(
-                    UserGenerator.generate(
-                        count = count.toIntOrNull()?.coerceIn(1, 5000) ?: 50,
-                        prefix = prefix,
-                        length = length.toIntOrNull()?.coerceIn(3, 20) ?: 6,
-                        charset = charset,
-                        mode = mode,
-                        passwordLength = passwordLength.toIntOrNull()?.coerceIn(3, 20) ?: 4,
-                        profile = profile,
-                        price = price,
-                        validity = validity,
-                        serialStart = Store.users.value.size + 1,
-                        batchTag = "vc-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
-                            .format(java.util.Date()),
-                        freeRules = rules,
-                    )
+                val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+                    .format(java.util.Date())
+                val main = UserGenerator.generate(
+                    count = count.toIntOrNull()?.coerceIn(1, 5000) ?: 50,
+                    prefix = prefix,
+                    length = length.toIntOrNull()?.coerceIn(3, 20) ?: 6,
+                    charset = charset,
+                    mode = mode,
+                    passwordLength = passwordLength.toIntOrNull()?.coerceIn(3, 20) ?: 4,
+                    profile = profile,
+                    price = price,
+                    validity = validity,
+                    serialStart = Store.users.value.size + 1,
+                    batchTag = "vc-" + stamp,
+                    freeRules = rules,
                 )
+                val bonus = if (!bonusOn) emptyList() else UserGenerator.generate(
+                    count = bonusCount.toIntOrNull()?.coerceIn(1, 2000) ?: 10,
+                    prefix = bonusPrefix,
+                    length = bonusLength.toIntOrNull()?.coerceIn(3, 20) ?: 8,
+                    charset = charset,
+                    mode = mode,
+                    passwordLength = passwordLength.toIntOrNull()?.coerceIn(3, 20) ?: 4,
+                    profile = bonusProfile.ifBlank { profile },
+                    price = price,
+                    validity = validity,
+                    serialStart = Store.users.value.size + main.size + 1,
+                    batchTag = "bonus-" + stamp,
+                    suffix = bonusSuffix,
+                )
+                onGenerate(main + bonus)
             }) { Text("توليد", color = Neon, fontWeight = FontWeight.Bold) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء", color = TextLow) } },

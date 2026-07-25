@@ -27,6 +27,8 @@ object UserGenerator {
         serialStart: Int = 1,
         batchTag: String = "",
         freeRules: FreeCardRules = FreeCardRules(),
+        /** لاحقة تُضاف بعد الرمز — تُستخدم في أكواد البونص */
+        suffix: String = "",
     ): List<UserEntry> {
         // مواضع الكروت المجانية داخل الدفعة
         val freeIdx = freePositions(count, freeRules)
@@ -34,7 +36,7 @@ object UserGenerator {
         return (0 until count).map { i ->
             var name: String
             do {
-                name = prefix + randomString(length, charset)
+                name = prefix + randomString(length, charset) + suffix
             } while (!used.add(name))
             val password = when (mode) {
                 // الهوتسبوت يقبل كلمة مرور فارغة عند الدخول بالاسم فقط
