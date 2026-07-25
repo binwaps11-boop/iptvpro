@@ -7,6 +7,7 @@ import com.binwaps.cardmanager.model.HotspotProfile
 import com.binwaps.cardmanager.model.RouterProfile
 import com.binwaps.cardmanager.model.RouterStatus
 import com.binwaps.cardmanager.model.SessionEntry
+import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -802,4 +803,187 @@ object MikrotikClient {
                 )
             }
         }
+
+    // ===== إدارة الراوتر =====
+
+    /** تعديل كرت واحد على الراوتر: كلمة المرور، الباقة، الملاحظة، والتعطيل */
+    suspend fun updateCard(
+        r: RouterProfile?,
+        user: UserEntry,
+        password: String? = null,
+        profile: String? = null,
+        comment: String? = null,
+        limitUptime: String? = null,
+    ): Result<Unit> = onRouter(r) { con ->
+        if (user.routerId.isBlank()) error("لا يمكن تعديل هذا الكرت — لم يُجلب من الراوتر")
+        val sets = buildString {
+            password?.let { append(" password=$it") }
+            profile?.let { append(" profile=$it") }
+            comment?.let { append(" comment=$it") }
+            limitUptime?.let { append(" limit-uptime=$it") }
+        }
+        if (sets.isBlank()) return@onRouter
+        val paths = when (user.source) {
+            CardSource.USER_MANAGER -> listOf("/user-manager/user", "/tool/user-manager/user")
+            else -> listOf("/ip/hotspot/user")
+        }
+        var ok = false
+        for (p in paths) {
+            if (runCatching { con.execute("$p/set .id=${user.routerId}$sets") }.isSuccess) { ok = true; break }
+        }
+        if (!ok) error("تعذّر تعديل الكرت على الراوتر")
+    }
+
+    /** قائمة عناوين DHCP الممنوحة — تكشف الأجهزة الموجودة على الشبكة */
+    suspend fun fetchDhcpLeases(r: RouterProfile?): Result<List<DhcpLease>> = onRouter(r) { con ->
+        con.tryPrintLight(
+            ".id,address,mac-address,host-name,status,expires-after,dynamic,comment",
+            "/ip/dhcp-server/lease",
+        ).map { row ->
+            DhcpLease(
+                id = row[".id"].orEmpty(),
+                address = row["address"].orEmpty(),
+                macAddress = row["mac-address"].orEmpty(),
+                hostName = row["host-name"].orEmpty(),
+                status = row["status"].orEmpty(),
+                expiresAfter = row["expires-after"].orEmpty(),
+                dynamic = row["dynamic"] == "true",
+                comment = row["comment"].orEmpty(),
+            )
+        }
+    }
+
+    /** المنافذ وحركة البيانات عليها */
+    suspend fun fetchInterfaces(r: RouterProfile?): Result<List<InterfaceStat>> = onRouter(r) { con ->
+        con.tryPrintLight(
+            ".id,name,type,running,disabled,rx-byte,tx-byte",
+            "/interface",
+        ).map { row ->
+            InterfaceStat(
+                name = row["name"].orEmpty(),
+                type = row["type"].orEmpty(),
+                running = row["running"] == "true",
+                disabled = row["disabled"] == "true",
+                rxBytes = row["rx-byte"]?.toLongOrNull() ?: 0,
+                txBytes = row["tx-byte"]?.toLongOrNull() ?: 0,
+            )
+        }
+    }
+
+    /** أجهزة محجوبة أو مثبّتة في الهوتسبوت (ip-binding) */
+    suspend fun fetchIpBindings(r: RouterProfile?): Result<List<IpBinding>> = onRouter(r) { con ->
+        con.tryPrintLight(
+            ".id,mac-address,address,to-address,type,comment,disabled",
+            "/ip/hotspot/ip-binding",
+        ).map { row ->
+            IpBinding(
+                id = row[".id"].orEmpty(),
+                macAddress = row["mac-address"].orEmpty(),
+                address = row["address"].orEmpty(),
+                type = row["type"].orEmpty(),
+                comment = row["comment"].orEmpty(),
+                disabled = row["disabled"] == "true",
+            )
+        }
+    }
+
+    /** حجب جهاز عن الشبكة بعنوانه الفيزيائي */
+    suspend fun blockMac(r: RouterProfile?, mac: String, note: String = ""): Result<Unit> = onRouter(r) { con ->
+        val comment = if (note.isBlank()) "" else " comment=$note"
+        con.execute("/ip/hotspot/ip-binding/add mac-address=$mac type=blocked$comment")
+        Unit
+    }
+
+    /** السماح لجهاز بالمرور بدون كرت */
+    suspend fun bypassMac(r: RouterProfile?, mac: String, note: String = ""): Result<Unit> = onRouter(r) { con ->
+        val comment = if (note.isBlank()) "" else " comment=$note"
+        con.execute("/ip/hotspot/ip-binding/add mac-address=$mac type=bypassed$comment")
+        Unit
+    }
+
+    suspend fun removeIpBinding(r: RouterProfile?, id: String): Result<Unit> = onRouter(r) { con ->
+        con.execute("/ip/hotspot/ip-binding/remove .id=$id")
+        Unit
+    }
+
+    /** حفظ نسخة احتياطية على ذاكرة الراوتر */
+    suspend fun backupRouter(r: RouterProfile?, name: String): Result<String> = onRouter(r) { con ->
+        con.execute("/system/backup/save name=$name")
+        "$name.backup"
+    }
+
+    /** تصدير الإعدادات نصياً — يعيد الأسطر كما يرسلها الراوتر */
+    suspend fun exportConfig(r: RouterProfile?): Result<String> = onRouter(r) { con ->
+        val rows = runCatching { con.execute("/export") }.getOrElse { emptyList() }
+        rows.joinToString("\n") { row -> row.values.joinToString(" ") }
+    }
+
+    /** إعادة تشغيل الراوتر */
+    suspend fun rebootRouter(r: RouterProfile?): Result<Unit> = onRouter(r) { con ->
+        runCatching { con.execute("/system/reboot") }
+        Unit
+    }
+
+    /** الخدمات المفعّلة (api، www، ssh…) — لتشخيص مشاكل الاتصال */
+    suspend fun fetchServices(r: RouterProfile?): Result<List<Triple<String, String, Boolean>>> =
+        onRouter(r) { con ->
+            con.tryPrintLight("name,port,disabled", "/ip/service").map { row ->
+                Triple(row["name"].orEmpty(), row["port"].orEmpty(), row["disabled"] != "true")
+            }
+        }
+
+    /**
+     * نقل كروت بين الهوتسبوت واليوزر منجر.
+     * يُنشئ الكروت في الوجهة ثم يحذفها من المصدر إن طُلب ذلك.
+     */
+    suspend fun moveCards(
+        r: RouterProfile?,
+        cards: List<UserEntry>,
+        to: UploadTarget,
+        deleteFromSource: Boolean,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<Int> {
+        if (cards.isEmpty()) return Result.success(0)
+        val create = when (to) {
+            UploadTarget.HOTSPOT -> createHotspotUsers(r, cards) { d, t -> onProgress(d, t) }
+            UploadTarget.USER_MANAGER -> createUserManagerUsers(r, cards) { d, t -> onProgress(d, t) }
+        }
+        create.onFailure { return Result.failure(it) }
+        if (!deleteFromSource) return Result.success(cards.size)
+        var removed = 0
+        cards.forEach { c -> if (removeUser(r, c).isSuccess) removed++ }
+        return Result.success(removed)
+    }
 }
+
+/** عنوان DHCP ممنوح لجهاز */
+data class DhcpLease(
+    val id: String = "",
+    val address: String = "",
+    val macAddress: String = "",
+    val hostName: String = "",
+    val status: String = "",
+    val expiresAfter: String = "",
+    val dynamic: Boolean = true,
+    val comment: String = "",
+)
+
+/** منفذ على الراوتر وحركة البيانات عليه */
+data class InterfaceStat(
+    val name: String = "",
+    val type: String = "",
+    val running: Boolean = false,
+    val disabled: Boolean = false,
+    val rxBytes: Long = 0,
+    val txBytes: Long = 0,
+)
+
+/** ربط عنوان فيزيائي في الهوتسبوت — محجوب أو مسموح بدون كرت */
+data class IpBinding(
+    val id: String = "",
+    val macAddress: String = "",
+    val address: String = "",
+    val type: String = "",
+    val comment: String = "",
+    val disabled: Boolean = false,
+)

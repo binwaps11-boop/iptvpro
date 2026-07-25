@@ -40,6 +40,7 @@ import com.binwaps.cardmanager.ui.screens.LicenseScreen
 import com.binwaps.cardmanager.ui.screens.PrintScreen
 import com.binwaps.cardmanager.ui.screens.ProfilesScreen
 import com.binwaps.cardmanager.ui.screens.ReportsScreen
+import com.binwaps.cardmanager.ui.screens.RouterAdminScreen
 import com.binwaps.cardmanager.ui.screens.SalesScreen
 import com.binwaps.cardmanager.ui.screens.SessionsScreen
 import com.binwaps.cardmanager.ui.screens.SettingsScreen
@@ -174,6 +175,7 @@ class MainActivity : ComponentActivity() {
                         composable("active") { SessionsScreen() }
                         composable("sales") { SalesScreen() }
                         composable("reports") { ReportsScreen() }
+                        composable("router") { RouterAdminScreen() }
                         composable("settings") {
                             SettingsScreen(
                                 onDisconnect = { navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } } },

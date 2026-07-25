@@ -252,9 +252,15 @@ fun DashboardScreen(navController: NavController) {
             HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("license")
             }
+            HomeTile("إدارة الراوتر", Icons.Filled.Router, Neon, null, Modifier.weight(1f)) {
+                navController.navigate("router")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("الإعدادات", Icons.Filled.Settings, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("settings")
             }
+            Box(Modifier.weight(1f))
         }
         Spacer(Modifier.height(20.dp))
     }
