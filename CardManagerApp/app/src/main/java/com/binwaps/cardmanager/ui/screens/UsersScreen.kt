@@ -529,6 +529,19 @@ fun UsersScreen() {
                     AppField(pw, { pw = it }, "كلمة المرور", Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
                     AppField(prof, { prof = it }, "الباقة", Modifier.fillMaxWidth())
+                    // اختيار مباشر من باقات الراوتر — بدل الكتابة اليدوية
+                    val routerProfiles = Store.profiles.collectAsState().value
+                    if (routerProfiles.isNotEmpty()) {
+                        Spacer(Modifier.height(7.dp))
+                        Row(
+                            Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            routerProfiles.forEach { p ->
+                                Chip(p.name, prof == p.name) { prof = p.name }
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
                     AppField(validity, { validity = it }, "الصلاحية (مثل 30d أو 12h)", Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))

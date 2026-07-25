@@ -57,6 +57,58 @@ object LicenseLink {
         )
     }
 
+    // ===== تحليل الطلب من نص ملصوق =====
+
+    /** رمز الجهاز بالشكل XXXX-XXXX — مجموعات المفتاح خمسة أحرف فلا تتطابق معه */
+    private val DEVICE_CODE_RE = Regex("\\b[A-Z0-9]{4}-[A-Z0-9]{4}\\b")
+
+    fun isDeviceCode(s: String): Boolean = DEVICE_CODE_RE.matches(s.trim().uppercase())
+
+    /** يستخرج رمز الجهاز من أي نص — رسالة كاملة أو رابط أو الرمز وحده */
+    fun extractDeviceCode(text: String): String? =
+        DEVICE_CODE_RE.find(text.uppercase())?.value
+
+    /**
+     * يحلّل أي نص ملصوق يحوي طلب ترخيص — رسالة واتساب كاملة، رابطاً، جزءاً
+     * مقصوصاً منه، أو الرمز وحده — ويستخرج الجهاز والبريد والاسم والجوال.
+     *
+     * واتساب لا يجعل روابط cardmanager-admin:// قابلة للضغط، فيلصق الأدمن
+     * الرسالة نصاً — وهذه الدالة تفهمها مهما كان شكلها أو ترميزها.
+     */
+    fun parseRequestText(text: String): Request? {
+        val t = text.trim()
+        if (t.isEmpty()) return null
+
+        // 1) رابط كامل داخل النص — Uri يتكفل بفك ترميز المعاملات
+        Regex("$SCHEME_ADMIN://\\S+").find(t)?.let { m ->
+            runCatching { parseRequest(Uri.parse(m.value)) }.getOrNull()?.let { return it }
+        }
+
+        // 2) معاملات مبعثرة (نص منسوخ جزئياً من الرابط) — تُفك يدوياً
+        fun param(k: String): String {
+            val raw = Regex("(?:^|[?&])$k=([^&\\s]+)").find(t)?.groupValues?.get(1) ?: return ""
+            return runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+        }
+
+        val device = extractDeviceCode(param("d")) ?: extractDeviceCode(t) ?: return null
+        val email = param("e").ifBlank {
+            Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}").find(t)?.value.orEmpty()
+        }
+        val phone = param("p").ifBlank {
+            Regex("(?<!\\d)\\d{9,15}(?!\\d)").find(t)?.value.orEmpty()
+        }
+        val name = param("n").ifBlank {
+            Regex("الاسم[:：]\\s*(.+)").find(t)?.groupValues?.get(1)?.trim().orEmpty()
+        }
+        return Request(
+            deviceCode = device,
+            name = name,
+            renewal = param("r") == "1" || t.contains("تجديد"),
+            email = email,
+            phone = phone,
+        )
+    }
+
     /** رقم واتساب مزوّد الخدمة (اليمن +967) — يُفتح إليه طلب الترخيص مباشرة */
     const val WHATSAPP_NUMBER = "967776831921"
 
@@ -95,6 +147,18 @@ object LicenseLink {
     fun parseActivation(uri: Uri?): String? {
         if (uri == null || uri.scheme != SCHEME_APP) return null
         return uri.getQueryParameter("k")?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * يستخرج مفتاح التفعيل من أي نص ملصوق — رابط تفعيل، رسالة واتساب كاملة،
+     * أو المفتاح وحده — حتى لا تفسده الكلمات المحيطة به عند التفعيل.
+     */
+    fun extractKey(text: String): String? {
+        Regex("$SCHEME_APP://\\S+").find(text)?.let { m ->
+            runCatching { parseActivation(Uri.parse(m.value)) }.getOrNull()?.let { return it }
+        }
+        // المفتاح: سلسلة طويلة من مجموعات Base32 مفصولة بشرطات (~24 مجموعة)
+        return Regex("(?:[A-Z0-9]{2,5}-){10,}[A-Z0-9]{1,5}").find(text.uppercase())?.value
     }
 
     /** الرسالة التي يرسلها الأدمن للمشترك */

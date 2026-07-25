@@ -138,7 +138,7 @@ object LicenseManager {
     /** محاولة تفعيل ترخيص. يعيد رسالة الخطأ أو null عند النجاح */
     fun activate(licenseText: String): String? {
         val info = LicenseCore.verify(appContext, licenseText)
-            ?: return "مفتاح غير صالح، أو صادر لجهاز آخر"
+            ?: return LicenseCore.diagnose(appContext, licenseText)
         if (!info.lifetime && info.expiryMillis < trustedNow()) {
             return "هذا المفتاح منتهي الصلاحية"
         }

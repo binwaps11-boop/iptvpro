@@ -115,6 +115,12 @@ fun DashboardScreen(navController: NavController) {
 
     LaunchedEffect(connected) {
         if (connected && status.hotspotUsers < 0) refreshStats()
+        // جلب الباقات تلقائياً بالخلفية — لتظهر في السريع والكروت والطباعة دون أي خطوة
+        if (connected && Store.profiles.value.isEmpty()) {
+            scope.launch {
+                MikrotikClient.fetchProfiles(Store.activeRouter()).onSuccess { Store.setProfiles(it) }
+            }
+        }
         while (connected) {
             refresh()
             delay(20_000)

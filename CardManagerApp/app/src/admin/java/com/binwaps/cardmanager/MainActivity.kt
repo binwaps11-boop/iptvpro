@@ -307,21 +307,29 @@ private fun AdminScreen(
             return
         }
         override = false
+        // استخراج رمز الجهاز الصحيح مهما كان شكل النص المحفوظ — لصقُ رابطٍ أو
+        // رسالة كاملة مكان الرمز كان يُصدر مفتاحاً لجهاز وهمي فيرفضه المشترك
+        val code = LicenseLink.extractDeviceCode(acc.deviceCode)
+        if (code == null) {
+            error = "رمز الجهاز غير صالح — يجب أن يكون بالشكل XXXX-XXXX. " +
+                "انسخ رسالة المشترك كاملة واضغط «لصق الطلب» وسيستخرج التطبيق الرمز بنفسه."
+            return
+        }
         val expiry = expiryFor(plan)
-        val key = LicenseCore.generate(AdminKeys.PRIVATE_KEY_B64, acc.deviceCode, expiry, plan)
+        val key = LicenseCore.generate(AdminKeys.PRIVATE_KEY_B64, code, expiry, plan)
         if (key == null) {
             error = "رمز الجهاز غير صحيح — تأكد من نسخه كاملاً"
             return
         }
         val updated = acc.copy(
             key = key, planCode = plan.code, issuedAt = System.currentTimeMillis(),
-            expiresAt = expiry, pending = false, boundDevice = acc.deviceCode.trim(),
+            expiresAt = expiry, pending = false, boundDevice = code, deviceCode = code,
         )
         AdminStore.upsert(updated)
         reload()
         // يصل المشترك لحظياً فيُفعَّل تطبيقه تلقائياً
         if (cloudReady) com.binwaps.cardmanager.data.Backend.issue(
-            accIdOf(acc), key, plan.code, expiry, acc.deviceCode.trim(),
+            accIdOf(acc), key, plan.code, expiry, code,
         )
         generated = updated
         editing = updated
@@ -353,6 +361,22 @@ private fun AdminScreen(
                 fontSize = 11.5.sp, color = TextLow,
             )
         }
+        // واتساب لا يجعل رابط الطلب قابلاً للضغط — فالأدمن ينسخ رسالة المشترك
+        // كاملة ويضغط هنا، والتطبيق يستخرج الجهاز والبريد والاسم بنفسه
+        GhostButton("لصق طلب من واتساب", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
+            val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+            val req = LicenseLink.parseRequestText(text)
+            if (req == null) {
+                Toast.makeText(context, "لم يُعثر على طلب في الحافظة — انسخ رسالة المشترك كاملة ثم أعد المحاولة", Toast.LENGTH_LONG).show()
+            } else {
+                AdminStore.recordRequest(req)
+                reload()
+                editing = AdminStore.byEmail(req.email.ifBlank { "device:${req.deviceCode}" })
+                generated = null; error = null; override = false
+                Toast.makeText(context, "تم التقاط الطلب — الجهاز ${req.deviceCode}", Toast.LENGTH_SHORT).show()
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         pending.forEach { acc ->
             GlassCard(Modifier.fillMaxWidth().padding(bottom = 8.dp), glow = Warn.copy(alpha = 0.35f), padding = 12) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -481,16 +505,29 @@ private fun AdminScreen(
             Spacer(Modifier.height(7.dp))
             AppField(manualDevice, { manualDevice = it }, "رمز جهاز المشترك", Modifier.fillMaxWidth())
             Spacer(Modifier.height(7.dp))
-            GhostButton("لصق رمز الجهاز", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
+            GhostButton("لصق الطلب / رمز الجهاز", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
                 val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                if (text.isNotBlank()) manualDevice = text.trim().lines().last { it.isNotBlank() }.trim()
+                val req = LicenseLink.parseRequestText(text)
+                if (req != null) {
+                    manualDevice = req.deviceCode
+                    if (req.email.isNotBlank()) manualEmail = req.email
+                } else {
+                    manualDevice = LicenseLink.extractDeviceCode(text)
+                        ?: text.trim().lines().lastOrNull { it.isNotBlank() }?.trim().orEmpty()
+                }
+            }
+            // تنبيه فوري إن كان الرمز المكتوب ليس بالشكل الصحيح
+            if (manualDevice.isNotBlank() && LicenseLink.extractDeviceCode(manualDevice) == null) {
+                Spacer(Modifier.height(6.dp))
+                Text("الرمز يجب أن يكون بالشكل XXXX-XXXX — انسخ رسالة المشترك كاملة والصقها", fontSize = 10.5.sp, color = Danger)
             }
             Spacer(Modifier.height(10.dp))
             Box {
                 NeonButton("تجهيز الحساب للإصدار", Modifier.fillMaxWidth(), Icons.Filled.VpnKey, enabled = manualDevice.isNotBlank()) {
-                    val email = manualEmail.trim().ifBlank { "device:${manualDevice.trim()}" }
+                    val device = LicenseLink.extractDeviceCode(manualDevice) ?: manualDevice.trim()
+                    val email = manualEmail.trim().ifBlank { "device:$device" }
                     val acc = AdminStore.byEmail(email) ?: Account(email = email)
-                    editing = acc.copy(email = email, deviceCode = manualDevice.trim())
+                    editing = acc.copy(email = email, deviceCode = device)
                     generated = null; error = null; override = false
                     manualDevice = ""; manualEmail = ""
                 }

@@ -130,11 +130,32 @@ object LicenseCore {
         }.getOrNull()
     }
 
+    /**
+     * تشخيص سبب رفض المفتاح — رسالة دقيقة بدل «غير صالح» العامة،
+     * فيعرف المشترك فوراً إن كان المفتاح ناقص النسخ أو لجهاز آخر.
+     */
+    fun diagnose(context: Context, licenseText: String): String {
+        val bytes = runCatching { base32Decode(normalize(licenseText)) }.getOrNull()
+            ?: return "المفتاح غير مقروء — انسخه من رسالة مزوّد الخدمة كما هو"
+        if (bytes.size < PAYLOAD_SIZE + 64) {
+            return "المفتاح غير مكتمل — انسخه كاملاً من أول حرف إلى آخر حرف ثم الصقه"
+        }
+        val payload = bytes.copyOfRange(0, PAYLOAD_SIZE)
+        val fp = deviceFingerprint(context)
+        for (i in 0 until 5) if (payload[i] != fp[i]) {
+            return "هذا المفتاح صادر لجهاز آخر — أرسل رمز جهازك الظاهر أعلاه لمزوّد الخدمة ليصدر مفتاحاً لهذا الجهاز"
+        }
+        return "المفتاح غير صالح — تأكد من نسخه دون أي تعديل"
+    }
+
     // ===== أدوات =====
 
-    private fun normalize(s: String) = s.uppercase()
-        .replace('O', '0').replace('I', '1').replace('L', '1')
-        .filter { it in ALPHABET }
+    /**
+     * تطبيع النص: أحرف كبيرة ثم إسقاط الفواصل والمسافات فقط.
+     * تحذير تاريخي: كان هنا استبدال L→1 ثم إسقاط 1 لأنها ليست في الأبجدية —
+     * فأي مفتاح يحوي حرف L (أغلب المفاتيح) كان يتشوه ويُرفض. لا تُعِد ذلك.
+     */
+    private fun normalize(s: String) = s.uppercase().filter { it in ALPHABET }
 
     private fun formatGroups(s: String, size: Int) =
         s.chunked(size).joinToString("-")

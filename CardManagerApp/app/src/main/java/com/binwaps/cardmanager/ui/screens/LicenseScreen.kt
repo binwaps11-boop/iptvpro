@@ -312,7 +312,8 @@ fun LicenseScreen(
                     if (text.isBlank()) {
                         Toast.makeText(context, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
                     } else {
-                        key = LicenseLink.parseActivation(Uri.parse(text.trim())) ?: text.trim()
+                        // يستخرج المفتاح من الرسالة كاملة أو الرابط — لا يتأثر بالنص المحيط
+                        key = LicenseLink.extractKey(text) ?: text.trim()
                         error = null
                     }
                 }
@@ -340,7 +341,7 @@ fun LicenseScreen(
 
                 Spacer(Modifier.height(12.dp))
                 NeonButton("تفعيل", Modifier.fillMaxWidth(), Icons.Filled.VerifiedUser, enabled = key.isNotBlank()) {
-                    activate(key)
+                    activate(LicenseLink.extractKey(key) ?: key)
                 }
             }
         }

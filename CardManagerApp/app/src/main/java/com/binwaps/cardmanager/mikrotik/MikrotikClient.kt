@@ -178,6 +178,25 @@ object MikrotikClient {
         return emptyList()
     }
 
+    /**
+     * عدّ فوري على الراوتر دون نقل أي صفوف: `count-only` يجعل الراوتر يعيد
+     * الرقم وحده في حقل `ret` — على دومين بعيد هذا الفرق بين تعليقٍ لدقائق
+     * (نقل عشرات آلاف المستخدمين) ورقمٍ يصل في أجزاء من الثانية.
+     */
+    internal fun ApiConnection.countOnly(path: String, where: String = ""): Int? =
+        runCatching {
+            val cmd = "$path/print count-only" + if (where.isBlank()) "" else " where $where"
+            execute(cmd)?.firstOrNull()?.get("ret")?.trim()?.toIntOrNull()
+        }.getOrNull()
+
+    internal fun ApiConnection.tryCountOnly(where: String = "", vararg paths: String): Int? {
+        for (p in paths) {
+            val c = countOnly(p, where)
+            if (c != null) return c
+        }
+        return null
+    }
+
     // ===== الحالة =====
 
     /**
@@ -205,19 +224,39 @@ object MikrotikClient {
         )
     }
 
-    /** عدادات الكروت — تُجلب بحقول مختصرة وعند الطلب فقط */
+    /**
+     * عدادات الكروت — بـ count-only يعيد الراوتر الأرقام فوراً دون نقل صف واحد،
+     * فتظهر العدادات في أقل من ثانية حتى على دومين بعيد ببطء عالٍ.
+     */
     suspend fun fetchCardStats(r: RouterProfile?): Result<RouterStatus> = onRouter(r) { con ->
-        val hotspotRows = con
-            .printLight("/ip/hotspot/user", "name,limit-uptime,uptime,limit-bytes-total,bytes-in,bytes-out,disabled,comment")
-            .filter { (it["name"] ?: "") != "default-trial" }
-        val used = hotspotRows.count { classify(it) != CardStatus.UNUSED }
-        val umCount = con.tryPrintLight("name", "/user-manager/user", "/tool/user-manager/user").size
-        RouterStatus(
-            activeUsers = -1,
-            hotspotUsers = hotspotRows.size,
-            userManagerUsers = umCount,
-            usedUsers = used,
-        )
+        val hs = "/ip/hotspot/user"
+        val total = con.countOnly(hs, "name!=default-trial") ?: con.countOnly(hs)
+        if (total != null) {
+            // المستعملة: دخلت ولو مرة (uptime > 0) أو معلّمة منتهية بأسلوب MIKHMON
+            // (limit-uptime=1s) أو معطّلة — نفس منطق classify لكن يعدّه الراوتر بنفسه
+            val used = con.countOnly(hs, "uptime>0s or limit-uptime=1s or disabled=yes")
+                ?: con.countOnly(hs, "uptime>0s")
+            val um = con.tryCountOnly("", "/user-manager/user", "/tool/user-manager/user") ?: 0
+            RouterStatus(
+                activeUsers = con.countOnly("/ip/hotspot/active") ?: -1,
+                hotspotUsers = total,
+                userManagerUsers = um,
+                usedUsers = used ?: -1,
+            )
+        } else {
+            // راوتر قديم جداً لا يدعم count-only — الطريقة الكاملة كخطة أخيرة
+            val hotspotRows = con
+                .printLight(hs, "name,limit-uptime,uptime,limit-bytes-total,bytes-in,bytes-out,disabled,comment")
+                .filter { (it["name"] ?: "") != "default-trial" }
+            val used = hotspotRows.count { classify(it) != CardStatus.UNUSED }
+            val umCount = con.tryPrintLight("name", "/user-manager/user", "/tool/user-manager/user").size
+            RouterStatus(
+                activeUsers = -1,
+                hotspotUsers = hotspotRows.size,
+                userManagerUsers = umCount,
+                usedUsers = used,
+            )
+        }
     }
 
     // ===== تصنيف حالة الكرت =====
@@ -464,12 +503,31 @@ object MikrotikClient {
 
     // ===== الباقات =====
 
-    /** باقات الهوتسبوت واليوزر منجر معاً، مع عدد الكروت في كل باقة */
+    /**
+     * باقات الهوتسبوت واليوزر منجر معاً، مع عدد الكروت في كل باقة.
+     * جداول الباقات صغيرة فتصل فوراً، وعدّ كروت كل باقة يتم على الراوتر
+     * نفسه بـ count-only — لا يُنقل أي مستخدم عبر الشبكة إطلاقاً.
+     */
     suspend fun fetchProfiles(r: RouterProfile?): Result<List<HotspotProfile>> = onRouter(r) { con ->
-        // حقل واحد فقط للعدّ — وليس كل بيانات المستخدمين
-        val hotspotUsers = runCatching { con.printLight("/ip/hotspot/user", "profile") }
-            .getOrDefault(emptyList())
-        val umUsers = con.tryPrintLight("group,actual-profile,profile", "/user-manager/user", "/tool/user-manager/user")
+        // إن فشل count-only (راوتر قديم جداً) نجلب قائمة الحقول المختصرة مرة واحدة كخطة بديلة
+        var hotspotUsersFallback: List<Map<String, String>>? = null
+        fun hotspotCount(name: String): Int {
+            con.countOnly("/ip/hotspot/user", "profile=${q(name)}")?.let { return it }
+            val list = hotspotUsersFallback ?: runCatching { con.printLight("/ip/hotspot/user", "profile") }
+                .getOrDefault(emptyList()).also { hotspotUsersFallback = it }
+            return list.count { it["profile"] == name }
+        }
+
+        var umUsersFallback: List<Map<String, String>>? = null
+        fun umCount(name: String): Int {
+            // v7: ربط المستخدم بالباقة في جدول user-profile — v6: حقل group على المستخدم
+            con.countOnly("/user-manager/user-profile", "profile=${q(name)}")?.let { return it }
+            con.countOnly("/tool/user-manager/user", "group=${q(name)}")?.let { return it }
+            val list = umUsersFallback ?: con.tryPrintLight(
+                "group,actual-profile,profile", "/user-manager/user", "/tool/user-manager/user",
+            ).also { umUsersFallback = it }
+            return list.count { (it["group"] ?: it["actual-profile"] ?: it["profile"]) == name }
+        }
 
         val hotspotProfiles = con.tryList("/ip/hotspot/user/profile/print").map { row ->
             val name = row["name"].orEmpty()
@@ -480,7 +538,7 @@ object MikrotikClient {
                 sessionTimeout = row["session-timeout"].orEmpty(),
                 sharedUsers = row["shared-users"] ?: "1",
                 source = CardSource.HOTSPOT,
-                userCount = hotspotUsers.count { it["profile"] == name },
+                userCount = hotspotCount(name),
             )
         }
 
@@ -495,7 +553,7 @@ object MikrotikClient {
                     sessionTimeout = row["validity"] ?: row["session-timeout"].orEmpty(),
                     sharedUsers = row["shared-users"] ?: "1",
                     source = CardSource.USER_MANAGER,
-                    userCount = umUsers.count { (it["group"] ?: it["actual-profile"] ?: it["profile"]) == name },
+                    userCount = umCount(name),
                 )
             }
 
