@@ -19,14 +19,28 @@ object LicenseLink {
 
     // ===== طلب الترخيص (من المشترك إلى الأدمن) =====
 
-    data class Request(val deviceCode: String, val name: String, val renewal: Boolean)
+    data class Request(
+        val deviceCode: String,
+        val name: String,
+        val renewal: Boolean,
+        val email: String = "",
+        val phone: String = "",
+    )
 
-    fun buildRequest(deviceCode: String, name: String, renewal: Boolean = false): String =
+    fun buildRequest(
+        deviceCode: String,
+        name: String,
+        renewal: Boolean = false,
+        email: String = "",
+        phone: String = "",
+    ): String =
         Uri.Builder()
             .scheme(SCHEME_ADMIN)
             .authority("request")
             .appendQueryParameter("d", deviceCode)
             .apply { if (name.isNotBlank()) appendQueryParameter("n", name) }
+            .apply { if (email.isNotBlank()) appendQueryParameter("e", email) }
+            .apply { if (phone.isNotBlank()) appendQueryParameter("p", phone) }
             .apply { if (renewal) appendQueryParameter("r", "1") }
             .build()
             .toString()
@@ -38,6 +52,8 @@ object LicenseLink {
             deviceCode = device,
             name = uri.getQueryParameter("n").orEmpty(),
             renewal = uri.getQueryParameter("r") == "1",
+            email = uri.getQueryParameter("e").orEmpty(),
+            phone = uri.getQueryParameter("p").orEmpty(),
         )
     }
 
@@ -59,7 +75,7 @@ object LicenseLink {
         appendLine("رمز الجهاز: $deviceCode")
         appendLine()
         appendLine("اضغط الرابط لفتحه في لوحة التراخيص:")
-        append(buildRequest(deviceCode, name, renewal))
+        append(buildRequest(deviceCode, name, renewal, email, phone))
     }
 
     /** رابط واتساب مباشر لمزوّد الخدمة مع الرسالة جاهزة */
