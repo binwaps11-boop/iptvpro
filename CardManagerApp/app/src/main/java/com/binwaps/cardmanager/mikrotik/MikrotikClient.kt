@@ -159,45 +159,69 @@ object MikrotikClient {
     ): BulkResult {
         if (cmds.isEmpty()) return BulkResult(0, 0)
         firstPipelineError.set(null)
-        val ok = java.util.concurrent.atomic.AtomicInteger(0)
-        val failed = java.util.concurrent.atomic.AtomicInteger(0)
-        val done = java.util.concurrent.atomic.AtomicInteger(0)
-        val latch = java.util.concurrent.CountDownLatch(cmds.size)
-        // حدّ الأوامر المعلّقة حتى لا نغرق راوترات ضعيفة
-        val inFlight = java.util.concurrent.Semaphore(32)
+        val total = cmds.size
+        val succeeded = java.util.concurrent.atomic.AtomicInteger(0)
+        val progressed = java.util.concurrent.atomic.AtomicInteger(0)
 
-        cmds.forEachIndexed { index, cmd ->
-            inFlight.acquire()
-            val listener = object : me.legrange.mikrotik.ResultListener {
-                private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
-                private fun finish(success: Boolean) {
-                    if (!finished.compareAndSet(false, true)) return
-                    if (success) ok.incrementAndGet() else failed.incrementAndGet()
-                    onDone(index, success)
-                    onProgress(done.incrementAndGet(), cmds.size)
+        // جولات: الدفعة كاملة، ثم إعادة صامتة لما فشل فقط — «صفر أخطاء» عملياً
+        // دون أن يرى المستخدم فشلاً عابراً أو يعيد شيئاً بنفسه
+        val retries = 2
+        var pending: List<Int> = cmds.indices.toList()
+        var round = 0
+        while (pending.isNotEmpty() && round <= retries) {
+            val lastRound = round == retries
+            val failedNow = java.util.Collections.synchronizedList(mutableListOf<Int>())
+            val latch = java.util.concurrent.CountDownLatch(pending.size)
+            // نافذة كبيرة تُبقي الأنبوب ممتلئاً فوق زمن الذهاب والإياب —
+            // أساس هدف «آلاف الكروت في أقل من دقيقة» حتى على دومين بعيد
+            val inFlight = java.util.concurrent.Semaphore(128)
+
+            for (index in pending) {
+                inFlight.acquire()
+                val listener = object : me.legrange.mikrotik.ResultListener {
+                    private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+                    private fun finish(success: Boolean) {
+                        if (!finished.compareAndSet(false, true)) return
+                        if (success) {
+                            succeeded.incrementAndGet()
+                            onDone(index, true)
+                            onProgress(progressed.incrementAndGet().coerceAtMost(total), total)
+                        } else {
+                            failedNow.add(index)
+                            if (lastRound) {
+                                onDone(index, false)
+                                onProgress(progressed.incrementAndGet().coerceAtMost(total), total)
+                            }
+                        }
+                        inFlight.release()
+                        latch.countDown()
+                    }
+                    override fun receive(result: Map<String, String>) {}
+                    override fun error(ex: me.legrange.mikrotik.MikrotikApiException) {
+                        if (firstPipelineError.get() == null) firstPipelineError.set(ex)
+                        finish(false)
+                    }
+                    override fun completed() = finish(true)
+                }
+                runCatching { execute(cmds[index], listener) }.onFailure {
+                    // فشل الإرسال نفسه — المستمع لن يُستدعى
+                    if (firstPipelineError.get() == null) firstPipelineError.set(it)
+                    failedNow.add(index)
+                    if (lastRound) {
+                        onDone(index, false)
+                        onProgress(progressed.incrementAndGet().coerceAtMost(total), total)
+                    }
                     inFlight.release()
                     latch.countDown()
                 }
-                override fun receive(result: Map<String, String>) {}
-                override fun error(ex: me.legrange.mikrotik.MikrotikApiException) {
-                    if (firstPipelineError.get() == null) firstPipelineError.set(ex)
-                    finish(false)
-                }
-                override fun completed() = finish(true)
             }
-            runCatching { execute(cmd, listener) }.onFailure {
-                // فشل الإرسال نفسه — المستمع لن يُستدعى
-                if (firstPipelineError.get() == null) firstPipelineError.set(it)
-                failed.incrementAndGet()
-                onDone(index, false)
-                onProgress(done.incrementAndGet(), cmds.size)
-                inFlight.release()
-                latch.countDown()
-            }
+            // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد.
+            // ما لم يصله ردّ لا يُعاد إرساله كي لا يتكرر أمر نجح متأخراً.
+            latch.await(60_000L + pending.size * 150L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            pending = if (lastRound) emptyList() else failedNow.toList().sorted()
+            round++
         }
-        // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد
-        latch.await(60_000L + cmds.size * 150L, java.util.concurrent.TimeUnit.MILLISECONDS)
-        return BulkResult(ok.get(), failed.get())
+        return BulkResult(succeeded.get(), total - succeeded.get())
     }
 
     /** أول خطأ في آخر عملية متدفقة — لعرض سببٍ مفهوم عند فشل الكل */
