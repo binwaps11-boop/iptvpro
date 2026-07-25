@@ -29,6 +29,13 @@ val sampleUser = UserEntry(
     price = "500",
     validity = "30d",
     serial = "0001",
+    batchTag = "D-1",
+)
+
+/** بيانات لحظة طباعة وهمية للمعاينة حتى تظهر الحقول المحسوبة بقيم واقعية */
+val samplePrintInfo = com.binwaps.cardmanager.model.RenderInfo(
+    pageNumber = 1, cardNumber = 1, printNo = 1,
+    dateText = "2026/01/01", timeText = "12:30",
 )
 
 /**
@@ -45,7 +52,7 @@ fun CardPreview(
     val settings = Store.settings.value
     val bitmap by produceState<ImageBitmap?>(null, template, user, widthPx, settings) {
         value = withContext(Dispatchers.Default) {
-            runCatching { CardRenderer.renderSafe(template, user, settings, widthPx).asImageBitmap() }.getOrNull()
+            runCatching { CardRenderer.renderSafe(template, user, settings, widthPx, samplePrintInfo).asImageBitmap() }.getOrNull()
         }
     }
 

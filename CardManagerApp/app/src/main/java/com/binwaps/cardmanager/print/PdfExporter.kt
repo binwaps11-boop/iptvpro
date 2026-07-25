@@ -16,6 +16,7 @@ import androidx.core.content.FileProvider
 import com.binwaps.cardmanager.model.AppSettings
 import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.CutMarkStyle
+import com.binwaps.cardmanager.model.RenderInfo
 import com.binwaps.cardmanager.model.UserEntry
 import com.binwaps.cardmanager.render.CardRenderer
 import java.io.File
@@ -108,6 +109,12 @@ object PdfExporter {
 
         val renderW = (info.cardWidthMm / 25.4f * RENDER_DPI).toInt().coerceIn(64, 2000)
 
+        // بيانات لحظة الطباعة: رقم الطباعة والتاريخ والوقت تُثبَّت لكل الورقة
+        val printNo = com.binwaps.cardmanager.data.Store.nextPrintNo()
+        val now = java.util.Date()
+        val dateText = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(now)
+        val timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now)
+
         val doc = PdfDocument()
         val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG)
         val markPaint = Paint().apply {
@@ -143,7 +150,16 @@ object PdfExporter {
                         return@forEachIndexed
                     }
 
-                    val bmp = CardRenderer.renderSafe(template, user, settings, renderW)
+                    val bmp = CardRenderer.renderSafe(
+                        template, user, settings, renderW,
+                        RenderInfo(
+                            pageNumber = pageNumber,
+                            cardNumber = done + 1,
+                            printNo = printNo,
+                            dateText = dateText,
+                            timeText = timeText,
+                        ),
+                    )
                     canvas.drawBitmap(bmp, null, rect, imagePaint)
                     bmp.recycle()
 
@@ -214,7 +230,17 @@ object PdfExporter {
 
         val cardRenderW = cardW.toInt().coerceIn(40, 600)
         val sample = users.firstOrNull() ?: UserEntry("user1234", "8642", price = "500", validity = "30d")
-        val cardBmp = CardRenderer.renderSafe(template, sample, settings, cardRenderW)
+        val previewNow = java.util.Date()
+        val cardBmp = CardRenderer.renderSafe(
+            template, sample, settings, cardRenderW,
+            RenderInfo(
+                pageNumber = 1,
+                cardNumber = 1,
+                printNo = settings.printCounter + 1,
+                dateText = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(previewNow),
+                timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(previewNow),
+            ),
+        )
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         val markPaint = Paint().apply {
             style = Paint.Style.STROKE; strokeWidth = 1f; color = 0xFFBDBDBD.toInt()

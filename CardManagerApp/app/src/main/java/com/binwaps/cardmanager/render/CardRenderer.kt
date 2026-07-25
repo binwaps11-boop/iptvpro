@@ -18,6 +18,7 @@ import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.CellAlign
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.QrContent
+import com.binwaps.cardmanager.model.RenderInfo
 import com.binwaps.cardmanager.model.UserEntry
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
@@ -76,8 +77,11 @@ object CardRenderer {
     }
 
     /** نسخة آمنة لا تُسقط التطبيق أبداً — تعيد صورة بسيطة عند أي خطأ */
-    fun renderSafe(template: CardTemplate, user: UserEntry, settings: AppSettings, widthPx: Int): Bitmap =
-        runCatching { render(template, user, settings, widthPx) }.getOrElse {
+    fun renderSafe(
+        template: CardTemplate, user: UserEntry, settings: AppSettings, widthPx: Int,
+        info: RenderInfo = RenderInfo(),
+    ): Bitmap =
+        runCatching { render(template, user, settings, widthPx, info) }.getOrElse {
             val w = widthPx.coerceIn(16, 1200)
             val h = (w * (template.heightMm.coerceAtLeast(1f)) / template.widthMm.coerceAtLeast(1f))
                 .toInt().coerceIn(16, 2000)
@@ -89,6 +93,7 @@ object CardRenderer {
         user: UserEntry,
         settings: AppSettings,
         widthPx: Int,
+        info: RenderInfo = RenderInfo(),
     ): Bitmap {
         // حماية من قيم القالب غير الصالحة التي قد تُنتج أبعاداً ضخمة أو صفرية
         val safeWidth = widthPx.coerceIn(16, 1600)
@@ -123,7 +128,7 @@ object CardRenderer {
         }
 
         if (template.layoutMode == CardLayoutMode.TABLE) {
-            drawTable(canvas, template, user, settings, widthPx, heightPx, pxPerMm)
+            drawTable(canvas, template, user, settings, widthPx, heightPx, pxPerMm, info)
             return bmp
         }
 
@@ -134,7 +139,7 @@ object CardRenderer {
             if (field.type == FieldType.QR_CODE) {
                 drawQr(canvas, field, template, user, settings, widthPx, heightPx)
             } else {
-                drawText(canvas, field, user, settings, widthPx, heightPx, template.font)
+                drawText(canvas, field, user, settings, widthPx, heightPx, template.font, info)
             }
         }
         return bmp
@@ -150,6 +155,17 @@ object CardRenderer {
         else -> true
     }
 
+    /** الحقول التي تُحسب لحظة الطباعة — رقم الصفحة والتسلسل والتاريخ والوقت */
+    private fun computed(type: FieldType, user: UserEntry, info: RenderInfo): String = when (type) {
+        FieldType.BATCH_NO -> user.batchTag
+        FieldType.PRINT_NO -> if (info.printNo > 0) info.printNo.toString() else ""
+        FieldType.PAGE_NO -> info.pageNumber.toString()
+        FieldType.CARD_NO -> info.cardNumber.toString()
+        FieldType.PRINT_DATE -> info.dateText
+        FieldType.PRINT_TIME -> info.timeText
+        else -> ""
+    }
+
     // ==================== نمط الجدول ====================
     // يُحاكي طريقة طباعة سمارت كريتور: صفوف بإطارات، كل صف مقسوم إلى خلايا،
     // والنص في وسط الخلية. الفرق أن كل شيء هنا قابل للتعديل من التطبيق.
@@ -161,7 +177,7 @@ object CardRenderer {
         return dataCells.any { fieldAppliesTo(it.type, mode) }
     }
 
-    fun cellValue(cell: CardCell, user: UserEntry, settings: AppSettings): String {
+    fun cellValue(cell: CardCell, user: UserEntry, settings: AppSettings, info: RenderInfo = RenderInfo()): String {
         val value = when (cell.type) {
             FieldType.USERNAME -> user.username
             FieldType.PASSWORD -> user.password
@@ -173,6 +189,7 @@ object CardRenderer {
             FieldType.SERIAL -> user.serial
             FieldType.CUSTOM_TEXT -> cell.customText
             FieldType.QR_CODE -> ""
+            else -> computed(cell.type, user, info)
         }
         if (value.isBlank() && cell.type != FieldType.CUSTOM_TEXT) return ""
         return cell.prefix + value
@@ -180,7 +197,7 @@ object CardRenderer {
 
     private fun drawTable(
         canvas: Canvas, template: CardTemplate, user: UserEntry, settings: AppSettings,
-        widthPx: Int, heightPx: Int, pxPerMm: Float,
+        widthPx: Int, heightPx: Int, pxPerMm: Float, info: RenderInfo,
     ) {
         val rows = template.rows.filter { rowApplies(it, settings.cardMode) && it.cells.isNotEmpty() }
         if (rows.isEmpty()) return
@@ -222,7 +239,7 @@ object CardRenderer {
                 if (cell.type == FieldType.QR_CODE) {
                     drawCellQr(canvas, cellRect, template, user, settings)
                 } else if (fieldAppliesTo(cell.type, settings.cardMode)) {
-                    drawCellText(canvas, cellRect, cell, user, settings, template.font, pxPerMm)
+                    drawCellText(canvas, cellRect, cell, user, settings, template.font, pxPerMm, info)
                 }
                 x -= cellW
             }
@@ -232,9 +249,9 @@ object CardRenderer {
 
     private fun drawCellText(
         canvas: Canvas, r: RectF, cell: CardCell, user: UserEntry, settings: AppSettings,
-        templateFont: CardFont, pxPerMm: Float,
+        templateFont: CardFont, pxPerMm: Float, info: RenderInfo,
     ) {
-        val text = cellValue(cell, user, settings)
+        val text = cellValue(cell, user, settings, info)
         if (text.isBlank()) return
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = cell.color.toInt()
@@ -268,7 +285,7 @@ object CardRenderer {
 
     private const val PT_MM = 0.352778f
 
-    fun fieldValue(field: CardField, user: UserEntry, settings: AppSettings): String {
+    fun fieldValue(field: CardField, user: UserEntry, settings: AppSettings, info: RenderInfo = RenderInfo()): String {
         val value = when (field.type) {
             FieldType.USERNAME -> user.username
             FieldType.PASSWORD -> user.password
@@ -280,15 +297,16 @@ object CardRenderer {
             FieldType.SERIAL -> user.serial
             FieldType.CUSTOM_TEXT -> field.customText
             FieldType.QR_CODE -> ""
+            else -> computed(field.type, user, info)
         }
         return field.prefix + value
     }
 
     private fun drawText(
         canvas: Canvas, field: CardField, user: UserEntry, settings: AppSettings,
-        widthPx: Int, heightPx: Int, templateFont: CardFont,
+        widthPx: Int, heightPx: Int, templateFont: CardFont, info: RenderInfo,
     ) {
-        val text = fieldValue(field, user, settings)
+        val text = fieldValue(field, user, settings, info)
         if (text.isBlank()) return
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = field.color.toInt()

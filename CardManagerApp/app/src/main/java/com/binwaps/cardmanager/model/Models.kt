@@ -90,7 +90,26 @@ enum class FieldType(val labelAr: String) {
     SERIAL("الرقم التسلسلي"),
     QR_CODE("رمز QR"),
     CUSTOM_TEXT("نص ثابت"),
+    // حقول تُحسب لحظة الطباعة
+    BATCH_NO("رقم الدفعة"),
+    PRINT_NO("رقم الطباعة"),
+    PAGE_NO("رقم الصفحة"),
+    CARD_NO("تسلسل الكرت"),
+    PRINT_DATE("تاريخ الطباعة"),
+    PRINT_TIME("وقت الطباعة"),
 }
+
+/**
+ * معلومات لحظة الطباعة — تُمرَّر للرسّام حتى تُطبع الحقول المحسوبة
+ * (رقم الصفحة، تسلسل الكرت، رقم الطباعة، التاريخ والوقت).
+ */
+data class RenderInfo(
+    val pageNumber: Int = 1,
+    val cardNumber: Int = 1,
+    val printNo: Int = 0,
+    val dateText: String = "",
+    val timeText: String = "",
+)
 
 /** خطوط الكرت — مضمّنة في التطبيق فتُطبع العربية بنفس الشكل على أي جهاز */
 @Serializable
@@ -455,4 +474,6 @@ data class AppSettings(
     val offsetYMm: Float = 0f,
     /** معرّف الراوتر النشط حالياً */
     val activeRouterId: Long = 0,
+    /** عدّاد الطباعة — يزيد مع كل عملية تصدير ويُطبع على الكرت إن أُضيف حقله */
+    val printCounter: Int = 0,
 )

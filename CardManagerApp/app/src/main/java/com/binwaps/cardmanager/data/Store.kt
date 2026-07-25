@@ -231,6 +231,13 @@ object Store {
 
     fun newId(): Long = System.currentTimeMillis() + (0..999).random()
 
+    /** يزيد عدّاد الطباعة ويعيد الرقم الجديد — يُطبع على الكرت إن أُضيف حقل "رقم الطباعة" */
+    fun nextPrintNo(): Int {
+        val next = _settings.value.printCounter + 1
+        updateSettings(_settings.value.copy(printCounter = next))
+        return next
+    }
+
     fun defaultTemplate(): CardTemplate = CardTemplate(
         id = 1L,
         name = "قالب افتراضي",

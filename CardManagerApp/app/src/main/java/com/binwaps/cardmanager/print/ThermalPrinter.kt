@@ -50,12 +50,21 @@ object ThermalPrinter {
             val printer = EscPosPrinter(connection, settings.thermalDpi, widthMm, charsPerLine(settings.paperType))
             try {
                 if (settings.escAsteriskMode) printer.useEscAsteriskCommand(true)
+                val printNo = com.binwaps.cardmanager.data.Store.nextPrintNo()
+                val now = java.util.Date()
+                val dateText = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(now)
+                val timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now)
+                fun thermalInfo(i: Int) = com.binwaps.cardmanager.model.RenderInfo(
+                    pageNumber = i + 1, cardNumber = i + 1, printNo = printNo,
+                    dateText = dateText, timeText = timeText,
+                )
+
                 val dotsPerMm = settings.thermalDpi / 25.4f
                 val widthPx = (widthMm * dotsPerMm).toInt()
                 val heightPx = (settings.thermalCardHeightMm * dotsPerMm).toInt().coerceAtLeast(32)
 
                 users.forEachIndexed { index, user ->
-                    val rendered = CardRenderer.render(template, user, settings, widthPx)
+                    val rendered = CardRenderer.renderSafe(template, user, settings, widthPx, thermalInfo(index))
                     // مط الكرت إلى الارتفاع المطلوب من الإعدادات
                     val scaled = if (rendered.height != heightPx) {
                         Bitmap.createScaledBitmap(rendered, widthPx, heightPx, true).also { rendered.recycle() }
