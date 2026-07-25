@@ -87,7 +87,7 @@ class MainActivity : ComponentActivity() {
                 val currentRoute = backStack?.destination?.route.orEmpty()
                 val licenseState by LicenseManager.state.collectAsState()
 
-                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired
+                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired || licenseState is LicenseState.NeedsRegister
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً

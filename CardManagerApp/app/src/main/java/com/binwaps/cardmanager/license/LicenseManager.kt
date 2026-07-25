@@ -6,21 +6,25 @@ import kotlinx.coroutines.flow.StateFlow
 
 /** حالة الترخيص الحالية للتطبيق */
 sealed interface LicenseState {
-    /** تجربة مفعّلة بمفتاح تجريبي صادر من لوحة التراخيص */
+    /** لم يُسجّل بريده بعد — يُطلب منه التسجيل لتبدأ التجربة */
+    data object NeedsRegister : LicenseState
+    /** التجربة المجانية جارية */
     data class Trial(val daysLeft: Int) : LicenseState
     data class Licensed(val plan: LicenseCore.Plan, val daysLeft: Int, val lifetime: Boolean) : LicenseState
     data object Expired : LicenseState
-    /** لا مفتاح — يطلب تجربة أو اشتراكاً من مزوّد الخدمة */
+    /** انتهت التجربة — يطلب ترخيصاً */
     data object TrialEnded : LicenseState
 }
 
 /**
- * يدير الترخيص والتحقق منه عند كل تشغيل.
+ * يدير التسجيل والتجربة (أسبوع) والترخيص، والتحقق منه عند كل تشغيل.
  *
- * التجربة المجانية لم تعد ذاتية داخل التطبيق: كانت تتجدد بحذف التطبيق
- * وإعادة تثبيته. صارت مفتاحاً تجريبياً يصدر من لوحة التراخيص مقفولاً على
- * بصمة الجهاز — والبصمة لا تتغير بإعادة التثبيت، ولوحة التراخيص تسجّل كل
- * جهاز أخذ تجربة فلا يحصل عليها مرتين.
+ * التدفق: المشترك يسجّل بريده (جيميل) ← تبدأ تجربة أسبوع تلقائياً ← بعد
+ * الأسبوع تُقفل ويُطلب ترخيص عبر واتساب مزوّد الخدمة.
+ *
+ * التجربة مقيّدة بوقت موثوق (يمنع إرجاع الساعة). حذف التطبيق وإعادة تثبيته
+ * يمسح التخزين المحلي، لذا القفل النهائي هو الترخيص المقفول على بصمة الجهاز
+ * الذي يصدره مزوّد الخدمة — والبصمة لا تتغير بإعادة التثبيت.
  */
 object LicenseManager {
     private const val PREFS = "license_store"
@@ -28,13 +32,15 @@ object LicenseManager {
     private const val KEY_LICENSE = "license_key"
     private const val KEY_NAME = "customer_name"
     private const val KEY_PHONE = "customer_phone"
+    private const val KEY_EMAIL = "customer_email"
+    private const val KEY_TRIAL_START = "trial_start"
 
     const val TRIAL_DAYS = 7
     private const val DAY_MS = 86_400_000L
 
     private lateinit var appContext: Context
 
-    private val _state = MutableStateFlow<LicenseState>(LicenseState.Trial(TRIAL_DAYS))
+    private val _state = MutableStateFlow<LicenseState>(LicenseState.NeedsRegister)
     val state: StateFlow<LicenseState> get() = _state
 
     fun init(context: Context) {
@@ -48,7 +54,6 @@ object LicenseManager {
 
     fun savedLicense(): String = prefs().getString(KEY_LICENSE, "").orEmpty()
 
-    /** اسم المشترك — يُرسل مع طلب التفعيل ليظهر في لوحة التراخيص */
     fun customerName(): String = prefs().getString(KEY_NAME, "").orEmpty()
 
     fun setCustomerName(value: String) {
@@ -59,6 +64,28 @@ object LicenseManager {
 
     fun setCustomerPhone(value: String) {
         prefs().edit().putString(KEY_PHONE, value).apply()
+    }
+
+    fun customerEmail(): String = prefs().getString(KEY_EMAIL, "").orEmpty()
+
+    /** هل سجّل بريده؟ */
+    fun isRegistered(): Boolean = customerEmail().isNotBlank()
+
+    /**
+     * تسجيل البريد وبدء التجربة. يعيد رسالة خطأ أو null عند النجاح.
+     * التجربة تبدأ مرة واحدة — لا تُصفَّر بإعادة إدخال بريد آخر.
+     */
+    fun register(email: String, name: String): String? {
+        val e = email.trim()
+        if (!e.contains("@") || !e.contains(".")) return "أدخل بريداً صحيحاً مثل name@gmail.com"
+        val now = trustedNow()
+        val edit = prefs().edit()
+        edit.putString(KEY_EMAIL, e)
+        if (name.isNotBlank()) edit.putString(KEY_NAME, name.trim())
+        if (prefs().getLong(KEY_TRIAL_START, 0) <= 0) edit.putLong(KEY_TRIAL_START, now)
+        edit.apply()
+        refresh()
+        return null
     }
 
     /**
@@ -78,6 +105,7 @@ object LicenseManager {
         val now = trustedNow()
         val license = savedLicense()
 
+        // الترخيص المدفوع له الأولوية دائماً
         if (license.isNotBlank()) {
             val info = LicenseCore.verify(appContext, license)
             if (info != null) {
@@ -93,12 +121,18 @@ object LicenseManager {
                 }
                 return
             }
-            // ترخيص غير صالح أو لجهاز آخر — نحذفه
             prefs().edit().remove(KEY_LICENSE).apply()
         }
 
-        // لا مفتاح إطلاقاً — التجربة تُطلب من مزوّد الخدمة، لا تبدأ من نفسها
-        _state.value = LicenseState.TrialEnded
+        // لا ترخيص — الحالة تتبع التسجيل والتجربة
+        if (!isRegistered()) {
+            _state.value = LicenseState.NeedsRegister
+            return
+        }
+        val start = prefs().getLong(KEY_TRIAL_START, 0)
+        val elapsedDays = if (start > 0) ((now - start) / DAY_MS).toInt() else 0
+        val left = TRIAL_DAYS - elapsedDays
+        _state.value = if (left > 0) LicenseState.Trial(left) else LicenseState.TrialEnded
     }
 
     /** محاولة تفعيل ترخيص. يعيد رسالة الخطأ أو null عند النجاح */

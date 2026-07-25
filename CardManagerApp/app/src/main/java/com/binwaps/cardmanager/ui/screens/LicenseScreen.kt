@@ -3,11 +3,11 @@ package com.binwaps.cardmanager.ui.screens
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,10 +21,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -62,8 +62,10 @@ import com.binwaps.cardmanager.ui.theme.Violet
 import com.binwaps.cardmanager.ui.theme.Warn
 
 /**
- * شاشة الاشتراك: تعرض الحالة، ترسل طلب التفعيل للأدمن بضغطة،
- * وتُفعِّل تلقائياً عند فتح رابط التفعيل القادم من لوحة التراخيص.
+ * شاشة الاشتراك:
+ * 1) غير مسجّل → يُدخل بريده (جيميل) فتبدأ تجربة أسبوع.
+ * 2) التجربة جارية → عدّاد الأيام المتبقية.
+ * 3) انتهت → زر يفتح واتساب مزوّد الخدمة برسالة الطلب جاهزة.
  */
 @Composable
 fun LicenseScreen(
@@ -76,9 +78,10 @@ fun LicenseScreen(
     val context = LocalContext.current
     val state by LicenseManager.state.collectAsState()
     val deviceCode = remember { LicenseManager.deviceCode() }
-    var key by remember { mutableStateOf(LicenseManager.savedLicense()) }
     var name by remember { mutableStateOf(LicenseManager.customerName()) }
+    var email by remember { mutableStateOf(LicenseManager.customerEmail()) }
     var phone by remember { mutableStateOf(LicenseManager.customerPhone()) }
+    var key by remember { mutableStateOf(LicenseManager.savedLicense()) }
     var error by remember { mutableStateOf<String?>(null) }
     var success by remember { mutableStateOf<String?>(null) }
 
@@ -97,7 +100,7 @@ fun LicenseScreen(
         }
     }
 
-    // تفعيل تلقائي عند وصول رابط من لوحة التراخيص
+    // تفعيل تلقائي عند وصول رابط تفعيل من مزوّد الخدمة
     LaunchedEffect(incomingKey) {
         val k = incomingKey ?: return@LaunchedEffect
         key = k
@@ -107,6 +110,26 @@ fun LicenseScreen(
 
     val isRenewal = state is LicenseState.Expired ||
         (state as? LicenseState.Licensed)?.let { !it.lifetime && it.daysLeft <= 7 } == true
+
+    /** يفتح واتساب مزوّد الخدمة برسالة الطلب جاهزة (وإن غاب واتساب يشارك نصياً) */
+    fun requestViaWhatsApp() {
+        LicenseManager.setCustomerName(name)
+        LicenseManager.setCustomerPhone(phone)
+        val message = LicenseLink.requestMessage(deviceCode, name, isRenewal, email, phone)
+        val wa = Intent(Intent.ACTION_VIEW, Uri.parse(LicenseLink.whatsappLink(message)))
+        val opened = runCatching { context.startActivity(wa); true }.getOrDefault(false)
+        if (!opened) {
+            context.startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, message)
+                    },
+                    "إرسال الطلب لمزوّد الخدمة",
+                )
+            )
+        }
+    }
 
     Column(
         Modifier
@@ -123,17 +146,28 @@ fun LicenseScreen(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                if (state is LicenseState.Licensed) Icons.Filled.VerifiedUser else Icons.Filled.Lock,
+                when (state) {
+                    is LicenseState.Licensed -> Icons.Filled.VerifiedUser
+                    is LicenseState.NeedsRegister -> Icons.Filled.PersonAdd
+                    else -> Icons.Filled.Lock
+                },
                 null, tint = Ink, modifier = Modifier.size(32.dp),
             )
         }
         Spacer(Modifier.height(13.dp))
 
         when (val s = state) {
+            is LicenseState.NeedsRegister -> {
+                Text("مرحباً بك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text(
+                    "سجّل بريدك لتبدأ تجربة مجانية ٧ أيام",
+                    fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
+                )
+            }
             is LicenseState.Trial -> {
                 Text("النسخة التجريبية", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(
-                    "متبقٍ ${s.daysLeft} ${if (s.daysLeft == 1) "يوم" else "أيام"} من الفترة التجريبية",
+                    "متبقٍ ${s.daysLeft} ${dayWord(s.daysLeft)} من التجربة المجانية",
                     fontSize = 13.sp, color = Warn, textAlign = TextAlign.Center,
                 )
             }
@@ -145,10 +179,9 @@ fun LicenseScreen(
                 )
             }
             LicenseState.TrialEnded -> {
-                Text("فعّل التطبيق", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text("انتهت التجربة", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(
-                    "اطلب تجربة مجانية 7 أيام أو اشتراكاً من مزوّد الخدمة — " +
-                        "التجربة مربوطة بجهازك ولا تتكرر بإعادة تثبيت التطبيق",
+                    "اطلب ترخيصاً لمتابعة الاستخدام",
                     fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
                 )
             }
@@ -160,114 +193,112 @@ fun LicenseScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        // طلب التفعيل / التجديد — يفتح لوحة التراخيص عند الأدمن مباشرة
-        GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.45f), padding = 16) {
-            Text(
-                if (isRenewal) "طلب تجديد الاشتراك" else "طلب التفعيل",
-                fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi,
-            )
-            Spacer(Modifier.height(9.dp))
-            AppField(name, { name = it; LicenseManager.setCustomerName(it) }, "اسمك (يظهر لمزوّد الخدمة)", Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            AppField(phone, { phone = it; LicenseManager.setCustomerPhone(it) }, "رقم جوالك", Modifier.fillMaxWidth(), numeric = true)
-            Spacer(Modifier.height(11.dp))
-
-            Text("رمز جهازك", fontSize = 11.5.sp, color = TextLow)
-            Text(
-                deviceCode,
-                fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Neon,
-                modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(11.dp))
-
-            fun sendRequest(wantTrial: Boolean) {
-                val label = if (wantTrial) "تجربة مجانية 7 أيام" else if (isRenewal) "تجديد الاشتراك" else "اشتراك"
-                val body = LicenseLink.requestMessage(deviceCode, name, isRenewal) +
-                    "\nالطلب: $label" +
-                    (if (phone.isNotBlank()) "\nالجوال: $phone" else "")
-                context.startActivity(
-                    Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, body)
-                        },
-                        "إرسال الطلب لمزوّد الخدمة",
-                    )
+        if (state is LicenseState.NeedsRegister) {
+            // ===== التسجيل =====
+            GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.4f), padding = 16) {
+                Text("التسجيل", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Spacer(Modifier.height(10.dp))
+                AppField(email, { email = it; error = null }, "بريدك (جيميل)", Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                AppField(name, { name = it }, "اسمك", Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                AppField(phone, { phone = it }, "رقم جوالك (اختياري)", Modifier.fillMaxWidth(), numeric = true)
+                error?.let {
+                    Spacer(Modifier.height(9.dp))
+                    Text(it, fontSize = 12.sp, color = Danger)
+                }
+                Spacer(Modifier.height(13.dp))
+                NeonButton("ابدأ التجربة المجانية", Modifier.fillMaxWidth(), Icons.Filled.PersonAdd) {
+                    LicenseManager.setCustomerPhone(phone)
+                    val msg = LicenseManager.register(email, name)
+                    if (msg != null) error = msg else onActivated()
+                }
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "التجربة أسبوع كامل، بعدها يمكنك طلب ترخيص. بريدك يبقى على جهازك.",
+                    fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
                 )
             }
-            if (state is LicenseState.TrialEnded) {
-                NeonButton("طلب تجربة مجانية 7 أيام", Modifier.fillMaxWidth(), Icons.Filled.Send) {
-                    sendRequest(wantTrial = true)
-                }
+        } else {
+            // ===== طلب الترخيص عبر واتساب =====
+            GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.45f), padding = 16) {
+                Text(
+                    if (isRenewal) "طلب تجديد الاشتراك" else "طلب الترخيص",
+                    fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi,
+                )
+                Spacer(Modifier.height(9.dp))
+                AppField(name, { name = it; LicenseManager.setCustomerName(it) }, "اسمك", Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
-                GhostButton("طلب اشتراك مدفوع", Modifier.fillMaxWidth(), Icons.Filled.Send) {
-                    sendRequest(wantTrial = false)
-                }
-            } else {
+                AppField(phone, { phone = it; LicenseManager.setCustomerPhone(it) }, "رقم جوالك", Modifier.fillMaxWidth(), numeric = true)
+                Spacer(Modifier.height(11.dp))
+
+                Text("رمز جهازك", fontSize = 11.5.sp, color = TextLow)
+                Text(
+                    deviceCode,
+                    fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Neon,
+                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(13.dp))
+
                 NeonButton(
-                    if (isRenewal) "إرسال طلب التجديد" else "إرسال طلب التفعيل",
-                    Modifier.fillMaxWidth(), Icons.Filled.Send,
-                ) { sendRequest(wantTrial = false) }
+                    if (isRenewal) "طلب التجديد عبر واتساب" else "طلب الترخيص عبر واتساب",
+                    Modifier.fillMaxWidth(), Icons.Filled.Chat,
+                ) { requestViaWhatsApp() }
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "يفتح محادثة واتساب مع مزوّد الخدمة ورسالة الطلب جاهزة — أرسلها فقط، " +
+                        "وسيصلك مفتاح التفعيل لتضغطه فيُفعَّل التطبيق تلقائياً.",
+                    fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
+                )
             }
-            Spacer(Modifier.height(7.dp))
-            Text(
-                "يُرسل الطلب برابط — يضغطه مزوّد الخدمة فتُفتح لوحة التراخيص وبياناتك جاهزة، ثم يرسل لك رابط التفعيل.",
-                fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(7.dp))
-            GhostButton("نسخ رمز الجهاز", Modifier.fillMaxWidth(), Icons.Filled.ContentCopy) {
-                clipboard().setPrimaryClip(android.content.ClipData.newPlainText("device", deviceCode))
-                Toast.makeText(context, "تم نسخ رمز الجهاز", Toast.LENGTH_SHORT).show()
-            }
-        }
 
-        Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(14.dp))
 
-        // إدخال المفتاح يدوياً (احتياطي)
-        GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 16) {
-            Text("لديك مفتاح؟", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
-            Text(
-                "إن ضغطت رابط التفعيل سيتم كل شيء تلقائياً — هذا الحقل للحالات الاستثنائية.",
-                fontSize = 10.5.sp, color = TextLow,
-            )
-            Spacer(Modifier.height(9.dp))
-            AppField(key, { key = it; error = null }, "الصق المفتاح هنا", Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            GhostButton("لصق من الحافظة", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
-                val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                if (text.isBlank()) {
-                    Toast.makeText(context, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
-                } else {
-                    // نقبل الرابط كاملاً أو المفتاح وحده
-                    key = LicenseLink.parseActivation(android.net.Uri.parse(text.trim())) ?: text.trim()
-                    error = null
+            // إدخال المفتاح يدوياً (احتياطي)
+            GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 16) {
+                Text("لديك مفتاح؟", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text(
+                    "إن ضغطت رابط التفعيل سيتم كل شيء تلقائياً — هذا الحقل للحالات الاستثنائية.",
+                    fontSize = 10.5.sp, color = TextLow,
+                )
+                Spacer(Modifier.height(9.dp))
+                AppField(key, { key = it; error = null }, "الصق المفتاح هنا", Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                GhostButton("لصق من الحافظة", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
+                    val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                    if (text.isBlank()) {
+                        Toast.makeText(context, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
+                    } else {
+                        key = LicenseLink.parseActivation(Uri.parse(text.trim())) ?: text.trim()
+                        error = null
+                    }
                 }
-            }
 
-            error?.let {
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Danger.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
-                        .border(1.dp, Danger.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                        .padding(11.dp)
-                ) { Text(it, fontSize = 12.sp, color = Danger) }
-            }
-            success?.let {
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Lime.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
-                        .border(1.dp, Lime.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                        .padding(11.dp)
-                ) { Text(it, fontSize = 12.sp, color = Lime) }
-            }
+                error?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Danger.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                            .border(1.dp, Danger.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                            .padding(11.dp)
+                    ) { Text(it, fontSize = 12.sp, color = Danger) }
+                }
+                success?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Lime.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                            .border(1.dp, Lime.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                            .padding(11.dp)
+                    ) { Text(it, fontSize = 12.sp, color = Lime) }
+                }
 
-            Spacer(Modifier.height(12.dp))
-            NeonButton("تفعيل", Modifier.fillMaxWidth(), Icons.Filled.VerifiedUser, enabled = key.isNotBlank()) {
-                activate(key)
+                Spacer(Modifier.height(12.dp))
+                NeonButton("تفعيل", Modifier.fillMaxWidth(), Icons.Filled.VerifiedUser, enabled = key.isNotBlank()) {
+                    activate(key)
+                }
             }
         }
 
@@ -282,4 +313,11 @@ fun LicenseScreen(
 
         Spacer(Modifier.height(30.dp))
     }
+}
+
+private fun dayWord(n: Int): String = when (n) {
+    1 -> "يوم"
+    2 -> "يومان"
+    in 3..10 -> "أيام"
+    else -> "يوماً"
 }

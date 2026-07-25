@@ -188,8 +188,9 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                     is LicenseState.Trial -> "نسخة تجريبية — متبقٍ ${s.daysLeft} يوم"
                     is LicenseState.Licensed ->
                         if (s.lifetime) "مفعّل — ترخيص دائم" else "مفعّل — ${s.plan.labelAr}، متبقٍ ${s.daysLeft} يوم"
-                    LicenseState.TrialEnded -> "غير مفعّل — اطلب تجربة أو اشتراكاً"
+                    LicenseState.TrialEnded -> "انتهت التجربة — اطلب ترخيصاً"
                     LicenseState.Expired -> "انتهى الاشتراك"
+                    LicenseState.NeedsRegister -> "غير مسجّل — سجّل بريدك لبدء التجربة"
                 },
                 fontSize = 12.5.sp,
                 color = if (ls is LicenseState.Licensed) Lime else Warn,

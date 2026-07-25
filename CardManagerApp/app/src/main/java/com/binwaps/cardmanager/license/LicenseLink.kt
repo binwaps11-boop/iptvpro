@@ -41,15 +41,30 @@ object LicenseLink {
         )
     }
 
+    /** رقم واتساب مزوّد الخدمة (اليمن +967) — يُفتح إليه طلب الترخيص مباشرة */
+    const val WHATSAPP_NUMBER = "967776831921"
+
     /** الرسالة التي يرسلها المشترك عبر واتساب */
-    fun requestMessage(deviceCode: String, name: String, renewal: Boolean): String = buildString {
-        appendLine(if (renewal) "طلب تجديد اشتراك — مدير الكروت" else "طلب تفعيل — مدير الكروت")
+    fun requestMessage(
+        deviceCode: String,
+        name: String,
+        renewal: Boolean,
+        email: String = "",
+        phone: String = "",
+    ): String = buildString {
+        appendLine(if (renewal) "طلب تجديد اشتراك — مدير الكروت" else "طلب ترخيص — مدير الكروت")
         if (name.isNotBlank()) appendLine("الاسم: $name")
+        if (email.isNotBlank()) appendLine("البريد: $email")
+        if (phone.isNotBlank()) appendLine("الجوال: $phone")
         appendLine("رمز الجهاز: $deviceCode")
         appendLine()
         appendLine("اضغط الرابط لفتحه في لوحة التراخيص:")
         append(buildRequest(deviceCode, name, renewal))
     }
+
+    /** رابط واتساب مباشر لمزوّد الخدمة مع الرسالة جاهزة */
+    fun whatsappLink(message: String): String =
+        "https://wa.me/$WHATSAPP_NUMBER?text=" + Uri.encode(message)
 
     // ===== التفعيل (من الأدمن إلى المشترك) =====
 
