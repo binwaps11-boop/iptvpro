@@ -10,6 +10,8 @@ import com.binwaps.cardmanager.model.SessionEntry
 import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.legrange.mikrotik.ApiConnection
 
@@ -44,20 +46,69 @@ object MikrotikClient {
         return ctx.socketFactory
     }
 
-    private inline fun <T> ApiConnection.useCon(block: (ApiConnection) -> T): T {
-        try {
-            return block(this)
-        } finally {
-            runCatching { close() }
-        }
+    // ===== جلسة دائمة =====
+    //
+    // فتح اتصال جديد لكل عملية (TCP + دخول) كان يكلف ثواني عن بعد وفي كل
+    // تحديث دوري. نُبقي جلسة واحدة حية ونعيد استخدامها، وإن ماتت نعيد فتحها
+    // تلقائياً ونكرر العملية مرة واحدة — المستخدم لا يرى إلا السرعة.
+
+    private var session: ApiConnection? = null
+    private var sessionKey: String? = null
+    private val sessionLock = Mutex()
+
+    // بصمة كلمة المرور ضمن المفتاح — تغييرها يجب أن يفتح جلسة جديدة لا يعاد
+    // استخدام جلسة قديمة سجّلت بكلمة سابقة فيبدو الاتصال ناجحاً زوراً
+    private fun keyOf(r: RouterProfile) =
+        "${r.host.trim()}:${r.port}:${r.username}:${r.useSsl}:${r.password.hashCode()}"
+
+    private fun obtain(r: RouterProfile): ApiConnection {
+        val k = keyOf(r)
+        session?.let { if (sessionKey == k && it.isConnected) return it }
+        runCatching { session?.close() }
+        return open(r).also { session = it; sessionKey = k }
     }
 
-    /** ينفّذ عملية على الراوتر ويحوّل الأخطاء إلى رسائل عربية مفهومة */
+    private fun invalidateSession() {
+        runCatching { session?.close() }
+        session = null
+        sessionKey = null
+    }
+
+    /** خطأ أمرٍ ردّه الراوتر (trap) — الجلسة سليمة ولا معنى لإعادة الاتصال */
+    private fun isCommandError(t: Throwable): Boolean {
+        var c: Throwable? = t
+        while (c != null) {
+            if (c.javaClass.name.endsWith("ApiCommandException")) return true
+            c = c.cause
+        }
+        return false
+    }
+
+    /**
+     * ينفّذ عملية على الراوتر عبر الجلسة الدائمة ويحوّل الأخطاء إلى رسائل عربية.
+     * القفل يمنع تداخل الكتابة على نفس المقبس من شاشتين في آن واحد.
+     */
     internal suspend fun <T> onRouter(r: RouterProfile?, block: (ApiConnection) -> T): Result<T> =
         withContext(Dispatchers.IO) {
             if (r == null) return@withContext Result.failure(Exception("لا يوجد راوتر محفوظ — اتصل أولاً"))
-            runCatching { open(r).useCon(block) }.recoverCatching { throw Exception(arabicError(it), it) }
+            runCatching {
+                sessionLock.withLock {
+                    try {
+                        block(obtain(r))
+                    } catch (e: Exception) {
+                        if (isCommandError(e)) throw e
+                        // الجلسة القديمة ماتت غالباً — اتصال جديد ومحاولة أخيرة
+                        invalidateSession()
+                        block(obtain(r))
+                    }
+                }
+            }.recoverCatching { throw Exception(arabicError(it), it) }
         }
+
+    /** يغلق الجلسة الدائمة — عند تغيير الراوتر أو قطع الاتصال يدوياً */
+    fun disconnect() {
+        invalidateSession()
+    }
 
     private fun arabicError(t: Throwable): String {
         val raw = (t.message ?: t.toString())

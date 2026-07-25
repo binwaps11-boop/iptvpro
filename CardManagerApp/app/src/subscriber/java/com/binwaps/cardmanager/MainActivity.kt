@@ -182,7 +182,10 @@ class MainActivity : ComponentActivity() {
                         composable("router") { RouterAdminScreen() }
                         composable("settings") {
                             SettingsScreen(
-                                onDisconnect = { navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } } },
+                                onDisconnect = {
+                                    com.binwaps.cardmanager.mikrotik.MikrotikClient.disconnect()
+                                    navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } }
+                                },
                                 onLicense = { navController.navigate("license") },
                             )
                         }
