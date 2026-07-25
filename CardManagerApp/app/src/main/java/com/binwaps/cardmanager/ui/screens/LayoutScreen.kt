@@ -134,6 +134,37 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
 
         Spacer(Modifier.height(16.dp))
 
+        // مقاس الكرت نفسه
+        if (template != null) {
+            GlassCard(Modifier.fillMaxWidth(), glow = Lime.copy(alpha = 0.3f)) {
+                Text("مقاس الكرت", fontSize = 13.5.sp, color = TextHi, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(9.dp))
+                LabeledSlider("العرض", template.widthMm, 20f, 210f, "مم") {
+                    Store.upsertTemplate(template.copy(widthMm = it))
+                }
+                LabeledSlider("الطول", template.heightMm, 20f, 297f, "مم") {
+                    Store.upsertTemplate(template.copy(heightMm = it))
+                }
+                Text("مقاسات جاهزة", fontSize = 12.sp, color = TextLow)
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "كرت بنكي 85×54" to (85.6f to 54f),
+                        "تذكرة 63×33" to (63f to 33f),
+                        "صغير 63×27" to (63f to 27f),
+                        "قسيمة 48×27" to (48f to 27f),
+                        "كبير 105×74" to (105f to 74f),
+                    ).forEach { (label, dims) ->
+                        val on = template.widthMm == dims.first && template.heightMm == dims.second
+                        Chip(label, on) {
+                            Store.upsertTemplate(template.copy(widthMm = dims.first, heightMm = dims.second))
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+
         // مقاس الورق
         Text("مقاس الورق", fontSize = 12.sp, color = TextLow)
         Spacer(Modifier.height(7.dp))
@@ -171,9 +202,14 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
 
             if (!layout.autoFit) {
                 Spacer(Modifier.height(12.dp))
-                Counter("عدد الأعمدة (كروت بالعرض)", layout.columns, 1, 10) { update { l -> l.copy(columns = it) } }
+                Counter("كم كرت بالعرض (أعمدة)", layout.columns, 1, 12) { update { l -> l.copy(columns = it) } }
                 Spacer(Modifier.height(8.dp))
-                Counter("عدد الصفوف (كروت بالطول)", layout.rows, 1, 20) { update { l -> l.copy(rows = it) } }
+                Counter("كم كرت بالطول (صفوف)", layout.rows, 1, 25) { update { l -> l.copy(rows = it) } }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "المجموع: ${layout.columns * layout.rows} كرت في الصفحة",
+                    fontSize = 12.5.sp, color = Neon, fontWeight = FontWeight.Bold,
+                )
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {

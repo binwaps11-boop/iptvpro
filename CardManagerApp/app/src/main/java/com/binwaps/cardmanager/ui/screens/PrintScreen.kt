@@ -204,32 +204,34 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 valueRange = 20f..120f,
                 colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
             )
-        } else {
-            // ملخص التخطيط مع زر فتح شاشة التخطيط
+        }
+
+        // تخطيط الصفحة — متاح دائماً للطباعة الورقية
+        if (settings.paperType == PaperType.A4 && template != null) {
             val info = remember(template, settings.layout, users.size) {
-                template?.let { PdfExporter.computeLayout(it, settings, users.size) }
+                PdfExporter.computeLayout(template, settings, users.size)
             }
-            if (info != null) {
-                GlassCard(
-                    Modifier.fillMaxWidth().clickable { navController.navigate("layout/${template!!.id}") },
-                    glow = Violet.copy(alpha = 0.35f), padding = 13,
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.GridView, null, tint = Violet, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "${info.columns} × ${info.rows} = ${info.perPage} كرت في الصفحة",
-                                fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi,
-                            )
-                            Text(
-                                "${settings.layout.paper.labelAr} ${settings.layout.orientation.labelAr} • " +
-                                    "${info.pages} صفحة • مقاس الكرت ${info.cardWidthMm.toInt()}×${info.cardHeightMm.toInt()} مم",
-                                fontSize = 11.sp, color = TextLow,
-                            )
-                        }
-                        Text("تعديل", fontSize = 12.sp, color = Neon, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            GlassCard(
+                Modifier.fillMaxWidth().clickable { navController.navigate("layout/${template.id}") },
+                glow = Violet.copy(alpha = 0.45f), padding = 14,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.GridView, null, tint = Violet, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(11.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("تخطيط الصفحة", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                        Text(
+                            "${info.columns} بالعرض × ${info.rows} بالطول = ${info.perPage} كرت في الصفحة",
+                            fontSize = 12.sp, color = Neon,
+                        )
+                        Text(
+                            "${settings.layout.paper.labelAr} ${settings.layout.orientation.labelAr} • " +
+                                "${info.pages} صفحة • الكرت ${info.cardWidthMm.toInt()}×${info.cardHeightMm.toInt()} مم",
+                            fontSize = 10.5.sp, color = TextLow,
+                        )
                     }
+                    Text("تعديل ‹", fontSize = 13.sp, color = Violet, fontWeight = FontWeight.Bold)
                 }
             }
         }

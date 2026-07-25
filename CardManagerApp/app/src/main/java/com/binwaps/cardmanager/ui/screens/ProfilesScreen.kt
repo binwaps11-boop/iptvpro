@@ -1,7 +1,9 @@
 package com.binwaps.cardmanager.ui.screens
 
-import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Wifi
@@ -35,12 +36,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.mikrotik.MikrotikClient
+import com.binwaps.cardmanager.model.CardSource
 import com.binwaps.cardmanager.model.HotspotProfile
 import com.binwaps.cardmanager.ui.components.AppField
 import com.binwaps.cardmanager.ui.components.EmptyState
@@ -52,6 +53,7 @@ import com.binwaps.cardmanager.ui.theme.Lime
 import com.binwaps.cardmanager.ui.theme.Neon
 import com.binwaps.cardmanager.ui.theme.Panel
 import com.binwaps.cardmanager.ui.theme.ScreenGradient
+import com.binwaps.cardmanager.ui.theme.Stroke
 import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
 import com.binwaps.cardmanager.ui.theme.TextMid
@@ -59,27 +61,28 @@ import com.binwaps.cardmanager.ui.theme.Violet
 import com.binwaps.cardmanager.ui.theme.Warn
 import kotlinx.coroutines.launch
 
-/** إدارة الباقات: جلبها من الراوتر، تسعيرها، إنشاء باقة جديدة، وتنظيف المنتهية */
+/** إدارة الباقات: جلبها من الهوتسبوت واليوزر منجر، تسعيرها، وإنشاء باقة جديدة */
 @Composable
 fun ProfilesScreen() {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val profiles by Store.profiles.collectAsState()
     val settings by Store.settings.collectAsState()
-    val connected by Store.connected.collectAsState()
     var busy by remember { mutableStateOf(false) }
     var showAdd by remember { mutableStateOf(false) }
     var priceEditing by remember { mutableStateOf<HotspotProfile?>(null) }
+    var message by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
 
     fun refresh() {
-        val r = Store.activeRouter() ?: run {
-            Toast.makeText(context, "اتصل بالراوتر أولاً", Toast.LENGTH_LONG).show(); return
-        }
-        busy = true
+        busy = true; message = null
         scope.launch {
-            MikrotikClient.fetchProfiles(r)
-                .onSuccess { Store.setProfiles(it); Toast.makeText(context, "تم جلب ${it.size} باقة", Toast.LENGTH_SHORT).show() }
-                .onFailure { Toast.makeText(context, "فشل: ${it.message}", Toast.LENGTH_LONG).show() }
+            MikrotikClient.fetchProfiles(Store.activeRouter())
+                .onSuccess {
+                    Store.setProfiles(it)
+                    val hs = it.count { p -> p.source == CardSource.HOTSPOT }
+                    val um = it.count { p -> p.source == CardSource.USER_MANAGER }
+                    message = "تم جلب ${it.size} باقة — $hs من الهوتسبوت، $um من اليوزر منجر" to false
+                }
+                .onFailure { message = (it.message ?: "فشل الجلب") to true }
             busy = false
         }
     }
@@ -94,41 +97,63 @@ fun ProfilesScreen() {
         SectionHeader("الباقات والأسعار", "${profiles.size} باقة", Icons.Filled.Speed)
         Spacer(Modifier.height(13.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             GhostButton("جلب من الراوتر", icon = Icons.Filled.Refresh, enabled = !busy) { refresh() }
             GhostButton("باقة جديدة", icon = Icons.Filled.Add, color = Violet, enabled = !busy) { showAdd = true }
         }
-        Spacer(Modifier.height(8.dp))
-        GhostButton(
-            "حذف المستخدمين المنتهية صلاحيتهم",
-            Modifier.fillMaxWidth(),
-            icon = Icons.Filled.CleaningServices,
-            color = Warn,
-            enabled = !busy && connected,
-        ) {
-            val r = Store.activeRouter() ?: return@GhostButton
-            busy = true
-            scope.launch {
-                MikrotikClient.removeExpiredUsers(r)
-                    .onSuccess { Toast.makeText(context, "تم حذف $it مستخدم منتهي", Toast.LENGTH_LONG).show() }
-                    .onFailure { Toast.makeText(context, "فشل: ${it.message}", Toast.LENGTH_LONG).show() }
-                busy = false
-            }
+
+        message?.let { (text, isError) ->
+            Spacer(Modifier.height(11.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background((if (isError) Danger else Lime).copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                    .border(1.dp, (if (isError) Danger else Lime).copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                    .clickable { message = null }
+                    .padding(11.dp)
+            ) { Text(text, fontSize = 12.sp, color = if (isError) Danger else Lime) }
         }
 
         Spacer(Modifier.height(16.dp))
 
         if (profiles.isEmpty()) {
-            EmptyState(Icons.Filled.Speed, "لا توجد باقات", "اضغط \"جلب من الراوتر\" لعرض باقات الهوتسبوت")
+            EmptyState(
+                Icons.Filled.Speed, "لا توجد باقات",
+                "اضغط \"جلب من الراوتر\" لعرض باقات الهوتسبوت واليوزر منجر",
+            )
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                profiles.forEach { p ->
-                    GlassCard(Modifier.fillMaxWidth(), glow = Lime.copy(alpha = 0.3f), padding = 13) {
+            listOf(CardSource.HOTSPOT, CardSource.USER_MANAGER).forEach { src ->
+                val group = profiles.filter { it.source == src }
+                if (group.isEmpty()) return@forEach
+                Text(
+                    if (src == CardSource.HOTSPOT) "باقات الهوتسبوت" else "باقات اليوزر منجر",
+                    fontSize = 12.sp, color = TextLow, modifier = Modifier.padding(bottom = 7.dp),
+                )
+                group.forEach { p ->
+                    GlassCard(
+                        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        glow = (if (src == CardSource.HOTSPOT) Lime else Violet).copy(alpha = 0.3f),
+                        padding = 13,
+                    ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
-                                Modifier.size(36.dp).background(Lime.copy(alpha = 0.12f), RoundedCornerShape(11.dp)),
+                                Modifier
+                                    .size(36.dp)
+                                    .background(
+                                        (if (src == CardSource.HOTSPOT) Lime else Violet).copy(alpha = 0.12f),
+                                        RoundedCornerShape(11.dp),
+                                    ),
                                 contentAlignment = Alignment.Center,
-                            ) { Icon(Icons.Filled.Wifi, null, tint = Lime, modifier = Modifier.size(18.dp)) }
+                            ) {
+                                Icon(
+                                    Icons.Filled.Wifi, null,
+                                    tint = if (src == CardSource.HOTSPOT) Lime else Violet,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(p.name, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextHi)
@@ -136,10 +161,11 @@ fun ProfilesScreen() {
                                     buildList {
                                         if (p.rateLimit.isNotBlank()) add("السرعة: ${p.rateLimit}")
                                         if (p.sessionTimeout.isNotBlank()) add("المدة: ${p.sessionTimeout}")
-                                        add("مشاركة: ${p.sharedUsers}")
+                                        add("أجهزة: ${p.sharedUsers}")
                                     }.joinToString("  •  "),
                                     fontSize = 11.sp, color = TextMid,
                                 )
+                                Text("${p.userCount} كرت في هذه الباقة", fontSize = 10.5.sp, color = TextLow)
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
@@ -155,12 +181,12 @@ fun ProfilesScreen() {
                         }
                     }
                 }
+                Spacer(Modifier.height(8.dp))
             }
         }
         Spacer(Modifier.height(24.dp))
     }
 
-    // حوار تعديل السعر
     priceEditing?.let { p ->
         var price by remember(p.name) { mutableStateOf(p.price) }
         AlertDialog(
@@ -169,9 +195,7 @@ fun ProfilesScreen() {
             titleContentColor = TextHi,
             shape = RoundedCornerShape(20.dp),
             title = { Text("سعر باقة ${p.name}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                AppField(price, { price = it }, "السعر بـ ${settings.currency}", Modifier.fillMaxWidth(), numeric = true)
-            },
+            text = { AppField(price, { price = it }, "السعر بـ ${settings.currency}", Modifier.fillMaxWidth(), numeric = true) },
             confirmButton = {
                 TextButton(onClick = {
                     Store.updateProfilePrice(p.name, price)
@@ -182,7 +206,6 @@ fun ProfilesScreen() {
         )
     }
 
-    // حوار إنشاء باقة
     if (showAdd) {
         var name by remember { mutableStateOf("") }
         var rate by remember { mutableStateOf("") }
@@ -194,7 +217,7 @@ fun ProfilesScreen() {
             containerColor = Panel,
             titleContentColor = TextHi,
             shape = RoundedCornerShape(20.dp),
-            title = { Text("باقة جديدة", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            title = { Text("باقة جديدة على الراوتر", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                     AppField(name, { name = it }, "اسم الباقة", Modifier.fillMaxWidth())
@@ -205,28 +228,29 @@ fun ProfilesScreen() {
                     }
                     AppField(price, { price = it }, "السعر (يُحفظ في التطبيق)", Modifier.fillMaxWidth(), numeric = true)
                     Text(
-                        "تُنشأ الباقة على الراوتر مباشرة، والسعر يُحفظ داخل التطبيق لأن الراوتر لا يخزّن الأسعار.",
+                        "تُنشأ الباقة في هوتسبوت الراوتر، والسعر يُحفظ داخل التطبيق لأن الراوتر لا يخزّن الأسعار.",
                         fontSize = 10.5.sp, color = TextLow,
                     )
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val r = Store.activeRouter()
-                    if (r == null || name.isBlank()) {
-                        Toast.makeText(context, "اتصل بالراوتر وأدخل اسم الباقة", Toast.LENGTH_LONG).show()
-                        return@TextButton
-                    }
-                    val p = HotspotProfile(name = name, rateLimit = rate, sessionTimeout = timeout, sharedUsers = shared, price = price)
+                    if (name.isBlank()) return@TextButton
+                    val p = HotspotProfile(
+                        name = name, rateLimit = rate, sessionTimeout = timeout,
+                        sharedUsers = shared, price = price, source = CardSource.HOTSPOT,
+                    )
                     showAdd = false
+                    busy = true; message = null
                     scope.launch {
-                        MikrotikClient.createProfile(r, p)
+                        MikrotikClient.createProfile(Store.activeRouter(), p)
                             .onSuccess {
                                 Store.setProfiles(Store.profiles.value + p)
                                 Store.updateProfilePrice(p.name, price)
-                                Toast.makeText(context, "تم إنشاء الباقة", Toast.LENGTH_LONG).show()
+                                message = "تم إنشاء الباقة ${p.name}" to false
                             }
-                            .onFailure { Toast.makeText(context, "فشل: ${it.message}", Toast.LENGTH_LONG).show() }
+                            .onFailure { message = (it.message ?: "فشل الإنشاء") to true }
+                        busy = false
                     }
                 }) { Text("إنشاء", color = Neon, fontWeight = FontWeight.Bold) }
             },

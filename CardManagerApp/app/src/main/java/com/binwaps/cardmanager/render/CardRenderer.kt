@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import com.binwaps.cardmanager.model.AppSettings
 import com.binwaps.cardmanager.model.CardField
+import com.binwaps.cardmanager.model.CardMode
 import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.FieldType
 import com.binwaps.cardmanager.model.QrContent
@@ -79,9 +80,10 @@ object CardRenderer {
             canvas.drawRoundRect(RectF(inset, inset, widthPx - inset, heightPx - inset), radius, radius, borderPaint)
         }
 
-        // الحقول
+        // الحقول — مع احترام نوع الكرت المختار
         for (field in template.fields) {
             if (!field.visible) continue
+            if (!fieldAppliesTo(field.type, settings.cardMode)) continue
             if (field.type == FieldType.QR_CODE) {
                 drawQr(canvas, field, template, user, settings, widthPx, heightPx)
             } else {
@@ -89,6 +91,16 @@ object CardRenderer {
             }
         }
         return bmp
+    }
+
+    /**
+     * هل يُطبع هذا الحقل مع نوع الكرت المختار؟
+     * - اسم مستخدم فقط: لا تُطبع كلمة المرور
+     * - متشابه: يُطبع رمز واحد فقط (نخفي كلمة المرور لأنها نفس الاسم)
+     */
+    fun fieldAppliesTo(type: FieldType, mode: CardMode): Boolean = when (type) {
+        FieldType.PASSWORD -> mode == CardMode.USER_PASS
+        else -> true
     }
 
     fun fieldValue(field: CardField, user: UserEntry, settings: AppSettings): String {
@@ -141,13 +153,23 @@ object CardRenderer {
         qr.recycle()
     }
 
-    fun qrText(kind: QrContent, user: UserEntry, settings: AppSettings): String = when (kind) {
-        QrContent.LOGIN_URL -> {
-            val base = settings.hotspotLoginUrl.trimEnd('/')
-            "$base?username=${user.username}&password=${user.password}"
+    fun qrText(kind: QrContent, user: UserEntry, settings: AppSettings): String {
+        // كلمة المرور الفعلية للدخول تختلف حسب نوع الكرت
+        val loginPassword = when (settings.cardMode) {
+            CardMode.USERNAME_ONLY -> ""
+            CardMode.SAME -> user.username
+            CardMode.USER_PASS -> user.password
         }
-        QrContent.WIFI -> "WIFI:S:${settings.wifiSsid};T:WPA;P:${settings.wifiPassword};;"
-        QrContent.USER_PASS -> "${user.username}:${user.password}"
+        return when (kind) {
+            QrContent.LOGIN_URL -> {
+                val base = settings.hotspotLoginUrl.trimEnd('/')
+                if (loginPassword.isBlank()) "$base?username=${user.username}"
+                else "$base?username=${user.username}&password=$loginPassword"
+            }
+            QrContent.WIFI -> "WIFI:S:${settings.wifiSsid};T:WPA;P:${settings.wifiPassword};;"
+            QrContent.USER_PASS ->
+                if (loginPassword.isBlank()) user.username else "${user.username}:$loginPassword"
+        }
     }
 
     fun encodeQr(content: String, sidePx: Int): Bitmap? = runCatching {

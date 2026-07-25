@@ -60,7 +60,6 @@ import com.binwaps.cardmanager.ui.theme.Lime
 import com.binwaps.cardmanager.ui.theme.Neon
 import com.binwaps.cardmanager.ui.theme.Panel
 import com.binwaps.cardmanager.ui.theme.ScreenGradient
-import com.binwaps.cardmanager.ui.theme.Stroke
 import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
 import com.binwaps.cardmanager.ui.theme.TextMid
@@ -80,6 +79,10 @@ fun DashboardScreen(navController: NavController) {
     val batches by Store.batches.collectAsState()
     val settings by Store.settings.collectAsState()
     var refreshing by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+    var history by remember { mutableStateOf<List<com.binwaps.cardmanager.model.SessionEntry>>(emptyList()) }
+    var historyBusy by remember { mutableStateOf(false) }
+    var historyError by remember { mutableStateOf<String?>(null) }
 
     fun refresh() {
         val router = Store.activeRouter() ?: return
@@ -213,9 +216,73 @@ fun DashboardScreen(navController: NavController) {
             QuickAction("التقارير", Icons.Filled.Analytics, Modifier.weight(1f)) { navController.navigate("history") }
         }
 
-        // المتصلون الآن
-        SectionHeader("المتصلون الآن", "${actives.size} مستخدم", Icons.Filled.People)
-        if (!connected) {
+        // الجلسات: النشطة الآن أو السجل
+        SectionHeader(
+            if (showHistory) "سجل الجلسات" else "المتصلون الآن",
+            if (showHistory) "${history.size} جلسة سابقة" else "${actives.size} مستخدم",
+            Icons.Filled.People,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(false to "المتصلون الآن", true to "سجل الجلسات").forEach { (isHist, label) ->
+                val on = showHistory == isHist
+                Text(
+                    label, fontSize = 11.5.sp,
+                    color = if (on) Neon else TextMid,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                    modifier = Modifier
+                        .background(if (on) Neon.copy(alpha = 0.12f) else Panel, RoundedCornerShape(999.dp))
+                        .clickable {
+                            showHistory = isHist
+                            if (isHist && history.isEmpty()) {
+                                scope.launch {
+                                    historyBusy = true
+                                    MikrotikClient.fetchSessionHistory(Store.activeRouter())
+                                        .onSuccess { history = it; historyError = null }
+                                        .onFailure { historyError = it.message }
+                                    historyBusy = false
+                                }
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+        }
+
+        if (showHistory) {
+            when {
+                historyBusy -> Text("جاري جلب السجل…", fontSize = 12.sp, color = Neon)
+                historyError != null -> Text(historyError!!, fontSize = 12.sp, color = Danger)
+                history.isEmpty() -> EmptyState(
+                    Icons.Filled.People, "لا يوجد سجل جلسات",
+                    "سجل الجلسات يتوفر مع اليوزر منجر، أو من كوكيز الهوتسبوت",
+                )
+                else -> history.take(50).forEach { s ->
+                    GlassCard(Modifier.fillMaxWidth(), padding = 11) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).background(TextLow, CircleShape))
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(s.username, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextHi)
+                                Text(
+                                    buildList {
+                                        if (s.uptime.isNotBlank()) add(s.uptime)
+                                        if (s.startedAt.isNotBlank()) add(s.startedAt)
+                                        if (s.macAddress.isNotBlank()) add(s.macAddress)
+                                    }.joinToString("  •  "),
+                                    fontSize = 10.5.sp, color = TextLow,
+                                )
+                                if (s.bytesIn > 0 || s.bytesOut > 0) {
+                                    Text(
+                                        "↓ ${formatBytes(s.bytesIn)}   ↑ ${formatBytes(s.bytesOut)}",
+                                        fontSize = 10.sp, color = TextMid,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (!connected) {
             EmptyState(Icons.Filled.Router, "غير متصل بالراوتر", "اتصل من الإعدادات لعرض المستخدمين المتصلين")
         } else if (actives.isEmpty()) {
             EmptyState(Icons.Filled.People, "لا يوجد مستخدمون متصلون", "سيظهرون هنا فور اتصالهم بالشبكة")

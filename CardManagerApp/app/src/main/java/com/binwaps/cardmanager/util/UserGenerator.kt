@@ -1,5 +1,6 @@
 package com.binwaps.cardmanager.util
 
+import com.binwaps.cardmanager.model.CardMode
 import com.binwaps.cardmanager.model.UserEntry
 import kotlin.random.Random
 
@@ -17,7 +18,7 @@ object UserGenerator {
         prefix: String,
         length: Int,
         charset: Charset,
-        samePassword: Boolean,
+        mode: CardMode,
         passwordLength: Int,
         profile: String,
         price: String,
@@ -30,9 +31,15 @@ object UserGenerator {
             do {
                 name = prefix + randomString(length, charset)
             } while (!used.add(name))
+            val password = when (mode) {
+                // الهوتسبوت يقبل كلمة مرور فارغة عند الدخول بالاسم فقط
+                CardMode.USERNAME_ONLY -> ""
+                CardMode.SAME -> name
+                CardMode.USER_PASS -> randomString(passwordLength, charset)
+            }
             UserEntry(
                 username = name,
-                password = if (samePassword) name else randomString(passwordLength, charset),
+                password = password,
                 profile = profile,
                 price = price,
                 validity = validity,

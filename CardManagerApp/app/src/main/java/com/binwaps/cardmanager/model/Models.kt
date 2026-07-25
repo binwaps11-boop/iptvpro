@@ -2,6 +2,32 @@ package com.binwaps.cardmanager.model
 
 import kotlinx.serialization.Serializable
 
+/** نوع الكرت — يحدد ما يُطبع عليه وكيف يُولَّد */
+@Serializable
+enum class CardMode(val labelAr: String, val hintAr: String) {
+    USERNAME_ONLY("اسم مستخدم فقط", "الدخول باسم المستخدم بدون كلمة مرور"),
+    USER_PASS("اسم مستخدم وكلمة مرور", "رمزان مختلفان على الكرت"),
+    SAME("متشابه (رمز واحد)", "اسم المستخدم = كلمة المرور"),
+}
+
+/** حالة الكرت على الراوتر */
+@Serializable
+enum class CardStatus(val labelAr: String) {
+    UNUSED("غير مستهلك"),
+    IN_USE("قيد الاستخدام"),
+    EXPIRED("منتهي"),
+    DISABLED("معطّل"),
+    UNKNOWN("—"),
+}
+
+/** مصدر الكرت */
+@Serializable
+enum class CardSource(val labelAr: String) {
+    LOCAL("محلي"),
+    HOTSPOT("هوتسبوت"),
+    USER_MANAGER("يوزر منجر"),
+}
+
 /** مستخدم واحد (من اليوزر منجر أو الهوتسبوت أو مولّد محلياً) */
 @Serializable
 data class UserEntry(
@@ -12,6 +38,29 @@ data class UserEntry(
     val validity: String = "",
     val serial: String = "",
     val comment: String = "",
+    /** معرّف السجل على الراوتر — يُستخدم للحذف والتعديل */
+    val routerId: String = "",
+    val source: CardSource = CardSource.LOCAL,
+    val status: CardStatus = CardStatus.UNKNOWN,
+    /** الوقت المستهلك كما يعرضه الراوتر */
+    val uptime: String = "",
+    val bytesUsed: Long = 0,
+    val disabled: Boolean = false,
+)
+
+/** جلسة — نشطة الآن أو من السجل */
+@Serializable
+data class SessionEntry(
+    val id: String = "",
+    val username: String = "",
+    val address: String = "",
+    val macAddress: String = "",
+    val uptime: String = "",
+    val bytesIn: Long = 0,
+    val bytesOut: Long = 0,
+    val startedAt: String = "",
+    val endedAt: String = "",
+    val active: Boolean = true,
 )
 
 /** أنواع الحقول التي يمكن وضعها على الكرت */
@@ -185,7 +234,7 @@ data class ActiveUser(
     val bytesOut: Long = 0,
 )
 
-/** باقة الهوتسبوت (بروفايل) */
+/** باقة — من الهوتسبوت أو من اليوزر منجر */
 @Serializable
 data class HotspotProfile(
     val id: String = "",
@@ -195,6 +244,9 @@ data class HotspotProfile(
     val sharedUsers: String = "1",
     /** السعر يُحفظ محلياً في التطبيق لأن الراوتر لا يخزنه */
     val price: String = "",
+    val source: CardSource = CardSource.HOTSPOT,
+    /** عدد الكروت المرتبطة بهذه الباقة */
+    val userCount: Int = 0,
 )
 
 /** دفعة كروت مطبوعة — للسجل وإعادة الطباعة والتقارير */
@@ -221,6 +273,8 @@ data class AppSettings(
     val wifiSsid: String = "",
     val wifiPassword: String = "",
     val currency: String = "ريال",
+    /** نوع الكرت: اسم فقط، اسم وكلمة مرور، أو متشابه */
+    val cardMode: CardMode = CardMode.SAME,
     val paperType: PaperType = PaperType.A4,
     /** ارتفاع الكرت على الطابعة الحرارية بالمليمتر */
     val thermalCardHeightMm: Float = 45f,
