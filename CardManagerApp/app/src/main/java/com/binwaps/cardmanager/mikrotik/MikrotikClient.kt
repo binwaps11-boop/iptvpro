@@ -924,6 +924,86 @@ object MikrotikClient {
         Unit
     }
 
+    /**
+     * ربط الكرت بأول جهاز يستخدمه.
+     *
+     * الراوتر لا يفعل ذلك من نفسه، فنكتب سكربت on-login على بروفايل سيرفر الهوتسبوت:
+     * عند أول دخول يُخزَّن عنوان الجهاز في الكرت، فلا يعمل الكرت على جهاز آخر بعدها.
+     */
+    /** علامة تُذيَّل بها السكربت لنعرف أنه من هذا التطبيق. تعليق في آخر السطر */
+    private const val BIND_MARKER = "# cardmanager-bind-first"
+
+    /**
+     * سطر واحد لأن مُحلِّل مكتبة الـ API لا يقبل سطراً جديداً داخل قيمة.
+     * ونتجنّب علامة التنصيص المفردة لأنها هي التي تُغلِّف القيمة.
+     */
+    private val bindScript: String = ":local usr ${'$'}user; " +
+        ":local mac ${'$'}\"mac-address\"; " +
+        ":if ([:len [/ip hotspot user find name=${'$'}usr]] > 0) do={ " +
+        ":if ([:len [/ip hotspot user get [find name=${'$'}usr] mac-address]] = 0) do={ " +
+        "/ip hotspot user set [find name=${'$'}usr] mac-address=${'$'}mac } }; " +
+        BIND_MARKER
+
+    /** نتيجة تشغيل الربط: كم بروفايل تغيّر وكم تُرك لأن عليه سكربت خاص */
+    data class BindResult(val changed: Int, val skipped: Int, val total: Int)
+
+    /** هل سكربت الربط مثبَّت على أي بروفايل سيرفر هوتسبوت؟ */
+    suspend fun isBindFirstDeviceOn(r: RouterProfile?): Result<Boolean> = onRouter(r) { con ->
+        con.tryPrintLight(".id,name,on-login", "/ip/hotspot/profile")
+            .any { (it["on-login"] ?: "").contains(BIND_MARKER) }
+    }
+
+    /**
+     * تشغيل أو إيقاف ربط الكرت بأول جهاز على بروفايلات سيرفر الهوتسبوت.
+     * لا نلمس بروفايلاً عليه سكربت on-login من عندك — نتركه ونخبرك بعددها.
+     */
+    suspend fun setBindFirstDevice(r: RouterProfile?, enabled: Boolean): Result<BindResult> =
+        onRouter(r) { con ->
+            val profiles = con.tryPrintLight(".id,name,on-login", "/ip/hotspot/profile")
+            if (profiles.isEmpty()) error("لا يوجد بروفايل سيرفر هوتسبوت على هذا الراوتر")
+            var changed = 0
+            var skipped = 0
+            profiles.forEach { p ->
+                val id = p[".id"].orEmpty()
+                if (id.isBlank()) return@forEach
+                val current = p["on-login"].orEmpty().trim()
+                val hasOurs = current.contains(BIND_MARKER)
+                val next: String? = when {
+                    enabled && hasOurs -> null
+                    enabled && current.isEmpty() -> bindScript
+                    enabled -> { skipped++; null }   // عليه سكربت خاص — لا نمسحه
+                    hasOurs -> ""
+                    else -> null
+                }
+                if (next != null) {
+                    val ok = runCatching {
+                        con.execute("/ip/hotspot/profile/set .id=$id on-login='$next'")
+                    }.isSuccess
+                    if (ok) changed++
+                }
+            }
+            BindResult(changed, skipped, profiles.size)
+        }
+
+    /** فك ربط الكروت المحددة بأجهزتها حتى تعمل على جهاز آخر */
+    suspend fun clearBoundDevice(
+        r: RouterProfile?,
+        cards: List<UserEntry>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+    ): Result<Int> = onRouter(r) { con ->
+        var ok = 0
+        cards.forEachIndexed { i, c ->
+            if (c.routerId.isNotBlank()) {
+                val done = runCatching {
+                    con.execute("/ip/hotspot/user/set .id=${c.routerId} mac-address=")
+                }.isSuccess
+                if (done) ok++
+            }
+            onProgress(i + 1, cards.size)
+        }
+        ok
+    }
+
     /** الخدمات المفعّلة (api، www، ssh…) — لتشخيص مشاكل الاتصال */
     suspend fun fetchServices(r: RouterProfile?): Result<List<Triple<String, String, Boolean>>> =
         onRouter(r) { con ->

@@ -342,6 +342,13 @@ fun UsersScreen() {
                         }
                     }
                     GhostButton("تمديد الصلاحية", enabled = !busy, color = Violet) { bulkDialog = "extend" }
+                    GhostButton("فك الربط بالجهاز", enabled = !busy, color = Warn) {
+                        progress = 0 to chosen.size
+                        run("جاري فك الربط…") {
+                            MikrotikClient.clearBoundDevice(Store.activeRouter(), chosen) { d, t -> progress = d to t }
+                                .map { "تم فك ربط $it كرت — يعمل الآن على أي جهاز" }
+                        }
+                    }
                     GhostButton("تصدير CSV", enabled = !busy) {
                         val f = com.binwaps.cardmanager.util.CsvExporter.exportCards(context, chosen)
                         com.binwaps.cardmanager.util.CsvExporter.share(context, f, "تصدير الكروت")

@@ -94,6 +94,7 @@ fun RouterAdminScreen() {
     var bindings by remember { mutableStateOf<List<IpBinding>>(emptyList()) }
     var services by remember { mutableStateOf<List<Triple<String, String, Boolean>>>(emptyList()) }
     var confirmReboot by remember { mutableStateOf(false) }
+    var bindOn by remember { mutableStateOf<Boolean?>(null) }
     var macToAdd by remember { mutableStateOf("") }
     var macNote by remember { mutableStateOf("") }
 
@@ -115,9 +116,12 @@ fun RouterAdminScreen() {
                 AdminTab.BLOCKED -> MikrotikClient.fetchIpBindings(router)
                     .onSuccess { bindings = it }
                     .onFailure { message = it.message.orEmpty() }
-                AdminTab.SYSTEM -> MikrotikClient.fetchServices(router)
-                    .onSuccess { services = it }
-                    .onFailure { message = it.message.orEmpty() }
+                AdminTab.SYSTEM -> {
+                    MikrotikClient.fetchServices(router)
+                        .onSuccess { services = it }
+                        .onFailure { message = it.message.orEmpty() }
+                    MikrotikClient.isBindFirstDeviceOn(router).onSuccess { bindOn = it }
+                }
             }
             busy = false
         }
@@ -320,6 +324,49 @@ fun RouterAdminScreen() {
                     }
                     if (services.isEmpty()) {
                         Text("اضغط تحديث لقراءة الخدمات", fontSize = 11.sp, color = TextLow)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                GlassCard(Modifier.fillMaxWidth(), padding = 12) {
+                    Text("ربط الكرت بأول جهاز", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "عند تشغيله يُثبَّت الكرت على أول جهاز يدخل به، فلا يعمل على جهاز آخر. " +
+                            "يُنفَّذ بسكربت دخول على بروفايل سيرفر الهوتسبوت.",
+                        fontSize = 10.5.sp, color = TextLow,
+                    )
+                    Spacer(Modifier.height(9.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            when (bindOn) {
+                                true -> "الحالة: مفعّل"
+                                false -> "الحالة: معطّل"
+                                null -> "الحالة: غير معروفة"
+                            },
+                            fontSize = 12.sp,
+                            color = if (bindOn == true) Lime else TextMid,
+                            modifier = Modifier.weight(1f),
+                        )
+                        GhostButton(
+                            if (bindOn == true) "إيقاف" else "تشغيل",
+                            color = if (bindOn == true) Danger else Lime,
+                            enabled = !busy,
+                        ) {
+                            val r = router ?: return@GhostButton
+                            val turnOn = bindOn != true
+                            busy = true
+                            scope.launch {
+                                MikrotikClient.setBindFirstDevice(r, turnOn)
+                                    .onSuccess { res ->
+                                        bindOn = turnOn
+                                        message = if (res.skipped > 0)
+                                            "تم على ${res.changed} بروفايل — تُرك ${res.skipped} لأن عليه سكربت دخول خاص بك"
+                                        else "تم على ${res.changed} من ${res.total} بروفايل"
+                                    }
+                                    .onFailure { message = it.message.orEmpty() }
+                                busy = false
+                            }
+                        }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
