@@ -224,6 +224,32 @@ fun ExpressScreen() {
                 }
             }
             Spacer(Modifier.height(7.dp))
+        } else {
+            var loadingProfiles by remember { mutableStateOf(false) }
+            var profilesError by remember { mutableStateOf<String?>(null) }
+            GhostButton(
+                if (loadingProfiles) "جاري جلب الباقات…" else "جلب باقات الراوتر للاختيار منها",
+                Modifier.fillMaxWidth(),
+                enabled = !loadingProfiles,
+            ) {
+                loadingProfiles = true; profilesError = null
+                scope.launch {
+                    MikrotikClient.fetchProfiles(Store.activeRouter())
+                        .onSuccess { list ->
+                            Store.setProfiles(list)
+                            list.firstOrNull()?.let { p ->
+                                if (profile.isBlank()) { profile = p.name; price = p.price }
+                            }
+                        }
+                        .onFailure { profilesError = it.message ?: "فشل جلب الباقات" }
+                    loadingProfiles = false
+                }
+            }
+            profilesError?.let {
+                Spacer(Modifier.height(5.dp))
+                Text(it, fontSize = 10.5.sp, color = com.binwaps.cardmanager.ui.theme.Danger)
+            }
+            Spacer(Modifier.height(7.dp))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AppField(profile, { profile = it }, "اسم الباقة", Modifier.weight(1.2f))

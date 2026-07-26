@@ -737,6 +737,9 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
 private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) -> Unit) {
     val profiles by Store.profiles.collectAsState()
     val settings by Store.settings.collectAsState()
+    val dialogScope = rememberCoroutineScope()
+    var loadingProfiles by remember { mutableStateOf(false) }
+    var profilesError by remember { mutableStateOf<String?>(null) }
     var count by remember { mutableStateOf("50") }
     var prefix by remember { mutableStateOf("") }
     var length by remember { mutableStateOf("6") }
@@ -842,6 +845,22 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                             }
                         }
                     }
+                } else {
+                    // جلب الباقات من هنا مباشرة — بدل مغادرة الحوار والذهاب لقسم الباقات
+                    GhostButton(
+                        if (loadingProfiles) "جاري جلب الباقات…" else "جلب باقات الراوتر للاختيار منها",
+                        Modifier.fillMaxWidth(),
+                        enabled = !loadingProfiles,
+                    ) {
+                        loadingProfiles = true; profilesError = null
+                        dialogScope.launch {
+                            MikrotikClient.fetchProfiles(Store.activeRouter())
+                                .onSuccess { Store.setProfiles(it) }
+                                .onFailure { profilesError = it.message ?: "فشل جلب الباقات" }
+                            loadingProfiles = false
+                        }
+                    }
+                    profilesError?.let { Text(it, fontSize = 10.5.sp, color = Danger) }
                 }
 
                 // أكواد بونص — دفعة إضافية برموز أطول وباقة خاصة، للهدايا والمسابقات
