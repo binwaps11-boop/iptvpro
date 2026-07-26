@@ -149,7 +149,10 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("connect") {
                             ConnectScreen(
-                                onConnected = { navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } } },
+                                onConnected = {
+                                    com.binwaps.cardmanager.data.SyncEngine.start()
+                                    navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } }
+                                },
                                 onSkip = { navController.navigate("dashboard") { popUpTo("connect") { inclusive = true } } },
                             )
                         }
@@ -185,6 +188,8 @@ class MainActivity : ComponentActivity() {
                         composable("settings") {
                             SettingsScreen(
                                 onDisconnect = {
+                                    // قطع فعلي: إيقاف المزامنة أولاً وإلا أعادت فتح الجلسة خلال ثوانٍ
+                                    com.binwaps.cardmanager.data.SyncEngine.stop()
                                     com.binwaps.cardmanager.mikrotik.MikrotikClient.disconnect()
                                     navController.navigate("connect") { popUpTo("dashboard") { inclusive = true } }
                                 },

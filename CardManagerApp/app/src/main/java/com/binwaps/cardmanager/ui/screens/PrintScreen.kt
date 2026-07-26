@@ -146,6 +146,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
      */
     fun autoUploadPending() {
         val router = Store.activeRouter() ?: return
+        // ضغطتا طباعة متتاليتان لا ترفعان نفس الكروت مرتين
+        if (uploadNote?.startsWith("جاري") == true) return
         val pendingCards = Store.users.value.filter { it.routerId.isBlank() && !it.uploaded }
         if (pendingCards.isEmpty()) return
         uploadNote = "جاري رفع ${pendingCards.size} كرت إلى الراوتر بالخلفية…"

@@ -34,6 +34,13 @@ object SyncEngine {
     private val _cardsSyncing = MutableStateFlow(false)
     val cardsSyncing: StateFlow<Boolean> get() = _cardsSyncing
 
+    /** يوقف المزامنة — عند قطع الاتصال يدوياً؛ يُستأنف بـ [start] عند الاتصال */
+    fun stop() {
+        loop?.cancel()
+        loop = null
+        Store.setConnected(false)
+    }
+
     /** يبدأ حلقة المزامنة — آمن استدعاؤه أكثر من مرة */
     fun start() {
         if (loop?.isActive == true) return

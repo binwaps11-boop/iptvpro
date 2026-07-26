@@ -10,6 +10,7 @@ import com.binwaps.cardmanager.model.SessionEntry
 import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -52,8 +53,8 @@ object MikrotikClient {
     // تحديث دوري. نُبقي جلسة واحدة حية ونعيد استخدامها، وإن ماتت نعيد فتحها
     // تلقائياً ونكرر العملية مرة واحدة — المستخدم لا يرى إلا السرعة.
 
-    private var session: ApiConnection? = null
-    private var sessionKey: String? = null
+    @Volatile private var session: ApiConnection? = null
+    @Volatile private var sessionKey: String? = null
     private val sessionLock = Mutex()
 
     // بصمة كلمة المرور ضمن المفتاح — تغييرها يجب أن يفتح جلسة جديدة لا يعاد
@@ -74,10 +75,18 @@ object MikrotikClient {
         sessionKey = null
     }
 
+    /**
+     * فشل منطقي (رفض من الراوتر أو نتيجة فارغة) — الجلسة سليمة، ولا يجوز
+     * أن تُعيد onRouter تنفيذ العملية كاملة بسببه.
+     */
+    internal class RouterLogicException(message: String, cause: Throwable? = null) :
+        Exception(message, cause)
+
     /** خطأ أمرٍ ردّه الراوتر (trap) — الجلسة سليمة ولا معنى لإعادة الاتصال */
     private fun isCommandError(t: Throwable): Boolean {
         var c: Throwable? = t
         while (c != null) {
+            if (c is RouterLogicException) return true
             if (c.javaClass.name.endsWith("ApiCommandException")) return true
             c = c.cause
         }
@@ -105,9 +114,17 @@ object MikrotikClient {
             }.recoverCatching { throw Exception(arabicError(it), it) }
         }
 
-    /** يغلق الجلسة الدائمة — عند تغيير الراوتر أو قطع الاتصال يدوياً */
+    private val clientScope =
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * يغلق الجلسة الدائمة — عند تغيير الراوتر أو قطع الاتصال يدوياً.
+     * الإغلاق تحت القفل نفسه حتى لا يسحب المقبس من تحت عملية جارية.
+     */
     fun disconnect() {
-        invalidateSession()
+        clientScope.launch {
+            sessionLock.withLock { invalidateSession() }
+        }
     }
 
     private fun arabicError(t: Throwable): String {
@@ -519,7 +536,7 @@ object MikrotikClient {
     suspend fun fetchUserManagerUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
         val list = readUserManager(con)
         if (list.isEmpty()) {
-            throw Exception("لم يُعثر على مستخدمين في اليوزر منجر — تأكد أن الحزمة مثبّتة ومفعّلة على الراوتر")
+            throw RouterLogicException("لم يُعثر على مستخدمين في اليوزر منجر — تأكد أن الحزمة مثبّتة ومفعّلة على الراوتر")
         }
         list
     }
@@ -684,7 +701,7 @@ object MikrotikClient {
             }
 
         val all = hotspotProfiles + umProfiles
-        if (all.isEmpty()) throw Exception("لا توجد باقات على الراوتر — أنشئ باقة من الهوتسبوت أو اليوزر منجر أولاً")
+        if (all.isEmpty()) throw RouterLogicException("لا توجد باقات على الراوتر — أنشئ باقة من الهوتسبوت أو اليوزر منجر أولاً")
         all
     }
 
@@ -723,7 +740,7 @@ object MikrotikClient {
             if (success) onCreated(users[index])
         }
         if (result.ok == 0 && users.isNotEmpty()) {
-            throw Exception("رفض الراوتر إنشاء الكروت: ${firstPipelineError.get()?.message ?: "سبب غير معروف"}")
+            throw RouterLogicException("رفض الراوتر إنشاء الكروت: ${firstPipelineError.get()?.message ?: "سبب غير معروف"}", firstPipelineError.get())
         }
         result.ok
     }
@@ -775,13 +792,16 @@ object MikrotikClient {
             }
         }
         if (addResult.ok == 0 && users.isNotEmpty()) {
-            throw Exception(
-                "تعذّر إنشاء أي مستخدم: ${firstPipelineError.get()?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}"
+            throw RouterLogicException(
+                "تعذّر إنشاء أي مستخدم: ${firstPipelineError.get()?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}",
+                firstPipelineError.get(),
             )
         }
 
-        // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم
-        val linkCmds = created.filter { it.profile.isNotBlank() }.map { u ->
+        // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم.
+        // نسخة ثابتة — مستمع متأخر من مهلة منتهية قد يضيف أثناء القراءة
+        val createdSafe = synchronized(created) { created.toList() }
+        val linkCmds = createdSafe.filter { it.profile.isNotBlank() }.map { u ->
             if (isV7) "$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}"
             else "$base/user/create-and-activate-profile customer=${q(customer)} " +
                 "numbers=${q(u.username)} profile=${q(u.profile)}"
@@ -793,7 +813,7 @@ object MikrotikClient {
     /** تفعيل أو تعطيل كرت على الراوتر */
     suspend fun setUserEnabled(r: RouterProfile?, user: UserEntry, enabled: Boolean): Result<Unit> =
         onRouter(r) { con ->
-            if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
+            if (user.routerId.isBlank()) throw RouterLogicException("هذا الكرت غير موجود على الراوتر")
             val path = when (user.source) {
                 CardSource.USER_MANAGER ->
                     if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
@@ -1064,7 +1084,7 @@ object MikrotikClient {
 
     /** حذف كرت واحد من الراوتر */
     suspend fun removeUser(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
-        if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
+        if (user.routerId.isBlank()) throw RouterLogicException("هذا الكرت غير موجود على الراوتر")
         val path = if (user.source == CardSource.USER_MANAGER) {
             if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
                 "/user-manager/user/remove" else "/tool/user-manager/user/remove"

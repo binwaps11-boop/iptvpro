@@ -125,11 +125,15 @@ object Store {
      * تبقى في الذاكرة — قد تكون بعشرات الآلاف وكتابتها تجمّد الجهاز،
      * وجلبها من جديد أصبح سريعاً.
      */
+    // كل تعديلات قائمة الكروت متزامنة — SyncEngine يدمج من خيط خلفي بينما
+    // الواجهة تولّد وتوسم، وقراءة-ثم-كتابة غير متزامنة كانت قد تمحو كروتاً وليدة
+    @Synchronized
     fun setUsers(list: List<UserEntry>) {
         _users.value = list
         save("users.json", list.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
     }
 
+    @Synchronized
     fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
     fun clearUsers() = setUsers(emptyList())
 
@@ -137,6 +141,7 @@ object Store {
      * دمج كروت الراوتر المجلوبة مع القائمة المحلية: نسخة الراوتر هي المرجع،
      * والكروت المحلية التي لم تُرفع بعد تبقى كما هي فلا يضيع منها شيء.
      */
+    @Synchronized
     fun mergeRouterCards(fetched: List<UserEntry>) {
         val names = fetched.map { it.username }.toHashSet()
         val localPending = _users.value.filter {
@@ -154,6 +159,7 @@ object Store {
     }
 
     /** وسم الكروت المحلية التي نجح رفعها للراوتر — حتى لا تُرفع مرتين */
+    @Synchronized
     fun markUploaded(usernames: Collection<String>) {
         if (usernames.isEmpty()) return
         val set = usernames.toHashSet()
