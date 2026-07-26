@@ -306,6 +306,9 @@ object MikrotikClient {
         probe("باقات الهوتسبوت", "/ip/hotspot/user/profile/print") { rows ->
             "${rows.size} باقة" + if (rows.isEmpty()) "" else " — " + rows.take(6).mapNotNull { it["name"] }.joinToString("، ")
         }
+        probe("عملاء اليوزر منجر v6", "/tool/user-manager/customer/print") { rows ->
+            if (rows.isEmpty()) "لا يوجد عملاء" else rows.take(5).mapNotNull { it["login"] }.joinToString("، ")
+        }
         probe("اليوزر منجر v6 (count-only)", "/tool/user-manager/user/print count-only", ::ret)
         probe("اليوزر منجر v6 (قائمة)", "/tool/user-manager/user/print return name,username", ::names)
         probe("باقات اليوزر منجر v6", "/tool/user-manager/profile/print") { rows -> "${rows.size} باقة" }
@@ -353,9 +356,12 @@ object MikrotikClient {
         if (total != null) {
             // المستعملة: دخلت ولو مرة (uptime > 0) أو معلّمة منتهية بأسلوب MIKHMON
             // (limit-uptime=1s) أو معطّلة — نفس منطق classify لكن يعدّه الراوتر بنفسه
-            val used = con.countOnly(hs, "uptime>0s or limit-uptime=1s or disabled=yes")
+            // القيم المنطقية في الـ API تُكتب true/false لا yes/no
+            val used = con.countOnly(hs, "uptime>0s or limit-uptime=1s or disabled=true")
                 ?: con.countOnly(hs, "uptime>0s")
-            val um = con.tryCountOnly("", "/user-manager/user", "/tool/user-manager/user") ?: 0
+            // إن فشل عدّ اليوزر منجر لا نعرض صفراً كاذباً — نجرب عدّ القائمة الخفيفة
+            val um = con.tryCountOnly("", "/user-manager/user", "/tool/user-manager/user")
+                ?: con.tryPrintLight(".id", "/user-manager/user", "/tool/user-manager/user").size
             RouterStatus(
                 activeUsers = con.countOnly("/ip/hotspot/active") ?: -1,
                 hotspotUsers = total,
@@ -641,7 +647,8 @@ object MikrotikClient {
         fun umCount(name: String): Int {
             // v7: ربط المستخدم بالباقة في جدول user-profile — v6: حقل group على المستخدم
             con.countOnly("/user-manager/user-profile", "profile=${q(name)}")?.let { return it }
-            con.countOnly("/tool/user-manager/user", "group=${q(name)}")?.let { return it }
+            // v6 لا يعرف group — ربط الباقة بعد التفعيل في حقل actual-profile
+            con.countOnly("/tool/user-manager/user", "actual-profile=${q(name)}")?.let { return it }
             val list = umUsersFallback ?: con.tryPrintLight(
                 "group,actual-profile,profile", "/user-manager/user", "/tool/user-manager/user",
             ).also { umUsersFallback = it }
@@ -722,6 +729,15 @@ object MikrotikClient {
     }
 
     /**
+     * أول عميل معرّف في يوزر منجر v6 — أوامر الإضافة والتفعيل تتطلب customer
+     * موجوداً فعلاً، وافتراض admin كان يُفشل الرفع عند من سمّاه غير ذلك.
+     */
+    private fun umCustomer(con: ApiConnection): String =
+        runCatching {
+            con.execute("/tool/user-manager/customer/print")?.firstOrNull()?.get("login")
+        }.getOrNull().takeUnless { it.isNullOrBlank() } ?: "admin"
+
+    /**
      * إنشاء المستخدمين في اليوزر منجر.
      * v7: يُنشأ المستخدم ثم تُربط به الباقة في جدول user-profile.
      * v6: أمر واحد create-and-activate-profile، وإلا إضافة عادية.
@@ -732,18 +748,21 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r) { con ->
-        val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+        // فحص v7 بعدٍّ لا بجلب القائمة كاملة
+        val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
         val base = if (isV7) "/user-manager" else "/tool/user-manager"
+        val customer = if (isV7) "" else umCustomer(con)
 
-        // الموجة الأولى (متدفقة): إنشاء المستخدمين كلهم
+        // الموجة الأولى (متدفقة): إنشاء المستخدمين كلهم.
+        // v6 يسمي حقل الدخول username لا name — استعمال name كان يُفشل كل الرفع
         val addCmds = users.map { u ->
             buildString {
-                append("$base/user/add name=${q(u.username)}")
+                append("$base/user/add ${if (isV7) "name" else "username"}=${q(u.username)}")
                 if (u.password.isNotBlank()) append(" password=${q(u.password)}")
                 if (isV7) {
                     if (u.profile.isNotBlank()) append(" group=${q(u.profile)}")
                 } else {
-                    append(" customer=admin")
+                    append(" customer=${q(customer)}")
                 }
                 if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
             }
@@ -764,7 +783,7 @@ object MikrotikClient {
         // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم
         val linkCmds = created.filter { it.profile.isNotBlank() }.map { u ->
             if (isV7) "$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}"
-            else "$base/user/create-and-activate-profile customer=admin " +
+            else "$base/user/create-and-activate-profile customer=${q(customer)} " +
                 "numbers=${q(u.username)} profile=${q(u.profile)}"
         }
         if (linkCmds.isNotEmpty()) con.pipeline(linkCmds)
@@ -777,7 +796,7 @@ object MikrotikClient {
             if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
             val path = when (user.source) {
                 CardSource.USER_MANAGER ->
-                    if (runCatching { con.execute("/user-manager/user/print") }.isSuccess)
+                    if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
                         "/user-manager/user" else "/tool/user-manager/user"
                 else -> "/ip/hotspot/user"
             }
@@ -864,7 +883,7 @@ object MikrotikClient {
             onProgress(++done, cards.size)
         }
         if (um.isNotEmpty()) {
-            val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+            val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
             // صفوف الصلاحيات الحالية مرة واحدة — إعادة الربط تحتاج حذف القديم.
             // مجرد set group لا يغيّر الباقة الفعلية في v7
             val existing = if (isV7) {
@@ -880,7 +899,7 @@ object MikrotikClient {
                         con.execute("/user-manager/user-profile/add user=${q(u.username)} profile=${q(profile)}")
                     } else {
                         con.execute(
-                            "/tool/user-manager/user/create-and-activate-profile customer=admin " +
+                            "/tool/user-manager/user/create-and-activate-profile customer=${q(umCustomer(con))} " +
                                 "numbers=${q(u.username)} profile=${q(profile)}"
                         )
                     }
@@ -1047,7 +1066,7 @@ object MikrotikClient {
     suspend fun removeUser(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
         if (user.routerId.isBlank()) throw Exception("هذا الكرت غير موجود على الراوتر")
         val path = if (user.source == CardSource.USER_MANAGER) {
-            if (runCatching { con.execute("/user-manager/user/print") }.isSuccess)
+            if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
                 "/user-manager/user/remove" else "/tool/user-manager/user/remove"
         } else "/ip/hotspot/user/remove"
         con.execute("$path .id=${user.routerId}")
@@ -1114,7 +1133,7 @@ object MikrotikClient {
         if (user.routerId.isBlank()) error("لا يمكن تعديل هذا الكرت — لم يُجلب من الراوتر")
         if (user.source == CardSource.USER_MANAGER) {
             // اليوزر منجر: الحقول تختلف — group بدل profile، ولا يوجد limit-uptime
-            val isV7 = runCatching { con.execute("/user-manager/user/print") }.isSuccess
+            val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
             val path = if (isV7) "/user-manager/user" else "/tool/user-manager/user"
             val sets = buildString {
                 password?.let { append(" password=${q(it)}") }
@@ -1132,7 +1151,7 @@ object MikrotikClient {
                         con.execute("/user-manager/user-profile/add user=${q(user.username)} profile=${q(p)}")
                     } else {
                         con.execute(
-                            "/tool/user-manager/user/create-and-activate-profile customer=admin " +
+                            "/tool/user-manager/user/create-and-activate-profile customer=${q(umCustomer(con))} " +
                                 "numbers=${q(user.username)} profile=${q(p)}"
                         )
                     }
