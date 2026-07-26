@@ -272,6 +272,48 @@ object MikrotikClient {
         return null
     }
 
+    // ===== التشخيص =====
+
+    data class DiagLine(val label: String, val value: String, val ok: Boolean)
+
+    /**
+     * فحص شامل يجري أوامر خام على الراوتر ويعرض ردّه الحقيقي على كلٍّ منها —
+     * حين «تظهر أصفار» يكشف هذا أين الكروت فعلاً وأي أمرٍ يفشل ولماذا.
+     */
+    suspend fun diagnose(r: RouterProfile?): Result<List<DiagLine>> = onRouter(r) { con ->
+        val out = mutableListOf<DiagLine>()
+        fun probe(label: String, cmd: String, render: (List<Map<String, String>>) -> String) {
+            runCatching { con.execute(cmd) ?: emptyList() }
+                .onSuccess { out.add(DiagLine(label, render(it), true)) }
+                .onFailure { out.add(DiagLine(label, it.message?.take(140) ?: "فشل", false)) }
+        }
+        fun ret(rows: List<Map<String, String>>) = rows.firstOrNull()?.get("ret") ?: "بدون ret"
+        fun names(rows: List<Map<String, String>>) =
+            "${rows.size} إجمالاً" + if (rows.isEmpty()) "" else " — أولها: " +
+                rows.take(5).mapNotNull { it["name"] ?: it["username"] }.joinToString("، ")
+
+        probe("هوية الراوتر", "/system/identity/print") { it.firstOrNull()?.get("name") ?: "؟" }
+        probe("الإصدار واللوحة", "/system/resource/print") {
+            "${it.firstOrNull()?.get("version") ?: "؟"} — ${it.firstOrNull()?.get("board-name").orEmpty()}"
+        }
+        probe("خوادم الهوتسبوت", "/ip/hotspot/print") { rows ->
+            if (rows.isEmpty()) "لا يوجد أي سيرفر هوتسبوت على هذا الراوتر"
+            else rows.mapNotNull { it["name"] }.joinToString("، ")
+        }
+        probe("عدّ مستخدمي الهوتسبوت (count-only)", "/ip/hotspot/user/print count-only", ::ret)
+        probe("مستخدمو الهوتسبوت (قائمة)", "/ip/hotspot/user/print return name", ::names)
+        probe("فحص استعلام الاستثناء (where)", "/ip/hotspot/user/print count-only where name!=default-trial", ::ret)
+        probe("باقات الهوتسبوت", "/ip/hotspot/user/profile/print") { rows ->
+            "${rows.size} باقة" + if (rows.isEmpty()) "" else " — " + rows.take(6).mapNotNull { it["name"] }.joinToString("، ")
+        }
+        probe("اليوزر منجر v6 (count-only)", "/tool/user-manager/user/print count-only", ::ret)
+        probe("اليوزر منجر v6 (قائمة)", "/tool/user-manager/user/print return name,username", ::names)
+        probe("باقات اليوزر منجر v6", "/tool/user-manager/profile/print") { rows -> "${rows.size} باقة" }
+        probe("اليوزر منجر v7 (count-only)", "/user-manager/user/print count-only", ::ret)
+        probe("المتصلون الآن", "/ip/hotspot/active/print count-only", ::ret)
+        out
+    }
+
     // ===== الحالة =====
 
     /**
@@ -305,7 +347,9 @@ object MikrotikClient {
      */
     suspend fun fetchCardStats(r: RouterProfile?): Result<RouterStatus> = onRouter(r) { con ->
         val hs = "/ip/hotspot/user"
-        val total = con.countOnly(hs, "name!=default-trial") ?: con.countOnly(hs)
+        // العدّ الصريح أولاً — استعلام الاستثناء قد يتصرف بغرابة على بعض إصدارات v6
+        // فلا نأتمنه على الإجمالي؛ خصم default-trial هامشي ولا يستحق المجازفة
+        val total = con.countOnly(hs)
         if (total != null) {
             // المستعملة: دخلت ولو مرة (uptime > 0) أو معلّمة منتهية بأسلوب MIKHMON
             // (limit-uptime=1s) أو معطّلة — نفس منطق classify لكن يعدّه الراوتر بنفسه

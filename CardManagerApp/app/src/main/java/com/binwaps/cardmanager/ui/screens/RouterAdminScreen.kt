@@ -68,6 +68,7 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 private enum class AdminTab(val labelAr: String) {
+    DIAG("فحص شامل"),
     DEVICES("أجهزة الشبكة"),
     INTERFACES("المنافذ والحركة"),
     BLOCKED("الحجب والسماح"),
@@ -94,6 +95,7 @@ fun RouterAdminScreen() {
     var bindings by remember { mutableStateOf<List<IpBinding>>(emptyList()) }
     var services by remember { mutableStateOf<List<Triple<String, String, Boolean>>>(emptyList()) }
     var confirmReboot by remember { mutableStateOf(false) }
+    var diag by remember { mutableStateOf<List<MikrotikClient.DiagLine>>(emptyList()) }
     var bindOn by remember { mutableStateOf<Boolean?>(null) }
     var macToAdd by remember { mutableStateOf("") }
     var macNote by remember { mutableStateOf("") }
@@ -127,6 +129,9 @@ fun RouterAdminScreen() {
                         .onFailure { if (fresh()) message = it.message.orEmpty() }
                     MikrotikClient.isBindFirstDeviceOn(router).onSuccess { if (fresh()) bindOn = it }
                 }
+                AdminTab.DIAG -> MikrotikClient.diagnose(router)
+                    .onSuccess { if (fresh()) diag = it }
+                    .onFailure { if (fresh()) message = it.message.orEmpty() }
             }
             if (fresh()) busy = false
         }
@@ -179,6 +184,34 @@ fun RouterAdminScreen() {
         Spacer(Modifier.height(12.dp))
 
         when (tab) {
+            AdminTab.DIAG -> {
+                Text(
+                    "يجري أوامر خام على الراوتر ويعرض ردّه الحقيقي على كلٍّ منها — " +
+                        "أرسل لقطة من هذه الشاشة عند أي مشكلة في العدادات أو الجلب",
+                    fontSize = 11.sp, color = TextLow,
+                )
+                Spacer(Modifier.height(9.dp))
+                diag.forEach { d ->
+                    GlassCard(Modifier.fillMaxWidth().padding(bottom = 7.dp), padding = 11) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (d.ok) "✓" else "✗",
+                                fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                                color = if (d.ok) Lime else Danger,
+                            )
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(d.label, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                                Text(d.value, fontSize = 11.sp, color = if (d.ok) TextMid else Danger)
+                            }
+                        }
+                    }
+                }
+                if (diag.isEmpty() && !busy) {
+                    Text("اضغط زر التحديث أعلاه لبدء الفحص", fontSize = 11.5.sp, color = TextLow)
+                }
+            }
+
             AdminTab.DEVICES -> {
                 Text("${leases.size} جهاز حصل على عنوان من الراوتر", fontSize = 11.5.sp, color = TextLow)
                 Spacer(Modifier.height(8.dp))
