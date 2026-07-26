@@ -79,6 +79,8 @@ class MainActivity : ComponentActivity() {
         com.binwaps.cardmanager.data.Backend.init(this)
         Store.init(this)
         LicenseManager.init(this)
+        // المزامنة التلقائية الكاملة — بلا أي زر جلب من المستخدم
+        com.binwaps.cardmanager.data.SyncEngine.start()
         startCloudAutoActivate()
         handleLink(intent)
 

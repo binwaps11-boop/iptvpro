@@ -133,6 +133,26 @@ object Store {
     fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
     fun clearUsers() = setUsers(emptyList())
 
+    /**
+     * دمج كروت الراوتر المجلوبة مع القائمة المحلية: نسخة الراوتر هي المرجع،
+     * والكروت المحلية التي لم تُرفع بعد تبقى كما هي فلا يضيع منها شيء.
+     */
+    fun mergeRouterCards(fetched: List<UserEntry>) {
+        val names = fetched.map { it.username }.toHashSet()
+        val localPending = _users.value.filter {
+            it.routerId.isBlank() && it.source == com.binwaps.cardmanager.model.CardSource.LOCAL &&
+                it.username !in names
+        }
+        // أسعار الكروت تعيش محلياً فقط — ننقلها لنسخة الراوتر بدل فقدها
+        val prices = _users.value.associate { it.username to it.price }
+        setUsers(
+            fetched.map { f ->
+                val oldPrice = prices[f.username].orEmpty()
+                if (f.price.isBlank() && oldPrice.isNotBlank()) f.copy(price = oldPrice) else f
+            } + localPending
+        )
+    }
+
     /** وسم الكروت المحلية التي نجح رفعها للراوتر — حتى لا تُرفع مرتين */
     fun markUploaded(usernames: Collection<String>) {
         if (usernames.isEmpty()) return

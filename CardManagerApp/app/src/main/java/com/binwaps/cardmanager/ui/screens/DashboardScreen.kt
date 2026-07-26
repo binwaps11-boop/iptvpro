@@ -113,19 +113,7 @@ fun DashboardScreen(navController: NavController) {
         }
     }
 
-    LaunchedEffect(connected) {
-        if (connected && status.hotspotUsers < 0) refreshStats()
-        // جلب الباقات تلقائياً بالخلفية — لتظهر في السريع والكروت والطباعة دون أي خطوة
-        if (connected && Store.profiles.value.isEmpty()) {
-            scope.launch {
-                MikrotikClient.fetchProfiles(Store.activeRouter()).onSuccess { Store.setProfiles(it) }
-            }
-        }
-        while (connected) {
-            refresh()
-            delay(20_000)
-        }
-    }
+    // التحديث الدوري كله يتولاه SyncEngine منذ فتح التطبيق — لا حلقة هنا
 
     // يُحسب في كل إعادة تركيب — remember كان يترك "اليوم" على يوم أمس بعد منتصف الليل
     val todayStart = java.util.Calendar.getInstance().apply {
