@@ -298,6 +298,107 @@ object MikrotikClient {
         return null
     }
 
+    // ===== PPP / PPPoE =====
+
+    data class PppSecret(
+        val id: String,
+        val name: String,
+        val password: String,
+        val profile: String,
+        val service: String,
+        val comment: String,
+        val disabled: Boolean,
+        val lastLoggedOut: String,
+        val active: Boolean = false,
+        val activeAddress: String = "",
+        val activeUptime: String = "",
+    )
+
+    /** حسابات PPPoE مع حالة اتصال كل حساب الآن */
+    suspend fun fetchPppSecrets(r: RouterProfile?): Result<List<PppSecret>> = onRouter(r) { con ->
+        val actives = con.tryPrintLight("name,address,uptime", "/ppp/active")
+            .associateBy { it["name"].orEmpty() }
+        con.printLight(
+            "/ppp/secret",
+            ".id,name,password,profile,service,comment,disabled,last-logged-out",
+        ).map { row ->
+            val name = row["name"].orEmpty()
+            val a = actives[name]
+            PppSecret(
+                id = row[".id"].orEmpty(),
+                name = name,
+                password = row["password"].orEmpty(),
+                profile = row["profile"].orEmpty(),
+                service = row["service"].orEmpty(),
+                comment = row["comment"].orEmpty(),
+                disabled = row["disabled"] == "true",
+                lastLoggedOut = row["last-logged-out"].orEmpty(),
+                active = a != null,
+                activeAddress = a?.get("address").orEmpty(),
+                activeUptime = a?.get("uptime").orEmpty(),
+            )
+        }
+    }
+
+    /** باقات PPP — لاختيارها عند رفع الكروت كحسابات PPPoE */
+    suspend fun fetchPppProfiles(r: RouterProfile?): Result<List<String>> = onRouter(r) { con ->
+        con.tryList("/ppp/profile/print").mapNotNull { it["name"] }
+    }
+
+    /**
+     * رفع كروت كحسابات PPPoE — متدفق بنفس محرك الهوتسبوت:
+     * نافذة 128، إعادة صامتة، والموجود مسبقاً يُحسب نجاحاً لا تكراراً.
+     */
+    suspend fun createPppSecrets(
+        r: RouterProfile?,
+        users: List<UserEntry>,
+        profile: String,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
+        onCreated: (UserEntry) -> Unit = {},
+    ): Result<Int> = onRouter(r) { con ->
+        val cmds = users.map { u ->
+            buildString {
+                append("/ppp/secret/add name=${q(u.username)} service=pppoe")
+                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
+                val p = profile.ifBlank { u.profile }
+                if (p.isNotBlank()) append(" profile=${q(p)}")
+                val tag = u.batchTag.ifBlank { u.comment }
+                if (tag.isNotBlank()) append(" comment=${q(tag)}")
+            }
+        }
+        val result = con.pipeline(
+            cmds, onProgress,
+            treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
+            onDone = { index, success -> if (success) onCreated(users[index]) },
+        )
+        if (result.ok == 0 && users.isNotEmpty()) {
+            throw RouterLogicException(
+                "رفض الراوتر إنشاء حسابات PPPoE: ${firstPipelineError.get()?.message ?: "تأكد من اسم الباقة"}",
+                firstPipelineError.get(),
+            )
+        }
+        result.ok
+    }
+
+    suspend fun setPppSecretDisabled(r: RouterProfile?, id: String, disabled: Boolean): Result<Unit> =
+        onRouter(r) { con ->
+            con.execute("/ppp/secret/set .id=$id disabled=${if (disabled) "yes" else "no"}")
+            Unit
+        }
+
+    suspend fun removePppSecret(r: RouterProfile?, id: String): Result<Unit> = onRouter(r) { con ->
+        con.execute("/ppp/secret/remove .id=$id")
+        Unit
+    }
+
+    /** فصل جلسة PPPoE نشطة باسم المستخدم */
+    suspend fun disconnectPppActive(r: RouterProfile?, name: String): Result<Unit> = onRouter(r) { con ->
+        con.tryPrintLight(".id,name", "/ppp/active")
+            .filter { it["name"] == name }
+            .forEach { row -> row[".id"]?.let { con.execute("/ppp/active/remove .id=$it") } }
+        Unit
+    }
+
     // ===== التشخيص =====
 
     data class DiagLine(val label: String, val value: String, val ok: Boolean)
@@ -340,6 +441,8 @@ object MikrotikClient {
         probe("باقات اليوزر منجر v6", "/tool/user-manager/profile/print") { rows -> "${rows.size} باقة" }
         probe("اليوزر منجر v7 (count-only)", "/user-manager/user/print count-only", ::ret)
         probe("المتصلون الآن", "/ip/hotspot/active/print count-only", ::ret)
+        probe("حسابات PPPoE (count-only)", "/ppp/secret/print count-only", ::ret)
+        probe("جلسات PPPoE النشطة", "/ppp/active/print count-only", ::ret)
         out
     }
 

@@ -69,6 +69,7 @@ import java.util.Locale
 
 private enum class AdminTab(val labelAr: String) {
     DIAG("فحص شامل"),
+    PPP("PPPoE"),
     DEVICES("أجهزة الشبكة"),
     INTERFACES("المنافذ والحركة"),
     BLOCKED("الحجب والسماح"),
@@ -96,6 +97,9 @@ fun RouterAdminScreen() {
     var services by remember { mutableStateOf<List<Triple<String, String, Boolean>>>(emptyList()) }
     var confirmReboot by remember { mutableStateOf(false) }
     var diag by remember { mutableStateOf<List<MikrotikClient.DiagLine>>(emptyList()) }
+    var ppp by remember { mutableStateOf<List<MikrotikClient.PppSecret>>(emptyList()) }
+    var pppProfiles by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pppUploadProfile by remember { mutableStateOf("") }
     var bindOn by remember { mutableStateOf<Boolean?>(null) }
     var macToAdd by remember { mutableStateOf("") }
     var macNote by remember { mutableStateOf("") }
@@ -132,6 +136,17 @@ fun RouterAdminScreen() {
                 AdminTab.DIAG -> MikrotikClient.diagnose(router)
                     .onSuccess { if (fresh()) diag = it }
                     .onFailure { if (fresh()) message = it.message.orEmpty() }
+                AdminTab.PPP -> {
+                    MikrotikClient.fetchPppSecrets(router)
+                        .onSuccess { if (fresh()) ppp = it }
+                        .onFailure { if (fresh()) message = it.message.orEmpty() }
+                    MikrotikClient.fetchPppProfiles(router).onSuccess {
+                        if (fresh()) {
+                            pppProfiles = it
+                            if (pppUploadProfile.isBlank()) pppUploadProfile = it.firstOrNull().orEmpty()
+                        }
+                    }
+                }
             }
             if (fresh()) busy = false
         }
@@ -209,6 +224,106 @@ fun RouterAdminScreen() {
                 }
                 if (diag.isEmpty() && !busy) {
                     Text("اضغط زر التحديث أعلاه لبدء الفحص", fontSize = 11.5.sp, color = TextLow)
+                }
+            }
+
+            AdminTab.PPP -> {
+                val pending = Store.users.collectAsState().value
+                    .filter { it.routerId.isBlank() && !it.uploaded }
+                Text(
+                    "${ppp.size} حساب PPPoE — ${ppp.count { it.active }} متصل الآن",
+                    fontSize = 11.5.sp, color = TextLow,
+                )
+                Spacer(Modifier.height(9.dp))
+                if (pending.isNotEmpty()) {
+                    if (pppProfiles.isNotEmpty()) {
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            pppProfiles.forEach { p ->
+                                Text(
+                                    p, fontSize = 11.sp,
+                                    color = if (pppUploadProfile == p) Neon else TextMid,
+                                    modifier = Modifier
+                                        .background(if (pppUploadProfile == p) Neon.copy(alpha = 0.12f) else Panel, RoundedCornerShape(999.dp))
+                                        .border(1.dp, if (pppUploadProfile == p) Neon.copy(alpha = 0.5f) else Stroke, RoundedCornerShape(999.dp))
+                                        .clickable { pppUploadProfile = p }
+                                        .padding(horizontal = 11.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(7.dp))
+                    }
+                    GhostButton("رفع ${pending.size} كرت كحسابات PPPoE", Modifier.fillMaxWidth(), enabled = !busy) {
+                        val r0 = router ?: return@GhostButton
+                        busy = true; message = ""
+                        scope.launch {
+                            val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+                            MikrotikClient.createPppSecrets(
+                                r0, pending, pppUploadProfile,
+                                onCreated = { created.add(it.username) },
+                            ).onSuccess {
+                                Store.markUploaded(created)
+                                message = "تم رفع $it حساب PPPoE"
+                            }.onFailure { message = it.message.orEmpty() }
+                            busy = false
+                            refresh()
+                        }
+                    }
+                    Spacer(Modifier.height(9.dp))
+                }
+                ppp.forEach { s ->
+                    GlassCard(Modifier.fillMaxWidth().padding(bottom = 7.dp), padding = 11) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.name, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                                Text(
+                                    buildList {
+                                        if (s.profile.isNotBlank()) add(s.profile)
+                                        if (s.active) add("متصل ${s.activeUptime} — ${s.activeAddress}")
+                                        else if (s.disabled) add("معطّل")
+                                        else add("غير متصل")
+                                    }.joinToString("  •  "),
+                                    fontSize = 10.5.sp,
+                                    color = if (s.active) Lime else if (s.disabled) Danger else TextLow,
+                                )
+                            }
+                            if (s.active) {
+                                Text(
+                                    "فصل", fontSize = 11.sp, color = Warn, fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .background(Warn.copy(alpha = 0.12f), RoundedCornerShape(999.dp))
+                                        .clickable {
+                                            val r0 = router ?: return@clickable
+                                            scope.launch {
+                                                MikrotikClient.disconnectPppActive(r0, s.name)
+                                                refresh()
+                                            }
+                                        }
+                                        .padding(horizontal = 11.dp, vertical = 5.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(
+                                if (s.disabled) "تفعيل" else "تعطيل",
+                                fontSize = 11.sp,
+                                color = if (s.disabled) Lime else TextMid,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .background(Panel, RoundedCornerShape(999.dp))
+                                    .border(1.dp, Stroke, RoundedCornerShape(999.dp))
+                                    .clickable {
+                                        val r0 = router ?: return@clickable
+                                        scope.launch {
+                                            MikrotikClient.setPppSecretDisabled(r0, s.id, !s.disabled)
+                                            refresh()
+                                        }
+                                    }
+                                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                            )
+                        }
+                    }
+                }
+                if (ppp.isEmpty() && !busy) {
+                    Text("لا توجد حسابات PPPoE على هذا الراوتر", fontSize = 11.5.sp, color = TextLow)
                 }
             }
 
