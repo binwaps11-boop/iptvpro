@@ -503,8 +503,11 @@ object MikrotikClient {
      * ابناً للواجهة لبقيت مهلة الشاشة تنتظره فعلياً وتعلّق على «جاري الاتصال».
      * بجعله مستقلاً تعود الواجهة في موعدها ويُكمل هو تنظيف نفسه في الخلفية.
      */
-    fun smartConnectAsync(r: RouterProfile): kotlinx.coroutines.Deferred<Result<SmartConnect>> =
-        clientScope.async { smartConnect(r) }
+    fun smartConnectAsync(
+        r: RouterProfile,
+        onStage: (String) -> Unit = {},
+    ): kotlinx.coroutines.Deferred<Result<SmartConnect>> =
+        clientScope.async { smartConnect(r, onStage) }
 
     /**
      * اتصال ذكي: لا يفشل لمجرد أن خانة «مشفّر» مضبوطة خطأ.
@@ -514,8 +517,12 @@ object MikrotikClient {
      * سبب وجوده: منفذ API عادي (مثل 8728 أو منفذ مخصّص) مع تفعيل api-ssl
      * يجعل مصافحة TLS تعلّق حتى انتهاء المهلة بلا سبب مفهوم للمستخدم.
      */
-    suspend fun smartConnect(r: RouterProfile): Result<SmartConnect> = withContext(Dispatchers.IO) {
+    suspend fun smartConnect(
+        r: RouterProfile,
+        onStage: (String) -> Unit = {},
+    ): Result<SmartConnect> = withContext(Dispatchers.IO) {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
+        onStage("فحص المنفذ ${r.port}…")
         if (!portReachable(r.host, r.port, timeoutMs)) {
             return@withContext Result.failure(
                 Exception(
@@ -531,9 +538,11 @@ object MikrotikClient {
         var lastError: Throwable? = null
         for (ssl in order) {
             var probe: ApiConnection? = null
+            onStage(if (ssl) "تجربة الاتصال المشفّر (api-ssl)…" else "تجربة الاتصال العادي (api)…")
             val attempt = runCatching {
                 val con = openWith(r, ssl)
                 probe = con
+                onStage("تسجيل الدخول وقراءة حالة الراوتر…")
                 readStatus(con)
             }
             attempt.onSuccess { status ->

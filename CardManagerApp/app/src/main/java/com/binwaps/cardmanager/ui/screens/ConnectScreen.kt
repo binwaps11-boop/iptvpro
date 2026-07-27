@@ -96,6 +96,8 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var connectJob by remember { mutableStateOf<Job?>(null) }
+    // ما الذي يجري الآن بالضبط — ليعرف المستخدم أين يتوقف بدل «جاري الاتصال» مبهمة
+    var stage by remember { mutableStateOf("") }
 
     // ملء الحقول عند اختيار راوتر محفوظ
     LaunchedEffect(editingId) {
@@ -127,10 +129,11 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         connectJob = scope.launch {
             // العمل يجري على نطاق مستقل عن الواجهة، لذا تعود المهلة في موعدها
             // فعلاً بدل أن تنتظر عملاً شبكياً لا يستجيب للإلغاء
-            val work = MikrotikClient.smartConnectAsync(profile)
+            val work = MikrotikClient.smartConnectAsync(profile) { s -> stage = s }
             val result = withTimeoutOrNull(hardLimitMs) { work.await() }
             if (result == null) work.cancel()
             busy = false
+            stage = ""
             connectJob = null
             if (result == null) {
                 error = "انتهت مهلة الاتصال — تأكد من العنوان والمنفذ، أو زد المهلة، " +
@@ -165,6 +168,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         connectJob?.cancel()
         connectJob = null
         busy = false
+        stage = ""
         error = "أُلغي الاتصال"
     }
 
@@ -350,6 +354,10 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             ) { doConnect() }
             // زر إلغاء يظهر أثناء الاتصال — لا تبقى الشاشة عالقة
             if (busy) {
+                if (stage.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(stage, fontSize = 11.5.sp, color = Neon)
+                }
                 Spacer(Modifier.height(8.dp))
                 GhostButton("إلغاء الاتصال", Modifier.fillMaxWidth(), Icons.Filled.Delete, color = Danger) {
                     cancelConnect()
