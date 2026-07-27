@@ -144,7 +144,7 @@ fun ExpressScreen() {
 
     fun go() {
         val t0 = template ?: return
-        val n = (count.toCountOrNull() ?: 0).coerceIn(1, 10000)
+        val n = (count.toCountOrNull() ?: 0).coerceIn(1, 100000)
         // نطاق الطباعة والنسخ لا يتدخلان في الوضع السريع — الكل يُطبع مرة واحدة
         val quickSettings = settings.copy(
             cardMode = mode, printFrom = 0, printTo = 0, startCell = 1, copies = 1,

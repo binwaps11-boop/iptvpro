@@ -916,7 +916,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                 val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
                     .format(java.util.Date())
                 val main = UserGenerator.generate(
-                    count = count.toIntOrNull()?.coerceIn(1, 5000) ?: 50,
+                    count = count.toIntOrNull()?.coerceIn(1, 100000) ?: 50,
                     prefix = prefix,
                     length = length.toIntOrNull()?.coerceIn(3, 20) ?: 6,
                     charset = charset,
@@ -930,7 +930,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     freeRules = rules,
                 )
                 val bonus = if (!bonusOn) emptyList() else UserGenerator.generate(
-                    count = bonusCount.toIntOrNull()?.coerceIn(1, 2000) ?: 10,
+                    count = bonusCount.toIntOrNull()?.coerceIn(1, 50000) ?: 10,
                     prefix = bonusPrefix,
                     length = bonusLength.toIntOrNull()?.coerceIn(3, 20) ?: 8,
                     charset = charset,

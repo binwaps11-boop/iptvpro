@@ -5,10 +5,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.CreditCard
-import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SpaceDashboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -56,11 +60,14 @@ import com.binwaps.cardmanager.ui.theme.TextLow
 
 private data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
 
-// أربعة تبويبات فقط — بقية الأقسام تفتح من شبكة الرئيسية
+// سبعة أقسام في الشريط السفلي — كل الأقسام الرئيسية في متناول ضغطة واحدة
 private val tabs = listOf(
-    Tab("dashboard", "الرئيسية", Icons.Filled.SpaceDashboard),
+    Tab("dashboard", "اللوحة", Icons.Filled.SpaceDashboard),
     Tab("users", "الكروت", Icons.Filled.CreditCard),
-    Tab("active", "المتصلون", Icons.Filled.People),
+    Tab("templates", "القوالب", Icons.Filled.Layers),
+    Tab("print", "الطباعة", Icons.Filled.Print),
+    Tab("profiles", "الباقات", Icons.Filled.Speed),
+    Tab("reports", "التقارير", Icons.Filled.Assessment),
     Tab("settings", "الإعدادات", Icons.Filled.Settings),
 )
 
@@ -131,8 +138,9 @@ class MainActivity : ComponentActivity() {
                                                 restoreState = true
                                             }
                                         },
-                                        icon = { Icon(tab.icon, contentDescription = tab.labelAr) },
-                                        label = { Text(tab.labelAr, fontSize = 9.5.sp) },
+                                        icon = { Icon(tab.icon, contentDescription = tab.labelAr, modifier = Modifier.size(20.dp)) },
+                                        label = { Text(tab.labelAr, fontSize = 8.5.sp, maxLines = 1) },
+                                        alwaysShowLabel = true,
                                         colors = NavigationBarItemDefaults.colors(
                                             selectedIconColor = Ink,
                                             selectedTextColor = Neon,
