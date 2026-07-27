@@ -229,6 +229,7 @@ fun UsersScreen() {
                 progress = 0 to pendingUpload.size
                 val target = settings.uploadTarget
                 run("جاري رفع ${pendingUpload.size} كرت إلى ${target.labelAr}…") {
+                    val t0 = System.currentTimeMillis()
                     val created = java.util.Collections.synchronizedList(mutableListOf<String>())
                     val res = if (target == UploadTarget.USER_MANAGER) {
                         MikrotikClient.createUserManagerUsers(
@@ -244,7 +245,11 @@ fun UsersScreen() {
                         )
                     }
                     Store.markUploaded(created)
-                    res.map { "تم رفع $it كرت إلى ${target.labelAr}" }
+                    // سرعة مقاسة لا مزعومة — يرى المستخدم أداء شبكته الحقيقي
+                    res.map {
+                        val secs = ((System.currentTimeMillis() - t0) / 1000).coerceAtLeast(1)
+                        "تم رفع $it كرت إلى ${target.labelAr} خلال ${secs} ثانية (${it / secs.toInt()} كرت/ث)"
+                    }
                 }
             }
             GhostButton("حذف المنتهية", icon = Icons.Filled.Delete, color = Warn, enabled = !busy) {
@@ -689,6 +694,7 @@ fun UsersScreen() {
                 progress = 0 to generated.size
                 val target = settings.uploadTarget
                 run("تم توليد ${generated.size} كرت — جاري رفعها تلقائياً إلى ${target.labelAr}…") {
+                    val t0 = System.currentTimeMillis()
                     val created = java.util.Collections.synchronizedList(mutableListOf<String>())
                     val res = if (target == UploadTarget.USER_MANAGER)
                         MikrotikClient.createUserManagerUsers(
@@ -703,7 +709,10 @@ fun UsersScreen() {
                             onCreated = { created.add(it.username) },
                         )
                     Store.markUploaded(created)
-                    res.map { ok -> "تم توليد ${generated.size} كرت ورفع $ok إلى ${target.labelAr} تلقائياً" }
+                    res.map { ok ->
+                        val secs = ((System.currentTimeMillis() - t0) / 1000).coerceAtLeast(1)
+                        "تم توليد ${generated.size} كرت ورفع $ok تلقائياً إلى ${target.labelAr} خلال ${secs} ثانية"
+                    }
                 }
             }
         }

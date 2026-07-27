@@ -26,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ContentPaste
@@ -573,6 +574,19 @@ private fun AdminScreen(
                                 .padding(horizontal = 11.dp, vertical = 5.dp),
                         )
                         Row {
+                            // إيقاف عن بعد — يقفل تطبيق المشترك لحظياً عبر السحابة
+                            if (cloudReady) {
+                                IconButton(onClick = {
+                                    com.binwaps.cardmanager.data.Backend.setSuspended(accIdOf(acc), true) { ok ->
+                                        Toast.makeText(
+                                            context,
+                                            if (ok) "تم إيقاف ${acc.customer.ifBlank { acc.email }} — سيُقفل تطبيقه لحظياً"
+                                            else "تعذر الإيقاف — تحقق من الاتصال",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                }) { Icon(Icons.Filled.Block, "إيقاف الاشتراك", tint = Warn, modifier = Modifier.size(17.dp)) }
+                            }
                             IconButton(onClick = {
                                 clipboard().setPrimaryClip(ClipData.newPlainText("license", acc.key))
                                 Toast.makeText(context, "تم نسخ المفتاح", Toast.LENGTH_SHORT).show()

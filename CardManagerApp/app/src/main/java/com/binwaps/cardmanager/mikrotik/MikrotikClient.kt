@@ -173,6 +173,11 @@ object MikrotikClient {
         cmds: List<String>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onDone: (index: Int, success: Boolean) -> Unit = { _, _ -> },
+        /**
+         * أخطاء تُعد نجاحاً — «already have user» عند إعادة رفع دفعة انقطعت
+         * يعني أن الكرت موجود فعلاً: إعادة التشغيل متكررة النتيجة بلا تكرار كروت
+         */
+        treatErrorAsOk: (String) -> Boolean = { false },
     ): BulkResult {
         if (cmds.isEmpty()) return BulkResult(0, 0)
         firstPipelineError.set(null)
@@ -215,6 +220,10 @@ object MikrotikClient {
                     }
                     override fun receive(result: Map<String, String>) {}
                     override fun error(ex: me.legrange.mikrotik.MikrotikApiException) {
+                        if (treatErrorAsOk(ex.message ?: "")) {
+                            finish(true)
+                            return
+                        }
                         if (firstPipelineError.get() == null) firstPipelineError.set(ex)
                         finish(false)
                     }
@@ -736,9 +745,13 @@ object MikrotikClient {
                 if (tag.isNotBlank()) append(" comment=${q(tag)}")
             }
         }
-        val result = con.pipeline(cmds, onProgress) { index, success ->
-            if (success) onCreated(users[index])
-        }
+        val result = con.pipeline(
+            cmds, onProgress,
+            treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
+            onDone = { index, success ->
+                if (success) onCreated(users[index])
+            },
+        )
         if (result.ok == 0 && users.isNotEmpty()) {
             throw RouterLogicException("رفض الراوتر إنشاء الكروت: ${firstPipelineError.get()?.message ?: "سبب غير معروف"}", firstPipelineError.get())
         }
@@ -785,12 +798,16 @@ object MikrotikClient {
             }
         }
         val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
-        val addResult = con.pipeline(addCmds, { d, t -> onProgress(d, t) }) { index, success ->
-            if (success) {
-                created.add(users[index])
-                onCreated(users[index])
-            }
-        }
+        val addResult = con.pipeline(
+            addCmds, { d, t -> onProgress(d, t) },
+            treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
+            onDone = { index, success ->
+                if (success) {
+                    created.add(users[index])
+                    onCreated(users[index])
+                }
+            },
+        )
         if (addResult.ok == 0 && users.isNotEmpty()) {
             throw RouterLogicException(
                 "تعذّر إنشاء أي مستخدم: ${firstPipelineError.get()?.message ?: "تأكد من تثبيت حزمة اليوزر منجر ومن الصلاحيات"}",

@@ -226,7 +226,13 @@ class MainActivity : ComponentActivity() {
         val id = com.binwaps.cardmanager.data.Backend.accountId(email, LicenseManager.deviceCode())
         cloudReg?.remove()
         cloudReg = com.binwaps.cardmanager.data.Backend.listenAccount(id) { acc ->
-            if (acc != null && acc.approved && acc.key != LicenseManager.savedLicense()) {
+            if (acc == null) return@listenAccount
+            // إيقاف عن بعد: قرار الأدمن نافذ لحظياً ولا يعتمد على ملف محلي
+            if (acc.status == "suspended" || acc.status == "blocked") {
+                if (LicenseManager.savedLicense().isNotBlank()) LicenseManager.deactivate()
+                return@listenAccount
+            }
+            if (acc.approved && acc.key != LicenseManager.savedLicense()) {
                 LicenseManager.activate(acc.key)
             }
         }

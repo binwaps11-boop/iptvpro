@@ -138,6 +138,19 @@ object Backend {
         accounts()?.document(id)?.delete()
     }
 
+    /**
+     * إيقاف/استئناف حساب عن بعد — القرار من الأدمن يصل المشترك لحظياً
+     * فيُقفل تطبيقه (أو يعود) دون أي ملف محلي يمكن التلاعب به.
+     */
+    fun setSuspended(id: String, suspended: Boolean, onResult: (Boolean) -> Unit = {}) {
+        val col = accounts() ?: return onResult(false)
+        col.document(id).set(
+            mapOf("status" to if (suspended) "suspended" else "approved"),
+            com.google.firebase.firestore.SetOptions.merge(),
+        ).addOnSuccessListener { onResult(true) }
+            .addOnFailureListener { _error.value = arabic(it); onResult(false) }
+    }
+
     // ==================== استماع ====================
 
     /** الأدمن: يستمع لكل الحسابات لحظياً (الطلبات والمشتركون) */
