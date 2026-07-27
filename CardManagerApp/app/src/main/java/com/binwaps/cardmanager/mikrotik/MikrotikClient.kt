@@ -10,6 +10,7 @@ import com.binwaps.cardmanager.model.SessionEntry
 import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -30,8 +31,15 @@ object MikrotikClient {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
         val factory = if (ssl) trustAllSocketFactory() else javax.net.SocketFactory.getDefault()
         val con = ApiConnection.connect(factory, r.host.trim(), r.port, timeoutMs)
-        con.setTimeout(timeoutMs)
-        con.login(r.username, r.password)
+        // فشل الدخول بعد نجاح فتح المقبس كان يترك المقبس وخيوط المكتبة مفتوحة —
+        // ومع تجربة النوع الخاطئ عمداً صار ذلك مساراً معتاداً لا حالة نادرة
+        try {
+            con.setTimeout(timeoutMs)
+            con.login(r.username, r.password)
+        } catch (e: Throwable) {
+            runCatching { con.close() }
+            throw e
+        }
         return con
     }
 
@@ -40,8 +48,10 @@ object MikrotikClient {
      * «مفتوح لكن نوع التشفير خاطئ» — بدل رسالة مهلة عامة لا تدل على شيء.
      */
     private fun portReachable(host: String, port: Int, timeoutMs: Int): Boolean = runCatching {
+        // فحص خفيف بمهلة قصيرة: ميزانية الاتصال الكلية يجب ألا تُستهلك هنا
+        val probeMs = timeoutMs.coerceAtMost(5000)
         java.net.Socket().use { s ->
-            s.connect(java.net.InetSocketAddress(java.net.InetAddress.getByName(host.trim()), port), timeoutMs)
+            s.connect(java.net.InetSocketAddress(host.trim(), port), probeMs)
             true
         }
     }.getOrDefault(false)
@@ -485,6 +495,16 @@ object MikrotikClient {
      */
     /** نتيجة الاتصال الذكي: الحالة + الإعداد الذي نجح فعلاً */
     data class SmartConnect(val status: RouterStatus, val useSsl: Boolean, val note: String)
+
+    /**
+     * ينفّذ الاتصال الذكي على نطاق مستقل عن الواجهة.
+     *
+     * السبب: العمل الشبكي المُعطِّل (blocking) لا يستجيب للإلغاء، فلو كان
+     * ابناً للواجهة لبقيت مهلة الشاشة تنتظره فعلياً وتعلّق على «جاري الاتصال».
+     * بجعله مستقلاً تعود الواجهة في موعدها ويُكمل هو تنظيف نفسه في الخلفية.
+     */
+    fun smartConnectAsync(r: RouterProfile): kotlinx.coroutines.Deferred<Result<SmartConnect>> =
+        clientScope.async { smartConnect(r) }
 
     /**
      * اتصال ذكي: لا يفشل لمجرد أن خانة «مشفّر» مضبوطة خطأ.

@@ -77,6 +77,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 @Composable
 fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val routers by Store.routers.collectAsState()
     val settings by Store.settings.collectAsState()
@@ -94,7 +95,6 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var timeout by remember { mutableStateOf((current?.timeoutSec ?: 12).toString()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var notice by remember { mutableStateOf<String?>(null) }
     var connectJob by remember { mutableStateOf<Job?>(null) }
 
     // ملء الحقول عند اختيار راوتر محفوظ
@@ -107,7 +107,6 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
 
     fun doConnect() {
         error = null
-        notice = null
         busy = true
         // إيقاف المزامنة قبل المحاولة: دورة مزامنة جارية تحتجز قفل الجلسة
         // فيقف اتصال المستخدم في الطابور حتى تنتهي مهلته بلا سبب ظاهر
@@ -123,13 +122,14 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             useSsl = useSsl,
             timeoutSec = timeout.toIntOrNull() ?: 12,
         )
-        // حدّ أقصى صارم = المهلة + هامش: حتى لو علِق التفاوض المشفّر لا تبقى
-        // الشاشة على «جاري الاتصال» للأبد
-        val hardLimitMs = ((profile.timeoutSec.coerceIn(3, 120)) + 5) * 1000L
+        // حدّ أقصى للواجهة: محاولتان (مشفّر/عادي) + فحص المنفذ + هامش
+        val hardLimitMs = ((profile.timeoutSec.coerceIn(3, 120)) * 3 + 8) * 1000L
         connectJob = scope.launch {
-            // اتصال ذكي: يجرّب المشفّر والعادي تلقائياً — خانة api-ssl الخاطئة
-            // لم تعد تسبب تعليقاً بلا سبب مفهوم. المهلة تكفي لمحاولتين.
-            val result = withTimeoutOrNull(hardLimitMs * 2) { MikrotikClient.smartConnect(profile) }
+            // العمل يجري على نطاق مستقل عن الواجهة، لذا تعود المهلة في موعدها
+            // فعلاً بدل أن تنتظر عملاً شبكياً لا يستجيب للإلغاء
+            val work = MikrotikClient.smartConnectAsync(profile)
+            val result = withTimeoutOrNull(hardLimitMs) { work.await() }
+            if (result == null) work.cancel()
             busy = false
             connectJob = null
             if (result == null) {
@@ -141,7 +141,11 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 // نحفظ الإعداد الذي نجح فعلاً لا الذي كُتب في الخانة
                 val saved = profile.copy(useSsl = smart.useSsl)
                 useSsl = smart.useSsl
-                if (smart.note.isNotBlank()) notice = smart.note
+                // شريط داخل الشاشة يُهدم فوراً بالانتقال للوحة — نعرضه كإشعار
+                // يبقى مرئياً بعد الانتقال ليعرف المستخدم أن الإعداد صُحِّح
+                if (smart.note.isNotBlank()) {
+                    android.widget.Toast.makeText(context, smart.note, android.widget.Toast.LENGTH_LONG).show()
+                }
                 Store.upsertRouter(saved)
                 Store.setActiveRouter(saved.id)
                 Store.setStatus(smart.status)
@@ -310,17 +314,6 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                             .padding(horizontal = 11.dp, vertical = 5.dp),
                     )
                 }
-            }
-
-            notice?.let { n ->
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
-                        .border(1.dp, Neon.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                        .padding(11.dp)
-                ) { Text(n, fontSize = 11.5.sp, color = Neon) }
             }
 
             if (error != null) {
