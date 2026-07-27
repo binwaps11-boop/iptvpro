@@ -295,6 +295,7 @@ fun RouterAdminScreen() {
                                             val r0 = router ?: return@clickable
                                             scope.launch {
                                                 MikrotikClient.disconnectPppActive(r0, s.name)
+                                                    .onFailure { message = it.message.orEmpty() }
                                                 refresh()
                                             }
                                         }
@@ -314,6 +315,7 @@ fun RouterAdminScreen() {
                                         val r0 = router ?: return@clickable
                                         scope.launch {
                                             MikrotikClient.setPppSecretDisabled(r0, s.id, !s.disabled)
+                                                .onFailure { message = it.message.orEmpty() }
                                             refresh()
                                         }
                                     }

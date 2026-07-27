@@ -197,6 +197,9 @@ object MikrotikClient {
             // نافذة كبيرة تُبقي الأنبوب ممتلئاً فوق زمن الذهاب والإياب —
             // أساس هدف «آلاف الكروت في أقل من دقيقة» حتى على دومين بعيد
             val inFlight = java.util.concurrent.Semaphore(128)
+            // يُغلق عند انقضاء مهلة الجولة — أي ردّ متأخر بعده يُتجاهل تماماً
+            // فلا يعدّل عدّادات جولةٍ تالية ولا يستدعي onDone خارج مسار الاكتمال
+            val roundClosed = java.util.concurrent.atomic.AtomicBoolean(false)
 
             for (index in pending) {
                 inFlight.acquire()
@@ -204,6 +207,7 @@ object MikrotikClient {
                     private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
                     private fun finish(success: Boolean) {
                         if (!finished.compareAndSet(false, true)) return
+                        if (roundClosed.get()) { inFlight.release(); return }
                         if (success) {
                             succeeded.incrementAndGet()
                             onDone(index, true)
@@ -244,9 +248,13 @@ object MikrotikClient {
             // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد.
             // ما لم يصله ردّ لا يُعاد إرساله كي لا يتكرر أمر نجح متأخراً.
             latch.await(60_000L + pending.size * 150L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            roundClosed.set(true)
             pending = if (lastRound) emptyList() else failedNow.toList().sorted()
             round++
         }
+        // في الجولة الأخيرة نُكمل شريط التقدم للنهاية حتى لو تجمّد بعض الأوامر
+        // دون ردّ قبل المهلة — العدّاد لا يتجاوز الإجمالي أبداً
+        if (progressed.get() < total) onProgress(total, total)
         return BulkResult(succeeded.get(), total - succeeded.get())
     }
 

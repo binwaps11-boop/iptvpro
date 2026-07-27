@@ -102,6 +102,20 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // القفل نافذ لحظياً على تطبيق مفتوح: عند إيقاف عن بعد أو انتهاء
+                // أثناء الجلسة يُدفع المستخدم لشاشة الترخيص فوراً، والمزامنة تتوقف
+                androidx.compose.runtime.LaunchedEffect(blocked) {
+                    if (blocked) {
+                        com.binwaps.cardmanager.data.SyncEngine.stop()
+                        if (currentRoute != "license") {
+                            navController.navigate("license") {
+                                popUpTo(navController.graph.findStartDestination().id) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+                }
+
                 Scaffold(
                     containerColor = Ink,
                     bottomBar = {
@@ -227,7 +241,12 @@ class MainActivity : ComponentActivity() {
         val id = com.binwaps.cardmanager.data.Backend.accountId(email, LicenseManager.deviceCode())
         cloudReg?.remove()
         cloudReg = com.binwaps.cardmanager.data.Backend.listenAccount(id) { acc ->
-            if (acc == null) return@listenAccount
+            if (acc == null) {
+                // حُذف الحساب من السحابة = لا قرار إيقاف قائم — نرفع القفل حتى
+                // لا يبقى المشترك محبوساً دون إشارة (سيناريو إيقاف ← حذف ← إعادة بيع)
+                if (LicenseManager.isRemoteSuspended()) LicenseManager.setRemoteSuspended(false)
+                return@listenAccount
+            }
             // إيقاف عن بعد: قرار الأدمن نافذ لحظياً ويُرجّح فوق التجربة والمفتاح
             val suspended = acc.status == "suspended" || acc.status == "blocked"
             if (suspended != LicenseManager.isRemoteSuspended()) {
