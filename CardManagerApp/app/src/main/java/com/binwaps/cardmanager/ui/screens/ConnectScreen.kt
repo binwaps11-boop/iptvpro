@@ -67,7 +67,9 @@ import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
 import com.binwaps.cardmanager.ui.theme.TextMid
 import com.binwaps.cardmanager.ui.theme.Violet
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * أول شاشة في التطبيق: الاتصال بالراوتر.
@@ -92,6 +94,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var timeout by remember { mutableStateOf((current?.timeoutSec ?: 12).toString()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var connectJob by remember { mutableStateOf<Job?>(null) }
 
     // ملء الحقول عند اختيار راوتر محفوظ
     LaunchedEffect(editingId) {
@@ -114,9 +117,18 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             useSsl = useSsl,
             timeoutSec = timeout.toIntOrNull() ?: 12,
         )
-        scope.launch {
-            val result = MikrotikClient.connect(profile)
+        // حدّ أقصى صارم = المهلة + هامش: حتى لو علِق التفاوض المشفّر لا تبقى
+        // الشاشة على «جاري الاتصال» للأبد
+        val hardLimitMs = ((profile.timeoutSec.coerceIn(3, 120)) + 5) * 1000L
+        connectJob = scope.launch {
+            val result = withTimeoutOrNull(hardLimitMs) { MikrotikClient.connect(profile) }
             busy = false
+            connectJob = null
+            if (result == null) {
+                error = "انتهت مهلة الاتصال — تأكد من العنوان والمنفذ، أو زد المهلة، " +
+                    "أو تأكد أن خدمة API مفتوحة من الخارج للاتصال البعيد"
+                return@launch
+            }
             result.onSuccess { status ->
                 Store.upsertRouter(profile)
                 Store.setActiveRouter(profile.id)
@@ -131,6 +143,13 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 error = it.message ?: "تعذّر الاتصال بالراوتر"
             }
         }
+    }
+
+    fun cancelConnect() {
+        connectJob?.cancel()
+        connectJob = null
+        busy = false
+        error = "أُلغي الاتصال"
     }
 
     val transition = rememberInfiniteTransition(label = "glow")
@@ -310,6 +329,13 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 enabled = !busy && host.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { doConnect() }
+            // زر إلغاء يظهر أثناء الاتصال — لا تبقى الشاشة عالقة
+            if (busy) {
+                Spacer(Modifier.height(8.dp))
+                GhostButton("إلغاء الاتصال", Modifier.fillMaxWidth(), Icons.Filled.Delete, color = Danger) {
+                    cancelConnect()
+                }
+            }
         }
 
         Spacer(Modifier.height(12.dp))
