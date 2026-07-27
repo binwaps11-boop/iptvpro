@@ -281,6 +281,13 @@ fun DashboardScreen(navController: NavController) {
                 navController.navigate("history")
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            // المتصلون الآن — كان قسماً يتيماً بعد نقل الشريط السفلي لسبعة أقسام
+            HomeTile("المتصلون الآن", Icons.Filled.People, Neon, actives.size.takeIf { it > 0 }, Modifier.weight(1f)) {
+                navController.navigate("active")
+            }
+            Box(Modifier.weight(1f))
+        }
 
         Spacer(Modifier.height(6.dp))
         Text("النظام", fontSize = 13.sp, color = TextLow)

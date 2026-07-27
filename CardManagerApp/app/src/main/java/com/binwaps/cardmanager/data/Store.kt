@@ -103,8 +103,11 @@ object Store {
      * كان يترك ملفاً نصفياً يمسح كل السجل عند التشغيل التالي.
      */
     private inline fun <reified T> save(name: String, value: T) {
-        val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return
+        // التسلسل نفسه على الخيط الخلفي: مع آلاف الكروت كان encodeToString
+        // يجمّد الخيط الرئيسي ثوانٍ في كل تعديل. القيمة لقطة ثابتة (immutable
+        // list) فلا خطر من تسلسلها لاحقاً.
         io.execute {
+            val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return@execute
             runCatching {
                 val tmp = File(appContext.filesDir, "$name.tmp")
                 tmp.writeText(text)

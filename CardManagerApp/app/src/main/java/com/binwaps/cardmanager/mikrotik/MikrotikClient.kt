@@ -280,7 +280,10 @@ object MikrotikClient {
             }
             // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد.
             // ما لم يصله ردّ لا يُعاد إرساله كي لا يتكرر أمر نجح متأخراً.
-            latch.await(60_000L + pending.size * 150L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            // مهلة متناسبة مع الحجم لكن مسقوفة بعشر دقائق للجولة: الصيغة القديمة
+            // كانت تبلغ ساعات لدفعة 100000 فيبدو التطبيق معلقاً بلا نهاية
+            val roundTimeout = (60_000L + pending.size * 150L).coerceAtMost(600_000L)
+            latch.await(roundTimeout, java.util.concurrent.TimeUnit.MILLISECONDS)
             roundClosed.set(true)
             pending = if (lastRound) emptyList() else failedNow.toList().sorted()
             round++
@@ -523,14 +526,9 @@ object MikrotikClient {
     ): Result<SmartConnect> = withContext(Dispatchers.IO) {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
         onStage("فحص المنفذ ${r.port}…")
-        if (!portReachable(r.host, r.port, timeoutMs)) {
-            return@withContext Result.failure(
-                Exception(
-                    "لا يمكن الوصول إلى ${r.host.trim()}:${r.port} — المنفذ مغلق أو العنوان خاطئ. " +
-                        "تأكد أن خدمة API مفعّلة على الراوتر وأن المنفذ مفتوح من الخارج (Port Forward) للاتصال البعيد."
-                )
-            )
-        }
+        // الفحص استرشادي فقط لتحسين رسالة الخطأ — لا يُجهض الاتصال.
+        // شبكة بطيئة (VPN) قد تتجاوز مهلة الفحص القصيرة بينما الاتصال نفسه ينجح.
+        val reachable = portReachable(r.host, r.port, timeoutMs)
         // المنفذ مفتوح — المشكلة إن وُجدت في نوع التشفير أو بيانات الدخول.
         // كل العمل الشبكي خارج قفل الجلسة: لو كانت دورة مزامنة عالقة تحتجز
         // القفل، لا يقف اتصال المستخدم في الطابور حتى تنتهي مهلته.
@@ -572,7 +570,14 @@ object MikrotikClient {
             val msg = lastError?.message.orEmpty()
             if (msg.contains("cannot log in", true) || msg.contains("invalid user", true)) break
         }
-        Result.failure(Exception(arabicError(lastError ?: Exception("تعذّر الاتصال")), lastError))
+        // فشل المحاولتان — إن كان المنفذ نفسه غير قابل للوصول فذاك السبب الأرجح
+        val reason = if (!reachable) {
+            "لا يمكن الوصول إلى ${r.host.trim()}:${r.port} — المنفذ مغلق أو العنوان خاطئ. " +
+                "تأكد أن خدمة API مفعّلة على الراوتر وأن المنفذ مفتوح من الخارج (Port Forward) للاتصال البعيد."
+        } else {
+            arabicError(lastError ?: Exception("تعذّر الاتصال"))
+        }
+        Result.failure(Exception(reason, lastError))
     }
 
     private fun readStatus(con: ApiConnection): RouterStatus {

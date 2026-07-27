@@ -98,7 +98,10 @@ object LicenseManager {
     private fun trustedNow(): Long {
         val now = System.currentTimeMillis()
         val lastSeen = prefs().getLong(KEY_LAST_SEEN, 0)
-        val trusted = maxOf(now, lastSeen)
+        // قفزة خاطئة في ساعة الجهاز (سنة للأمام مثلاً) كانت تُخزَّن للأبد فتقفل
+        // التطبيق حتى بعد تصحيح الساعة — نتجاهل أي انحراف يفوق أسبوعاً
+        val drift = lastSeen - now
+        val trusted = if (drift > 7 * DAY_MS) now else maxOf(now, lastSeen)
         prefs().edit().putLong(KEY_LAST_SEEN, trusted).apply()
         return trusted
     }

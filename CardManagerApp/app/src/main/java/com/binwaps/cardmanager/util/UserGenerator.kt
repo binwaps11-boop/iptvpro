@@ -14,6 +14,24 @@ enum class Charset(val labelAr: String, val chars: String) {
 
 /** توليد دفعة كروت عشوائية */
 object UserGenerator {
+
+    /**
+     * أدنى عدد خانات يكفي لتوليد [count] رمزاً فريداً براحة.
+     * نطلب سعةً تعادل عشرة أضعاف المطلوب: التصادم العشوائي يتضاعف كلما
+     * امتلأ الفضاء، وملء 100% منه يعني دوراناً لا ينتهي عملياً.
+     */
+    fun minLengthFor(count: Int, charset: Charset): Int {
+        if (count <= 0) return 1
+        val base = charset.chars.length.toDouble()
+        var len = 1
+        var capacity = base
+        while (capacity < count * 10.0 && len < 24) {
+            len++
+            capacity *= base
+        }
+        return len
+    }
+
     fun generate(
         count: Int,
         prefix: String,
@@ -32,12 +50,23 @@ object UserGenerator {
     ): List<UserEntry> {
         // مواضع الكروت المجانية داخل الدفعة
         val freeIdx = freePositions(count, freeRules)
-        val used = mutableSetOf<String>()
+        val used = HashSet<String>(count * 2)
+        // توسيع الطول تلقائياً إن كان فضاء الرموز أضيق من العدد المطلوب —
+        // بدونه كانت حلقة البحث عن اسم فريد تدور بلا نهاية وتجمّد التطبيق
+        val safeLength = maxOf(length, minLengthFor(count, charset))
         return (0 until count).map { i ->
-            var name: String
-            do {
-                name = prefix + randomString(length, charset) + suffix
-            } while (!used.add(name))
+            var name = ""
+            var attempts = 0
+            // حدّ محاولات ثم لاحقة تسلسلية مضمونة التفرد — لا دوران أبدي
+            while (true) {
+                name = prefix + randomString(safeLength, charset) + suffix
+                if (used.add(name)) break
+                if (++attempts >= 60) {
+                    name = prefix + randomString(safeLength, charset) + suffix + "-" + (i + 1)
+                    used.add(name)
+                    break
+                }
+            }
             val password = when (mode) {
                 // الهوتسبوت يقبل كلمة مرور فارغة عند الدخول بالاسم فقط
                 CardMode.USERNAME_ONLY -> ""

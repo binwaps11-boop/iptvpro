@@ -134,7 +134,10 @@ class MainActivity : ComponentActivity() {
                                         selected = currentRoute == tab.route,
                                         onClick = {
                                             navController.navigate(tab.route) {
-                                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                                // «اللوحة» هي جذر التبويبات فعلياً بعد الاتصال —
+                                                // الوجهة الأصلية (connect) تُحذف من المكدس فلا
+                                                // يقتطع popUpTo شيئاً وينمو المكدس بلا حد
+                                                popUpTo("dashboard") { saveState = true }
                                                 launchSingleTop = true
                                                 restoreState = true
                                             }

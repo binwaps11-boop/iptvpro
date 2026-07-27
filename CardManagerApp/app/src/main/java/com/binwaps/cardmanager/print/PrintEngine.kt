@@ -59,7 +59,20 @@ object PrintEngine {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> get() = _state
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * أي خطأ يفلت من داخل مهمة الطباعة يتحول إلى حالة «متوقفة» قابلة للاستئناف
+     * بدل أن يُسقط التطبيق كله — الطباعة لا تفشل فشلاً كارثياً أبداً.
+     */
+    private val crashGuard = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+        val s = _state.value
+        val done = (s as? State.Running)?.done ?: 0
+        val total = (s as? State.Running)?.total ?: 0
+        val kind = (s as? State.Running)?.kind ?: Kind.PDF
+        _state.value = State.Failed(kind, done, total, friendly(e) + " — اضغط استئناف للمتابعة")
+        runCatching { persist(kind) }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashGuard)
     private var job: Job? = null
 
     // لقطة المهمة الحالية — تبقى في الذاكرة للاستئناف الفوري
@@ -153,7 +166,9 @@ object PrintEngine {
                 files = mutableListOf(file)
                 nextPage = totalPages
                 finishJob(Kind.PDF, p.totalCards)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable لا Exception: نفاد الذاكرة مع الدفعات الضخمة كان
+                // يهرب من الالتقاط ويُسقط التطبيق بدل أن يصير حالة قابلة للاستئناف
                 _state.value = State.Failed(
                     Kind.PDF, 0, totalPages,
                     friendly(e) + " — اضغط استئناف وسيُعاد بناء الملف في ثوانٍ",

@@ -112,13 +112,25 @@ fun UsersScreen() {
     var selected by remember { mutableStateOf(setOf<String>()) }
     var bulkDialog by remember { mutableStateOf<String?>(null) }
     var editCard by remember { mutableStateOf<UserEntry?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
     val selecting = selected.isNotEmpty()
 
     val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val imported = CsvImporter.import(context, uri)
-            Store.addUsers(imported)
-            message = "تم استيراد ${imported.size} كرت من الملف" to false
+            // القراءة على خيط خلفي مع التقاط الأخطاء — ملف تالف كان يُسقط التطبيق
+            scope.launch {
+                val res = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching { CsvImporter.import(context, uri) }
+                }
+                res.onSuccess { imported ->
+                    Store.addUsers(imported)
+                    message = if (imported.isEmpty())
+                        "لم يُعثر على كروت في الملف — تأكد من تنسيقه" to true
+                    else "تم استيراد ${imported.size} كرت من الملف" to false
+                }.onFailure {
+                    message = "تعذّرت قراءة الملف: ${it.message ?: "ملف غير صالح"}" to true
+                }
+            }
         }
     }
 
@@ -219,8 +231,10 @@ fun UsersScreen() {
                     }
                 }
             }
-            // يرفع الكروت المحلية غير المرفوعة فقط — رفع الكل كان يكرر الموجود على الراوتر
-            val pendingUpload = users.filter { it.routerId.isBlank() && !it.uploaded }
+            // يرفع الكروت المحلية غير المرفوعة فقط — رفع الكل كان يكرر الموجود على الراوتر.
+            // remember على users: بدونه يُمسح آلاف الكروت في كل تحديث لشريط
+            // التقدم أثناء الرفع فتتجمّد الواجهة
+            val pendingUpload = remember(users) { users.filter { it.routerId.isBlank() && !it.uploaded } }
             GhostButton(
                 "رفع الجديد (${pendingUpload.size}) إلى ${settings.uploadTarget.labelAr}",
                 icon = Icons.Filled.CloudUpload, color = Violet,
@@ -363,8 +377,17 @@ fun UsersScreen() {
                         }
                     }
                     GhostButton("تصدير CSV", enabled = !busy) {
-                        val f = com.binwaps.cardmanager.util.CsvExporter.exportCards(context, chosen)
-                        com.binwaps.cardmanager.util.CsvExporter.share(context, f, "تصدير الكروت")
+                        // الكتابة على خيط خلفي مع التقاط الأخطاء — امتلاء الذاكرة
+                        // كان يُسقط التطبيق بدل إظهار رسالة
+                        scope.launch {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                runCatching { com.binwaps.cardmanager.util.CsvExporter.exportCards(context, chosen) }
+                            }.onSuccess { f ->
+                                com.binwaps.cardmanager.util.CsvExporter.share(context, f, "تصدير الكروت")
+                            }.onFailure {
+                                message = "تعذّر التصدير: ${it.message ?: "تأكد من وجود مساحة كافية"}" to true
+                            }
+                        }
                     }
                     GhostButton("حذف", enabled = !busy, color = Danger) { bulkDialog = "delete" }
                 }
@@ -375,32 +398,57 @@ fun UsersScreen() {
         if (users.isNotEmpty()) {
             AppField(query, { query = it }, "بحث باسم المستخدم أو الباقة", Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
+            // مسحة واحدة تحسب كل العدادات — كانت سبع مسحات كاملة في كل إعادة
+            // تركيب، وشريط التقدم أثناء الرفع يعيد التركيب آلاف المرات
+            val counts = remember(users) {
+                var unused = 0; var inUse = 0; var expired = 0
+                var hotspot = 0; var um = 0; var local = 0
+                users.forEach {
+                    when (it.status) {
+                        CardStatus.UNUSED -> unused++
+                        CardStatus.IN_USE -> inUse++
+                        CardStatus.EXPIRED, CardStatus.DISABLED -> expired++
+                        else -> {}
+                    }
+                    when (it.source) {
+                        CardSource.HOTSPOT -> hotspot++
+                        CardSource.USER_MANAGER -> um++
+                        CardSource.LOCAL -> local++
+                    }
+                }
+                mapOf(
+                    CardFilter.ALL to users.size,
+                    CardFilter.UNUSED to unused,
+                    CardFilter.IN_USE to inUse,
+                    CardFilter.EXPIRED to expired,
+                    CardFilter.HOTSPOT to hotspot,
+                    CardFilter.USER_MANAGER to um,
+                    CardFilter.LOCAL to local,
+                )
+            }
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 CardFilter.entries.forEach { f ->
-                    val count = when (f) {
-                        CardFilter.ALL -> users.size
-                        CardFilter.UNUSED -> users.count { it.status == CardStatus.UNUSED }
-                        CardFilter.IN_USE -> users.count { it.status == CardStatus.IN_USE }
-                        CardFilter.EXPIRED -> users.count { it.status == CardStatus.EXPIRED || it.status == CardStatus.DISABLED }
-                        CardFilter.HOTSPOT -> users.count { it.source == CardSource.HOTSPOT }
-                        CardFilter.USER_MANAGER -> users.count { it.source == CardSource.USER_MANAGER }
-                        CardFilter.LOCAL -> users.count { it.source == CardSource.LOCAL }
-                    }
+                    val count = counts[f] ?: 0
                     if (count > 0 || f == CardFilter.ALL) {
                         Chip("${f.labelAr} ($count)", filter == f) { filter = f }
                     }
                 }
             }
-            // الدفعات
+            // الدفعات — الأسماء وأعدادها في مسحة واحدة بدل مسحة لكل دفعة
             val batches = remember(users) {
-                users.mapNotNull { it.batchTag.takeIf { t -> t.isNotBlank() } }.distinct().sortedDescending()
+                users.asSequence()
+                    .map { it.batchTag }
+                    .filter { it.isNotBlank() }
+                    .groupingBy { it }
+                    .eachCount()
+                    .toList()
+                    .sortedByDescending { it.first }
             }
             if (batches.isNotEmpty()) {
                 Spacer(Modifier.height(7.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("الدفعات:", fontSize = 11.sp, color = TextLow, modifier = Modifier.padding(top = 7.dp))
-                    batches.take(12).forEach { tag ->
-                        val n = users.count { it.batchTag == tag }
+                    batches.take(12).forEach { (tag, n) ->
                         Chip("$tag ($n)", query == tag) { query = if (query == tag) "" else tag }
                     }
                 }
@@ -408,7 +456,8 @@ fun UsersScreen() {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { Store.clearUsers(); message = null }) {
+                // تأكيد إلزامي: كان يمحو كل الكروت بضغطة واحدة بلا رجعة
+                TextButton(onClick = { confirmClear = true }) {
                     Icon(Icons.Filled.Delete, null, tint = Danger, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("إفراغ القائمة", color = Danger, fontSize = 12.sp)
@@ -676,6 +725,33 @@ fun UsersScreen() {
                 }
             },
             dismissButton = { TextButton(onClick = { bulkDialog = null }) { Text("إلغاء", color = TextLow) } },
+        )
+    }
+
+    if (confirmClear) {
+        val localOnly = users.count { it.routerId.isBlank() && !it.uploaded }
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            containerColor = Panel,
+            titleContentColor = TextHi,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("إفراغ قائمة الكروت؟", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Text(
+                    "ستُحذف ${users.size} كرت من التطبيق" +
+                        (if (localOnly > 0) "، منها $localOnly كرت لم يُرفع للراوتر بعد وسيضيع نهائياً" else "") +
+                        ".\nكروت الراوتر لا تُحذف منه — يمكنك جلبها مجدداً.",
+                    fontSize = 12.5.sp, color = TextMid,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    Store.clearUsers(); message = null; confirmClear = false
+                }) { Text("إفراغ", color = Danger, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("إلغاء", color = TextLow) }
+            },
         )
     }
 

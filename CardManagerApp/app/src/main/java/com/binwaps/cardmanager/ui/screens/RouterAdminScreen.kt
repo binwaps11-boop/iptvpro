@@ -107,14 +107,18 @@ fun RouterAdminScreen() {
     // رقم جيل لكل تحديث — استجابة قديمة بطيئة لا تكتب فوق بيانات أحدث
     var refreshGen by remember { mutableStateOf(0) }
 
-    fun refresh() {
+    /**
+     * [keepMessage] يُبقي رسالة نتيجة العملية التي سبقت التحديث — كانت تُمسح
+     * فوراً فتبدو الأزرار وكأنها لا تفعل شيئاً.
+     */
+    fun refresh(keepMessage: Boolean = false) {
         if (router == null) {
             message = "لا يوجد راوتر — اتصل أولاً من شاشة الاتصال"
             return
         }
         val gen = ++refreshGen
         busy = true
-        message = ""
+        if (!keepMessage) message = ""
         scope.launch {
             fun fresh() = gen == refreshGen
             when (tab) {
@@ -190,7 +194,9 @@ fun RouterAdminScreen() {
 
         if (message.isNotBlank()) {
             Spacer(Modifier.height(10.dp))
-            Text(message, fontSize = 11.5.sp, color = Danger)
+            // رسائل النجاح كانت تُعرض بلون الخطأ الأحمر فتبدو كأنها فشل
+            val ok = message.startsWith("تم") || message.startsWith("✓")
+            Text(message, fontSize = 11.5.sp, color = if (ok) Lime else Danger)
         }
         if (busy) {
             Spacer(Modifier.height(10.dp))
@@ -265,7 +271,7 @@ fun RouterAdminScreen() {
                                 message = "تم رفع $it حساب PPPoE"
                             }.onFailure { message = it.message.orEmpty() }
                             busy = false
-                            refresh()
+                            refresh(keepMessage = true)
                         }
                     }
                     Spacer(Modifier.height(9.dp))
@@ -296,7 +302,7 @@ fun RouterAdminScreen() {
                                             scope.launch {
                                                 MikrotikClient.disconnectPppActive(r0, s.name)
                                                     .onFailure { message = it.message.orEmpty() }
-                                                refresh()
+                                                refresh(keepMessage = true)
                                             }
                                         }
                                         .padding(horizontal = 11.dp, vertical = 5.dp),
@@ -316,7 +322,7 @@ fun RouterAdminScreen() {
                                         scope.launch {
                                             MikrotikClient.setPppSecretDisabled(r0, s.id, !s.disabled)
                                                 .onFailure { message = it.message.orEmpty() }
-                                            refresh()
+                                            refresh(keepMessage = true)
                                         }
                                     }
                                     .padding(horizontal = 11.dp, vertical = 5.dp),
