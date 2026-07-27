@@ -94,6 +94,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var timeout by remember { mutableStateOf((current?.timeoutSec ?: 12).toString()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
     var connectJob by remember { mutableStateOf<Job?>(null) }
 
     // ملء الحقول عند اختيار راوتر محفوظ
@@ -106,6 +107,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
 
     fun doConnect() {
         error = null
+        notice = null
         busy = true
         val profile = RouterProfile(
             id = if (editingId != 0L) editingId else Store.newId(),
@@ -121,7 +123,9 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         // الشاشة على «جاري الاتصال» للأبد
         val hardLimitMs = ((profile.timeoutSec.coerceIn(3, 120)) + 5) * 1000L
         connectJob = scope.launch {
-            val result = withTimeoutOrNull(hardLimitMs) { MikrotikClient.connect(profile) }
+            // اتصال ذكي: يجرّب المشفّر والعادي تلقائياً — خانة api-ssl الخاطئة
+            // لم تعد تسبب تعليقاً بلا سبب مفهوم. المهلة تكفي لمحاولتين.
+            val result = withTimeoutOrNull(hardLimitMs * 2) { MikrotikClient.smartConnect(profile) }
             busy = false
             connectJob = null
             if (result == null) {
@@ -129,14 +133,18 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                     "أو تأكد أن خدمة API مفتوحة من الخارج للاتصال البعيد"
                 return@launch
             }
-            result.onSuccess { status ->
-                Store.upsertRouter(profile)
-                Store.setActiveRouter(profile.id)
-                Store.setStatus(status)
+            result.onSuccess { smart ->
+                // نحفظ الإعداد الذي نجح فعلاً لا الذي كُتب في الخانة
+                val saved = profile.copy(useSsl = smart.useSsl)
+                useSsl = smart.useSsl
+                if (smart.note.isNotBlank()) notice = smart.note
+                Store.upsertRouter(saved)
+                Store.setActiveRouter(saved.id)
+                Store.setStatus(smart.status)
                 Store.setConnected(true)
                 // تحديث رابط الهوتسبوت تلقائياً حسب عنوان الراوتر
                 if (Store.settings.value.hotspotLoginUrl.contains("192.168.88.1")) {
-                    Store.updateSettings(Store.settings.value.copy(hotspotLoginUrl = "http://${profile.host}/login"))
+                    Store.updateSettings(Store.settings.value.copy(hotspotLoginUrl = "http://${saved.host}/login"))
                 }
                 onConnected()
             }.onFailure {
@@ -254,7 +262,10 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("اتصال مشفّر (api-ssl)", fontSize = 12.5.sp, color = TextHi)
-                    Text("للاتصال عن بعد عبر دومين أو IP Cloud", fontSize = 10.5.sp, color = TextLow)
+                    Text(
+                        "إن لم تكن متأكداً اتركه كما هو — التطبيق يجرّب النوعين ويختار الناجح",
+                        fontSize = 10.5.sp, color = TextLow,
+                    )
                 }
                 Switch(
                     checked = useSsl,
@@ -295,6 +306,17 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                             .padding(horizontal = 11.dp, vertical = 5.dp),
                     )
                 }
+            }
+
+            notice?.let { n ->
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                        .border(1.dp, Neon.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                        .padding(11.dp)
+                ) { Text(n, fontSize = 11.5.sp, color = Neon) }
             }
 
             if (error != null) {

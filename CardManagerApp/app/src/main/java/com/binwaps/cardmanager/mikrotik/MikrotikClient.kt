@@ -24,13 +24,27 @@ object MikrotikClient {
 
     // ===== الاتصال =====
 
-    private fun open(r: RouterProfile): ApiConnection {
+    private fun open(r: RouterProfile): ApiConnection = openWith(r, r.useSsl)
+
+    private fun openWith(r: RouterProfile, ssl: Boolean): ApiConnection {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
-        val factory = if (r.useSsl) trustAllSocketFactory() else javax.net.SocketFactory.getDefault()
+        val factory = if (ssl) trustAllSocketFactory() else javax.net.SocketFactory.getDefault()
         val con = ApiConnection.connect(factory, r.host.trim(), r.port, timeoutMs)
+        con.setTimeout(timeoutMs)
         con.login(r.username, r.password)
         return con
     }
+
+    /**
+     * فحص وصول خام: هل المنفذ مفتوح أصلاً؟ يفصل «العنوان/المنفذ مغلق» عن
+     * «مفتوح لكن نوع التشفير خاطئ» — بدل رسالة مهلة عامة لا تدل على شيء.
+     */
+    private fun portReachable(host: String, port: Int, timeoutMs: Int): Boolean = runCatching {
+        java.net.Socket().use { s ->
+            s.connect(java.net.InetSocketAddress(java.net.InetAddress.getByName(host.trim()), port), timeoutMs)
+            true
+        }
+    }.getOrDefault(false)
 
     /**
      * راوترات مايكروتك تستخدم شهادة موقّعة ذاتياً افتراضياً، فلا يمكن التحقق منها
@@ -460,6 +474,77 @@ object MikrotikClient {
      * اتصال سريع: حالة النظام وعدد المتصلين فقط.
      * لا يمسح قوائم المستخدمين — تلك تُجلب عند الطلب عبر [fetchCardStats].
      */
+    /** نتيجة الاتصال الذكي: الحالة + الإعداد الذي نجح فعلاً */
+    data class SmartConnect(val status: RouterStatus, val useSsl: Boolean, val note: String)
+
+    /**
+     * اتصال ذكي: لا يفشل لمجرد أن خانة «مشفّر» مضبوطة خطأ.
+     * يفحص أن المنفذ مفتوح أصلاً، ثم يجرّب النوع المطلوب، وإن فشل يجرّب
+     * النوع الآخر تلقائياً ويخبرنا أيهما نجح لنحفظه.
+     *
+     * سبب وجوده: منفذ API عادي (مثل 8728 أو منفذ مخصّص) مع تفعيل api-ssl
+     * يجعل مصافحة TLS تعلّق حتى انتهاء المهلة بلا سبب مفهوم للمستخدم.
+     */
+    suspend fun smartConnect(r: RouterProfile): Result<SmartConnect> = withContext(Dispatchers.IO) {
+        val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
+        if (!portReachable(r.host, r.port, timeoutMs)) {
+            return@withContext Result.failure(
+                Exception(
+                    "لا يمكن الوصول إلى ${r.host.trim()}:${r.port} — المنفذ مغلق أو العنوان خاطئ. " +
+                        "تأكد أن خدمة API مفعّلة على الراوتر وأن المنفذ مفتوح من الخارج (Port Forward) للاتصال البعيد."
+                )
+            )
+        }
+        // المنفذ مفتوح — المشكلة إن وُجدت في نوع التشفير أو بيانات الدخول
+        val order = listOf(r.useSsl, !r.useSsl)
+        var lastError: Throwable? = null
+        for (ssl in order) {
+            val attempt = runCatching {
+                sessionLock.withLock {
+                    invalidateSession()
+                    val con = openWith(r, ssl)
+                    session = con
+                    sessionKey = keyOf(r.copy(useSsl = ssl))
+                    readStatus(con)
+                }
+            }
+            attempt.onSuccess { status ->
+                val note = when {
+                    ssl == r.useSsl -> ""
+                    ssl -> "تم الاتصال بالوضع المشفّر (api-ssl) — فُعِّل تلقائياً"
+                    else -> "المنفذ ${r.port} غير مشفّر — أُطفئ خيار api-ssl تلقائياً ونجح الاتصال"
+                }
+                return@withContext Result.success(SmartConnect(status, ssl, note))
+            }
+            lastError = attempt.exceptionOrNull()
+            // بيانات دخول خاطئة: لا فائدة من تجربة النوع الآخر
+            val msg = lastError?.message.orEmpty()
+            if (msg.contains("cannot log in", true) || msg.contains("invalid user", true)) break
+        }
+        invalidateSession()
+        Result.failure(Exception(arabicError(lastError ?: Exception("تعذّر الاتصال")), lastError))
+    }
+
+    private fun readStatus(con: ApiConnection): RouterStatus {
+        val res = con.execute("/system/resource/print").firstOrNull() ?: emptyMap()
+        val identity = runCatching { con.execute("/system/identity/print").firstOrNull()?.get("name") }
+            .getOrNull().orEmpty()
+        val active = con.countOnly("/ip/hotspot/active") ?: -1
+        return RouterStatus(
+            identity = identity,
+            version = res["version"].orEmpty(),
+            board = res["board-name"].orEmpty(),
+            uptime = res["uptime"].orEmpty(),
+            cpuLoad = res["cpu-load"].orEmpty(),
+            freeMemory = res["free-memory"].orEmpty(),
+            totalMemory = res["total-memory"].orEmpty(),
+            activeUsers = active,
+            hotspotUsers = -1,
+            userManagerUsers = -1,
+            usedUsers = -1,
+        )
+    }
+
     suspend fun connect(r: RouterProfile): Result<RouterStatus> = onRouter(r) { con ->
         val res = con.execute("/system/resource/print").firstOrNull() ?: emptyMap()
         val identity = runCatching { con.execute("/system/identity/print").firstOrNull()?.get("name") }
