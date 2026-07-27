@@ -66,12 +66,16 @@ object SyncEngine {
                         val needCards = cardsFetchedForRouter != r.id || round % 8 == 0
                         if (needCards && !_cardsSyncing.value) {
                             _cardsSyncing.value = true
-                            MikrotikClient.fetchAllCards(r)
-                                .onSuccess {
-                                    Store.mergeRouterCards(it)
-                                    cardsFetchedForRouter = r.id
-                                }
-                            _cardsSyncing.value = false
+                            try {
+                                MikrotikClient.fetchAllCards(r)
+                                    .onSuccess {
+                                        Store.mergeRouterCards(it)
+                                        cardsFetchedForRouter = r.id
+                                    }
+                            } finally {
+                                // إلغاء الحلقة أثناء الجلب كان يترك العلم true للأبد فتتجمد المزامنة
+                                _cardsSyncing.value = false
+                            }
                         }
                         _lastSyncAt.value = System.currentTimeMillis()
                     }

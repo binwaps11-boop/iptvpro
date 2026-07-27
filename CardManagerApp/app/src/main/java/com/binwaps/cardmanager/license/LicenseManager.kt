@@ -14,6 +14,8 @@ sealed interface LicenseState {
     data object Expired : LicenseState
     /** انتهت التجربة — يطلب ترخيصاً */
     data object TrialEnded : LicenseState
+    /** أوقفه مزوّد الخدمة عن بعد — يُرجّح فوق كل شيء بما فيه التجربة */
+    data object Suspended : LicenseState
 }
 
 /**
@@ -34,6 +36,7 @@ object LicenseManager {
     private const val KEY_PHONE = "customer_phone"
     private const val KEY_EMAIL = "customer_email"
     private const val KEY_TRIAL_START = "trial_start"
+    private const val KEY_SUSPENDED = "suspended_remote"
 
     const val TRIAL_DAYS = 7
     private const val DAY_MS = 86_400_000L
@@ -100,8 +103,24 @@ object LicenseManager {
         return trusted
     }
 
+    /**
+     * إيقاف/استئناف عن بعد — قرار مزوّد الخدمة يُرجّح فوق كل شيء بما فيه
+     * التجربة، ويُحفظ محلياً حتى لا يُتجاوز بإسقاط المفتاح.
+     */
+    fun setRemoteSuspended(suspended: Boolean) {
+        prefs().edit().putBoolean(KEY_SUSPENDED, suspended).apply()
+        refresh()
+    }
+
+    fun isRemoteSuspended(): Boolean = prefs().getBoolean(KEY_SUSPENDED, false)
+
     /** إعادة حساب الحالة */
     fun refresh() {
+        // الإيقاف عن بعد يعلو كل شيء — حتى داخل أيام التجربة أو بلا مفتاح
+        if (isRemoteSuspended()) {
+            _state.value = LicenseState.Suspended
+            return
+        }
         val now = trustedNow()
         val license = savedLicense()
 

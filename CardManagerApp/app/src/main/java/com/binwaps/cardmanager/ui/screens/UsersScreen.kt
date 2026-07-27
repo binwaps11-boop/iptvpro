@@ -246,10 +246,7 @@ fun UsersScreen() {
                     }
                     Store.markUploaded(created)
                     // سرعة مقاسة لا مزعومة — يرى المستخدم أداء شبكته الحقيقي
-                    res.map {
-                        val secs = ((System.currentTimeMillis() - t0) / 1000).coerceAtLeast(1)
-                        "تم رفع $it كرت إلى ${target.labelAr} خلال ${secs} ثانية (${it / secs.toInt()} كرت/ث)"
-                    }
+                    res.map { uploadSpeedMessage(it, target.labelAr, System.currentTimeMillis() - t0) }
                 }
             }
             GhostButton("حذف المنتهية", icon = Icons.Filled.Delete, color = Warn, enabled = !busy) {
@@ -710,13 +707,26 @@ fun UsersScreen() {
                         )
                     Store.markUploaded(created)
                     res.map { ok ->
-                        val secs = ((System.currentTimeMillis() - t0) / 1000).coerceAtLeast(1)
-                        "تم توليد ${generated.size} كرت ورفع $ok تلقائياً إلى ${target.labelAr} خلال ${secs} ثانية"
+                        "تم توليد ${generated.size} كرت و" +
+                            uploadSpeedMessage(ok, target.labelAr, System.currentTimeMillis() - t0, auto = true)
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * رسالة سرعة رفع مقاسة حقيقية — المعدّل بفاصلة عشرية على المللي ثانية
+ * (لا قسمة صحيحة تعرض «0 كرت/ث»)، ويُخفى المعدّل حين لا يكون ذا معنى.
+ */
+private fun uploadSpeedMessage(count: Int, target: String, elapsedMs: Long, auto: Boolean = false): String {
+    val secs = (elapsedMs / 1000.0).coerceAtLeast(0.1)
+    val rate = count / secs
+    val head = if (auto) "رفع $count تلقائياً إلى $target" else "تم رفع $count كرت إلى $target"
+    val secsText = if (secs < 1) "أقل من ثانية" else "${secs.toInt()} ثانية"
+    val rateText = if (count >= 5 && rate >= 1) " (%.0f كرت/ث)".format(rate) else ""
+    return "$head خلال $secsText$rateText"
 }
 
 private fun statusColor(s: CardStatus): Color = when (s) {

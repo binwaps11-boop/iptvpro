@@ -210,6 +210,13 @@ fun LicenseScreen(
                 Text("انتهى الاشتراك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Danger)
                 Text("اطلب التجديد بضغطة واحدة", fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center)
             }
+            LicenseState.Suspended -> {
+                Text("تم إيقاف الاشتراك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Danger)
+                Text(
+                    "أوقف مزوّد الخدمة اشتراكك — تواصل معه لإعادة التفعيل",
+                    fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
+                )
+            }
         }
 
         Spacer(Modifier.height(20.dp))

@@ -99,6 +99,8 @@ data class Account(
     val pending: Boolean = true,
     val requestedAt: Long = 0,
     val renewal: Boolean = false,
+    /** موقوف عن بعد — من حالة السحابة suspended/blocked */
+    val suspended: Boolean = false,
 ) {
     val activated: Boolean get() = key.isNotBlank()
 }
@@ -271,6 +273,7 @@ private fun AdminScreen(
         boundDevice = c.boundDevice, key = c.key, planCode = c.planCode,
         issuedAt = c.issuedAt, expiresAt = c.expiresAt,
         pending = c.status == "pending", requestedAt = c.requestedAt, renewal = c.renewal,
+        suspended = c.status == "suspended" || c.status == "blocked",
     )
 
     // المصدر الحي إن توفر السحاب، وإلا المحلي
@@ -564,6 +567,12 @@ private fun AdminScreen(
                             fontSize = 11.sp,
                             color = if (expired) Danger else if (soon) Warn else TextLow,
                         )
+                        if (acc.suspended) {
+                            Text(
+                                "⛔ موقوف — تطبيق المشترك مقفل",
+                                fontSize = 11.sp, color = Danger, fontWeight = FontWeight.Bold,
+                            )
+                        }
                     }
                     Column {
                         Text(
@@ -574,18 +583,31 @@ private fun AdminScreen(
                                 .padding(horizontal = 11.dp, vertical = 5.dp),
                         )
                         Row {
-                            // إيقاف عن بعد — يقفل تطبيق المشترك لحظياً عبر السحابة
-                            if (cloudReady) {
+                            // إيقاف/استئناف عن بعد — تبديل يقفل أو يعيد تطبيق المشترك لحظياً.
+                            // يتطلب حساباً ببريد حقيقي: حساب device:فقط لا يطابق ما يستمع
+                            // إليه المشترك في السحابة فلا يصله القرار
+                            if (cloudReady && !acc.email.startsWith("device:")) {
                                 IconButton(onClick = {
-                                    com.binwaps.cardmanager.data.Backend.setSuspended(accIdOf(acc), true) { ok ->
+                                    val turnOn = !acc.suspended
+                                    com.binwaps.cardmanager.data.Backend.setSuspended(accIdOf(acc), turnOn) { ok ->
                                         Toast.makeText(
                                             context,
-                                            if (ok) "تم إيقاف ${acc.customer.ifBlank { acc.email }} — سيُقفل تطبيقه لحظياً"
-                                            else "تعذر الإيقاف — تحقق من الاتصال",
+                                            when {
+                                                !ok -> "تعذّر التنفيذ — تحقق من الاتصال"
+                                                turnOn -> "تم إيقاف ${acc.customer.ifBlank { acc.email }} — سيُقفل تطبيقه لحظياً"
+                                                else -> "تم استئناف ${acc.customer.ifBlank { acc.email }} — سيعمل تطبيقه لحظياً"
+                                            },
                                             Toast.LENGTH_SHORT,
                                         ).show()
                                     }
-                                }) { Icon(Icons.Filled.Block, "إيقاف الاشتراك", tint = Warn, modifier = Modifier.size(17.dp)) }
+                                }) {
+                                    Icon(
+                                        if (acc.suspended) Icons.Filled.VerifiedUser else Icons.Filled.Block,
+                                        if (acc.suspended) "استئناف الاشتراك" else "إيقاف الاشتراك",
+                                        tint = if (acc.suspended) Lime else Warn,
+                                        modifier = Modifier.size(17.dp),
+                                    )
+                                }
                             }
                             IconButton(onClick = {
                                 clipboard().setPrimaryClip(ClipData.newPlainText("license", acc.key))

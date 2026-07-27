@@ -91,7 +91,8 @@ class MainActivity : ComponentActivity() {
                 val currentRoute = backStack?.destination?.route.orEmpty()
                 val licenseState by LicenseManager.state.collectAsState()
 
-                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired || licenseState is LicenseState.NeedsRegister
+                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired ||
+                    licenseState is LicenseState.NeedsRegister || licenseState is LicenseState.Suspended
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً
@@ -227,11 +228,12 @@ class MainActivity : ComponentActivity() {
         cloudReg?.remove()
         cloudReg = com.binwaps.cardmanager.data.Backend.listenAccount(id) { acc ->
             if (acc == null) return@listenAccount
-            // إيقاف عن بعد: قرار الأدمن نافذ لحظياً ولا يعتمد على ملف محلي
-            if (acc.status == "suspended" || acc.status == "blocked") {
-                if (LicenseManager.savedLicense().isNotBlank()) LicenseManager.deactivate()
-                return@listenAccount
+            // إيقاف عن بعد: قرار الأدمن نافذ لحظياً ويُرجّح فوق التجربة والمفتاح
+            val suspended = acc.status == "suspended" || acc.status == "blocked"
+            if (suspended != LicenseManager.isRemoteSuspended()) {
+                LicenseManager.setRemoteSuspended(suspended)
             }
+            if (suspended) return@listenAccount
             if (acc.approved && acc.key != LicenseManager.savedLicense()) {
                 LicenseManager.activate(acc.key)
             }
