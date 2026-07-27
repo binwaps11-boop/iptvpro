@@ -49,6 +49,8 @@ object SyncEngine {
             var cardsFetchedForRouter: Long? = null
             while (isActive) {
                 val r = Store.activeRouter()
+                // فشل دورة عابر لا يوقف المزامنة للأبد — تعاود المحاولة في
+                // الدورة التالية. والمحرك أصلاً لا يبدأ إلا بعد نجاح اتصال.
                 if (r != null) {
                     val connected = MikrotikClient.connect(r)
                         .onSuccess { Store.setStatus(it); Store.setConnected(true) }

@@ -137,7 +137,16 @@ object MikrotikClient {
      */
     fun disconnect() {
         clientScope.launch {
-            sessionLock.withLock { invalidateSession() }
+            // القفل إن توفّر فوراً؛ وإلا نُسقط المرجع بلا انتظار — عملية عالقة
+            // قد تحتجز القفل دقيقة كاملة، ولا يصح أن يتعطّل القطع بسببها
+            if (sessionLock.tryLock()) {
+                try { invalidateSession() } finally { sessionLock.unlock() }
+            } else {
+                val old = session
+                session = null
+                sessionKey = null
+                runCatching { old?.close() }
+            }
         }
     }
 
@@ -495,20 +504,32 @@ object MikrotikClient {
                 )
             )
         }
-        // المنفذ مفتوح — المشكلة إن وُجدت في نوع التشفير أو بيانات الدخول
+        // المنفذ مفتوح — المشكلة إن وُجدت في نوع التشفير أو بيانات الدخول.
+        // كل العمل الشبكي خارج قفل الجلسة: لو كانت دورة مزامنة عالقة تحتجز
+        // القفل، لا يقف اتصال المستخدم في الطابور حتى تنتهي مهلته.
         val order = listOf(r.useSsl, !r.useSsl)
         var lastError: Throwable? = null
         for (ssl in order) {
+            var probe: ApiConnection? = null
             val attempt = runCatching {
-                sessionLock.withLock {
-                    invalidateSession()
-                    val con = openWith(r, ssl)
-                    session = con
-                    sessionKey = keyOf(r.copy(useSsl = ssl))
-                    readStatus(con)
-                }
+                val con = openWith(r, ssl)
+                probe = con
+                readStatus(con)
             }
             attempt.onSuccess { status ->
+                // تثبيت الجلسة إن كان القفل متاحاً فوراً؛ وإلا نغلق النسخة
+                // المؤقتة ويفتح obtain() جلسة جديدة عند أول عملية — بلا انتظار
+                if (sessionLock.tryLock()) {
+                    try {
+                        invalidateSession()
+                        session = probe
+                        sessionKey = keyOf(r.copy(useSsl = ssl))
+                    } finally {
+                        sessionLock.unlock()
+                    }
+                } else {
+                    runCatching { probe?.close() }
+                }
                 val note = when {
                     ssl == r.useSsl -> ""
                     ssl -> "تم الاتصال بالوضع المشفّر (api-ssl) — فُعِّل تلقائياً"
@@ -516,12 +537,12 @@ object MikrotikClient {
                 }
                 return@withContext Result.success(SmartConnect(status, ssl, note))
             }
+            runCatching { probe?.close() }
             lastError = attempt.exceptionOrNull()
             // بيانات دخول خاطئة: لا فائدة من تجربة النوع الآخر
             val msg = lastError?.message.orEmpty()
             if (msg.contains("cannot log in", true) || msg.contains("invalid user", true)) break
         }
-        invalidateSession()
         Result.failure(Exception(arabicError(lastError ?: Exception("تعذّر الاتصال")), lastError))
     }
 

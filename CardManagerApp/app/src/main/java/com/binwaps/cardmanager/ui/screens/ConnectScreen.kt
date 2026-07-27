@@ -109,6 +109,10 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         error = null
         notice = null
         busy = true
+        // إيقاف المزامنة قبل المحاولة: دورة مزامنة جارية تحتجز قفل الجلسة
+        // فيقف اتصال المستخدم في الطابور حتى تنتهي مهلته بلا سبب ظاهر
+        com.binwaps.cardmanager.data.SyncEngine.stop()
+        com.binwaps.cardmanager.mikrotik.MikrotikClient.disconnect()
         val profile = RouterProfile(
             id = if (editingId != 0L) editingId else Store.newId(),
             name = name.ifBlank { "راوتر" },

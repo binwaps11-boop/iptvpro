@@ -86,8 +86,9 @@ class MainActivity : ComponentActivity() {
         com.binwaps.cardmanager.data.Backend.init(this)
         Store.init(this)
         LicenseManager.init(this)
-        // المزامنة التلقائية الكاملة — بلا أي زر جلب من المستخدم
-        com.binwaps.cardmanager.data.SyncEngine.start()
+        // المزامنة لا تبدأ هنا: كانت تحاول الاتصال بالراوتر المحفوظ فور الإقلاع
+        // وتحتجز قفل الجلسة، فيقف اتصال المستخدم اليدوي في الطابور حتى تنتهي
+        // مهلته. تبدأ الآن بعد نجاح الاتصال من شاشة الاتصال فقط.
         startCloudAutoActivate()
         handleLink(intent)
 
