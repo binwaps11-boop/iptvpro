@@ -1,0 +1,229 @@
+[
+  {
+    "file": "ESM48150B1_V114_full_patched.bin",
+    "size": 32768,
+    "size_kbit": 256,
+    "ff_ratio": 0.9044,
+    "magic": {
+      "value": 1437256925,
+      "hex": "0x55AACCDD",
+      "instances": [
+        "0x0000",
+        "0x0040",
+        "0x0080",
+        "0x0480"
+      ],
+      "count": 4
+    },
+    "fw_constants": [
+      {
+        "value": 1437256925,
+        "label": "BMS_MAGIC universal",
+        "date": "2015-07-18",
+        "offsets": [
+          "0x0000",
+          "0x0040",
+          "0x0080",
+          "0x0480"
+        ]
+      },
+      {
+        "value": 1718157313,
+        "label": "FW fingerprint V115/V124/V130",
+        "date": "2024-06-12",
+        "offsets": [
+          "0x0124",
+          "0x02AA",
+          "0x0524",
+          "0x06AA"
+        ]
+      },
+      {
+        "value": 1497759799,
+        "label": "FW const",
+        "date": "2017-06-18",
+        "offsets": [
+          "0x012A",
+          "0x052A"
+        ]
+      },
+      {
+        "value": 1690042368,
+        "label": "FW const",
+        "date": "2023-07-22",
+        "offsets": [
+          "0x01E4",
+          "0x05E4"
+        ]
+      }
+    ],
+    "discriminators": {
+      "const_0x0344": "0x55960000",
+      "const_0x0362": "0x637F60B0",
+      "hw_variant": "TBEW"
+    },
+    "fabrication": {
+      "offset": "0x01AC",
+      "raw": 1717699808,
+      "utc": "2024-06-06 18:50:08"
+    },
+    "elabels": [
+      {
+        "offset": "0x3000",
+        "properties": {
+          "ArchivesInfoVersion": "3.0",
+          "BoardType": "ESM-48150B1",
+          "BarCode": "EX2460012038",
+          "Item": "01074848-010",
+          "Description": "Lithium Battery,ESM-48150B1,442mm (W) * 560mm (D) * 130mm (H),48V,150Ah",
+          "Manufactured": "2024-06-06",
+          "VendorName": "Huawei",
+          "IssueNumber": "00",
+          "CLEICode": "",
+          "BOM": "",
+          "Model": "ESM-48150B1",
+          "ElabelVersion": "4.0"
+        }
+      },
+      {
+        "offset": "0x3400",
+        "properties": {
+          "ArchivesInfoVersion": "3.0",
+          "BoardType": "ESMU-36A",
+          "BarCode": "BT2451333961",
+          "Item": "02313PWE",
+          "Description": "Function Module,ESMU-36A",
+          "Manufactured": "2024-05-30",
+          "VendorName": "Huawei",
+          "IssueNumber": "00",
+          "CLEICode": "",
+          "BOM": "",
+          "Model": "ESMU-36A",
+          "ElabelVersion": "4.0",
+          "d": "2024-05-29"
+        }
+      }
+    ],
+    "zones": {
+      "count": 17,
+      "list": [
+        {
+          "start": "0x0000",
+          "end": "0x0006",
+          "len": 6
+        },
+        {
+          "start": "0x0040",
+          "end": "0x0046",
+          "len": 6
+        },
+        {
+          "start": "0x0080",
+          "end": "0x0394",
+          "len": 788
+        },
+        {
+          "start": "0x0480",
+          "end": "0x0794",
+          "len": 788
+        },
+        {
+          "start": "0x0800",
+          "end": "0x086E",
+          "len": 110
+        },
+        {
+          "start": "0x0C00",
+          "end": "0x0C6E",
+          "len": 110
+        },
+        {
+          "start": "0x3000",
+          "end": "0x3162",
+          "len": 354
+        },
+        {
+          "start": "0x3400",
+          "end": "0x3592",
+          "len": 402
+        },
+        {
+          "start": "0x3840",
+          "end": "0x386A",
+          "len": 42
+        },
+        {
+          "start": "0x3980",
+          "end": "0x3A00",
+          "len": 128
+        },
+        {
+          "start": "0x3B40",
+          "end": "0x3B44",
+          "len": 4
+        },
+        {
+          "start": "0x3B80",
+          "end": "0x3C00",
+          "len": 128
+        },
+        {
+          "start": "0x3F80",
+          "end": "0x3F98",
+          "len": 24
+        },
+        {
+          "start": "0x4000",
+          "end": "0x4078",
+          "len": 120
+        },
+        {
+          "start": "0x4140",
+          "end": "0x41DC",
+          "len": 156
+        },
+        {
+          "start": "0x4320",
+          "end": "0x4360",
+          "len": 64
+        },
+        {
+          "start": "0x4380",
+          "end": "0x4394",
+          "len": 20
+        }
+      ],
+      "main_zone_end": "0x0394"
+    },
+    "alarm": {
+      "signature": "88 88 88 88",
+      "hits": [
+        "0x0140",
+        "0x014C",
+        "0x0540",
+        "0x054C",
+        "0x3000",
+        "0x3400"
+      ],
+      "in_main_zone": [
+        "0x0140",
+        "0x014C"
+      ]
+    },
+    "state": {
+      "code": "alarma_anti_theft",
+      "label": "Solo alarma Anti-theft",
+      "reason": "firma 88 88 88 88 en zona main @ 0x0140, 0x014C"
+    },
+    "serials": [
+      {
+        "offset": "0x00AE",
+        "value": "12P31320TBEWL"
+      },
+      {
+        "offset": "0x3840(swap)",
+        "value": "BN2451078024"
+      }
+    ]
+  }
+]

@@ -1,0 +1,473 @@
+<title>ESM-48150B1 EEPROM Analysis</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#111823; --panel2:#0d141d; --line:#1e2b3a;
+    --ink:#c8d2dc; --dim:#7d8da0; --faint:#4a5a6d;
+    --accent:#35d0e0; --accent-dim:#1c6b74;
+    --good:#46d17a; --warn:#e0a53a; --crit:#e05555; --mag:#c07de0;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);
+    font-size:13px;line-height:1.5;
+    background-image:radial-gradient(circle at 15% -10%,rgba(53,208,224,.06),transparent 45%);}
+  a{color:var(--accent)}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px 22px 60px}
+
+  /* header */
+  header{display:flex;align-items:center;gap:14px;padding-bottom:18px;
+    border-bottom:1px solid var(--line);margin-bottom:22px}
+  .logo{width:40px;height:40px;border-radius:9px;display:grid;place-items:center;
+    background:linear-gradient(150deg,#12313a,#0c1a20);border:1px solid var(--accent-dim);
+    color:var(--accent);font-size:20px;box-shadow:0 0 22px rgba(53,208,224,.18) inset}
+  .htitle{font-family:var(--sans);font-weight:700;font-size:19px;letter-spacing:.2px}
+  .htitle b{color:var(--accent)}
+  .hsub{color:var(--dim);font-size:11px;letter-spacing:2.5px;text-transform:uppercase;margin-top:3px}
+  .badge{margin-left:auto;font-size:11px;color:var(--good);border:1px solid #1f5236;
+    background:#0e1c14;border-radius:20px;padding:6px 13px;letter-spacing:.4px}
+  .badge::before{content:"● ";color:var(--good)}
+
+  /* chip selector */
+  .picker{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+  .picker button{font-family:var(--mono);font-size:12px;cursor:pointer;
+    background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+    border-radius:7px;padding:8px 12px}
+  .picker button:hover{border-color:var(--accent-dim);color:var(--ink)}
+  .picker button[aria-current="true"]{border-color:var(--accent);color:var(--accent);
+    box-shadow:0 0 0 1px var(--accent-dim)}
+  .picker button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* grid + panels */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .grid .span2{grid-column:1 / -1}
+  @media(max-width:820px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 18px;min-width:0}
+  .ptitle{font-family:var(--sans);font-size:12px;font-weight:600;letter-spacing:1.6px;
+    text-transform:uppercase;color:var(--accent);margin:0 0 14px;display:flex;
+    align-items:center;gap:8px}
+  .ptitle .ico{opacity:.8}
+
+  /* key/value tables */
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  .kv td{padding:5px 0;vertical-align:top;border-bottom:1px solid rgba(30,43,58,.5)}
+  .kv tr:last-child td{border-bottom:0}
+  .kv td:first-child{color:var(--dim);white-space:nowrap;padding-right:16px;width:40%}
+  .kv td:last-child{color:var(--ink);word-break:break-word}
+  .kv .val{color:var(--good)}
+
+  /* data tables */
+  .dt{overflow-x:auto}
+  .dt table{min-width:420px}
+  .dt th{text-align:left;font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;
+    color:var(--faint);font-weight:600;padding:6px 12px 8px 0;border-bottom:1px solid var(--line)}
+  .dt td{padding:6px 12px 6px 0;border-bottom:1px solid rgba(30,43,58,.45);white-space:nowrap}
+  .dt tr:last-child td{border-bottom:0}
+  .dt .off{color:var(--faint);font-size:11.5px}
+  .num{color:var(--accent)}
+
+  .chip{display:inline-block;font-size:11px;padding:2px 9px;border-radius:20px;
+    border:1px solid var(--line);color:var(--dim)}
+  .chip.good{color:var(--good);border-color:#1f5236;background:#0e1c14}
+  .chip.warn{color:var(--warn);border-color:#4a3a17;background:#1c160c}
+  .chip.crit{color:var(--crit);border-color:#4a1f1f;background:#1c0e0e}
+  .chip.mag{color:var(--mag);border-color:#3a2447;background:#160c1c}
+  .match{color:var(--good)} .nomatch{color:var(--crit)}
+
+  /* state banner */
+  .state{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .state .lbl{font-family:var(--sans);font-size:20px;font-weight:700}
+  .state .reason{color:var(--dim);font-size:12px}
+  .state.warn .lbl{color:var(--warn)} .state.good .lbl{color:var(--good)}
+  .state.crit .lbl{color:var(--crit)}
+  .stateico{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:18px}
+  .state.warn .stateico{background:#1c160c;border:1px solid #4a3a17}
+  .state.good .stateico{background:#0e1c14;border:1px solid #1f5236}
+
+  /* notes */
+  .notes{list-style:none;margin:0;padding:0}
+  .notes li{padding:7px 0 7px 16px;position:relative;color:var(--ink);
+    border-bottom:1px solid rgba(30,43,58,.45);font-size:12.5px}
+  .notes li:last-child{border-bottom:0}
+  .notes li::before{content:"";position:absolute;left:0;top:14px;width:6px;height:6px;
+    border-radius:2px;background:var(--accent-dim)}
+  .notes li.alarm::before{background:var(--warn)}
+  .notes b{color:var(--accent)}
+
+  /* meter */
+  .meter{height:7px;border-radius:5px;background:var(--panel2);overflow:hidden;
+    border:1px solid var(--line);margin-top:6px}
+  .meter i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-dim),var(--accent))}
+  .foot{color:var(--faint);font-size:11px;margin-top:26px;text-align:center;
+    border-top:1px solid var(--line);padding-top:16px}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="logo">⚡</div>
+    <div>
+      <div class="htitle"><b>ESM-48150B1</b> EEPROM Analysis</div>
+      <div class="hsub">Huawei LiFePO4 BMS — Reverse-Engineering Dashboard</div>
+    </div>
+    <div class="badge" id="badge">read-only scan</div>
+  </header>
+
+  <div class="picker" id="picker"></div>
+  <div id="view"></div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script id="data" type="application/json">[
+  {
+    "file": "ESM48150B1_V114_full_patched.bin",
+    "size": 32768,
+    "size_kbit": 256,
+    "ff_ratio": 0.9044,
+    "magic": {
+      "value": 1437256925,
+      "hex": "0x55AACCDD",
+      "instances": [
+        "0x0000",
+        "0x0040",
+        "0x0080",
+        "0x0480"
+      ],
+      "count": 4
+    },
+    "fw_constants": [
+      {
+        "value": 1437256925,
+        "label": "BMS_MAGIC universal",
+        "date": "2015-07-18",
+        "offsets": [
+          "0x0000",
+          "0x0040",
+          "0x0080",
+          "0x0480"
+        ]
+      },
+      {
+        "value": 1718157313,
+        "label": "FW fingerprint V115/V124/V130",
+        "date": "2024-06-12",
+        "offsets": [
+          "0x0124",
+          "0x02AA",
+          "0x0524",
+          "0x06AA"
+        ]
+      },
+      {
+        "value": 1497759799,
+        "label": "FW const",
+        "date": "2017-06-18",
+        "offsets": [
+          "0x012A",
+          "0x052A"
+        ]
+      },
+      {
+        "value": 1690042368,
+        "label": "FW const",
+        "date": "2023-07-22",
+        "offsets": [
+          "0x01E4",
+          "0x05E4"
+        ]
+      }
+    ],
+    "discriminators": {
+      "const_0x0344": "0x55960000",
+      "const_0x0362": "0x637F60B0",
+      "hw_variant": "TBEW"
+    },
+    "fabrication": {
+      "offset": "0x01AC",
+      "raw": 1717699808,
+      "utc": "2024-06-06 18:50:08"
+    },
+    "elabels": [
+      {
+        "offset": "0x3000",
+        "properties": {
+          "ArchivesInfoVersion": "3.0",
+          "BoardType": "ESM-48150B1",
+          "BarCode": "EX2460012038",
+          "Item": "01074848-010",
+          "Description": "Lithium Battery,ESM-48150B1,442mm (W) * 560mm (D) * 130mm (H),48V,150Ah",
+          "Manufactured": "2024-06-06",
+          "VendorName": "Huawei",
+          "IssueNumber": "00",
+          "CLEICode": "",
+          "BOM": "",
+          "Model": "ESM-48150B1",
+          "ElabelVersion": "4.0"
+        }
+      },
+      {
+        "offset": "0x3400",
+        "properties": {
+          "ArchivesInfoVersion": "3.0",
+          "BoardType": "ESMU-36A",
+          "BarCode": "BT2451333961",
+          "Item": "02313PWE",
+          "Description": "Function Module,ESMU-36A",
+          "Manufactured": "2024-05-30",
+          "VendorName": "Huawei",
+          "IssueNumber": "00",
+          "CLEICode": "",
+          "BOM": "",
+          "Model": "ESMU-36A",
+          "ElabelVersion": "4.0",
+          "d": "2024-05-29"
+        }
+      }
+    ],
+    "zones": {
+      "count": 17,
+      "list": [
+        {
+          "start": "0x0000",
+          "end": "0x0006",
+          "len": 6
+        },
+        {
+          "start": "0x0040",
+          "end": "0x0046",
+          "len": 6
+        },
+        {
+          "start": "0x0080",
+          "end": "0x0394",
+          "len": 788
+        },
+        {
+          "start": "0x0480",
+          "end": "0x0794",
+          "len": 788
+        },
+        {
+          "start": "0x0800",
+          "end": "0x086E",
+          "len": 110
+        },
+        {
+          "start": "0x0C00",
+          "end": "0x0C6E",
+          "len": 110
+        },
+        {
+          "start": "0x3000",
+          "end": "0x3162",
+          "len": 354
+        },
+        {
+          "start": "0x3400",
+          "end": "0x3592",
+          "len": 402
+        },
+        {
+          "start": "0x3840",
+          "end": "0x386A",
+          "len": 42
+        },
+        {
+          "start": "0x3980",
+          "end": "0x3A00",
+          "len": 128
+        },
+        {
+          "start": "0x3B40",
+          "end": "0x3B44",
+          "len": 4
+        },
+        {
+          "start": "0x3B80",
+          "end": "0x3C00",
+          "len": 128
+        },
+        {
+          "start": "0x3F80",
+          "end": "0x3F98",
+          "len": 24
+        },
+        {
+          "start": "0x4000",
+          "end": "0x4078",
+          "len": 120
+        },
+        {
+          "start": "0x4140",
+          "end": "0x41DC",
+          "len": 156
+        },
+        {
+          "start": "0x4320",
+          "end": "0x4360",
+          "len": 64
+        },
+        {
+          "start": "0x4380",
+          "end": "0x4394",
+          "len": 20
+        }
+      ],
+      "main_zone_end": "0x0394"
+    },
+    "alarm": {
+      "signature": "88 88 88 88",
+      "hits": [
+        "0x0140",
+        "0x014C",
+        "0x0540",
+        "0x054C",
+        "0x3000",
+        "0x3400"
+      ],
+      "in_main_zone": [
+        "0x0140",
+        "0x014C"
+      ]
+    },
+    "state": {
+      "code": "alarma_anti_theft",
+      "label": "Solo alarma Anti-theft",
+      "reason": "firma 88 88 88 88 en zona main @ 0x0140, 0x014C"
+    },
+    "serials": [
+      {
+        "offset": "0x00AE",
+        "value": "12P31320TBEWL"
+      },
+      {
+        "offset": "0x3840(swap)",
+        "value": "BN2451078024"
+      }
+    ]
+  }
+]</script>
+<script>
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const stateClass = c => ({sana:'good',alarma_anti_theft:'warn',bloqueo_salida:'crit'}[c]||'warn');
+const stateIco   = c => ({sana:'✓',alarma_anti_theft:'⚠',bloqueo_salida:'🔒'}[c]||'⚠');
+const esc = s => String(s==null?'':s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+
+function el(html){const t=document.createElement('template');t.innerHTML=html.trim();return t.content.firstChild;}
+
+function kv(rows){
+  return `<table class="kv"><tbody>${rows.map(([k,v,cls])=>
+    `<tr><td>${esc(k)}</td><td class="${cls||''}">${v}</td></tr>`).join('')}</tbody></table>`;
+}
+
+function render(r){
+  const lbl = (r.elabels[0]&&r.elabels[0].properties)||{};
+  const st = r.state, sc = stateClass(st.code);
+  const fw = r.discriminators;
+
+  // board properties
+  const board = kv([
+    ['Modelo', `<span class="val">${esc(lbl.Model||'—')}</span>`],
+    ['Board Type', esc(lbl.BoardType||'—')],
+    ['Bar Code', `<span class="num">${esc(lbl.BarCode||'—')}</span>`],
+    ['Item Code', esc(lbl.Item||'—')],
+    ['Descripción', esc(lbl.Description||'—')],
+    ['Manufactura FRU', `<span class="val">${esc(lbl.Manufactured||'—')}</span>`],
+    ['Vendor', esc(lbl.VendorName||'—')],
+  ]);
+
+  // identity / firmware
+  const ident = kv([
+    ['Firmware', `<span class="chip mag">V114</span>`],
+    ['Tamaño', `<span class="num">${r.size_kbit} Kbit</span> · ${r.size} B`],
+    ['Vacío (0xFF)', `${(r.ff_ratio*100).toFixed(1)}%<div class="meter"><i style="width:${(r.ff_ratio*100).toFixed(1)}%"></i></div>`],
+    ['BMS Magic', `<span class="num">${esc(r.magic.hex)}</span> ×${r.magic.count}`],
+    ['Instancias', r.magic.instances.map(o=>`<span class="off">${esc(o)}</span>`).join(' ')],
+    ['HW Variant', `<span class="chip">${esc(fw.hw_variant||'—')}</span>`],
+    ['Fabricación', `<span class="val">${esc(r.fabrication.utc)}</span> <span class="off">@${esc(r.fabrication.offset)}</span>`],
+  ]);
+
+  // state banner
+  const banner = `<div class="panel span2"><div class="ptitle"><span class="ico">◆</span> Estado del chip</div>
+    <div class="state ${sc}">
+      <div class="stateico">${stateIco(st.code)}</div>
+      <div><div class="lbl">${esc(st.label)}</div>
+      <div class="reason">${esc(st.reason||'')}</div></div>
+      <div style="margin-left:auto;text-align:right">
+        <div class="off">alarm signature</div>
+        <div class="num">${esc(r.alarm.signature)}</div>
+      </div>
+    </div></div>`;
+
+  // firmware constants
+  const consts = `<div class="panel span2"><div class="ptitle"><span class="ico">⟠</span> Constantes de firmware (${r.fw_constants.length})</div>
+    <div class="dt"><table><thead><tr><th>Valor</th><th>Descripción</th><th>Fecha</th><th>Offsets</th></tr></thead>
+    <tbody>${r.fw_constants.map(c=>`<tr>
+      <td class="num">${c.value}</td>
+      <td>${esc(c.label)}</td>
+      <td class="off">${esc(c.date)}</td>
+      <td class="off">${c.offsets.map(esc).join(', ')}</td></tr>`).join('')}</tbody></table></div></div>`;
+
+  // zones
+  const zrows = r.zones.list.map(z=>{
+    const main = parseInt(z.start,16) < 0x3000;
+    return `<tr><td class="off">${esc(z.start)}</td><td class="off">${esc(z.end)}</td>
+      <td class="num">${z.len}</td>
+      <td>${main?'<span class="chip">config/BMS</span>':'<span class="chip good">e-label</span>'}</td></tr>`;
+  }).join('');
+  const zones = `<div class="panel span2"><div class="ptitle"><span class="ico">▦</span> Zonas detectadas (${r.zones.count}) · main_zone_end ${esc(r.zones.main_zone_end)}</div>
+    <div class="dt"><table><thead><tr><th>Inicio</th><th>Fin</th><th>Bytes</th><th>Tipo</th></tr></thead>
+    <tbody>${zrows}</tbody></table></div></div>`;
+
+  // e-labels
+  const elabels = r.elabels.map(l=>{
+    const p=l.properties;
+    return `<div class="panel"><div class="ptitle"><span class="ico">▤</span> e-Label @ ${esc(l.offset)}</div>
+      ${kv([
+        ['Board Type',`<span class="val">${esc(p.BoardType||'—')}</span>`],
+        ['Model',esc(p.Model||'—')],
+        ['Bar Code',`<span class="num">${esc(p.BarCode||'—')}</span>`],
+        ['Description',esc(p.Description||'—')],
+        ['Manufactured',esc(p.Manufactured||'—')],
+        ['Vendor',esc(p.VendorName||'—')],
+      ])}</div>`;
+  }).join('');
+
+  // detector notes
+  const notes = `<div class="panel span2"><div class="ptitle"><span class="ico">✎</span> Notas del detector</div>
+    <ul class="notes">
+      <li>FRU model = <b>${esc(lbl.Model)}</b> · timestamp fabricación <b>${esc(r.fabrication.utc)}</b> válido</li>
+      <li>BMS magic <b>${esc(r.magic.hex)}</b> en ${r.magic.count} instancias (${r.magic.instances.slice(0,3).join(', ')})</li>
+      <li>Discriminadores V114/V117 en <b>0x0344</b>=${esc(fw.const_0x0344)} y <b>0x0362</b>=${esc(fw.const_0x0362)}</li>
+      <li>Bloque primario 0x0080 y espejo 0x0480 son idénticos (redundancia)</li>
+      <li class="alarm">ALARMA firma <b>${esc(r.alarm.signature)}</b> en zona main @ ${esc(r.alarm.in_main_zone.join(', '))} — chip clasificado como <b>${esc(st.label)}</b></li>
+      <li>Seriales: ${r.serials.map(s=>`${esc(s.value)} <span class="off">@${esc(s.offset)}</span>`).join(' · ')}</li>
+    </ul></div>`;
+
+  return `<div class="grid">
+    ${banner}
+    <div class="panel"><div class="ptitle"><span class="ico">▣</span> Board Properties (FRU)</div>${board}</div>
+    <div class="panel"><div class="ptitle"><span class="ico">◈</span> Identidad & Firmware</div>${ident}</div>
+    ${notes}
+    ${consts}
+    ${zones}
+    ${elabels}
+  </div>`;
+}
+
+const picker = document.getElementById('picker');
+const view = document.getElementById('view');
+function select(i){
+  [...picker.children].forEach((b,j)=>b.setAttribute('aria-current', j===i?'true':'false'));
+  view.innerHTML = render(DATA[i]);
+}
+DATA.forEach((r,i)=>{
+  const b=el(`<button type="button">${esc(r.file)}</button>`);
+  b.onclick=()=>select(i); picker.appendChild(b);
+});
+if(DATA.length<=1) picker.style.display='none';
+select(0);
+document.getElementById('foot').textContent =
+  `${DATA.length} chip(s) escaneado(s) · scanner read-only · offsets en hex, little-endian`;
+</script>
