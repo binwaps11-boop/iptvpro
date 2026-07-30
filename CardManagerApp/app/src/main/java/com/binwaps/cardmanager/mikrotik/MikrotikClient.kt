@@ -211,6 +211,12 @@ object MikrotikClient {
          * يعني أن الكرت موجود فعلاً: إعادة التشغيل متكررة النتيجة بلا تكرار كروت
          */
         treatErrorAsOk: (String) -> Boolean = { false },
+        /**
+         * عدد الأوامر المعلّقة في وقت واحد. الهوتسبوت خفيف فيتحمّل نافذة واسعة،
+         * أما يوزر منجر v6 فكل إضافة فيه تكتب في قاعدة بياناته — نافذة واسعة
+         * تخنقه فيتوقف عن الرد وتتجمّد الدفعة.
+         */
+        window: Int = 128,
     ): BulkResult {
         if (cmds.isEmpty()) return BulkResult(0, 0)
         firstPipelineError.set(null)
@@ -227,15 +233,31 @@ object MikrotikClient {
             val lastRound = round == retries
             val failedNow = java.util.Collections.synchronizedList(mutableListOf<Int>())
             val latch = java.util.concurrent.CountDownLatch(pending.size)
-            // نافذة كبيرة تُبقي الأنبوب ممتلئاً فوق زمن الذهاب والإياب —
+            // نافذة تُبقي الأنبوب ممتلئاً فوق زمن الذهاب والإياب —
             // أساس هدف «آلاف الكروت في أقل من دقيقة» حتى على دومين بعيد
-            val inFlight = java.util.concurrent.Semaphore(128)
+            val inFlight = java.util.concurrent.Semaphore(window.coerceIn(1, 256))
             // يُغلق عند انقضاء مهلة الجولة — أي ردّ متأخر بعده يُتجاهل تماماً
             // فلا يعدّل عدّادات جولةٍ تالية ولا يستدعي onDone خارج مسار الاكتمال
             val roundClosed = java.util.concurrent.atomic.AtomicBoolean(false)
 
+            // الأوامر التي لم تُرسَل لأن الراوتر توقف عن الرد — تُحسب فاشلة
+            val notSent = mutableListOf<Int>()
+            var stalled = false
             for (index in pending) {
-                inFlight.acquire()
+                if (stalled) { notSent.add(index); continue }
+                // مهلة على انتظار مكان في النافذة: acquire() بلا مهلة كان يتجمّد
+                // للأبد إن توقف الراوتر عن الرد بعد امتلاء النافذة، فلا تُبلغ
+                // حتى مهلة الجولة ويبقى شريط التقدم فارغاً بلا نهاية
+                if (!inFlight.tryAcquire(90, java.util.concurrent.TimeUnit.SECONDS)) {
+                    stalled = true
+                    notSent.add(index)
+                    if (firstPipelineError.get() == null) {
+                        firstPipelineError.set(
+                            Exception("الراوتر توقف عن الرد أثناء الرفع — قد يكون محمّلاً أو الاتصال ضعيفاً")
+                        )
+                    }
+                    continue
+                }
                 val listener = object : me.legrange.mikrotik.ResultListener {
                     private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
                     private fun finish(success: Boolean) {
@@ -278,14 +300,22 @@ object MikrotikClient {
                     latch.countDown()
                 }
             }
-            // مهلة سخية تتناسب مع الحجم — ثم نمضي بما اكتمل بدل التعليق للأبد.
-            // ما لم يصله ردّ لا يُعاد إرساله كي لا يتكرر أمر نجح متأخراً.
+            // ما لم يُرسَل لن يأتيه ردّ — نُنزل عدّاد الانتظار بعدده وإلا انتظرنا
+            // المهلة كاملة بلا داعٍ، ونُعيده في الجولة التالية فهو لم يُنفَّذ أصلاً
+            repeat(notSent.size) { latch.countDown() }
             // مهلة متناسبة مع الحجم لكن مسقوفة بعشر دقائق للجولة: الصيغة القديمة
             // كانت تبلغ ساعات لدفعة 100000 فيبدو التطبيق معلقاً بلا نهاية
             val roundTimeout = (60_000L + pending.size * 150L).coerceAtMost(600_000L)
             latch.await(roundTimeout, java.util.concurrent.TimeUnit.MILLISECONDS)
             roundClosed.set(true)
-            pending = if (lastRound) emptyList() else failedNow.toList().sorted()
+            if (lastRound) {
+                // الجولة الأخيرة: نُبلّغ عن غير المُرسَل كفاشل ليكتمل التقدم
+                notSent.forEach { i ->
+                    onDone(i, false)
+                    onProgress(progressed.incrementAndGet().coerceAtMost(total), total)
+                }
+            }
+            pending = if (lastRound) emptyList() else (failedNow + notSent).distinct().sorted()
             round++
         }
         // في الجولة الأخيرة نُكمل شريط التقدم للنهاية حتى لو تجمّد بعض الأوامر
@@ -1057,6 +1087,11 @@ object MikrotikClient {
         val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
         val base = if (isV7) "/user-manager" else "/tool/user-manager"
         val customer = if (isV7) "" else umCustomer(con)
+        com.binwaps.cardmanager.data.EventLog.log(
+            "رفع",
+            "يوزر منجر ${if (isV7) "v7" else "v6"} — المسار $base" +
+                (if (isV7) "" else "، العميل «$customer»") + "، ${users.size} كرت",
+        )
 
         // الموجة الأولى (متدفقة): إنشاء المستخدمين كلهم.
         // v6 يسمي حقل الدخول username لا name — استعمال name كان يُفشل كل الرفع
@@ -1073,6 +1108,9 @@ object MikrotikClient {
             }
         }
         val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
+        // نافذة محافظة لليوزر منجر: كل إضافة تكتب في قاعدة بياناته، ونافذة
+        // واسعة تخنق v6 فيتوقف عن الرد وتتجمّد الدفعة بلا تقدّم
+        val umWindow = if (isV7) 48 else 16
         val addResult = con.pipeline(
             addCmds, { d, t -> onProgress(d, t) },
             treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
@@ -1082,6 +1120,7 @@ object MikrotikClient {
                     onCreated(users[index])
                 }
             },
+            window = umWindow,
         )
         if (addResult.ok == 0 && users.isNotEmpty()) {
             throw RouterLogicException(
@@ -1098,7 +1137,7 @@ object MikrotikClient {
             else "$base/user/create-and-activate-profile customer=${q(customer)} " +
                 "numbers=${q(u.username)} profile=${q(u.profile)}"
         }
-        if (linkCmds.isNotEmpty()) con.pipeline(linkCmds)
+        if (linkCmds.isNotEmpty()) con.pipeline(linkCmds, window = umWindow)
         addResult.ok
     }
 
