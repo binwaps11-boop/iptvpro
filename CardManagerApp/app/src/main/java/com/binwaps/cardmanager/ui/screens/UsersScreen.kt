@@ -134,11 +134,14 @@ fun UsersScreen() {
         }
     }
 
+    // المهمة الجارية — ليتمكن المستخدم من إلغائها بدل الانتظار بلا مخرج
+    var currentJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
     fun run(label: String, block: suspend () -> Result<String>) {
         busy = true; busyLabel = label; message = null
-        scope.launch {
+        currentJob = scope.launch {
             val r = block()
-            busy = false; progress = null
+            busy = false; progress = null; currentJob = null
             r.onSuccess { message = it to false }
                 .onFailure { message = (it.message ?: "فشلت العملية") to true }
         }
@@ -249,18 +252,35 @@ fun UsersScreen() {
                         MikrotikClient.createUserManagerUsers(
                             Store.activeRouter(), pendingUpload,
                             onProgress = { d, t -> progress = d to t },
-                            onCreated = { created.add(it.username) },
+                            onCreated = { u ->
+                                created.add(u.username)
+                                // وسم تدريجي: مغادرة الشاشة أو إلغاء لا يضيّع سجل ما رُفع
+                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                            },
                         )
                     } else {
                         MikrotikClient.createHotspotUsers(
                             Store.activeRouter(), pendingUpload,
                             onProgress = { d, t -> progress = d to t },
-                            onCreated = { created.add(it.username) },
+                            onCreated = { u ->
+                                created.add(u.username)
+                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                            },
                         )
                     }
                     Store.markUploaded(created)
-                    // سرعة مقاسة لا مزعومة — يرى المستخدم أداء شبكته الحقيقي
-                    res.map { uploadSpeedMessage(it, target.labelAr, System.currentTimeMillis() - t0) }
+                    // الفشل الجزئي لم يعد يظهر كنجاح أخضر: يُذكر العدد الفاشل صراحة
+                    val requested = pendingUpload.size
+                    res.mapCatching { ok ->
+                        val failed = requested - ok
+                        if (failed > 0) {
+                            throw Exception(
+                                "رُفع $ok من $requested — فشل $failed. الكروت محفوظة محلياً، " +
+                                    "اضغط «رفع الجديد» لإعادة محاولة الباقي"
+                            )
+                        }
+                        uploadSpeedMessage(ok, target.labelAr, System.currentTimeMillis() - t0)
+                    }
                 }
             }
             GhostButton("حذف المنتهية", icon = Icons.Filled.Delete, color = Warn, enabled = !busy) {
@@ -273,8 +293,20 @@ fun UsersScreen() {
         if (busy) {
             Spacer(Modifier.height(10.dp))
             Text(busyLabel, fontSize = 12.sp, color = Neon)
+            // الأرقام الحقيقية أمام المستخدم: يفرّق بين «يعمل» و«متوقف»
+            progress?.let { (d, t) ->
+                Text("$d من $t", fontSize = 11.sp, color = TextMid)
+            }
             Spacer(Modifier.height(5.dp))
             progress?.let { (d, t) -> NeonProgress(d.toFloat() / t.coerceAtLeast(1)) } ?: NeonProgress(0.4f)
+            Spacer(Modifier.height(7.dp))
+            GhostButton("إلغاء العملية", color = Warn) {
+                currentJob?.cancel()
+                currentJob = null
+                busy = false
+                progress = null
+                message = "أُلغيت العملية — ما رُفع فعلاً موسوم مرفوعاً، والباقي يبقى في «رفع الجديد»" to false
+            }
         }
 
         message?.let { (text, isError) ->
@@ -774,16 +806,29 @@ fun UsersScreen() {
                         MikrotikClient.createUserManagerUsers(
                             router, generated,
                             onProgress = { d, t -> progress = d to t },
-                            onCreated = { created.add(it.username) },
+                            onCreated = { u ->
+                                created.add(u.username)
+                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                            },
                         )
                     else
                         MikrotikClient.createHotspotUsers(
                             router, generated,
                             onProgress = { d, t -> progress = d to t },
-                            onCreated = { created.add(it.username) },
+                            onCreated = { u ->
+                                created.add(u.username)
+                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                            },
                         )
                     Store.markUploaded(created)
-                    res.map { ok ->
+                    res.mapCatching { ok ->
+                        val failed = generated.size - ok
+                        if (failed > 0) {
+                            throw Exception(
+                                "تم توليد ${generated.size} كرت، ورُفع $ok فقط — فشل $failed. " +
+                                    "الكروت محفوظة، اضغط «رفع الجديد» لإعادة محاولة الباقي"
+                            )
+                        }
                         "تم توليد ${generated.size} كرت و" +
                             uploadSpeedMessage(ok, target.labelAr, System.currentTimeMillis() - t0, auto = true)
                     }

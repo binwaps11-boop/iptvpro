@@ -243,6 +243,8 @@ object MikrotikClient {
             // الأوامر التي لم تُرسَل لأن الراوتر توقف عن الرد — تُحسب فاشلة
             val notSent = mutableListOf<Int>()
             var stalled = false
+            // الفهارس التي وصلت نتيجتها فعلاً — ما ليس فيها لم يأتِه ردّ
+            val reported = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
             for (index in pending) {
                 if (stalled) { notSent.add(index); continue }
                 // مهلة على انتظار مكان في النافذة: acquire() بلا مهلة كان يتجمّد
@@ -263,6 +265,7 @@ object MikrotikClient {
                     private fun finish(success: Boolean) {
                         if (!finished.compareAndSet(false, true)) return
                         if (roundClosed.get()) { inFlight.release(); return }
+                        reported.add(index)
                         if (success) {
                             succeeded.incrementAndGet()
                             onDone(index, true)
@@ -291,6 +294,7 @@ object MikrotikClient {
                 runCatching { execute(cmds[index], listener) }.onFailure {
                     // فشل الإرسال نفسه — المستمع لن يُستدعى
                     if (firstPipelineError.get() == null) firstPipelineError.set(it)
+                    reported.add(index)
                     failedNow.add(index)
                     if (lastRound) {
                         onDone(index, false)
@@ -308,14 +312,19 @@ object MikrotikClient {
             val roundTimeout = (60_000L + pending.size * 150L).coerceAtMost(600_000L)
             latch.await(roundTimeout, java.util.concurrent.TimeUnit.MILLISECONDS)
             roundClosed.set(true)
+            // أوامر أُرسلت ولم يأتِها ردّ قبل المهلة: كانت تُسقط تماماً — لا تُعاد
+            // ولا يُبلَّغ عنها، فتضيع صامتة. إعادتها آمنة لأن «موجود مسبقاً»
+            // يُحسب نجاحاً، فالعملية متكررة النتيجة بلا تكرار كروت
+            val unanswered = pending.filter { it !in reported && it !in notSent }
             if (lastRound) {
-                // الجولة الأخيرة: نُبلّغ عن غير المُرسَل كفاشل ليكتمل التقدم
-                notSent.forEach { i ->
+                // الجولة الأخيرة: نُبلّغ عن غير المُرسَل وغير المُجاب كفاشل ليكتمل التقدم
+                (notSent + unanswered).forEach { i ->
                     onDone(i, false)
                     onProgress(progressed.incrementAndGet().coerceAtMost(total), total)
                 }
             }
-            pending = if (lastRound) emptyList() else (failedNow + notSent).distinct().sorted()
+            pending = if (lastRound) emptyList()
+            else (failedNow + notSent + unanswered).distinct().sorted()
             round++
         }
         // في الجولة الأخيرة نُكمل شريط التقدم للنهاية حتى لو تجمّد بعض الأوامر
@@ -1137,7 +1146,31 @@ object MikrotikClient {
             else "$base/user/create-and-activate-profile customer=${q(customer)} " +
                 "numbers=${q(u.username)} profile=${q(u.profile)}"
         }
-        if (linkCmds.isNotEmpty()) con.pipeline(linkCmds, window = umWindow)
+        // نتيجة ربط الباقة كانت مُهمَلة تماماً: كرت أُنشئ بلا باقة كان يُحسب
+        // نجاحاً كاملاً، فيبدو الرفع سليماً والكرت لا يعمل على الشبكة
+        if (linkCmds.isNotEmpty()) {
+            val addError = firstPipelineError.get()
+            val link = con.pipeline(
+                linkCmds,
+                treatErrorAsOk = { it.contains("already", true) },
+                window = umWindow,
+            )
+            com.binwaps.cardmanager.data.EventLog.log(
+                "رفع",
+                "ربط الباقة: نجح ${link.ok} من ${linkCmds.size}",
+                ok = link.failed == 0,
+            )
+            if (link.ok == 0) {
+                throw RouterLogicException(
+                    "أُنشئ ${addResult.ok} مستخدماً لكن تعذّر ربط الباقة بأي منهم — " +
+                        "تأكد أن الباقة «${createdSafe.firstOrNull { it.profile.isNotBlank() }?.profile}» " +
+                        "موجودة في اليوزر منجر: ${firstPipelineError.get()?.message?.take(120) ?: ""}",
+                    firstPipelineError.get(),
+                )
+            }
+            // لا نُخفي سبب فشل الإضافة إن كان موجوداً قبل موجة الربط
+            if (addError != null) firstPipelineError.set(addError)
+        }
         addResult.ok
     }
 
