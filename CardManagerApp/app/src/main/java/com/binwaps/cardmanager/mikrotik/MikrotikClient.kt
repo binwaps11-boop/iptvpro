@@ -445,16 +445,7 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r) { con ->
-        val cmds = users.map { u ->
-            buildString {
-                append("/ppp/secret/add name=${q(u.username)} service=pppoe")
-                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
-                val p = profile.ifBlank { u.profile }
-                if (p.isNotBlank()) append(" profile=${q(p)}")
-                val tag = u.batchTag.ifBlank { u.comment }
-                if (tag.isNotBlank()) append(" comment=${q(tag)}")
-            }
-        }
+        val cmds = users.map { pppAddCommand(it, profile) }
         val result = con.pipeline(
             cmds, onProgress,
             treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
@@ -1049,16 +1040,7 @@ object MikrotikClient {
     ): Result<Int> = onRouter(r) { con ->
         // إرسال متدفق: كل أوامر الإنشاء تنطلق معاً وتُجمع الردود وهي تصل —
         // على دومين بعيد هذا أسرع بعشرات المرات من أمرٍ بعد أمر
-        val cmds = users.map { u ->
-            buildString {
-                append("/ip/hotspot/user/add name=${q(u.username)}")
-                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
-                if (u.profile.isNotBlank()) append(" profile=${q(u.profile)}")
-                if (u.validity.isNotBlank()) append(" limit-uptime=${q(u.validity)}")
-                val tag = u.batchTag.ifBlank { u.comment }
-                if (tag.isNotBlank()) append(" comment=${q(tag)}")
-            }
-        }
+        val cmds = users.map { hotspotAddCommand(it) }
         val result = con.pipeline(
             cmds, onProgress,
             treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
@@ -1070,6 +1052,57 @@ object MikrotikClient {
             throw RouterLogicException("رفض الراوتر إنشاء الكروت: ${firstPipelineError.get()?.message ?: "سبب غير معروف"}", firstPipelineError.get())
         }
         result.ok
+    }
+
+    // ===== بناء الأوامر (دوال صافية قابلة للاختبار) =====
+    //
+    // فُصلت عن دوال الاتصال عمداً: أخطاء صيغة الأوامر (مثل name بدل username
+    // في v6) كانت تُفشل الرفع كله ولا تُكتشف إلا على جهاز المستخدم. الآن
+    // تغطيها اختبارات وحدة تعمل في كل بناء.
+
+    /** أمر إنشاء كرت هوتسبوت */
+    internal fun hotspotAddCommand(u: UserEntry): String = buildString {
+        append("/ip/hotspot/user/add name=${q(u.username)}")
+        if (u.password.isNotBlank()) append(" password=${q(u.password)}")
+        if (u.profile.isNotBlank()) append(" profile=${q(u.profile)}")
+        if (u.validity.isNotBlank()) append(" limit-uptime=${q(u.validity)}")
+        val tag = u.batchTag.ifBlank { u.comment }
+        if (tag.isNotBlank()) append(" comment=${q(tag)}")
+    }
+
+    /**
+     * أمر إنشاء مستخدم يوزر منجر.
+     * v6 (/tool/user-manager): حقل الدخول `username` و`customer` إلزامي.
+     * v7 (/user-manager): حقل الدخول `name` والباقة في `group`.
+     */
+    internal fun umAddCommand(isV7: Boolean, customer: String, u: UserEntry): String {
+        val base = if (isV7) "/user-manager" else "/tool/user-manager"
+        return buildString {
+            append("$base/user/add ${if (isV7) "name" else "username"}=${q(u.username)}")
+            if (u.password.isNotBlank()) append(" password=${q(u.password)}")
+            if (isV7) {
+                if (u.profile.isNotBlank()) append(" group=${q(u.profile)}")
+            } else {
+                append(" customer=${q(customer)}")
+            }
+            if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
+        }
+    }
+
+    /** أمر ربط الباقة بالمستخدم بعد إنشائه */
+    internal fun umLinkProfileCommand(isV7: Boolean, customer: String, username: String, profile: String): String =
+        if (isV7) "/user-manager/user-profile/add user=${q(username)} profile=${q(profile)}"
+        else "/tool/user-manager/user/create-and-activate-profile customer=${q(customer)} " +
+            "numbers=${q(username)} profile=${q(profile)}"
+
+    /** أمر إنشاء حساب PPPoE */
+    internal fun pppAddCommand(u: UserEntry, profile: String): String = buildString {
+        append("/ppp/secret/add name=${q(u.username)} service=pppoe")
+        if (u.password.isNotBlank()) append(" password=${q(u.password)}")
+        val p = profile.ifBlank { u.profile }
+        if (p.isNotBlank()) append(" profile=${q(p)}")
+        val tag = u.batchTag.ifBlank { u.comment }
+        if (tag.isNotBlank()) append(" comment=${q(tag)}")
     }
 
     /**
@@ -1104,18 +1137,7 @@ object MikrotikClient {
 
         // الموجة الأولى (متدفقة): إنشاء المستخدمين كلهم.
         // v6 يسمي حقل الدخول username لا name — استعمال name كان يُفشل كل الرفع
-        val addCmds = users.map { u ->
-            buildString {
-                append("$base/user/add ${if (isV7) "name" else "username"}=${q(u.username)}")
-                if (u.password.isNotBlank()) append(" password=${q(u.password)}")
-                if (isV7) {
-                    if (u.profile.isNotBlank()) append(" group=${q(u.profile)}")
-                } else {
-                    append(" customer=${q(customer)}")
-                }
-                if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
-            }
-        }
+        val addCmds = users.map { umAddCommand(isV7, customer, it) }
         val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
         // نافذة محافظة لليوزر منجر: كل إضافة تكتب في قاعدة بياناته، ونافذة
         // واسعة تخنق v6 فيتوقف عن الرد وتتجمّد الدفعة بلا تقدّم
@@ -1141,11 +1163,8 @@ object MikrotikClient {
         // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم.
         // نسخة ثابتة — مستمع متأخر من مهلة منتهية قد يضيف أثناء القراءة
         val createdSafe = synchronized(created) { created.toList() }
-        val linkCmds = createdSafe.filter { it.profile.isNotBlank() }.map { u ->
-            if (isV7) "$base/user-profile/add user=${q(u.username)} profile=${q(u.profile)}"
-            else "$base/user/create-and-activate-profile customer=${q(customer)} " +
-                "numbers=${q(u.username)} profile=${q(u.profile)}"
-        }
+        val linkCmds = createdSafe.filter { it.profile.isNotBlank() }
+            .map { umLinkProfileCommand(isV7, customer, it.username, it.profile) }
         // نتيجة ربط الباقة كانت مُهمَلة تماماً: كرت أُنشئ بلا باقة كان يُحسب
         // نجاحاً كاملاً، فيبدو الرفع سليماً والكرت لا يعمل على الشبكة
         if (linkCmds.isNotEmpty()) {

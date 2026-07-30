@@ -52,6 +52,10 @@ android {
 }
 
 dependencies {
+    // اختبارات وحدة تعمل على JVM في كل بناء — تمنع رجوع الأعطال المتكررة
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.22")
+
     val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
     implementation(composeBom)
     implementation("androidx.core:core-ktx:1.12.0")
