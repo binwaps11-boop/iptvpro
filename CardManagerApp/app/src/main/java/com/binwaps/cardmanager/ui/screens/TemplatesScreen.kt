@@ -50,6 +50,9 @@ import com.binwaps.cardmanager.ui.theme.Violet
 @Composable
 fun TemplatesScreen(navController: NavController) {
     val templates by Store.templates.collectAsState()
+    val settings by Store.settings.collectAsState()
+    val defaultId = settings.defaultTemplateId.takeIf { id -> templates.any { it.id == id } }
+        ?: templates.firstOrNull()?.id
 
     Column(
         Modifier
@@ -97,15 +100,29 @@ fun TemplatesScreen(navController: NavController) {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(templates.size) { i ->
                 val t = templates[i]
+                val isDefault = t.id == defaultId
                 GlassCard(
-                    Modifier.fillMaxWidth().clickable { navController.navigate("editor/${t.id}") },
+                    Modifier.fillMaxWidth().clickable { Store.setDefaultTemplate(t.id) },
+                    glow = if (isDefault) Neon.copy(alpha = 0.5f) else Neon.copy(alpha = 0.12f),
                     padding = 10,
                 ) {
                     CardPreview(template = t, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(9.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(t.name, fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(t.name, fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                                if (isDefault) {
+                                    Spacer(Modifier.width(7.dp))
+                                    Text(
+                                        "✓ مُختار",
+                                        fontSize = 10.5.sp, color = Neon, fontWeight = FontWeight.Bold,
+                                        modifier = Modifier
+                                            .background(Neon.copy(alpha = 0.14f), RoundedCornerShape(999.dp))
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
                             val shape = if (t.layoutMode == com.binwaps.cardmanager.model.CardLayoutMode.TABLE)
                                 "جدول ${t.rows.size} صفوف" else "${t.fields.size} حقل"
                             Text(
@@ -127,6 +144,15 @@ fun TemplatesScreen(navController: NavController) {
                                 Icon(Icons.Filled.Delete, "حذف", tint = Danger, modifier = Modifier.size(19.dp))
                             }
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        GhostButton(
+                            if (isDefault) "القالب المستخدم للطباعة" else "استخدام هذا القالب",
+                            Modifier.weight(1f),
+                            color = if (isDefault) Neon else Violet,
+                        ) { Store.setDefaultTemplate(t.id) }
+                        GhostButton("تعديل", icon = Icons.Filled.Edit) { navController.navigate("editor/${t.id}") }
                     }
                 }
             }

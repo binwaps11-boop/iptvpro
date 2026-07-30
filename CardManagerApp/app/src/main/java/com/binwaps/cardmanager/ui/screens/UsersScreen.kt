@@ -836,6 +836,16 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
     val dialogScope = rememberCoroutineScope()
     var loadingProfiles by remember { mutableStateOf(false) }
     var profilesError by remember { mutableStateOf<String?>(null) }
+    // جلب الباقات تلقائياً فور فتح الحوار إن كانت فارغة — دون أي ضغطة
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (profiles.isEmpty() && Store.activeRouter() != null) {
+            loadingProfiles = true
+            MikrotikClient.fetchProfiles(Store.activeRouter())
+                .onSuccess { Store.setProfiles(it) }
+                .onFailure { profilesError = it.message }
+            loadingProfiles = false
+        }
+    }
     var count by remember { mutableStateOf("50") }
     var prefix by remember { mutableStateOf("") }
     var length by remember { mutableStateOf("6") }

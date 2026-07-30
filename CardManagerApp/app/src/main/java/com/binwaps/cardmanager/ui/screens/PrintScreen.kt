@@ -87,8 +87,9 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
     val templates by Store.templates.collectAsState()
     val settings by Store.settings.collectAsState()
 
-    var selectedTemplateId by remember { mutableStateOf(templates.firstOrNull()?.id) }
-    val template = templates.firstOrNull { it.id == selectedTemplateId } ?: templates.firstOrNull()
+    // يبدأ من القالب المختار في شاشة القوالب
+    var selectedTemplateId by remember { mutableStateOf(Store.defaultTemplateOrFirst()?.id) }
+    val template = templates.firstOrNull { it.id == selectedTemplateId } ?: Store.defaultTemplateOrFirst()
 
     // محرك الطباعة الصامد — يعمل في الخلفية ويستأنف من نقطة التوقف عند أي فشل
     val engineState by PrintEngine.state.collectAsState()

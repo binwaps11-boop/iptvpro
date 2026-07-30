@@ -92,8 +92,21 @@ fun ReportsScreen() {
     val dayFmt = remember { SimpleDateFormat("yyyy/MM/dd", Locale.US) }
     val timeFmt = remember { SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US) }
     val cur = settings.currency
+    val connected by Store.connected.collectAsState()
+    var loading by remember { mutableStateOf(false) }
 
-    val rows: List<ReportRow> = when (tab) {
+    // التقرير يغطي كل كروت الراوتر لا المطبوعة فقط — نجلبها فور فتح الشاشة
+    androidx.compose.runtime.LaunchedEffect(connected) {
+        if (connected && Store.activeRouter() != null) {
+            loading = true
+            com.binwaps.cardmanager.mikrotik.MikrotikClient.fetchAllCards(Store.activeRouter())
+                .onSuccess { Store.mergeRouterCards(it) }
+            loading = false
+        }
+    }
+
+    // الحساب ثقيل مع آلاف الكروت — يُحسب مرة عند تغيّر المدخلات لا كل إعادة تركيب
+    val rows: List<ReportRow> = remember(tab, users, batches, sales, activeUsers, profiles, cur) { when (tab) {
         ReportTab.PROFILE -> users.groupBy { it.profile.ifBlank { "بدون باقة" } }
             .map { (profile, list) ->
                 val p = profiles.firstOrNull { it.name == profile }
@@ -170,7 +183,7 @@ fun ReportsScreen() {
                     )
                 }.sortedByDescending { it.money }
         }
-    }
+    } }
 
     Column(
         Modifier
@@ -180,7 +193,11 @@ fun ReportsScreen() {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {
-                SectionHeader("التقارير", "${rows.size} سجل في هذا التقرير", Icons.Filled.Assessment)
+                SectionHeader(
+                    "التقارير",
+                    if (loading) "جاري جلب كل كروت الراوتر…" else "${rows.size} سجل — يشمل كل كروت الراوتر",
+                    Icons.Filled.Assessment,
+                )
             }
             GhostButton("مشاركة", icon = Icons.Filled.Share) {
                 shareCsv(context, tab.labelAr, rows, cur)

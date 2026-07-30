@@ -87,8 +87,8 @@ fun ExpressScreen() {
     val engineState by PrintEngine.state.collectAsState()
     LaunchedEffect(Unit) { PrintEngine.restoreIfAny() }
 
-    var templateId by remember { mutableStateOf(templates.firstOrNull()?.id) }
-    val template = templates.firstOrNull { it.id == templateId } ?: templates.firstOrNull()
+    var templateId by remember { mutableStateOf(Store.defaultTemplateOrFirst()?.id) }
+    val template = templates.firstOrNull { it.id == templateId } ?: Store.defaultTemplateOrFirst()
 
     var count by remember { mutableStateOf("100") }
     var length by remember { mutableStateOf("6") }

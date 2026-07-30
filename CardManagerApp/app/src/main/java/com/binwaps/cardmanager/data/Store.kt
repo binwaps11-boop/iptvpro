@@ -191,6 +191,15 @@ object Store {
         save("settings.json", s)
     }
 
+    /** يختار القالب الافتراضي للطباعة والتوليد السريع */
+    fun setDefaultTemplate(id: Long) = updateSettings(_settings.value.copy(defaultTemplateId = id))
+
+    /** القالب المختار افتراضياً، أو الأول إن لم يُختر شيء */
+    fun defaultTemplateOrFirst(): CardTemplate? {
+        val list = _templates.value
+        return list.firstOrNull { it.id == _settings.value.defaultTemplateId } ?: list.firstOrNull()
+    }
+
     // ===== الراوترات =====
     fun upsertRouter(r: RouterProfile) {
         val cur = _routers.value
