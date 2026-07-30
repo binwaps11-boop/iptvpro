@@ -374,6 +374,40 @@ object PdfExporter {
         return bmp
     }
 
+    /**
+     * يحفظ الملف في مجلد «التنزيلات» على الجوال تلقائياً — بلا أي ضغطة ولا
+     * إذن إضافي (MediaStore على أندرويد 10+، والمجلد العام على ما قبله).
+     * يعيد اسم الملف المحفوظ أو null إن تعذّر.
+     */
+    fun saveToDownloads(context: Context, file: File): String? = runCatching {
+        if (!file.exists()) return null
+        val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+            .format(java.util.Date())
+        val name = "كروت-$stamp-${file.name}"
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+            ) ?: return null
+            resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+            values.clear()
+            values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } else {
+            val dir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS,
+            )
+            if (!dir.exists()) dir.mkdirs()
+            file.copyTo(File(dir, name), overwrite = true)
+        }
+        name
+    }.getOrNull()
+
     /** مشاركة عدة ملفات دفعة واحدة — تظهر عند تقسيم الدفعات الضخمة */
     fun shareAll(context: Context, files: List<File>) {
         if (files.isEmpty()) return

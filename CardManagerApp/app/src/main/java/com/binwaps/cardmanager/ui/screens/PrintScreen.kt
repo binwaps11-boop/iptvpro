@@ -352,6 +352,15 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 Spacer(Modifier.height(10.dp))
                 GlassCard(Modifier.fillMaxWidth(), glow = com.binwaps.cardmanager.ui.theme.Lime.copy(alpha = 0.5f), padding = 12) {
                     Text("✓ اكتملت الطباعة — ${es.total} كرت", fontSize = 13.sp, color = com.binwaps.cardmanager.ui.theme.Lime, fontWeight = FontWeight.Bold)
+                    // تأكيد الحفظ التلقائي في مجلد التنزيلات
+                    val savedName by PrintEngine.savedTo.collectAsState()
+                    savedName?.let { n ->
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            "📥 حُفظ تلقائياً في مجلد «التنزيلات»: $n",
+                            fontSize = 11.sp, color = com.binwaps.cardmanager.ui.theme.Lime,
+                        )
+                    }
                     if (es.files.isNotEmpty()) {
                         Spacer(Modifier.height(9.dp))
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

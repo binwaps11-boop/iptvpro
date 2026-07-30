@@ -75,6 +75,9 @@ object PrintEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + crashGuard)
     private var job: Job? = null
 
+    /** سياق التطبيق المحفوظ — للحفظ التلقائي في التنزيلات بعد اكتمال المهمة */
+    private var savedContext: Context? = null
+
     // لقطة المهمة الحالية — تبقى في الذاكرة للاستئناف الفوري
     private var template: CardTemplate? = null
     private var settings: AppSettings = AppSettings()
@@ -134,6 +137,7 @@ object PrintEngine {
             "بدء PDF: ${users.size} كرت، قالب «${template.name}»، ورق ${settings.paperType}",
         )
         val appContext = context.applicationContext
+        savedContext = appContext
         this.template = template
         this.settings = settings
         this.cards = PdfExporter.selectRange(users, settings)
@@ -196,6 +200,7 @@ object PrintEngine {
     ) {
         if (isRunning()) return
         val appContext = context.applicationContext
+        savedContext = appContext
         this.template = template
         this.settings = settings
         this.cards = PdfExporter.selectRange(users, settings)
@@ -325,6 +330,7 @@ object PrintEngine {
     /** بعد اكتمال مهمة: العودة للوضع الطبيعي (الملفات تبقى للمشاركة من السجل) */
     fun acknowledge() {
         if (_state.value is State.Done) _state.value = State.Idle
+        _savedTo.value = null
     }
 
     private fun finishJob(kind: Kind, totalCards: Int) {
@@ -335,7 +341,29 @@ object PrintEngine {
             "طباعة",
             "اكتمل ${if (kind == Kind.PDF) "PDF" else "حراري"}: $totalCards كرت، ${files.size} ملف",
         )
+        // حفظ تلقائي في «التنزيلات» — كل شيء تلقائي بلا ضغطة زر
+        if (kind == Kind.PDF) {
+            val ctx = savedContext
+            val toSave = files.toList()
+            if (ctx != null && toSave.isNotEmpty()) {
+                scope.launch {
+                    val names = toSave.mapNotNull { PdfExporter.saveToDownloads(ctx, it) }
+                    if (names.isNotEmpty()) {
+                        _savedTo.value = names.joinToString("، ")
+                        com.binwaps.cardmanager.data.EventLog.log(
+                            "طباعة", "حُفظ تلقائياً في التنزيلات: ${names.joinToString("، ")}",
+                        )
+                    }
+                }
+            }
+        }
     }
+
+    /** آخر ملف حُفظ تلقائياً في التنزيلات — لعرض تأكيد للمستخدم */
+    private val _savedTo = MutableStateFlow<String?>(null)
+    val savedTo: StateFlow<String?> get() = _savedTo
+
+    fun clearSavedTo() { _savedTo.value = null }
 
     private fun saveBatchOnce() {
         if (batchSaved) return
