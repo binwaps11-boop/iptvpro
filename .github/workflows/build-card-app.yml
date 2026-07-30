@@ -30,6 +30,11 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      # اختبارات المنطق الحرج تسبق البناء: أي رجوع لعطل معروف يوقف الإصدار
+      - name: Run unit tests
+        working-directory: CardManagerApp
+        run: gradle testSubscriberDebugUnitTest --no-daemon --stacktrace
+
       - name: Build both APKs
         working-directory: CardManagerApp
         run: gradle assembleSubscriberDebug assembleAdminDebug --no-daemon --stacktrace

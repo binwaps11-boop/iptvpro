@@ -44,9 +44,16 @@ class UserGeneratorTest {
 
     @Test
     fun `الطول يتوسع تلقائياً ليتسع للعدد المطلوب`() {
-        // 1000 كرت تحتاج سعة 10000 على الأقل ⇒ 5 خانات لا 2
-        assertTrue(UserGenerator.minLengthFor(1000, Charset.DIGITS) >= 5)
+        // السعة المطلوبة عشرة أضعاف العدد: 1000 كرت ⇒ 10000 احتمال ⇒ 4 خانات
+        assertEquals(4, UserGenerator.minLengthFor(1000, Charset.DIGITS))
+        // 5000 كرت ⇒ 50000 احتمال ⇒ 5 خانات (10000 لا تكفي)
+        assertEquals(5, UserGenerator.minLengthFor(5000, Charset.DIGITS))
         assertEquals(1, UserGenerator.minLengthFor(0, Charset.DIGITS))
+        // أبجدية أوسع تحتاج خانات أقل
+        assertTrue(
+            UserGenerator.minLengthFor(5000, Charset.MIXED) <
+                UserGenerator.minLengthFor(5000, Charset.DIGITS),
+        )
     }
 
     @Test
