@@ -758,6 +758,7 @@ fun UsersScreen() {
     if (showGenerate) {
         GenerateDialog(onDismiss = { showGenerate = false }) { generated ->
             Store.addUsers(generated)
+            com.binwaps.cardmanager.data.EventLog.log("توليد", "تم توليد ${generated.size} كرت")
             showGenerate = false
             // الرفع التلقائي الفوري — التوليد وحده كان يترك الكروت محلية فلا تعمل على الشبكة
             val router = Store.activeRouter()

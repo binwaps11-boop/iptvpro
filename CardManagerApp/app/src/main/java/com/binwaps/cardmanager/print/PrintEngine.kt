@@ -125,7 +125,14 @@ object PrintEngine {
     // ==================== PDF ====================
 
     fun startPdf(context: Context, template: CardTemplate, users: List<UserEntry>, settings: AppSettings) {
-        if (isRunning()) return
+        if (isRunning()) {
+            com.binwaps.cardmanager.data.EventLog.log("طباعة", "تم تجاهل الطلب — مهمة طباعة جارية بالفعل", ok = false)
+            return
+        }
+        com.binwaps.cardmanager.data.EventLog.log(
+            "طباعة",
+            "بدء PDF: ${users.size} كرت، قالب «${template.name}»، ورق ${settings.paperType}",
+        )
         val appContext = context.applicationContext
         this.template = template
         this.settings = settings
@@ -324,6 +331,10 @@ object PrintEngine {
         saveBatchOnce()
         _state.value = State.Done(kind, totalCards, files.toList())
         clearPersisted()
+        com.binwaps.cardmanager.data.EventLog.log(
+            "طباعة",
+            "اكتمل ${if (kind == Kind.PDF) "PDF" else "حراري"}: $totalCards كرت، ${files.size} ملف",
+        )
     }
 
     private fun saveBatchOnce() {

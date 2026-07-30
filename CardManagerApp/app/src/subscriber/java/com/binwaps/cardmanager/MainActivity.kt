@@ -85,6 +85,8 @@ class MainActivity : ComponentActivity() {
         com.binwaps.cardmanager.render.CardRenderer.init(this)
         com.binwaps.cardmanager.data.Backend.init(this)
         Store.init(this)
+        com.binwaps.cardmanager.data.EventLog.init(this)
+        com.binwaps.cardmanager.data.EventLog.log("تشغيل", "فتح التطبيق")
         LicenseManager.init(this)
         // المزامنة لا تبدأ هنا: كانت تحاول الاتصال بالراوتر المحفوظ فور الإقلاع
         // وتحتجز قفل الجلسة، فيقف اتصال المستخدم اليدوي في الطابور حتى تنتهي

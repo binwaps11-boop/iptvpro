@@ -366,13 +366,14 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         }
 
         Spacer(Modifier.height(12.dp))
-        Text(
-            "الدخول بدون اتصال — للتصميم والطباعة محلياً",
-            fontSize = 12.sp, color = TextMid,
-            modifier = Modifier
-                .clickable { Store.setConnected(false); onSkip() }
-                .padding(8.dp),
-        )
+        // زر بارز لا رابط صغير: توليد الكروت وتصميمها وطباعتها لا يحتاج راوتراً،
+        // ويجب أن يكون الوصول إليها واضحاً حتى لو تعذّر الاتصال
+        GhostButton(
+            "الدخول بدون اتصال — توليد وتصميم وطباعة محلياً",
+            Modifier.fillMaxWidth(),
+            color = Violet,
+            enabled = !busy,
+        ) { Store.setConnected(false); onSkip() }
         Spacer(Modifier.height(30.dp))
     }
 }

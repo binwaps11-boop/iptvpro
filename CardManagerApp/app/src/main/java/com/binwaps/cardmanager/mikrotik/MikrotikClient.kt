@@ -291,7 +291,13 @@ object MikrotikClient {
         // في الجولة الأخيرة نُكمل شريط التقدم للنهاية حتى لو تجمّد بعض الأوامر
         // دون ردّ قبل المهلة — العدّاد لا يتجاوز الإجمالي أبداً
         if (progressed.get() < total) onProgress(total, total)
-        return BulkResult(succeeded.get(), total - succeeded.get())
+        val ok = succeeded.get()
+        com.binwaps.cardmanager.data.EventLog.log(
+            "رفع",
+            "نجح $ok من $total" + if (ok < total) " — أول خطأ: ${firstPipelineError.get()?.message?.take(140)}" else "",
+            ok = ok == total,
+        )
+        return BulkResult(ok, total - ok)
     }
 
     /** أول خطأ في آخر عملية متدفقة — لعرض سببٍ مفهوم عند فشل الكل */
@@ -526,9 +532,18 @@ object MikrotikClient {
     ): Result<SmartConnect> = withContext(Dispatchers.IO) {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
         onStage("فحص المنفذ ${r.port}…")
+        com.binwaps.cardmanager.data.EventLog.log(
+            "اتصال",
+            "محاولة ${r.host.trim()}:${r.port} مستخدم=${r.username} مشفّر=${if (r.useSsl) "نعم" else "لا"} مهلة=${r.timeoutSec}ث",
+        )
         // الفحص استرشادي فقط لتحسين رسالة الخطأ — لا يُجهض الاتصال.
         // شبكة بطيئة (VPN) قد تتجاوز مهلة الفحص القصيرة بينما الاتصال نفسه ينجح.
         val reachable = portReachable(r.host, r.port, timeoutMs)
+        com.binwaps.cardmanager.data.EventLog.log(
+            "اتصال",
+            if (reachable) "المنفذ ${r.port} مفتوح" else "فحص المنفذ ${r.port} لم ينجح — نتابع المحاولة",
+            reachable,
+        )
         // المنفذ مفتوح — المشكلة إن وُجدت في نوع التشفير أو بيانات الدخول.
         // كل العمل الشبكي خارج قفل الجلسة: لو كانت دورة مزامنة عالقة تحتجز
         // القفل، لا يقف اتصال المستخدم في الطابور حتى تنتهي مهلته.
@@ -562,10 +577,19 @@ object MikrotikClient {
                     ssl -> "تم الاتصال بالوضع المشفّر (api-ssl) — فُعِّل تلقائياً"
                     else -> "المنفذ ${r.port} غير مشفّر — أُطفئ خيار api-ssl تلقائياً ونجح الاتصال"
                 }
+                com.binwaps.cardmanager.data.EventLog.log(
+                    "اتصال",
+                    "نجح (${if (ssl) "مشفّر" else "عادي"}) — ${status.identity.ifBlank { "بلا اسم" }} ${status.version}",
+                )
                 return@withContext Result.success(SmartConnect(status, ssl, note))
             }
             runCatching { probe?.close() }
             lastError = attempt.exceptionOrNull()
+            com.binwaps.cardmanager.data.EventLog.log(
+                "اتصال",
+                "فشل (${if (ssl) "مشفّر" else "عادي"}): ${lastError?.message?.take(160)}",
+                ok = false,
+            )
             // بيانات دخول خاطئة: لا فائدة من تجربة النوع الآخر
             val msg = lastError?.message.orEmpty()
             if (msg.contains("cannot log in", true) || msg.contains("invalid user", true)) break

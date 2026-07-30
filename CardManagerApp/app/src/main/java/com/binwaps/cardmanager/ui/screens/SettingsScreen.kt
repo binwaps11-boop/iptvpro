@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -227,6 +228,56 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                     }
                     GhostButton("مسح") { com.binwaps.cardmanager.data.CrashLogger.clear() }
                 }
+            }
+        }
+
+        // سجل العمليات — يوضح أين توقف الاتصال أو الرفع أو الطباعة فعلاً
+        val events by com.binwaps.cardmanager.data.EventLog.events.collectAsState()
+        GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.3f)) {
+            Text("سجل العمليات", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Text(
+                "آخر ما جرى فعلاً: الاتصال، التوليد، الرفع، الطباعة — أرسله عند أي مشكلة",
+                fontSize = 10.5.sp, color = TextLow,
+            )
+            Spacer(Modifier.height(9.dp))
+            if (events.isEmpty()) {
+                Text("لا عمليات بعد", fontSize = 11.5.sp, color = TextLow)
+            } else {
+                val fmt = remember { java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US) }
+                events.asReversed().take(12).forEach { e ->
+                    Row(Modifier.padding(bottom = 4.dp)) {
+                        Text(
+                            if (e.ok) "✓" else "✗",
+                            fontSize = 11.sp,
+                            color = if (e.ok) Lime else Danger,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "${fmt.format(java.util.Date(e.at))} [${e.tag}] ${e.text}",
+                            fontSize = 10.5.sp,
+                            color = if (e.ok) TextMid else Danger,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton("إرسال السجل", icon = Icons.Filled.Send) {
+                    context.startActivity(
+                        android.content.Intent.createChooser(
+                            android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(
+                                    android.content.Intent.EXTRA_TEXT,
+                                    com.binwaps.cardmanager.data.EventLog.asText(),
+                                )
+                            },
+                            "إرسال سجل العمليات",
+                        )
+                    )
+                }
+                GhostButton("مسح") { com.binwaps.cardmanager.data.EventLog.clear() }
             }
         }
 
