@@ -78,13 +78,22 @@ object LicenseManager {
      * تسجيل البريد وبدء التجربة. يعيد رسالة خطأ أو null عند النجاح.
      * التجربة تبدأ مرة واحدة — لا تُصفَّر بإعادة إدخال بريد آخر.
      */
-    fun register(email: String, name: String): String? {
+    fun register(email: String, name: String, phone: String = ""): String? {
         val e = email.trim()
-        if (!e.contains("@") || !e.contains(".")) return "أدخل بريداً صحيحاً مثل name@gmail.com"
+        if (!Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$").matches(e)) {
+            return "أدخل بريداً صحيحاً مثل name@gmail.com"
+        }
+        val n = name.trim()
+        if (n.length < 3) return "أدخل اسمك كاملاً (٣ أحرف على الأقل)"
+        // الجوال إلزامي: بدونه لا يمكن الوصول إليك لتسليم الترخيص أو دعمك
+        val digits = phone.filter { it.isDigit() }
+        if (digits.length !in 9..15) return "أدخل رقم جوال صحيح (٩ إلى ١٥ رقماً)"
+
         val now = trustedNow()
         val edit = prefs().edit()
         edit.putString(KEY_EMAIL, e)
-        if (name.isNotBlank()) edit.putString(KEY_NAME, name.trim())
+        edit.putString(KEY_NAME, n)
+        edit.putString(KEY_PHONE, digits)
         if (prefs().getLong(KEY_TRIAL_START, 0) <= 0) edit.putLong(KEY_TRIAL_START, now)
         edit.apply()
         refresh()

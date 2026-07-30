@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -181,7 +182,7 @@ fun LicenseScreen(
             is LicenseState.NeedsRegister -> {
                 Text("مرحباً بك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(
-                    "سجّل بريدك لتبدأ تجربة مجانية ٧ أيام",
+                    "سجّل بياناتك لتبدأ تجربة مجانية ٧ أيام",
                     fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
                 )
             }
@@ -223,22 +224,69 @@ fun LicenseScreen(
 
         if (state is LicenseState.NeedsRegister) {
             // ===== التسجيل =====
+            // الترتيب يتبع المنطق: من أنت ← كيف نصلك ← بريدك (معرّف الحساب).
+            // كل حقل إلزامي ويُتحقق منه فور الكتابة لا بعد الضغط.
+            val nameOk = name.trim().length >= 3
+            val digits = phone.filter { it.isDigit() }
+            val phoneOk = digits.length in 9..15
+            val emailOk = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$").matches(email.trim())
+            val formOk = nameOk && phoneOk && emailOk
+
             GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.4f), padding = 16) {
-                Text("التسجيل", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
-                Spacer(Modifier.height(10.dp))
-                AppField(email, { email = it; error = null }, "بريدك (جيميل)", Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                AppField(name, { name = it }, "اسمك", Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
-                AppField(phone, { phone = it }, "رقم جوالك (اختياري)", Modifier.fillMaxWidth(), numeric = true)
+                Text("إنشاء حسابك", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text(
+                    "بيانات صحيحة تضمن وصول ترخيصك ودعمك عند الحاجة",
+                    fontSize = 11.sp, color = TextLow,
+                )
+                Spacer(Modifier.height(14.dp))
+
+                FieldWithHint(
+                    label = "الاسم الكامل",
+                    value = name,
+                    onChange = { name = it; error = null },
+                    ok = nameOk,
+                    hint = if (name.isBlank()) "مثال: علي واقص" else "أدخل ثلاثة أحرف على الأقل",
+                )
+                Spacer(Modifier.height(11.dp))
+
+                FieldWithHint(
+                    label = "رقم الجوال (واتساب)",
+                    value = phone,
+                    onChange = { phone = it.filter { c -> c.isDigit() }; error = null },
+                    ok = phoneOk,
+                    hint = if (phone.isBlank()) "مثال: 776831921" else "الرقم يجب أن يكون بين ٩ و١٥ رقماً",
+                    numeric = true,
+                )
+                Spacer(Modifier.height(11.dp))
+
+                FieldWithHint(
+                    label = "البريد الإلكتروني",
+                    value = email,
+                    onChange = { email = it.trim(); error = null },
+                    ok = emailOk,
+                    hint = if (email.isBlank()) "مثال: name@gmail.com" else "أدخل بريداً صحيحاً يحوي @ ونطاقاً",
+                )
+
                 error?.let {
-                    Spacer(Modifier.height(9.dp))
-                    Text(it, fontSize = 12.sp, color = Danger)
+                    Spacer(Modifier.height(11.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Danger.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                            .border(1.dp, Danger.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                            .padding(11.dp),
+                    ) { Text(it, fontSize = 12.sp, color = Danger) }
                 }
-                Spacer(Modifier.height(13.dp))
-                NeonButton("ابدأ التجربة المجانية", Modifier.fillMaxWidth(), Icons.Filled.PersonAdd) {
+
+                Spacer(Modifier.height(16.dp))
+                NeonButton(
+                    "ابدأ التجربة المجانية — ٧ أيام",
+                    Modifier.fillMaxWidth(),
+                    Icons.Filled.PersonAdd,
+                    enabled = formOk,
+                ) {
                     LicenseManager.setCustomerPhone(phone)
-                    val msg = LicenseManager.register(email, name)
+                    val msg = LicenseManager.register(email, name, phone)
                     if (msg != null) {
                         error = msg
                     } else {
@@ -247,10 +295,20 @@ fun LicenseScreen(
                         onActivated()
                     }
                 }
-                Spacer(Modifier.height(7.dp))
+                Spacer(Modifier.height(9.dp))
                 Text(
-                    "التجربة أسبوع كامل، بعدها يمكنك طلب ترخيص. بريدك يبقى على جهازك.",
-                    fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
+                    if (formOk) "بياناتك مكتملة — اضغط للبدء"
+                    else "أكمل الحقول الثلاثة لتفعيل الزر",
+                    fontSize = 11.sp,
+                    color = if (formOk) Lime else TextLow,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "بياناتك تبقى على جهازك ولا تُرسل إلا عند طلب الترخيص.",
+                    fontSize = 10.sp, color = TextLow,
+                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                 )
             }
         } else {
@@ -371,4 +429,37 @@ private fun dayWord(n: Int): String = when (n) {
     2 -> "يومان"
     in 3..10 -> "أيام"
     else -> "يوماً"
+}
+
+/**
+ * حقل إدخال بعنوان فوقه وتحقق فوري تحته.
+ *
+ * سبب وجوده: الحقول القديمة كانت تعتمد على نص داخلي واحد يختفي عند الكتابة،
+ * فلا يعرف المستخدم ما المطلوب ولا لماذا رُفض إدخاله إلا بعد الضغط.
+ * هنا العنوان ثابت، والحالة تظهر لحظياً: ✓ خضراء عند الصحة، وتلميح عند النقص.
+ */
+@Composable
+private fun FieldWithHint(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+    ok: Boolean,
+    hint: String,
+    numeric: Boolean = false,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontSize = 12.sp, color = TextMid, fontWeight = FontWeight.SemiBold)
+            if (ok) {
+                Spacer(Modifier.width(6.dp))
+                Text("✓", fontSize = 12.sp, color = Lime, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        AppField(value, onChange, label, Modifier.fillMaxWidth(), numeric = numeric)
+        if (!ok) {
+            Spacer(Modifier.height(4.dp))
+            Text(hint, fontSize = 10.sp, color = TextLow)
+        }
+    }
 }
