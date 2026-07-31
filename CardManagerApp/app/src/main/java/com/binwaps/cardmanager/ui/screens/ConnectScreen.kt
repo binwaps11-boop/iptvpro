@@ -274,7 +274,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             // يعيد المستخدم المحاولة دون أن يعرف أنه أخطأ حرفاً واحداً
             AppField(
                 pass, { pass = it }, "كلمة المرور", Modifier.fillMaxWidth(),
-                password = !showPass, leading = Icons.Filled.Lock, ltr = true,
+                password = true, reveal = showPass, leading = Icons.Filled.Lock, ltr = true,
                 trailing = {
                     androidx.compose.material3.IconButton(onClick = { showPass = !showPass }) {
                         Icon(

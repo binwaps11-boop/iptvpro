@@ -161,6 +161,13 @@ fun AppField(
     supporting: String? = null,
     ltr: Boolean = false,
     email: Boolean = false,
+    /**
+     * يكشف كلمة المرور بصرياً فقط. منفصل عن `password` عمداً: لو أُطفئ
+     * `password` للكشف لانقلبت لوحة المفاتيح إلى نص عادي بتكبير أول حرف
+     * وتصحيح تلقائي، فيتحول `admin` إلى `Admin` ويفشل الاتصال بسبب الزر
+     * الذي أُضيف لتشخيصه.
+     */
+    reveal: Boolean = false,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val isErr = !error.isNullOrBlank()
@@ -184,7 +191,8 @@ fun AppField(
         supportingText = (error ?: supporting)?.takeIf { it.isNotBlank() }?.let {
             { Text(it, fontSize = 11.5.sp, lineHeight = 17.sp, color = if (isErr) Danger else TextMid) }
         },
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        visualTransformation =
+            if (password && !reveal) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(
             keyboardType = when {
                 numeric -> KeyboardType.Number

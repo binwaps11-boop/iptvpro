@@ -19,8 +19,10 @@ import java.util.Base64
  * يتحقق من التوقيع قبل الوثوق بأي حالة. حمولة الرد تُنقل كنص base64 ويُتحقق
  * من نفس بايتاتها بالضبط — إعادة تسلسل JSON كانت ستغيّر الترتيب فيفشل التحقق.
  *
- * المفتاح العام يُجلب مرة واحدة عند أول اتصال ويُثبَّت محلياً (pinning)،
- * فأي خادم آخر أو رد مزوّر بعدها يُرفض.
+ * المفتاح العام يُقرأ من BackendConfig إن مُلئ — وهذا هو الوضع الصحيح.
+ * إن تُرك فارغاً يُجلب عند أول اتصال ويُثبَّت (TOFU)، وهو أضعف بوضوح: فوق HTTP
+ * يستطيع وسيط على الشبكة زرع مفتاحه في تلك اللحظة فتُقبل ردوده المزوّرة بعدها.
+ * املأ SERVER_PUBLIC_KEY بما يطبعه install.sh ليختفي هذا الباب تماماً.
  */
 object LicenseServer {
 
@@ -99,15 +101,19 @@ object LicenseServer {
 
     // ==================== التوقيع ====================
 
-    /** يجلب المفتاح العام ويثبّته عند أول اتصال */
+    /**
+     * المفتاح المرجعي: من الإعدادات أولاً، ثم المثبَّت سابقاً، ثم — كحل أخير —
+     * جلبه من الخادم وتثبيته. الترتيب مقصود: الإعدادات لا تمرّ بالشبكة أصلاً.
+     */
     private fun pinnedKey(): ByteArray? {
-        prefs().getString(KEY_PINNED_PUBKEY, null)?.let {
-            return runCatching { Base64.getDecoder().decode(it) }.getOrNull()
-        }
-        // المفتاح المضمّن في الإعدادات له الأولوية إن وُجد
+        // المضمّن في الإعدادات يسبق أي شيء، ويصحّح تثبيتاً سابقاً خاطئاً:
+        // لو زُرع مفتاح مزوّر بـTOFU ثم مُلئت الإعدادات، يجب أن يُزاح لا أن يبقى
         BackendConfig.SERVER_PUBLIC_KEY.takeIf { it.isNotBlank() }?.let { embedded ->
             prefs().edit().putString(KEY_PINNED_PUBKEY, embedded).apply()
             return runCatching { Base64.getDecoder().decode(embedded) }.getOrNull()
+        }
+        prefs().getString(KEY_PINNED_PUBKEY, null)?.let {
+            return runCatching { Base64.getDecoder().decode(it) }.getOrNull()
         }
         val fetched = runCatching {
             JSONObject(request("/api/pubkey", null)).optString("publicKey")

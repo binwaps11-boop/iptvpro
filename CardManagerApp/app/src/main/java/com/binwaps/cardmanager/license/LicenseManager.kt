@@ -38,7 +38,10 @@ object LicenseManager {
     private const val KEY_PHONE = "customer_phone"
     private const val KEY_EMAIL = "customer_email"
     private const val KEY_TRIAL_START = "trial_start"
+    // مصدرا إيقاف مستقلان — الأدمن عبر Firestore، وخادم التراخيص. لا يتشاركان
+    // مفتاحاً واحداً: كان أي رد `active` من الخادم يمسح إيقافاً أصدره الأدمن.
     private const val KEY_SUSPENDED = "suspended_remote"
+    private const val KEY_SUSPENDED_SERVER = "suspended_server"
 
     // حالة الحساب كما قررها خادم التراخيص (القرار الأعلى بعد الإيقاف)
     private const val KEY_ON_STATUS = "online_status"
@@ -198,7 +201,9 @@ object LicenseManager {
         refresh()
     }
 
-    fun isRemoteSuspended(): Boolean = prefs().getBoolean(KEY_SUSPENDED, false)
+    /** موقوف إن أوقفه أيٌّ من المصدرين — رفع الإيقاف يلزم من أوقفه */
+    fun isRemoteSuspended(): Boolean =
+        prefs().getBoolean(KEY_SUSPENDED, false) || prefs().getBoolean(KEY_SUSPENDED_SERVER, false)
 
     // ==================== طبقة الخادم ====================
 
@@ -213,8 +218,11 @@ object LicenseManager {
             .putInt(KEY_ON_GRACE, s.graceHours)
             .apply()
         noteServerTime(s.issuedAt)
-        // قرار الإيقاف يُثبَّت محلياً فلا يُتجاوز بقطع الإنترنت
-        prefs().edit().putBoolean(KEY_SUSPENDED, s.status == "blocked" || s.status == "wrong_device").apply()
+        // قرار الإيقاف يُثبَّت محلياً فلا يُتجاوز بقطع الإنترنت — في مفتاح
+        // خاص بالخادم حتى لا يمسح قرار الأدمن القادم من Firestore
+        prefs().edit()
+            .putBoolean(KEY_SUSPENDED_SERVER, s.status == "blocked" || s.status == "wrong_device")
+            .apply()
         _reason.value = s.reason
     }
 
@@ -303,9 +311,12 @@ object LicenseManager {
             return
         }
         // ساعة مُرجَعة للخلف: لا نمنح وقتاً، ومخرجها اتصال واحد بالإنترنت.
-        // لا يُطبَّق على من لم يسجّل بعد — لا مدة عنده تُحمى، ومنعه من التسجيل
-        // بسبب ساعة جهازه عقوبة بلا سبب.
-        if ((isRegistered() || savedLicense().isNotBlank()) && clockRolledBack()) {
+        //
+        // مقصور على المسجَّلين عمداً — وهم وحدهم من يملك `syncOnline` مخرجاً لهم.
+        // لا يشمل حامل مفتاح مدفوع بلا بريد: `syncOnline` ترفض العمل بلا تسجيل
+        // فيبقى مقفولاً بلا مخرج، وهو أصلاً غير معرَّض للخطر لأن مدة المفتاح
+        // تُقاس بـ trustedNow() التصاعدية فلا يمدّدها إرجاع الساعة.
+        if (isRegistered() && clockRolledBack()) {
             _state.value = LicenseState.ClockInvalid
             return
         }

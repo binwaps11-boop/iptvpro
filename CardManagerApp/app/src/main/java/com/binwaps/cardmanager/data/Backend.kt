@@ -96,9 +96,11 @@ object Backend {
     /** المشترك يرسل طلب ترخيص — يصل لوحة الأدمن لحظياً */
     fun submitRequest(
         email: String, name: String, phone: String, deviceCode: String, renewal: Boolean,
-        onResult: (ok: Boolean, id: String) -> Unit = { _, _ -> },
+        // detail = معرّف الحساب عند النجاح، ورسالة الخطأ العربية عند الفشل.
+        // كان يمرّر المعرّف في الحالتين فلا يجد المتصل ما يعرضه للمستخدم.
+        onResult: (ok: Boolean, detail: String) -> Unit = { _, _ -> },
     ) {
-        val col = accounts() ?: return onResult(false, "")
+        val col = accounts() ?: return onResult(false, "الربط السحابي غير مُهيَّأ")
         val id = accountId(email, deviceCode)
         val data = mapOf(
             "email" to email.trim(),
@@ -112,7 +114,7 @@ object Backend {
         )
         col.document(id).set(data, com.google.firebase.firestore.SetOptions.merge())
             .addOnSuccessListener { onResult(true, id) }
-            .addOnFailureListener { _error.value = arabic(it); onResult(false, id) }
+            .addOnFailureListener { val m = arabic(it); _error.value = m; onResult(false, m) }
     }
 
     // ==================== كتابة (الأدمن) ====================
@@ -253,10 +255,16 @@ data class CloudAccount(
     val requestedAt: Long,
     val issuedAt: Long,
 ) {
-    // طلب معلّق = أعلن المشترك رغبته ولم يبتّ الأدمن بعد
+    /**
+     * طلب معلّق = أعلن المشترك رغبته ولم يبتّ الأدمن بعد.
+     *
+     * التمييز زمني لا بالحالة: طلب التجديد يأتي من مشترك حالته `approved` أصلاً،
+     * فاشتراط `status != "approved"` كان يُخفي كل طلبات التجديد عن لوحة الأدمن.
+     * الطلب جديد متى وصل بعد آخر إصدار مفتاح.
+     */
     val pending: Boolean get() =
         (requestState == "pending" || status == "pending") &&
-            status != "approved" && status != "suspended"
+            requestedAt > issuedAt && status != "suspended"
     val approved: Boolean get() = status == "approved" && key.isNotBlank()
 }
 

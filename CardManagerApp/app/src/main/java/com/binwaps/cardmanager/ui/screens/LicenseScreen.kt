@@ -137,26 +137,8 @@ fun LicenseScreen(
         onDispose { reg?.remove() }
     }
 
-    /** يرسل الطلب: للخادم إن كان مُهيّأً، ثم سحابياً، وإلا عبر واتساب */
-    fun sendRequest() {
-        LicenseManager.setCustomerName(name)
-        LicenseManager.setCustomerPhone(phone)
-        if (com.binwaps.cardmanager.data.BackendConfig.licenseServerEnabled) {
-            // الطلب يصل لوحة مزوّد الخدمة مباشرة ويبقى مسجّلاً حتى لو أُغلق التطبيق
-            busy = true
-            scope.launch {
-                val msg = LicenseManager.requestOnline(isRenewal, "من التطبيق")
-                busy = false
-                if (msg == null) { requestSent = true; error = null } else error = msg
-            }
-            return
-        }
-        if (cloudReady) {
-            com.binwaps.cardmanager.data.Backend.submitRequest(email, name, phone, deviceCode, isRenewal) { ok, _ ->
-                requestSent = ok
-            }
-            return
-        }
+    /** الملاذ الأخير: يفتح واتساب مزوّد الخدمة برسالة الطلب جاهزة */
+    fun sendViaWhatsapp() {
         val message = LicenseLink.requestMessage(deviceCode, name, isRenewal, email, phone)
         val wa = Intent(Intent.ACTION_VIEW, Uri.parse(LicenseLink.whatsappLink(message)))
         val opened = runCatching { context.startActivity(wa); true }.getOrDefault(false)
@@ -171,6 +153,43 @@ fun LicenseScreen(
                 )
             )
         }
+    }
+
+    /** يرسل الطلب: للخادم إن كان مُهيّأً، ثم سحابياً، وإلا عبر واتساب */
+    fun sendRequest() {
+        LicenseManager.setCustomerName(name)
+        LicenseManager.setCustomerPhone(phone)
+        if (com.binwaps.cardmanager.data.BackendConfig.licenseServerEnabled) {
+            // الطلب يصل لوحة مزوّد الخدمة مباشرة ويبقى مسجّلاً حتى لو أُغلق التطبيق
+            busy = true
+            scope.launch {
+                val msg = LicenseManager.requestOnline(isRenewal, "من التطبيق")
+                busy = false
+                if (msg == null) {
+                    requestSent = true
+                    error = null
+                } else {
+                    // الخادم متوقف، أو الحساب سُجّل محلياً وقت انقطاع فلا وجود له
+                    // هناك. المستخدم يجب ألا يعلق بلا طريق: نفتح له واتساب فوراً
+                    // بدل تركه أمام رسالة خطأ وحدها.
+                    error = "$msg — نفتح لك واتساب مزوّد الخدمة"
+                    sendViaWhatsapp()
+                }
+            }
+            return
+        }
+        if (cloudReady) {
+            com.binwaps.cardmanager.data.Backend.submitRequest(email, name, phone, deviceCode, isRenewal) { ok, err ->
+                requestSent = ok
+                // فشل الإرسال السحابي كان صامتاً تماماً — لا رسالة ولا بديل
+                if (!ok) {
+                    error = err.ifBlank { "تعذّر إرسال الطلب" } + " — نفتح لك واتساب"
+                    sendViaWhatsapp()
+                }
+            }
+            return
+        }
+        sendViaWhatsapp()
     }
 
     Column(
@@ -273,8 +292,10 @@ fun LicenseScreen(
                         val msg = LicenseManager.syncOnline(userInitiated = true)
                         busy = false
                         // syncOnline يعيد null أيضاً حين لا يوجد ما يُتحقق منه،
-                        // فلا نترك الزر بلا أي رد فعل ظاهر
-                        error = msg ?: if (state is LicenseState.ClockInvalid) {
+                        // فلا نترك الزر بلا أي رد فعل ظاهر. نقرأ المصدر مباشرة
+                        // لا `state` المؤلَّفة: تحديثها يُجدوَل على حلقة الواجهة
+                        // فتُقرأ القيمة القديمة بعد نجاح فعلي فتظهر رسالة كاذبة.
+                        error = msg ?: if (LicenseManager.state.value is LicenseState.ClockInvalid) {
                             "ما زالت ساعة الجهاز غير صحيحة — صحّحها من الإعدادات"
                         } else null
                     }
