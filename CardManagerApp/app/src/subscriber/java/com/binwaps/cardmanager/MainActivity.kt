@@ -26,7 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -102,7 +101,8 @@ class MainActivity : ComponentActivity() {
                 val licenseState by LicenseManager.state.collectAsState()
 
                 val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired ||
-                    licenseState is LicenseState.NeedsRegister || licenseState is LicenseState.Suspended
+                    licenseState is LicenseState.NeedsRegister || licenseState is LicenseState.Suspended ||
+                    licenseState is LicenseState.ClockInvalid
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً
@@ -113,17 +113,33 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // القفل نافذ لحظياً على تطبيق مفتوح: عند إيقاف عن بعد أو انتهاء
-                // أثناء الجلسة يُدفع المستخدم لشاشة الترخيص فوراً، والمزامنة تتوقف
+                // أثناء الجلسة تتوقف المزامنة فوراً ولا يبقى شيء يعمل بالخلفية
                 androidx.compose.runtime.LaunchedEffect(blocked) {
-                    if (blocked) {
-                        com.binwaps.cardmanager.data.SyncEngine.stop()
-                        if (currentRoute != "license") {
-                            navController.navigate("license") {
-                                popUpTo(navController.graph.findStartDestination().id) { inclusive = true }
-                                launchSingleTop = true
-                            }
-                        }
+                    if (blocked) com.binwaps.cardmanager.data.SyncEngine.stop()
+                }
+
+                // نبضة التحقق الأونلاين: عند الفتح ثم كل ٦ ساعات ما دام مفتوحاً.
+                // بدونها يبقى قرار الخادم (إيقاف أو انتهاء) بلا أثر حتى إعادة التشغيل.
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    while (true) {
+                        LicenseManager.syncOnline()
+                        kotlinx.coroutines.delay(6 * 3600_000L)
                     }
+                }
+
+                if (blocked) {
+                    // بوابة بنيوية لا تنقّلية: عند القفل لا تُبنى شجرة التطبيق
+                    // أصلاً، فلا مكدس خلفي يُرجع إليه ولا سباق مع إعادة بناء
+                    // الغراف. الاعتماد على navigate/popUpTo كان يترك اللوحة تحت
+                    // شاشة الترخيص فتفلت بضغطة «رجوع» واحدة.
+                    LicenseScreen(
+                        blocking = true,
+                        incomingKey = incomingKey.value,
+                        onIncomingConsumed = { incomingKey.value = null },
+                        onActivated = {},
+                        onBack = null,
+                    )
+                    return@CardManagerTheme
                 }
 
                 Scaffold(
@@ -145,7 +161,15 @@ class MainActivity : ComponentActivity() {
                                             }
                                         },
                                         icon = { Icon(tab.icon, contentDescription = tab.labelAr, modifier = Modifier.size(20.dp)) },
-                                        label = { Text(tab.labelAr, fontSize = 8.5.sp, maxLines = 1) },
+                                        // ٨٫٥sp كان غير مقروء للعربية على أي جهاز
+                                        label = {
+                                            Text(
+                                                tab.labelAr,
+                                                fontSize = 10.sp,
+                                                lineHeight = 14.sp,
+                                                maxLines = 1,
+                                            )
+                                        },
                                         alwaysShowLabel = true,
                                         colors = NavigationBarItemDefaults.colors(
                                             selectedIconColor = Ink,
@@ -162,18 +186,18 @@ class MainActivity : ComponentActivity() {
                 ) { padding ->
                     NavHost(
                         navController = navController,
-                        startDestination = if (blocked) "license" else "connect",
+                        startDestination = "connect",
                         modifier = Modifier.padding(padding).background(Ink),
                     ) {
                         composable("license") {
                             LicenseScreen(
-                                blocking = blocked,
+                                blocking = false,
                                 incomingKey = incomingKey.value,
                                 onIncomingConsumed = { incomingKey.value = null },
                                 onActivated = {
                                     navController.navigate("connect") { popUpTo("license") { inclusive = true } }
                                 },
-                                onBack = if (blocked) null else ({ navController.popBackStack(); Unit }),
+                                onBack = { navController.popBackStack(); Unit },
                             )
                         }
                         composable("connect") {

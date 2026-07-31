@@ -21,54 +21,52 @@
 | منع إعادة التشغيل | نفس `nonce` لا يُقبل مرتين |
 | مسارات الأدمن | تتطلب رمزاً سرياً، ومقارنته ثابتة الزمن |
 | تحديد المعدل | 60 طلباً/دقيقة لكل عنوان |
+| منع إعادة بث الردود | الـ`nonce` داخل الحمولة الموقّعة — رد قديم لا يُقبل |
+| جهاز واحد = حساب واحد | بريد جديد على جهاز مسجّل → **رفض** |
 
 كل رد يُوقَّع بـ **ECDSA P-256**؛ المفتاح الخاص لا يغادر الخادم، والتطبيق
 يحمل العام فقط ويتحقق من التوقيع قبل الوثوق بأي حالة.
 
 ---
 
-## النشر على VPS أوبونتو (٣ أوامر)
+## النشر على VPS أوبونتو (أمر واحد)
+
+انسخ مجلد `license-server` إلى الخادم ثم:
 
 ```bash
-# 1) ثبّت Node (مرة واحدة)
-sudo apt update && sudo apt install -y nodejs
-
-# 2) انسخ المجلد license-server إلى الخادم ثم:
-cd license-server
-export ADMIN_TOKEN="$(openssl rand -hex 24)"   # احفظه — رمز لوحة الأدمن
-echo "رمز الأدمن: $ADMIN_TOKEN"
-
-# 3) شغّله
-node server.js
+sudo bash install.sh
 ```
 
-عند أول تشغيل يطبع **المفتاح العام** — انسخه وضعه في التطبيق (انظر أدناه).
+هذا كل شيء. السكربت يثبّت Node ٢٠، ينشئ خدمة دائمة تعمل بعد إعادة التشغيل،
+يولّد رمز الأدمن، ثم يطبع **المفتاح العام وعنوان الخادم** جاهزين للصق في
+`BackendConfig.kt`.
 
-### تشغيل دائم (يعيد نفسه بعد إعادة التشغيل)
+> **لماذا Node ٢٠ تحديداً؟** `apt install nodejs` على أوبونتو ٢٢ يعطي Node ١٢،
+> وهو أقدم من أن يشغّل الخادم فيفشل برسالة `SyntaxError` محيّرة. السكربت يأخذه
+> من NodeSource فيتجنّب ذلك.
+
+### تشغيل يدوي (للتجربة فقط)
 
 ```bash
-sudo tee /etc/systemd/system/cardlicense.service > /dev/null <<'EOF'
-[Unit]
-Description=Card Manager License Server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/license-server
-Environment=PORT=8090
-Environment=ADMIN_TOKEN=ضع_الرمز_هنا
-ExecStart=/usr/bin/node /opt/license-server/server.js
-Restart=always
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now cardlicense
-sudo systemctl status cardlicense
+ADMIN_TOKEN="$(openssl rand -hex 24)" node server.js
 ```
+
+### الاختبارات
+
+```bash
+node test.js
+```
+
+يشغّل الخادم بنفسه على منفذ مؤقت ثم يوقفه، فلا يمسّ بياناتك. يغطي ٢١ حالة:
+التوقيع كما يتحقق منه أندرويد بالضبط، منع إعادة بث الردود، ربط الجهاز في
+الاتجاهين، الإيقاف عن بعد، نقل الجهاز، ولوحة الأدمن.
+
+## لوحة الأدمن
+
+افتح `http://عنوان-خادمك:8090/` من جوالك، الصق رمز الأدمن، فتظهر كل الحسابات:
+الطلبات المعلّقة أولاً، ومع كل حساب أزرار **اعتماد** (بخطة تختارها) و**إيقاف**
+و**نقل لجهاز**. الصفحة تُخدَم من الخادم نفسه بلا أي مكتبة خارجية، والرمز يبقى
+في متصفحك فقط.
 
 ### HTTPS (موصى به بشدة)
 
@@ -86,6 +84,17 @@ sudo ln -sf /etc/nginx/sites-available/license /etc/nginx/sites-enabled/
 sudo certbot --nginx -d license.example.com
 ```
 
+خلف Nginx يصبح عنوان كل الطلبات `127.0.0.1` فيتشارك المشتركون دلو تحديد
+المعدل نفسه ويُقفلون جميعاً. أضف للخدمة `Environment=TRUST_PROXY=1` ليقرأ
+الخادم `X-Forwarded-For`، وتأكد أن Nginx يضبطه:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
 ---
 
 ## ربطه بالتطبيق
@@ -97,7 +106,9 @@ const val LICENSE_SERVER = "https://license.example.com"   // عنوان خاد�
 const val SERVER_PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcD..."  // المفتاح المطبوع
 ```
 
-ثم ابنِ التطبيق. بمجرد امتلاء هذين الحقلين يتحول الترخيص من محلي إلى أونلاين.
+`SERVER_PUBLIC_KEY` اختياري: إن تُرك فارغاً يجلب التطبيق المفتاح عند أول اتصال
+ويثبّته محلياً، فأي خادم آخر بعدها يُرفض. ملؤه هنا أقوى لأنه يحمي أيضاً أول
+اتصال. **لا تغيّره بعد التوزيع** — الأجهزة التي ثبّتت المفتاح القديم سترفض الجديد.
 
 ---
 
@@ -107,7 +118,7 @@ const val SERVER_PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcD..."  // المف
 
 | المسار | الغرض |
 |---|---|
-| `POST /api/register` | تسجيل حساب وبدء التجربة. الحقول: `email, phone, name, device` |
+| `POST /api/register` | تسجيل حساب وبدء التجربة. الحقول: `email, phone, name, device, nonce` |
 | `POST /api/check` | التحقق الدوري. الحقول: `email, device, nonce` |
 | `POST /api/request` | طلب ترخيص/تجديد. الحقول: `email, device, renewal, note` |
 | `GET /api/pubkey` | المفتاح العام |

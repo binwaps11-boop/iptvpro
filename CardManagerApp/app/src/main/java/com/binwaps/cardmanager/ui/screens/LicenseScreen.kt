@@ -35,6 +35,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import com.binwaps.cardmanager.license.LicenseLink
 import com.binwaps.cardmanager.license.LicenseManager
 import com.binwaps.cardmanager.license.LicenseState
@@ -85,8 +87,16 @@ fun LicenseScreen(
     var key by remember { mutableStateOf(LicenseManager.savedLicense()) }
     var error by remember { mutableStateOf<String?>(null) }
     var success by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val serverReason by LicenseManager.reason.collectAsState()
 
     fun clipboard() = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+    fun copy(label: String, text: String) {
+        clipboard().setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+        Toast.makeText(context, "نُسخ: $text", Toast.LENGTH_SHORT).show()
+    }
 
     fun activate(value: String) {
         val message = LicenseManager.activate(value)
@@ -127,10 +137,20 @@ fun LicenseScreen(
         onDispose { reg?.remove() }
     }
 
-    /** يرسل الطلب: سحابياً إن كان مُهيّأً (فوري ومع دردشة)، وإلا عبر واتساب */
+    /** يرسل الطلب: للخادم إن كان مُهيّأً، ثم سحابياً، وإلا عبر واتساب */
     fun sendRequest() {
         LicenseManager.setCustomerName(name)
         LicenseManager.setCustomerPhone(phone)
+        if (com.binwaps.cardmanager.data.BackendConfig.licenseServerEnabled) {
+            // الطلب يصل لوحة مزوّد الخدمة مباشرة ويبقى مسجّلاً حتى لو أُغلق التطبيق
+            busy = true
+            scope.launch {
+                val msg = LicenseManager.requestOnline(isRenewal, "من التطبيق")
+                busy = false
+                if (msg == null) { requestSent = true; error = null } else error = msg
+            }
+            return
+        }
         if (cloudReady) {
             com.binwaps.cardmanager.data.Backend.submitRequest(email, name, phone, deviceCode, isRenewal) { ok, _ ->
                 requestSent = ok
@@ -214,13 +234,55 @@ fun LicenseScreen(
             LicenseState.Suspended -> {
                 Text("تم إيقاف الاشتراك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Danger)
                 Text(
-                    "أوقف مزوّد الخدمة اشتراكك — تواصل معه لإعادة التفعيل",
+                    serverReason.ifBlank { "أوقف مزوّد الخدمة اشتراكك — تواصل معه لإعادة التفعيل" },
+                    fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
+                )
+            }
+            LicenseState.ClockInvalid -> {
+                Text("ساعة الجهاز غير صحيحة", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Warn)
+                Text(
+                    "تاريخ جهازك مُرجَع للخلف. صحّح التاريخ والوقت من إعدادات الجهاز، " +
+                        "أو اتصل بالإنترنت مرة واحدة ليُضبط تلقائياً.",
                     fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
                 )
             }
         }
 
         Spacer(Modifier.height(20.dp))
+
+        if (state is LicenseState.ClockInvalid) {
+            // مخرج واضح بدل تركه أمام رسالة بلا فعل
+            GlassCard(Modifier.fillMaxWidth(), glow = Warn.copy(alpha = 0.45f), padding = 16) {
+                Text("كيف تصلحها", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "١) إعدادات الجهاز ← التاريخ والوقت ← فعّل «الضبط التلقائي».\n" +
+                        "٢) أو اتصل بالإنترنت واضغط الزر بالأسفل.",
+                    fontSize = 12.5.sp, lineHeight = 21.sp, color = TextMid,
+                )
+                Spacer(Modifier.height(12.dp))
+                NeonButton(
+                    if (busy) "جارٍ التحقق…" else "تحقق الآن عبر الإنترنت",
+                    Modifier.fillMaxWidth(),
+                    Icons.Filled.VerifiedUser,
+                    enabled = !busy,
+                ) {
+                    busy = true
+                    error = null
+                    scope.launch {
+                        val msg = LicenseManager.syncOnline(userInitiated = true)
+                        busy = false
+                        error = msg
+                    }
+                }
+                error?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(it, fontSize = 12.sp, color = Danger)
+                }
+            }
+            Spacer(Modifier.height(30.dp))
+            return@Column
+        }
 
         if (state is LicenseState.NeedsRegister) {
             // ===== التسجيل =====
@@ -256,6 +318,7 @@ fun LicenseScreen(
                     ok = phoneOk,
                     hint = if (phone.isBlank()) "مثال: 776831921" else "الرقم يجب أن يكون بين ٩ و١٥ رقماً",
                     numeric = true,
+                    ltr = true,
                 )
                 Spacer(Modifier.height(11.dp))
 
@@ -265,6 +328,8 @@ fun LicenseScreen(
                     onChange = { email = it.trim(); error = null },
                     ok = emailOk,
                     hint = if (email.isBlank()) "مثال: name@gmail.com" else "أدخل بريداً صحيحاً يحوي @ ونطاقاً",
+                    ltr = true,
+                    email = true,
                 )
 
                 error?.let {
@@ -280,34 +345,44 @@ fun LicenseScreen(
 
                 Spacer(Modifier.height(16.dp))
                 NeonButton(
-                    "ابدأ التجربة المجانية — ٧ أيام",
+                    if (busy) "جارٍ إنشاء حسابك…" else "ابدأ التجربة المجانية — ٧ أيام",
                     Modifier.fillMaxWidth(),
                     Icons.Filled.PersonAdd,
-                    enabled = formOk,
+                    enabled = formOk && !busy,
                 ) {
-                    LicenseManager.setCustomerPhone(phone)
-                    val msg = LicenseManager.register(email, name, phone)
-                    if (msg != null) {
-                        error = msg
-                    } else {
-                        // يظهر للأدمن كحساب في التجربة فور التسجيل
-                        if (cloudReady) com.binwaps.cardmanager.data.Backend.registerAccount(email, name, phone, deviceCode)
-                        onActivated()
+                    busy = true
+                    error = null
+                    scope.launch {
+                        // التسجيل على الخادم أولاً — هو من يقرر أهليّة الجهاز
+                        val msg = LicenseManager.registerFull(email, name, phone)
+                        busy = false
+                        if (msg != null) {
+                            error = msg
+                        } else {
+                            if (cloudReady) {
+                                com.binwaps.cardmanager.data.Backend
+                                    .registerAccount(email, name, phone, deviceCode)
+                            }
+                            onActivated()
+                        }
                     }
                 }
                 Spacer(Modifier.height(9.dp))
                 Text(
-                    if (formOk) "بياناتك مكتملة — اضغط للبدء"
-                    else "أكمل الحقول الثلاثة لتفعيل الزر",
-                    fontSize = 11.sp,
-                    color = if (formOk) Lime else TextLow,
+                    when {
+                        busy -> "نتحقق من جهازك لدى مزوّد الخدمة…"
+                        formOk -> "بياناتك مكتملة — اضغط للبدء"
+                        else -> "أكمل الحقول الثلاثة لتفعيل الزر"
+                    },
+                    fontSize = 12.sp,
+                    color = if (formOk) Lime else TextMid,
                     modifier = Modifier.fillMaxWidth(),
                     textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "بياناتك تبقى على جهازك ولا تُرسل إلا عند طلب الترخيص.",
-                    fontSize = 10.sp, color = TextLow,
+                    "يُسجَّل حسابك لدى مزوّد الخدمة ليُربط ترخيصك برقم جوالك وجهازك.",
+                    fontSize = 11.5.sp, lineHeight = 18.sp, color = TextMid,
                     modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                 )
             }
@@ -319,38 +394,88 @@ fun LicenseScreen(
                     fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi,
                 )
                 Spacer(Modifier.height(9.dp))
-                AppField(name, { name = it; LicenseManager.setCustomerName(it) }, "اسمك", Modifier.fillMaxWidth())
+                // الطلب كان يُرسل باسم وجوال فارغين فيصل الأدمن بلا وسيلة تواصل
+                val reqNameOk = name.trim().length >= 3
+                val reqPhoneOk = phone.filter { it.isDigit() }.length in 9..15
+                AppField(
+                    name, { name = it; LicenseManager.setCustomerName(it) }, "اسمك",
+                    Modifier.fillMaxWidth(),
+                    error = if (!reqNameOk) "الاسم مطلوب (٣ أحرف على الأقل)" else null,
+                )
                 Spacer(Modifier.height(8.dp))
-                AppField(phone, { phone = it; LicenseManager.setCustomerPhone(it) }, "رقم جوالك", Modifier.fillMaxWidth(), numeric = true)
+                AppField(
+                    phone,
+                    { v -> phone = v.filter { it.isDigit() }; LicenseManager.setCustomerPhone(phone) },
+                    "رقم جوالك (واتساب)",
+                    Modifier.fillMaxWidth(), numeric = true, ltr = true,
+                    error = if (!reqPhoneOk) "أدخل رقماً بين ٩ و١٥ خانة" else null,
+                )
                 Spacer(Modifier.height(11.dp))
 
-                Text("رمز جهازك", fontSize = 11.5.sp, color = TextLow)
-                Text(
-                    deviceCode,
-                    fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Neon,
-                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
-                )
+                Text("رمز جهازك — اضغط عليه لنسخه", fontSize = 12.sp, color = TextMid)
+                Spacer(Modifier.height(4.dp))
+                // هذا هو ما يجب أن يرسله المستخدم؛ كان نصاً غير قابل للتحديد
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Neon.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+                        .border(1.dp, Neon.copy(alpha = 0.40f), RoundedCornerShape(12.dp))
+                        .clickable { copy("رمز الجهاز", deviceCode) }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        deviceCode,
+                        fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Neon,
+                        letterSpacing = 2.sp,
+                    )
+                }
                 Spacer(Modifier.height(13.dp))
 
+                val serverMode = com.binwaps.cardmanager.data.BackendConfig.licenseServerEnabled
                 NeonButton(
                     when {
+                        busy -> "جارٍ الإرسال…"
                         requestSent -> "أُرسل الطلب ✓ — بانتظار الموافقة"
-                        cloudReady && isRenewal -> "طلب التجديد"
-                        cloudReady -> "طلب الترخيص"
+                        serverMode || cloudReady -> if (isRenewal) "طلب التجديد" else "طلب الترخيص"
                         isRenewal -> "طلب التجديد عبر واتساب"
                         else -> "طلب الترخيص عبر واتساب"
                     },
-                    Modifier.fillMaxWidth(), Icons.Filled.Chat, enabled = !requestSent,
+                    Modifier.fillMaxWidth(), Icons.Filled.Chat,
+                    enabled = !requestSent && !busy && reqNameOk && reqPhoneOk,
                 ) { sendRequest() }
+
+                if (requestSent) {
+                    Spacer(Modifier.height(9.dp))
+                    // التأكيد كان نصاً داخل زر معطّل فلا يكاد يُرى — الآن شريط واضح
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Lime.copy(alpha = 0.12f), RoundedCornerShape(11.dp))
+                            .border(1.dp, Lime.copy(alpha = 0.40f), RoundedCornerShape(11.dp))
+                            .padding(12.dp),
+                    ) {
+                        Text(
+                            "وصل طلبك لمزوّد الخدمة. فور الموافقة يُفعَّل التطبيق تلقائياً.",
+                            fontSize = 12.5.sp, lineHeight = 19.sp, color = Lime,
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(7.dp))
                 Text(
-                    if (cloudReady)
-                        "طلبك يصل مزوّد الخدمة لحظياً، ويمكنك مراسلته بالأسفل. " +
-                            "فور الموافقة يُفعَّل التطبيق تلقائياً دون أي خطوة منك."
-                    else
-                        "يفتح محادثة واتساب مع مزوّد الخدمة ورسالة الطلب جاهزة — أرسلها فقط، " +
-                            "وسيصلك مفتاح التفعيل لتضغطه فيُفعَّل التطبيق تلقائياً.",
-                    fontSize = 10.5.sp, color = TextLow, textAlign = TextAlign.Center,
+                    when {
+                        serverMode ->
+                            "طلبك يصل مزوّد الخدمة فوراً مربوطاً برقم جوالك ورمز جهازك، " +
+                                "ويُفعَّل التطبيق تلقائياً عند الموافقة."
+                        cloudReady ->
+                            "طلبك يصل مزوّد الخدمة لحظياً، ويمكنك مراسلته بالأسفل. " +
+                                "فور الموافقة يُفعَّل التطبيق تلقائياً دون أي خطوة منك."
+                        else ->
+                            "يفتح محادثة واتساب مع مزوّد الخدمة ورسالة الطلب جاهزة — أرسلها فقط، " +
+                                "وسيصلك مفتاح التفعيل لتضغطه فيُفعَّل التطبيق تلقائياً."
+                    },
+                    fontSize = 12.sp, lineHeight = 19.sp, color = TextMid, textAlign = TextAlign.Center,
                 )
             }
 
@@ -370,7 +495,10 @@ fun LicenseScreen(
                     fontSize = 10.5.sp, color = TextLow,
                 )
                 Spacer(Modifier.height(9.dp))
-                AppField(key, { key = it; error = null }, "الصق المفتاح هنا", Modifier.fillMaxWidth())
+                AppField(
+                    key, { key = it; error = null }, "الصق المفتاح هنا",
+                    Modifier.fillMaxWidth(), ltr = true,
+                )
                 Spacer(Modifier.height(8.dp))
                 GhostButton("لصق من الحافظة", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
                     val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
@@ -446,20 +574,30 @@ private fun FieldWithHint(
     ok: Boolean,
     hint: String,
     numeric: Boolean = false,
+    ltr: Boolean = false,
+    email: Boolean = false,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, fontSize = 12.sp, color = TextMid, fontWeight = FontWeight.SemiBold)
+            Text(label, fontSize = 12.5.sp, color = TextMid, fontWeight = FontWeight.SemiBold)
             if (ok) {
                 Spacer(Modifier.width(6.dp))
-                Text("✓", fontSize = 12.sp, color = Lime, fontWeight = FontWeight.Bold)
+                Text("✓", fontSize = 13.sp, color = Lime, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(5.dp))
-        AppField(value, onChange, label, Modifier.fillMaxWidth(), numeric = numeric)
-        if (!ok) {
-            Spacer(Modifier.height(4.dp))
-            Text(hint, fontSize = 10.sp, color = TextLow)
-        }
+        AppField(
+            value = value,
+            onValueChange = onChange,
+            label = label,
+            modifier = Modifier.fillMaxWidth(),
+            numeric = numeric,
+            // التلميح يظهر تحت الحقل نفسه لا في صندوق بعيد أسفل البطاقة،
+            // ويصير أحمر عند النقص فيعرف المستخدم أي حقل يصلح بالضبط
+            error = if (value.isNotBlank() && !ok) hint else null,
+            supporting = if (value.isBlank()) hint else null,
+            ltr = ltr,
+            email = email,
+        )
     }
 }

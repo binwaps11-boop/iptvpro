@@ -26,4 +26,20 @@ object BackendConfig {
 
     /** هل الربط السحابي مُهيَّأ؟ */
     val enabled: Boolean get() = API_KEY.isNotBlank() && PROJECT_ID.isNotBlank() && APP_ID.isNotBlank()
+
+    /**
+     * خادم التراخيص (مجلد license-server في المستودع).
+     * هو قاعدة البيانات التي تربط الحساب + رقم الجوال + بصمة الجهاز بالترخيص.
+     * اتركه فارغاً ليعمل التطبيق بالترخيص المحلي فقط.
+     */
+    const val LICENSE_SERVER = "http://217.216.59.159:8090"
+
+    /**
+     * المفتاح العام للخادم (Base64 من نداء /api/pubkey).
+     * إن تُرك فارغاً يُجلب المفتاح عند أول اتصال ويُثبَّت محلياً (TOFU)،
+     * فأي خادم آخر بعدها يُرفض. املأه هنا إن أردت تثبيتاً منذ التثبيت الأول.
+     */
+    const val SERVER_PUBLIC_KEY = ""
+
+    val licenseServerEnabled: Boolean get() = LICENSE_SERVER.isNotBlank()
 }

@@ -99,14 +99,20 @@ function publicKeyB64() {
     .toString('base64')
 }
 
-/** يوقّع الحمولة ويعيدها مع التوقيع — التطبيق يتحقق قبل الوثوق */
+/**
+ * يوقّع الحمولة ويعيدها مع التوقيع — التطبيق يتحقق قبل الوثوق.
+ *
+ * تُرسل الحمولة كنص base64 لا ككائن JSON: إعادة تسلسل الكائن على العميل
+ * قد تغيّر ترتيب المفاتيح أو المسافات فيفشل التحقق من التوقيع. بهذه الصيغة
+ * يتحقق العميل من نفس البايتات تماماً ثم يحللها.
+ */
 function signed(payload) {
-  const body = JSON.stringify(payload)
-  const sig = crypto.sign('sha256', Buffer.from(body), {
+  const raw = Buffer.from(JSON.stringify(payload), 'utf8')
+  const sig = crypto.sign('sha256', raw, {
     key: signingKey,
-    dsaEncoding: 'ieee-p1363',
+    dsaEncoding: 'ieee-p1363', // 64 بايت خام — يحوّلها العميل إلى DER
   })
-  return { payload, signature: sig.toString('base64') }
+  return { data: raw.toString('base64'), signature: sig.toString('base64') }
 }
 
 // ==================== أدوات ====================
@@ -132,7 +138,25 @@ function rateLimited(key) {
   if (t - win.start > 60000) { win.start = t; win.count = 0 }
   win.count++
   rate.set(key, win)
+  // تنظيف دوري: بلا هذا تنمو الخريطة بعدد العناوين للأبد
+  if (rate.size > 5000) {
+    for (const [k, v] of rate) if (t - v.start > 120000) rate.delete(k)
+  }
   return win.count > 60
+}
+
+/**
+ * عنوان العميل الحقيقي. خلف Nginx يكون remoteAddress دائماً 127.0.0.1،
+ * فيتشارك كل المشتركين دلواً واحداً ويُقفلون جميعاً بعد ٦٠ طلباً. لا نثق
+ * برأس X-Forwarded-For إلا إن أعلن المشغّل أن الخادم خلف بروكسي.
+ */
+const TRUST_PROXY = process.env.TRUST_PROXY === '1'
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    if (fwd) return fwd
+  }
+  return req.socket.remoteAddress || 'unknown'
 }
 
 /** يمنع إعادة تشغيل الطلبات: نفس الـnonce لا يُقبل مرتين */
@@ -177,13 +201,20 @@ function accountState(acc) {
   }
 }
 
-/** الرد الموحّد: حالة موقّعة + مهلة سماح + موعد الفحص التالي */
-function stateResponse(acc, deviceCode) {
+/**
+ * الرد الموحّد: حالة موقّعة + مهلة سماح + موعد الفحص التالي.
+ *
+ * الـnonce يعود داخل الحمولة الموقّعة لا خارجها: بدونه يكفي أن يحتفظ أحدهم
+ * برد قديم صالح ويعيد بثّه للتطبيق بعد انتهاء اشتراكه، فيُقبل لأن توقيعه سليم.
+ * التطبيق يولّد nonce لكل نداء ويرفض أي رد لا يحمله.
+ */
+function stateResponse(acc, deviceCode, nonce) {
   const st = accountState(acc)
   return signed({
     ...st,
     account: acc ? acc.id : null,
     device: deviceCode || null,
+    nonce: nonce || null,
     // مهلة سماح بلا إنترنت — بعدها يجب التحقق أونلاين
     graceHours: 72,
     issuedAt: now(),
@@ -208,9 +239,25 @@ const routes = {
       return { code: 400, json: { error: 'أدخل رقم جوال صحيح' } }
     }
     if (!device) return { code: 400, json: { error: 'رمز الجهاز مفقود' } }
+    const nonce = String(body.nonce || '')
+    if (!nonce) return { code: 400, json: { error: 'الطلب ناقص' } }
+    if (nonceUsed(nonce)) return { code: 400, json: { error: 'طلب مكرر' } }
 
     const id = accountId(email, device)
     let acc = db.accounts[id]
+
+    // القاعدة في الاتجاهين: حساب واحد = جهاز واحد، وجهاز واحد = حساب واحد.
+    // بدون هذا الشق يفتح الجهاز نفسه حسابات بلا حد ببريد جديد كل مرة.
+    const owner = db.devices[device] && db.devices[device].account
+    if (owner && owner !== id) {
+      return {
+        code: 409,
+        json: {
+          error: 'هذا الجهاز مسجّل بحساب آخر — استخدم بريده أو اطلب نقل الجهاز من مزوّد الخدمة',
+          boundAccount: owner,
+        },
+      }
+    }
 
     if (acc) {
       // حساب موجود: قاعدة «حساب واحد = جهاز واحد» تُفرض هنا على الخادم
@@ -240,17 +287,20 @@ const routes = {
       }
       db.accounts[id] = acc
       db.devices[device] = { ...(deviceRecord || {}), trialUsed: true, account: id, at: now() }
+      acc.trialUsedBefore = !!trialUsed
       logEvent('register', { id, phone, device, trialUsed: !!trialUsed })
     }
     saveDb()
-    return { code: 200, json: stateResponse(acc, device) }
+    return { code: 200, json: stateResponse(acc, device, nonce) }
   },
 
   /** التحقق الدوري — التطبيق يسأل، الخادم يقرر */
   'POST /api/check': (body) => {
     const device = String(body.device || '').trim().toUpperCase()
     const email = String(body.email || '').trim().toLowerCase()
-    if (nonceUsed(body.nonce)) {
+    const nonce = String(body.nonce || '')
+    if (!nonce) return { code: 400, json: { error: 'الطلب ناقص' } }
+    if (nonceUsed(nonce)) {
       return { code: 400, json: { error: 'طلب مكرر' } }
     }
     const id = accountId(email, device)
@@ -263,6 +313,7 @@ const routes = {
           json: signed({
             status: 'wrong_device', valid: false,
             reason: 'هذا الحساب مربوط بجهاز آخر',
+            device, nonce,
             issuedAt: now(), graceHours: 0, nextCheckAt: now() + 3600000,
           }),
         }
@@ -270,7 +321,7 @@ const routes = {
       acc.lastSeen = now()
       saveDb()
     }
-    return { code: 200, json: stateResponse(acc, device) }
+    return { code: 200, json: stateResponse(acc, device, nonce) }
   },
 
   /** طلب ترخيص/تجديد — يصل الأدمن */
@@ -333,7 +384,10 @@ const routes = {
     const device = String(body.device || '').trim().toUpperCase()
     if (!device) return { code: 400, json: { error: 'رمز الجهاز مفقود' } }
     logEvent('rebind', { id: acc.id, from: acc.device, to: device })
+    // نحرّر الجهاز القديم ونربط الجديد، وإلا بقي القديم يحجب أي تسجيل عليه
+    if (acc.device && db.devices[acc.device]) delete db.devices[acc.device].account
     acc.device = device
+    db.devices[device] = { ...(db.devices[device] || {}), trialUsed: true, account: acc.id, at: now() }
     saveDb()
     return { code: 200, json: { ok: true, account: acc } }
   },
@@ -352,7 +406,7 @@ const routes = {
 // ==================== الخادم ====================
 
 const server = http.createServer((req, res) => {
-  const ip = req.socket.remoteAddress || 'unknown'
+  const ip = clientIp(req)
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
   const key = `${req.method} ${url.pathname}`
 
@@ -368,16 +422,34 @@ const server = http.createServer((req, res) => {
 
   if (rateLimited(ip)) return send(429, { error: 'طلبات كثيرة — انتظر قليلاً' })
 
+  // لوحة الأدمن: صفحة واحدة تُخدَم من الخادم نفسه. الصفحة عامة لأنها لا تحوي
+  // بيانات — الرمز يُدخَل فيها ويُرسل في ترويسة كل نداء، وهو ما تفحصه المسارات.
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/admin')) {
+    try {
+      const html = fs.readFileSync(path.join(__dirname, 'admin.html'))
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': html.length,
+        'Cache-Control': 'no-store',
+      })
+      return res.end(html)
+    } catch (_) {
+      return send(404, { error: 'صفحة اللوحة غير موجودة' })
+    }
+  }
+
   const handler = routes[key]
   if (!handler) return send(404, { error: 'مسار غير معروف' })
 
   // مسارات الأدمن تتطلب الرمز
   if (url.pathname.startsWith('/api/admin/')) {
     const token = req.headers['x-admin-token']
-    // مقارنة ثابتة الزمن تمنع تخمين الرمز بقياس الوقت
-    const ok = typeof token === 'string' &&
-      token.length === ADMIN_TOKEN.length &&
-      crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_TOKEN))
+    // مقارنة ثابتة الزمن تمنع تخمين الرمز بقياس الوقت.
+    // المقارنة على البايتات لا على طول النص: رمز بأحرف غير لاتينية يعطي
+    // طولاً نصياً متساوياً وبايتات مختلفة، وكانت timingSafeEqual ترمي استثناءً.
+    const given = typeof token === 'string' ? Buffer.from(token, 'utf8') : Buffer.alloc(0)
+    const expect = Buffer.from(ADMIN_TOKEN, 'utf8')
+    const ok = given.length === expect.length && crypto.timingSafeEqual(given, expect)
     if (!ok) return send(401, { error: 'غير مصرّح' })
   }
 

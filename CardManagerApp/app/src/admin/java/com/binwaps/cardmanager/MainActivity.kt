@@ -273,7 +273,7 @@ private fun AdminScreen(
         customer = c.name, phone = c.phone, deviceCode = c.deviceCode,
         boundDevice = c.boundDevice, key = c.key, planCode = c.planCode,
         issuedAt = c.issuedAt, expiresAt = c.expiresAt,
-        pending = c.status == "pending", requestedAt = c.requestedAt, renewal = c.renewal,
+        pending = c.pending, requestedAt = c.requestedAt, renewal = c.renewal,
         suspended = c.status == "suspended" || c.status == "blocked",
     )
 

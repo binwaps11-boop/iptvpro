@@ -29,6 +29,8 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -90,6 +92,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var port by remember { mutableStateOf((current?.port ?: 8728).toString()) }
     var user by remember { mutableStateOf(current?.username ?: "admin") }
     var pass by remember { mutableStateOf(current?.password ?: "") }
+    var showPass by remember { mutableStateOf(false) }
 
     var useSsl by remember { mutableStateOf(current?.useSsl ?: false) }
     var timeout by remember { mutableStateOf((current?.timeoutSec ?: 12).toString()) }
@@ -261,13 +264,28 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             AppField(name, { name = it }, "اسم الراوتر", Modifier.fillMaxWidth(), leading = Icons.Filled.Router)
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(host, { host = it }, "عنوان IP أو الدومين", Modifier.weight(2f), leading = Icons.Filled.Dns)
-                AppField(port, { port = it.filter { c -> c.isDigit() } }, "المنفذ", Modifier.weight(1f), numeric = true)
+                AppField(host, { host = it }, "عنوان IP أو الدومين", Modifier.weight(2f), leading = Icons.Filled.Dns, ltr = true)
+                AppField(port, { port = it.filter { c -> c.isDigit() } }, "المنفذ", Modifier.weight(1f), numeric = true, ltr = true)
             }
             Spacer(Modifier.height(9.dp))
-            AppField(user, { user = it }, "اسم المستخدم", Modifier.fillMaxWidth(), leading = Icons.Filled.Person)
+            AppField(user, { user = it }, "اسم المستخدم", Modifier.fillMaxWidth(), leading = Icons.Filled.Person, ltr = true)
             Spacer(Modifier.height(9.dp))
-            AppField(pass, { pass = it }, "كلمة المرور", Modifier.fillMaxWidth(), password = true, leading = Icons.Filled.Lock)
+            // زر الإظهار: كلمة المرور أكثر سبب لفشل الاتصال، وبلا رؤيتها
+            // يعيد المستخدم المحاولة دون أن يعرف أنه أخطأ حرفاً واحداً
+            AppField(
+                pass, { pass = it }, "كلمة المرور", Modifier.fillMaxWidth(),
+                password = !showPass, leading = Icons.Filled.Lock, ltr = true,
+                trailing = {
+                    androidx.compose.material3.IconButton(onClick = { showPass = !showPass }) {
+                        Icon(
+                            if (showPass) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (showPass) "إخفاء كلمة المرور" else "إظهار كلمة المرور",
+                            tint = TextMid,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                },
+            )
 
             Spacer(Modifier.height(11.dp))
             // الاتصال عن بعد

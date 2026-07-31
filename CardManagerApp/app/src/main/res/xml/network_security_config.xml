@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  targetSdk 34 يمنع HTTP العادي افتراضياً، فبدون هذا الملف يفشل كل نداء لخادم
+  التراخيص بصمت (استثناء اتصال بلا رسالة مفهومة). الخادم ذاتي الاستضافة على
+  عنوان IP ولا يملك شهادة SSL، وكذلك الروترات على الشبكة المحلية.
+
+  الحمولة الحسّاسة (حالة الترخيص) موقّعة بـ ECDSA على الخادم ويُتحقق منها في
+  التطبيق، فالتلاعب بالرد مكشوف حتى فوق HTTP. متى ما صار للخادم نطاق وشهادة:
+  غيّر LICENSE_SERVER إلى https واحذف هذا الملف من AndroidManifest.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

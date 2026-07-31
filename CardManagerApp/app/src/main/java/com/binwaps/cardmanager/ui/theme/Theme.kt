@@ -26,15 +26,21 @@ import androidx.compose.ui.unit.sp
 val Ink = Color(0xFF070B14)          // خلفية الشاشة
 val Panel = Color(0xFF111827)         // البطاقات
 val PanelHi = Color(0xFF18213A)       // بطاقة مرتفعة
-val Stroke = Color(0xFF23304D)        // الحدود
+val Stroke = Color(0xFF23304D)        // حدود خفيفة (زينة فقط)
+val StrokeHi = Color(0xFF3B4C74)      // حدود الحقول غير المركّزة — تُرى فعلاً
 val Neon = Color(0xFF00D4FF)          // اللون المميز الأساسي
 val Violet = Color(0xFF7C4DFF)        // اللون المميز الثانوي
 val Lime = Color(0xFF4ADE80)          // حالة: متصل / نجاح
 val Warn = Color(0xFFFBBF24)          // حالة: تنبيه
 val Danger = Color(0xFFFF5470)        // حالة: خطأ / حذف
-val TextHi = Color(0xFFEAF2FF)        // نص أساسي
-val TextMid = Color(0xFF93A4C4)       // نص ثانوي
-val TextLow = Color(0xFF5B6B8A)       // نص خافت
+
+// سلّم النصوص مضبوط على تباين مقروء فوق Panel/PanelHi.
+// كان TextLow (5B6B8A) يُستخدم لجُمل كاملة بتباين ٢٫٩:١ — أقل من نصف الحد
+// الأدنى ٤٫٥:١، فالنص الإرشادي كان يكاد لا يُقرأ. الآن:
+val TextHi = Color(0xFFEAF2FF)        // نص أساسي وعناوين
+val TextMid = Color(0xFFA9BAD8)       // نص ثانوي وإرشادي — يُقرأ بلا جهد
+val TextLow = Color(0xFF7F91B3)       // تسميات قصيرة فقط، لا جُمل
+val Muted = Color(0xFF5B6B8A)         // زينة وأيقونات معطّلة — لا نص أبداً
 
 val NeonGradient = Brush.horizontalGradient(listOf(Neon, Violet))
 val PanelGradient = Brush.verticalGradient(listOf(PanelHi, Panel))
@@ -56,13 +62,14 @@ private val Scheme = darkColorScheme(
     error = Danger,
 )
 
+// lineHeight إلزامي للعربية: بدونه تُقصّ التشكيلات وأذيال الحروف (ج، ح، ي)
 private val AppTypography = Typography(
-    headlineMedium = TextStyle(fontSize = 24.sp, fontWeight = FontWeight.Bold, color = TextHi),
-    titleLarge = TextStyle(fontSize = 19.sp, fontWeight = FontWeight.Bold, color = TextHi),
-    titleMedium = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextHi),
-    bodyLarge = TextStyle(fontSize = 15.sp, color = TextHi),
-    bodyMedium = TextStyle(fontSize = 13.sp, color = TextMid),
-    labelSmall = TextStyle(fontSize = 11.sp, color = TextLow, letterSpacing = 0.6.sp),
+    headlineMedium = TextStyle(fontSize = 24.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, color = TextHi),
+    titleLarge = TextStyle(fontSize = 19.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = TextHi),
+    titleMedium = TextStyle(fontSize = 15.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, color = TextHi),
+    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 24.sp, color = TextHi),
+    bodyMedium = TextStyle(fontSize = 13.sp, lineHeight = 21.sp, color = TextMid),
+    labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 17.sp, color = TextLow, letterSpacing = 0.6.sp),
 )
 
 @Composable

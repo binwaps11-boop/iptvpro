@@ -84,7 +84,9 @@ object Backend {
                 "name" to name.trim(),
                 "phone" to phone.trim(),
                 "deviceCode" to deviceCode.trim(),
-                "status" to "trial",
+                // لا يُكتب "status" هنا: كان يمسح قرار الأدمن (suspended) فيفكّ
+                // الإيقاف من تطبيق المشترك نفسه. الحقل ملك الأدمن وحده.
+                "requestState" to "trial",
                 "registeredAt" to System.currentTimeMillis(),
             ),
             com.google.firebase.firestore.SetOptions.merge(),
@@ -103,7 +105,8 @@ object Backend {
             "name" to name.trim(),
             "phone" to phone.trim(),
             "deviceCode" to deviceCode.trim(),
-            "status" to "pending",
+            // كذلك هنا: المشترك يعلن رغبته في حقل خاص به، والأدمن هو من يغيّر status
+            "requestState" to "pending",
             "renewal" to renewal,
             "requestedAt" to System.currentTimeMillis(),
         )
@@ -206,6 +209,7 @@ object Backend {
             phone = getString("phone").orEmpty(),
             deviceCode = getString("deviceCode").orEmpty(),
             status = getString("status").orEmpty(),
+            requestState = getString("requestState").orEmpty(),
             key = getString("key").orEmpty(),
             planCode = (getLong("planCode") ?: 1).toInt(),
             expiresAt = getLong("expiresAt") ?: 0,
@@ -237,7 +241,10 @@ data class CloudAccount(
     val name: String,
     val phone: String,
     val deviceCode: String,
+    /** قرار الأدمن — لا يكتبه تطبيق المشترك أبداً */
     val status: String,
+    /** رغبة المشترك (trial/pending) — يكتبها هو ولا تمسّ قرار الأدمن */
+    val requestState: String = "",
     val key: String,
     val planCode: Int,
     val expiresAt: Long,
@@ -246,7 +253,10 @@ data class CloudAccount(
     val requestedAt: Long,
     val issuedAt: Long,
 ) {
-    val pending: Boolean get() = status == "pending"
+    // طلب معلّق = أعلن المشترك رغبته ولم يبتّ الأدمن بعد
+    val pending: Boolean get() =
+        (requestState == "pending" || status == "pending") &&
+            status != "approved" && status != "suspended"
     val approved: Boolean get() = status == "approved" && key.isNotBlank()
 }
 

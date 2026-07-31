@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -33,6 +35,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -46,6 +50,7 @@ import com.binwaps.cardmanager.ui.theme.Neon
 import com.binwaps.cardmanager.ui.theme.NeonGradient
 import com.binwaps.cardmanager.ui.theme.Panel
 import com.binwaps.cardmanager.ui.theme.Stroke
+import com.binwaps.cardmanager.ui.theme.StrokeHi
 import com.binwaps.cardmanager.ui.theme.TextHi
 import com.binwaps.cardmanager.ui.theme.TextLow
 import com.binwaps.cardmanager.ui.theme.TextMid
@@ -97,10 +102,11 @@ fun NeonButton(
                 disabledContainerColor = Color.Transparent,
                 disabledContentColor = TextLow,
             ),
-            modifier = Modifier.fillMaxWidth(),
+            // ٥٢dp: ارتفاع Material الافتراضي ٤٠dp أقل من الحد الأدنى للمس (٤٨dp)
+            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
         ) {
             if (icon != null) { Icon(icon, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)) }
-            Text(text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Text(text, fontWeight = FontWeight.Bold, fontSize = 14.5.sp, lineHeight = 21.sp)
         }
     }
 }
@@ -125,14 +131,23 @@ fun GhostButton(
             disabledContainerColor = Panel,
             disabledContentColor = TextLow,
         ),
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 48.dp),
     ) {
         if (icon != null) { Icon(icon, null, Modifier.size(17.dp)); Spacer(Modifier.width(5.dp)) }
-        Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(text, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
     }
 }
 
-/** حقل إدخال بنمط التطبيق الداكن */
+/**
+ * حقل إدخال بنمط التطبيق الداكن.
+ *
+ * - `error`: يلوّن الحد ويعرض السبب أسفل الحقل مباشرة. كانت رسائل الخطأ تظهر
+ *   في صندوق واحد أسفل البطاقة، فلا يعرف المستخدم أي حقل يصلح.
+ * - `ltr`: للمحتوى اللاتيني (بريد، مفتاح، IP). داخل تخطيط عربي كانت النقاط
+ *   والشرطات تُحاذى في الجهة الخطأ ويقفز المؤشر أثناء الكتابة.
+ * - `email`: لوحة مفاتيح البريد بلا تكبير أول حرف — كان يُدخل Name@… فيُرفض.
+ * - حدّ الحقل غير المركّز أوضح: اللون القديم كان بالكاد يُرى على الخلفية.
+ */
 @Composable
 fun AppField(
     value: String,
@@ -142,29 +157,57 @@ fun AppField(
     numeric: Boolean = false,
     password: Boolean = false,
     leading: ImageVector? = null,
+    error: String? = null,
+    supporting: String? = null,
+    ltr: Boolean = false,
+    email: Boolean = false,
+    trailing: @Composable (() -> Unit)? = null,
 ) {
+    val isErr = !error.isNullOrBlank()
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label, fontSize = 12.sp) },
         singleLine = true,
-        modifier = modifier,
+        isError = isErr,
+        modifier = modifier.heightIn(min = 56.dp),
         shape = RoundedCornerShape(12.dp),
-        leadingIcon = leading?.let { { Icon(it, null, tint = TextLow, modifier = Modifier.size(18.dp)) } },
+        leadingIcon = leading?.let {
+            { Icon(it, null, tint = if (isErr) Danger else TextMid, modifier = Modifier.size(18.dp)) }
+        },
+        trailingIcon = trailing,
+        textStyle = LocalTextStyle.current.copy(
+            fontSize = 15.sp,
+            lineHeight = 23.sp,
+            textDirection = if (ltr) TextDirection.Ltr else TextDirection.Content,
+        ),
+        supportingText = (error ?: supporting)?.takeIf { it.isNotBlank() }?.let {
+            { Text(it, fontSize = 11.5.sp, lineHeight = 17.sp, color = if (isErr) Danger else TextMid) }
+        },
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(
-            keyboardType = if (numeric) KeyboardType.Number else if (password) KeyboardType.Password else KeyboardType.Text
+            keyboardType = when {
+                numeric -> KeyboardType.Number
+                email -> KeyboardType.Email
+                password -> KeyboardType.Password
+                else -> KeyboardType.Text
+            },
+            capitalization = if (email || password || numeric) KeyboardCapitalization.None
+                else KeyboardCapitalization.Sentences,
+            autoCorrect = !email && !password && !numeric,
         ),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Neon,
-            unfocusedBorderColor = Stroke,
+            unfocusedBorderColor = StrokeHi,
+            errorBorderColor = Danger,
             focusedLabelColor = Neon,
-            unfocusedLabelColor = TextLow,
+            unfocusedLabelColor = TextMid,
             focusedTextColor = TextHi,
             unfocusedTextColor = TextHi,
             cursorColor = Neon,
             focusedContainerColor = Panel.copy(alpha = 0.6f),
             unfocusedContainerColor = Panel.copy(alpha = 0.6f),
+            errorContainerColor = Panel.copy(alpha = 0.6f),
         ),
     )
 }

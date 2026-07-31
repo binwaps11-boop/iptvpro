@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>لوحة تراخيص مدير الكروت</title>
+<style>
+  :root{
+    --ink:#070b14; --panel:#111827; --panel2:#18213a; --line:#3b4c74;
+    --neon:#00d4ff; --lime:#4ade80; --warn:#fbbf24; --danger:#ff5470;
+    --hi:#eaf2ff; --mid:#a9bad8; --low:#7f91b3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(#0b1220,var(--ink));color:var(--hi);
+       font:15px/1.7 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;
+       min-height:100vh;padding:16px;padding-bottom:40px}
+  h1{font-size:20px;margin:6px 0 2px}
+  .sub{color:var(--mid);font-size:13px;margin-bottom:18px}
+  .card{background:var(--panel);border:1px solid #23304d;border-radius:16px;
+        padding:16px;margin-bottom:14px}
+  label{display:block;font-size:13px;color:var(--mid);margin-bottom:6px}
+  input,select{width:100%;padding:13px;border-radius:12px;border:1px solid var(--line);
+        background:var(--panel2);color:var(--hi);font-size:15px;font-family:inherit}
+  input:focus,select:focus{outline:none;border-color:var(--neon)}
+  button{border:0;border-radius:12px;padding:13px 16px;font-size:14px;font-weight:700;
+         font-family:inherit;cursor:pointer;min-height:48px}
+  .primary{background:linear-gradient(90deg,var(--neon),#7c4dff);color:#04121a;width:100%}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .row button{flex:1;min-width:96px}
+  .ok{background:rgba(74,222,128,.15);color:var(--lime);border:1px solid rgba(74,222,128,.4)}
+  .bad{background:rgba(255,84,112,.15);color:var(--danger);border:1px solid rgba(255,84,112,.4)}
+  .ghost{background:rgba(0,212,255,.10);color:var(--neon);border:1px solid rgba(0,212,255,.35)}
+  .acc{background:var(--panel2);border:1px solid #23304d;border-radius:14px;padding:14px;margin-bottom:10px}
+  .acc h3{margin:0;font-size:16px}
+  .meta{color:var(--mid);font-size:13px;margin-top:4px;word-break:break-all}
+  .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700}
+  .p-trial{background:rgba(251,191,36,.15);color:var(--warn)}
+  .p-active{background:rgba(74,222,128,.15);color:var(--lime)}
+  .p-dead{background:rgba(255,84,112,.15);color:var(--danger)}
+  .note{color:var(--low);font-size:12px}
+  .empty{color:var(--mid);text-align:center;padding:22px 0}
+  .msg{margin-top:10px;padding:11px;border-radius:11px;font-size:13px}
+  .bell{background:rgba(0,212,255,.10);border:1px solid rgba(0,212,255,.35);color:var(--neon);
+        padding:10px 12px;border-radius:12px;margin-bottom:12px;font-size:13px}
+</style>
+</head>
+<body>
+
+<h1>لوحة التراخيص</h1>
+<div class="sub">اعتماد المشتركين وإيقافهم — كل شيء يصل تطبيقاتهم خلال ٦ ساعات أو عند فتحه.</div>
+
+<div class="card" id="login">
+  <label for="tok">رمز الأدمن</label>
+  <input id="tok" type="password" autocomplete="current-password" placeholder="الرمز المطبوع عند التثبيت">
+  <div class="row"><button class="primary" onclick="signIn()">دخول</button></div>
+  <div id="loginMsg"></div>
+</div>
+
+<div id="panel" hidden>
+  <div id="alert" class="bell" hidden></div>
+  <div class="row" style="margin-bottom:14px">
+    <button class="ghost" onclick="load()">تحديث</button>
+    <button class="ghost" onclick="signOut()">خروج</button>
+  </div>
+  <div id="list"></div>
+</div>
+
+<script>
+// كل شيء بلا مكتبات خارجية: الصفحة تُخدَم من الخادم نفسه فلا اتصال بأي طرف ثالث.
+var token = sessionStorage.getItem('adminToken') || ''
+
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c] }) }
+
+function api(path, body){
+  return fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'x-admin-token': token, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(function(r){ return r.json().then(function(j){ return { code: r.status, json: j } }) })
+}
+
+function signIn(){
+  // عند الدخول التلقائي يكون الحقل فارغاً والرمز محفوظ — لا نمسحه بفراغ
+  var typed = document.getElementById('tok').value.trim()
+  if (typed) token = typed
+  document.getElementById('loginMsg').innerHTML = ''
+  if (!token) return
+  api('/api/admin/accounts').then(function(r){
+    if (r.code === 200){
+      sessionStorage.setItem('adminToken', token)
+      document.getElementById('login').hidden = true
+      document.getElementById('panel').hidden = false
+      render(r.json.accounts)
+    } else {
+      document.getElementById('loginMsg').innerHTML =
+        '<div class="msg bad">رمز غير صحيح</div>'
+    }
+  }).catch(function(){
+    document.getElementById('loginMsg').innerHTML =
+      '<div class="msg bad">تعذّر الوصول للخادم</div>'
+  })
+}
+
+function signOut(){
+  sessionStorage.removeItem('adminToken'); token = ''
+  document.getElementById('login').hidden = false
+  document.getElementById('panel').hidden = true
+}
+
+function load(){
+  api('/api/admin/accounts').then(function(r){
+    if (r.code === 200) render(r.json.accounts); else signOut()
+  })
+}
+
+function days(ms){ return Math.ceil((ms - Date.now()) / 86400000) }
+
+function render(accounts){
+  var waiting = accounts.filter(function(a){ return a.pending })
+  var bell = document.getElementById('alert')
+  bell.hidden = waiting.length === 0
+  bell.textContent = waiting.length + ' طلب بانتظار قرارك'
+
+  var list = document.getElementById('list')
+  if (!accounts.length){ list.innerHTML = '<div class="empty">لا حسابات بعد</div>'; return }
+
+  // الطلبات المعلّقة أولاً — هي ما يحتاج قراراً الآن
+  accounts.sort(function(a,b){ return (b.pending?1:0) - (a.pending?1:0) })
+
+  list.innerHTML = accounts.map(function(a){
+    var st = a.state || {}
+    var cls = st.status === 'active' ? 'p-active' : st.status === 'trial' ? 'p-trial' : 'p-dead'
+    var label = { active:'مشترك', trial:'تجربة', trial_ended:'انتهت التجربة',
+                  expired:'انتهى', blocked:'موقوف' }[st.status] || st.status
+    var left = st.valid && a.expiresAt ? ' — متبقٍ ' + days(a.expiresAt) + ' يوم' : ''
+    var id = esc(a.id)
+    return '<div class="acc">' +
+      '<h3>' + esc(a.name || a.email) + '</h3>' +
+      '<div class="meta">' + esc(a.email) + '</div>' +
+      '<div class="meta">جوال: ' + esc(a.phone) + ' · جهاز: ' + esc(a.device) + '</div>' +
+      '<div style="margin-top:8px"><span class="pill ' + cls + '">' + esc(label + left) + '</span>' +
+        (a.pending ? ' <span class="pill p-trial">طلب ' + (a.pending.renewal ? 'تجديد' : 'جديد') + '</span>' : '') +
+      '</div>' +
+      '<div class="row">' +
+        '<select id="plan_' + id + '">' +
+          '<option value="month">شهر</option>' +
+          '<option value="quarter">٣ أشهر</option>' +
+          '<option value="year">سنة</option>' +
+          '<option value="lifetime">دائم</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="row">' +
+        '<button class="ok" onclick="approve(\'' + id + '\')">اعتماد</button>' +
+        (a.blocked
+          ? '<button class="ghost" onclick="block(\'' + id + '\',false)">استئناف</button>'
+          : '<button class="bad" onclick="block(\'' + id + '\',true)">إيقاف</button>') +
+        '<button class="ghost" onclick="rebind(\'' + id + '\')">نقل لجهاز</button>' +
+      '</div>' +
+      '<div id="msg_' + id + '"></div>' +
+    '</div>'
+  }).join('')
+}
+
+function say(id, text, good){
+  var el = document.getElementById('msg_' + id)
+  if (el) el.innerHTML = '<div class="msg ' + (good ? 'ok' : 'bad') + '">' + esc(text) + '</div>'
+}
+
+function approve(id){
+  var plan = document.getElementById('plan_' + id).value
+  api('/api/admin/approve', { id: id, plan: plan }).then(function(r){
+    if (r.code === 200){ say(id, 'تم الاعتماد — يصل التطبيق عند أول تحقق', true); load() }
+    else say(id, r.json.error || 'فشل', false)
+  })
+}
+
+function block(id, on){
+  api('/api/admin/block', { id: id, blocked: on }).then(function(r){
+    if (r.code === 200){ say(id, on ? 'أُوقف' : 'استُؤنف', true); load() }
+    else say(id, r.json.error || 'فشل', false)
+  })
+}
+
+function rebind(id){
+  var device = prompt('رمز الجهاز الجديد (XXXX-XXXX):')
+  if (!device) return
+  api('/api/admin/rebind', { id: id, device: device }).then(function(r){
+    if (r.code === 200){ say(id, 'نُقل الحساب للجهاز الجديد', true); load() }
+    else say(id, r.json.error || 'فشل', false)
+  })
+}
+
+if (token) signIn()
+</script>
+</body>
+</html>
