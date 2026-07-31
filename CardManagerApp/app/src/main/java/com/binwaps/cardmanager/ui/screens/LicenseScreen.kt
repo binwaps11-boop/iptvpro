@@ -272,7 +272,11 @@ fun LicenseScreen(
                     scope.launch {
                         val msg = LicenseManager.syncOnline(userInitiated = true)
                         busy = false
-                        error = msg
+                        // syncOnline يعيد null أيضاً حين لا يوجد ما يُتحقق منه،
+                        // فلا نترك الزر بلا أي رد فعل ظاهر
+                        error = msg ?: if (state is LicenseState.ClockInvalid) {
+                            "ما زالت ساعة الجهاز غير صحيحة — صحّحها من الإعدادات"
+                        } else null
                     }
                 }
                 error?.let {

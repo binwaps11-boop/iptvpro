@@ -93,14 +93,16 @@ fun CardManagerTheme(content: @Composable () -> Unit) {
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
-    glow: Color = Stroke,
+    glow: Color = StrokeHi,
     padding: Int = 14,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
         modifier
             .background(PanelGradient, RoundedCornerShape(16.dp))
-            .border(1.dp, glow.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+            // ألفا المتصل تُحترم: `copy(alpha = 0.55f)` كان يمسحها فتخرج كل
+            // البطاقات بشدة توهج واحدة مهما مرّر المتصل، فتضيع الهرمية البصرية
+            .border(1.dp, glow, RoundedCornerShape(16.dp))
             .padding(padding.dp),
         content = content,
     )
