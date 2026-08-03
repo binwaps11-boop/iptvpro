@@ -72,6 +72,13 @@ if ! systemctl is-active --quiet $SERVICE; then
   exit 1
 fi
 
+# فتح المنفذ تلقائياً في الجدار الناري المحلي إن كان مفعّلاً — حتى لا يبقى
+# شيء على المستخدم. الجدار الناري السحابي (لوحة مزوّد الـVPS) يبقى يدوياً.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
+  echo "  فُتح المنفذ $PORT في ufw"
+fi
+
 PUBKEY="$(curl -fsS "http://127.0.0.1:$PORT/api/pubkey" | sed 's/.*"publicKey":"\([^"]*\)".*/\1/')"
 IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 
@@ -90,13 +97,16 @@ cat <<EOF
   const val LICENSE_SERVER    = "http://$IP:$PORT"
   const val SERVER_PUBLIC_KEY = "$PUBKEY"
 
+التطبيق الذي وزّعته يتصل بهذا الخادم تلقائياً — لا خطوة أخرى مطلوبة.
+(الأمان الأقوى اختياري: الصق المفتاح العام أعلاه في SERVER_PUBLIC_KEY
+ وأعد بناء التطبيق. بدونه يجلبه التطبيق عند أول اتصال ويثبّته.)
+
 أوامر مفيدة:
   systemctl status $SERVICE      حالة الخادم
   journalctl -u $SERVICE -f      متابعة السجل
   systemctl restart $SERVICE     إعادة التشغيل
 
-⚠ افتح المنفذ في الجدار الناري إن كان مفعّلاً:
-  ufw allow $PORT/tcp
+⚠ إن كان لمزوّد الـVPS جدار ناري في لوحته (سحابي) فافتح المنفذ $PORT هناك أيضاً.
 ⚠ نسخة احتياطية إلزامية من:  $APP_DIR/data/
 ════════════════════════════════════════════════════
 EOF
