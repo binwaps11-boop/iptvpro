@@ -48,6 +48,13 @@ object SyncEngine {
             var round = 0
             var cardsFetchedForRouter: Long? = null
             while (isActive) {
+                // عملية أمامية جارية (رفع/توليد بضغطة المستخدم): نتنحّى تماماً
+                // عن القفل ونعيد الفحص قريباً. دورة المزامنة كانت تحتجز القفل
+                // بجلب كل الكروت فيقف رفع المستخدم بلا نبضة تقدّم على «0 من N»
+                if (MikrotikClient.foregroundActive()) {
+                    delay(2_000)
+                    continue
+                }
                 val r = Store.activeRouter()
                 // فشل دورة عابر لا يوقف المزامنة للأبد — تعاود المحاولة في
                 // الدورة التالية. والمحرك أصلاً لا يبدأ إلا بعد نجاح اتصال.
