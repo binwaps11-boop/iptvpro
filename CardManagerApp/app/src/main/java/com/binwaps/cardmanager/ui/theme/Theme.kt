@@ -46,6 +46,23 @@ val NeonGradient = Brush.horizontalGradient(listOf(Neon, Violet))
 val PanelGradient = Brush.verticalGradient(listOf(PanelHi, Panel))
 val ScreenGradient = Brush.verticalGradient(listOf(Color(0xFF0B1220), Ink))
 
+// ===== رموز تباعد دلالية =====
+// بدل الأرقام السحرية المتناثرة (6..30dp) — نظام تباعد واحد متسق.
+object Space {
+    val xs = 4.dp
+    val sm = 8.dp
+    val md = 12.dp
+    val lg = 16.dp
+    val xl = 24.dp
+}
+
+// ===== رموز ألفا دلالية =====
+// كانت 0.08..0.5 عشوائية لأغراض متشابهة — الآن أسماء تصف الغرض.
+const val AlphaGlow = 0.40f       // توهّج حدود البطاقة المميّزة
+const val AlphaFillSoft = 0.12f   // تعبئة خفيفة (خلفية شريحة/شارة)
+const val AlphaBorderSoft = 0.35f // حدّ خفيف حول عنصر مميّز
+const val AlphaFillFaint = 0.10f  // تعبئة أخفت (شرائط الرسائل)
+
 private val Scheme = darkColorScheme(
     primary = Neon,
     onPrimary = Color(0xFF00212B),

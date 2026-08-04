@@ -59,14 +59,14 @@ import com.binwaps.cardmanager.ui.theme.TextLow
 
 private data class Tab(val route: String, val labelAr: String, val icon: ImageVector)
 
-// سبعة أقسام في الشريط السفلي — كل الأقسام الرئيسية في متناول ضغطة واحدة
+// خمس وجهات عليا فقط في الشريط السفلي — أنظف وأوضح على الشاشات الضيقة.
+// البقية (الباقات/التقارير/المبيعات/السجل/المتصلون/الراوتر/السريع) وجهات
+// ثانوية يصلها المستخدم من بلاطات لوحة التحكم — فلا ازدواج بين الشريط واللوحة.
 private val tabs = listOf(
     Tab("dashboard", "اللوحة", Icons.Filled.SpaceDashboard),
     Tab("users", "الكروت", Icons.Filled.CreditCard),
     Tab("templates", "القوالب", Icons.Filled.Layers),
     Tab("print", "الطباعة", Icons.Filled.Print),
-    Tab("profiles", "الباقات", Icons.Filled.Speed),
-    Tab("reports", "التقارير", Icons.Filled.Assessment),
     Tab("settings", "الإعدادات", Icons.Filled.Settings),
 )
 

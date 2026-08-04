@@ -7,6 +7,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +45,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
 import com.binwaps.cardmanager.ui.theme.Danger
+import com.binwaps.cardmanager.ui.theme.AlphaBorderSoft
+import com.binwaps.cardmanager.ui.theme.AlphaFillFaint
+import com.binwaps.cardmanager.ui.theme.AlphaFillSoft
+import com.binwaps.cardmanager.ui.theme.Space
 import com.binwaps.cardmanager.ui.theme.GlassCard
 import com.binwaps.cardmanager.ui.theme.Lime
 import com.binwaps.cardmanager.ui.theme.Neon
@@ -309,6 +314,63 @@ fun EmptyState(icon: ImageVector, title: String, hint: String) {
         ) { Icon(icon, null, tint = TextLow, modifier = Modifier.size(26.dp)) }
         Text(title, fontSize = 14.sp, color = TextMid, fontWeight = FontWeight.SemiBold)
         Text(hint, fontSize = 12.sp, color = TextLow)
+    }
+}
+
+/**
+ * شريط رسالة موحّد على مستوى الشاشة/العملية (نجاح/خطأ/تنبيه). يستبدل النمط
+ * المكرّر يدوياً في عدة شاشات. خطأ الحقل المفرد يبقى في AppField(error=…).
+ */
+enum class BannerKind { SUCCESS, ERROR, INFO }
+
+@Composable
+fun MessageBanner(text: String, kind: BannerKind, modifier: Modifier = Modifier) {
+    val color = when (kind) {
+        BannerKind.SUCCESS -> Lime
+        BannerKind.ERROR -> Danger
+        BannerKind.INFO -> Neon
+    }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = AlphaFillFaint), RoundedCornerShape(11.dp))
+            .border(1.dp, color.copy(alpha = AlphaBorderSoft), RoundedCornerShape(11.dp))
+            .padding(Space.md),
+    ) {
+        Text(text, fontSize = 12.5.sp, lineHeight = 19.sp, color = color)
+    }
+}
+
+/**
+ * شريحة اختيار موحّدة (Chip) — كانت تُعرَّف محلياً بأشكال مختلفة في ٨ شاشات.
+ * ارتفاع لمس ≥ الحدّ الأدنى، ونصّ بـ lineHeight للعربية.
+ */
+@Composable
+fun AppChip(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    accent: Color = Neon,
+    onClick: () -> Unit,
+) {
+    val bg = if (selected) accent.copy(alpha = AlphaFillSoft) else Panel.copy(alpha = 0.6f)
+    val border = if (selected) accent.copy(alpha = AlphaBorderSoft) else StrokeHi
+    Box(
+        modifier
+            .heightIn(min = 40.dp)
+            .background(bg, RoundedCornerShape(999.dp))
+            .border(1.dp, border, RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Space.lg, vertical = Space.sm),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            fontSize = 12.5.sp,
+            lineHeight = 18.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) TextHi else TextMid,
+        )
     }
 }
 

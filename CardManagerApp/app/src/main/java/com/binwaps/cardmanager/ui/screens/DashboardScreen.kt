@@ -243,30 +243,22 @@ fun DashboardScreen(navController: NavController) {
             }
         }
 
-        // الأقسام مجمّعة على طريقة سمارت كريتور V5:
-        // عمليات الكروت، الإدارة والتقارير، النظام
-        Text("عمليات الكروت", fontSize = 13.sp, color = TextLow)
+        // مركز الوجهات الثانوية: الكروت/القوالب/الطباعة/الإعدادات في الشريط
+        // السفلي، وهنا ما لا مكان له فيه — بلا تكرار بينهما.
+        Text("عملية سريعة", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("توليد وطباعة ⚡", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
+            HomeTile("توليد وطباعة ورفع ⚡", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
                 navController.navigate("express")
             }
-            HomeTile("الطباعة", Icons.Filled.Print, Violet, users.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("print")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("الكروت", Icons.Filled.CreditCard, Neon, users.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("users")
-            }
-            HomeTile("القوالب", Icons.Filled.Layers, Violet, null, Modifier.weight(1f)) {
-                navController.navigate("templates")
+            HomeTile("المتصلون الآن", Icons.Filled.People, Neon, actives.size.takeIf { it > 0 }, Modifier.weight(1f)) {
+                navController.navigate("active")
             }
         }
 
         Spacer(Modifier.height(6.dp))
         Text("الإدارة والتقارير", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("الباقات", Icons.Filled.Speed, Lime, null, Modifier.weight(1f)) {
+            HomeTile("الباقات والأسعار", Icons.Filled.Speed, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("profiles")
             }
             HomeTile("التقارير", Icons.Filled.Analytics, Warn, null, Modifier.weight(1f)) {
@@ -274,19 +266,12 @@ fun DashboardScreen(navController: NavController) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("المبيعات", Icons.Filled.Payments, Lime, null, Modifier.weight(1f)) {
+            HomeTile("المبيعات والصندوق", Icons.Filled.Payments, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("sales")
             }
             HomeTile("سجل الدفعات", Icons.Filled.History, Violet, batches.size.takeIf { it > 0 }, Modifier.weight(1f)) {
                 navController.navigate("history")
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            // المتصلون الآن — كان قسماً يتيماً بعد نقل الشريط السفلي لسبعة أقسام
-            HomeTile("المتصلون الآن", Icons.Filled.People, Neon, actives.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("active")
-            }
-            Box(Modifier.weight(1f))
         }
 
         Spacer(Modifier.height(6.dp))
@@ -295,15 +280,9 @@ fun DashboardScreen(navController: NavController) {
             HomeTile("إدارة الراوتر", Icons.Filled.Router, Neon, null, Modifier.weight(1f)) {
                 navController.navigate("router")
             }
-            HomeTile("الإعدادات", Icons.Filled.Settings, TextMid, null, Modifier.weight(1f)) {
-                navController.navigate("settings")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             HomeTile("الترخيص", Icons.Filled.VerifiedUser, TextMid, null, Modifier.weight(1f)) {
                 navController.navigate("license")
             }
-            Box(Modifier.weight(1f))
         }
         Spacer(Modifier.height(20.dp))
     }
