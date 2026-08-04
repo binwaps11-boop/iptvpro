@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binwaps.cardmanager.data.Store
+import com.binwaps.cardmanager.model.CardSource
 import com.binwaps.cardmanager.model.CardStatus
 import com.binwaps.cardmanager.model.SaleKind
 import com.binwaps.cardmanager.util.toMoneyOrNull
@@ -94,13 +95,26 @@ fun ReportsScreen() {
     val cur = settings.currency
     val connected by Store.connected.collectAsState()
     var loading by remember { mutableStateOf(false) }
+    var loadNote by remember { mutableStateOf<String?>(null) }
 
-    // التقرير يغطي كل كروت الراوتر لا المطبوعة فقط — نجلبها فور فتح الشاشة
-    androidx.compose.runtime.LaunchedEffect(connected) {
-        if (connected && Store.activeRouter() != null) {
+    // التقرير يقرأ من الذاكرة (تملؤها المزامنة) فيفتح فوراً بلا انتظار. نجلب
+    // من الراوتر **مرة واحدة فقط** إن لم تكن كروت الراوتر محمّلة بعد — بمفتاح
+    // Unit لا connected (فلا يُعاد الجلب الثقيل عند تذبذب VPN)، وبأولوية
+    // (foreground) فلا يصطف خلف المزامنة، وبمهلة فلا يعلق «جاري الجلب» أبداً.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        val hasRouterCards = users.any { it.source != CardSource.LOCAL }
+        if (!hasRouterCards && connected && Store.activeRouter() != null) {
             loading = true
-            com.binwaps.cardmanager.mikrotik.MikrotikClient.fetchAllCards(Store.activeRouter())
-                .onSuccess { Store.mergeRouterCards(it) }
+            val res = kotlinx.coroutines.withTimeoutOrNull(40_000) {
+                com.binwaps.cardmanager.mikrotik.MikrotikClient.fetchAllCards(
+                    Store.activeRouter(), foreground = true,
+                )
+            }
+            when {
+                res == null -> loadNote = "الجلب بطيء عبر الشبكة — ستُحدَّث القائمة تلقائياً بالمزامنة"
+                res.isSuccess -> res.getOrNull()?.let { Store.mergeRouterCards(it) }
+                else -> loadNote = "تعذّر جلب كروت الراوتر — تحقق من الاتصال"
+            }
             loading = false
         }
     }
@@ -195,7 +209,11 @@ fun ReportsScreen() {
             Box(Modifier.weight(1f)) {
                 SectionHeader(
                     "التقارير",
-                    if (loading) "جاري جلب كل كروت الراوتر…" else "${rows.size} سجل — يشمل كل كروت الراوتر",
+                    when {
+                        loading -> "جاري جلب كروت الراوتر…"
+                        loadNote != null -> loadNote!!
+                        else -> "${rows.size} سجل — يشمل كل كروت الراوتر"
+                    },
                     Icons.Filled.Assessment,
                 )
             }

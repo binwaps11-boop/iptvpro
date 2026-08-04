@@ -856,7 +856,7 @@ object MikrotikClient {
         ".id,name,password,profile,limit-uptime,uptime,limit-bytes-total,bytes-in,bytes-out,disabled,comment"
 
     /** كروت الهوتسبوت مع حالتها */
-    suspend fun fetchHotspotUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
+    suspend fun fetchHotspotUsers(r: RouterProfile?, foreground: Boolean = false): Result<List<UserEntry>> = onRouter(r, foreground = foreground) { con ->
         con.printLight("/ip/hotspot/user", HOTSPOT_PROPS).mapNotNull { row ->
             val name = row["name"] ?: return@mapNotNull null
             if (name == "default-trial") return@mapNotNull null
@@ -970,7 +970,7 @@ object MikrotikClient {
         }
     }
 
-    suspend fun fetchUserManagerUsers(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
+    suspend fun fetchUserManagerUsers(r: RouterProfile?, foreground: Boolean = false): Result<List<UserEntry>> = onRouter(r, foreground = foreground) { con ->
         val list = readUserManager(con)
         if (list.isEmpty()) {
             throw RouterLogicException("لم يُعثر على مستخدمين في اليوزر منجر — تأكد أن الحزمة مثبّتة ومفعّلة على الراوتر")
@@ -995,7 +995,7 @@ object MikrotikClient {
     }
 
     /** كل الكروت من المصدرين معاً */
-    suspend fun fetchAllCards(r: RouterProfile?): Result<List<UserEntry>> = onRouter(r) { con ->
+    suspend fun fetchAllCards(r: RouterProfile?, foreground: Boolean = false): Result<List<UserEntry>> = onRouter(r, foreground = foreground) { con ->
         // فشل الهوتسبوت خطأ حقيقي يظهر للمستخدم — كان يتحول إلى "0 كرت" بنجاح زائف
         val hotspot = con.printLight("/ip/hotspot/user", HOTSPOT_PROPS)
             .filter { (it["name"] ?: "") != "default-trial" }
@@ -1054,7 +1054,7 @@ object MikrotikClient {
     }
 
     /** سجل الجلسات السابقة — من اليوزر منجر إن وُجد، وإلا من كوكيز الهوتسبوت */
-    suspend fun fetchSessionHistory(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
+    suspend fun fetchSessionHistory(r: RouterProfile?, foreground: Boolean = false): Result<List<SessionEntry>> = onRouter(r, foreground = foreground) { con ->
         val umSessions = con.tryList("/user-manager/session/print", "/tool/user-manager/session/print")
         if (umSessions.isNotEmpty()) {
             return@onRouter umSessions.map { row ->
@@ -1579,7 +1579,7 @@ object MikrotikClient {
     }
 
     /** الأجهزة المتصلة: عملاء الواي فاي وحجوزات DHCP */
-    suspend fun fetchConnectedDevices(r: RouterProfile?): Result<List<SessionEntry>> = onRouter(r) { con ->
+    suspend fun fetchConnectedDevices(r: RouterProfile?, foreground: Boolean = false): Result<List<SessionEntry>> = onRouter(r, foreground = foreground) { con ->
         val wireless = con.tryList(
             "/interface/wireless/registration-table/print",
             "/interface/wifi/registration-table/print",

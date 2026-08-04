@@ -98,18 +98,29 @@ fun SessionsScreen() {
         if (t == SessionTab.HISTORY && history.isEmpty()) {
             busy = true
             scope.launch {
-                MikrotikClient.fetchSessionHistory(Store.activeRouter())
-                    .onSuccess { history = it }
-                    .onFailure { error = it.message }
+                // أولوية على المزامنة + مهلة فلا يعلق «جاري الجلب» أبداً
+                val res = kotlinx.coroutines.withTimeoutOrNull(40_000) {
+                    MikrotikClient.fetchSessionHistory(Store.activeRouter(), foreground = true)
+                }
+                when {
+                    res == null -> error = "الجلب بطيء عبر الشبكة — حاول مجدداً"
+                    res.isSuccess -> history = res.getOrNull().orEmpty()
+                    else -> error = res.exceptionOrNull()?.message
+                }
                 busy = false
             }
         }
         if (t == SessionTab.DEVICES && devices.isEmpty()) {
             busy = true
             scope.launch {
-                MikrotikClient.fetchConnectedDevices(Store.activeRouter())
-                    .onSuccess { devices = it }
-                    .onFailure { error = it.message }
+                val res = kotlinx.coroutines.withTimeoutOrNull(40_000) {
+                    MikrotikClient.fetchConnectedDevices(Store.activeRouter(), foreground = true)
+                }
+                when {
+                    res == null -> error = "الجلب بطيء عبر الشبكة — حاول مجدداً"
+                    res.isSuccess -> devices = res.getOrNull().orEmpty()
+                    else -> error = res.exceptionOrNull()?.message
+                }
                 busy = false
             }
         }

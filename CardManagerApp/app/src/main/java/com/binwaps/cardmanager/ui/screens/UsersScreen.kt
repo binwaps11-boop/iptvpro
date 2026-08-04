@@ -212,7 +212,7 @@ fun UsersScreen() {
         ) {
             GhostButton("كل الكروت", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري جلب كل الكروت من الراوتر…") {
-                    MikrotikClient.fetchAllCards(Store.activeRouter()).map { list ->
+                    MikrotikClient.fetchAllCards(Store.activeRouter(), foreground = true).map { list ->
                         Store.mergeRouterCards(list)
                         val unused = list.count { it.status == CardStatus.UNUSED }
                         val expired = list.count { it.status == CardStatus.EXPIRED }
@@ -222,14 +222,14 @@ fun UsersScreen() {
             }
             GhostButton("الهوتسبوت", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري الجلب من الهوتسبوت…") {
-                    MikrotikClient.fetchHotspotUsers(Store.activeRouter()).map { list ->
+                    MikrotikClient.fetchHotspotUsers(Store.activeRouter(), foreground = true).map { list ->
                         Store.mergeRouterCards(list); "تم جلب ${list.size} كرت من الهوتسبوت"
                     }
                 }
             }
             GhostButton("اليوزر منجر", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري الجلب من اليوزر منجر…") {
-                    MikrotikClient.fetchUserManagerUsers(Store.activeRouter()).map { list ->
+                    MikrotikClient.fetchUserManagerUsers(Store.activeRouter(), foreground = true).map { list ->
                         Store.mergeRouterCards(list); "تم جلب ${list.size} مستخدم من اليوزر منجر"
                     }
                 }
