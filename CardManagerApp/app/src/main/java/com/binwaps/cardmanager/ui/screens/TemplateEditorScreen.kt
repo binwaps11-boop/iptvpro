@@ -243,9 +243,11 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                     }) { Icon(Icons.Filled.Delete, "حذف", tint = Danger, modifier = Modifier.size(19.dp)) }
                 }
                 Spacer(Modifier.height(6.dp))
+                // الرمز والباركود عنصران رسوميان — لا نص بادئة ولا تنسيق خط لهما
+                val graphic = selected.type == FieldType.QR_CODE || selected.type == FieldType.BARCODE
                 if (selected.type == FieldType.CUSTOM_TEXT) {
                     AppField(selected.customText, { updateField(selected.copy(customText = it)) }, "النص", Modifier.fillMaxWidth())
-                } else if (selected.type != FieldType.QR_CODE) {
+                } else if (!graphic) {
                     AppField(selected.prefix, { updateField(selected.copy(prefix = it)) }, "نص قبل القيمة (مثل: المستخدم:)", Modifier.fillMaxWidth())
                 }
                 Spacer(Modifier.height(8.dp))
@@ -299,10 +301,10 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 Slider(
                     value = selected.sizeFrac,
                     onValueChange = { updateField(selected.copy(sizeFrac = it)) },
-                    valueRange = 0.03f..if (selected.type == FieldType.QR_CODE) 0.95f else 0.32f,
+                    valueRange = 0.03f..if (graphic) 0.95f else 0.32f,
                     colors = SliderDefaults.colors(thumbColor = Neon, activeTrackColor = Neon, inactiveTrackColor = Stroke),
                 )
-                if (selected.type != FieldType.QR_CODE) {
+                if (!graphic) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("خط عريض", fontSize = 12.sp, color = TextMid, modifier = Modifier.weight(1f))
                         Text(
@@ -500,7 +502,11 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                                     val f = CardField(
                                         id = Store.newId(),
                                         type = type,
-                                        sizeFrac = if (type == FieldType.QR_CODE) 0.45f else 0.10f,
+                                        sizeFrac = when (type) {
+                                            FieldType.QR_CODE -> 0.45f
+                                            FieldType.BARCODE -> 0.6f // الباركود عريض
+                                            else -> 0.10f
+                                        },
                                         customText = if (type == FieldType.CUSTOM_TEXT) "نص جديد" else "",
                                     )
                                     template = template.copy(fields = template.fields + f)

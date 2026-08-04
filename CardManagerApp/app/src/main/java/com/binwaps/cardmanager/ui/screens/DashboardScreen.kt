@@ -216,7 +216,8 @@ fun DashboardScreen(navController: NavController) {
             val lowProfiles = users
                 .filter { it.status == com.binwaps.cardmanager.model.CardStatus.UNUSED && it.profile.isNotBlank() }
                 .groupingBy { it.profile }.eachCount()
-                .filter { it.value <= threshold }
+                // العتبة صفر تعطّل التنبيه بدل إظهار باقات فارغة بلا داعٍ
+                .filter { com.binwaps.cardmanager.util.CardUtils.isLowStock(it.value, threshold) }
                 .toList().sortedBy { it.second }
             // لكل زبون على حدة — الدفعة الزائدة لزبون لا تُخفي دين زبون آخر
             val openDebt = com.binwaps.cardmanager.util.Ledger.totalDebt(sales)

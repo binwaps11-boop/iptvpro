@@ -22,6 +22,7 @@ import com.binwaps.cardmanager.model.RenderInfo
 import com.binwaps.cardmanager.model.UserEntry
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
+import com.google.zxing.oned.Code128Writer
 import com.google.zxing.qrcode.QRCodeWriter
 import java.io.File
 
@@ -157,10 +158,13 @@ object CardRenderer {
         for (field in template.fields) {
             if (!field.visible) continue
             if (!fieldAppliesTo(field.type, settings.cardMode)) continue
-            if (field.type == FieldType.QR_CODE) {
-                drawQr(canvas, field, template, user, settings, widthPx, heightPx)
-            } else {
-                drawText(canvas, field, user, settings, widthPx, heightPx, template.font, info)
+            when (field.type) {
+                FieldType.QR_CODE ->
+                    drawQr(canvas, field, template, user, settings, widthPx, heightPx)
+                FieldType.BARCODE ->
+                    drawBarcode(canvas, field, user, settings, widthPx, heightPx)
+                else ->
+                    drawText(canvas, field, user, settings, widthPx, heightPx, template.font, info)
             }
         }
     }
@@ -357,6 +361,41 @@ object CardRenderer {
         val top = field.yFrac * heightPx - side / 2f
         canvas.drawBitmap(qr, left, top, null)
     }
+
+    /** الباركود يرمّز اسم المستخدم — أكثر قيمة قابلة للمسح على الكرت */
+    private fun barcodeContent(user: UserEntry, settings: AppSettings): String =
+        user.username.trim()
+
+    private fun drawBarcode(
+        canvas: Canvas, field: CardField, user: UserEntry,
+        settings: AppSettings, widthPx: Int, heightPx: Int,
+    ) {
+        val content = barcodeContent(user, settings)
+        if (content.isBlank()) return
+        // الباركود عريض قصير: العرض نسبة من عرض الكرت والارتفاع كسر منه
+        val bw = (field.sizeFrac * widthPx).toInt().coerceIn(40, widthPx)
+        val bh = (bw * 0.32f).toInt().coerceAtLeast(20)
+        val bmp = encodeBarcode(content, bw, bh) ?: return
+        val left = field.xFrac * widthPx - bw / 2f
+        val top = field.yFrac * heightPx - bh / 2f
+        canvas.drawBitmap(bmp, left, top, null)
+    }
+
+    /** Code128 — يقبل الأرقام والحروف اللاتينية. يعيد صورة أو null عند الفشل */
+    fun encodeBarcode(content: String, wPx: Int, hPx: Int): Bitmap? = runCatching {
+        val hints = mapOf(EncodeHintType.MARGIN to 2)
+        val matrix = Code128Writer().encode(content, BarcodeFormat.CODE_128, wPx, hPx, hints)
+        val pixels = IntArray(wPx * hPx)
+        for (y in 0 until hPx) {
+            val off = y * wPx
+            for (x in 0 until wPx) {
+                pixels[off + x] = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
+            }
+        }
+        Bitmap.createBitmap(wPx, hPx, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(pixels, 0, wPx, 0, 0, wPx, hPx)
+        }
+    }.getOrNull()
 
     fun qrText(kind: QrContent, user: UserEntry, settings: AppSettings): String {
         // كلمة المرور الفعلية للدخول تختلف حسب نوع الكرت

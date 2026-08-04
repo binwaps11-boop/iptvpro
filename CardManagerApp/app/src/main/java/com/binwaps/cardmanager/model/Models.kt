@@ -91,6 +91,7 @@ enum class FieldType(val labelAr: String) {
     PROFILE("الباقة"),
     SERIAL("الرقم التسلسلي"),
     QR_CODE("رمز QR"),
+    BARCODE("باركود"),
     CUSTOM_TEXT("نص ثابت"),
     // حقول تُحسب لحظة الطباعة
     BATCH_NO("رقم الدفعة"),
