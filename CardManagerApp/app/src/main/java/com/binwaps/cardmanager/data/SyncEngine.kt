@@ -95,12 +95,31 @@ object SyncEngine {
         }
     }
 
-    /** مزامنة فورية الآن (بعد رفع أو توليد) دون انتظار الدورة القادمة */
+    /**
+     * مزامنة فورية الآن (بعد رفع أو توليد) دون انتظار الدورة القادمة.
+     * تشمل **الكروت** أيضاً: كانت لا تُجلب هنا، فبعد الرفع تبقى القائمة قديمة
+     * حتى الدورة الدورية (حتى دقيقتين). ننتظر انتهاء العملية الأمامية (الرفع)
+     * كي لا نزاحمها على قفل الجلسة، ونحمي بعلم الجلب نفسه ضد تداخل جلبين.
+     */
     fun syncNow() {
         scope.launch {
             val r = Store.activeRouter() ?: return@launch
             MikrotikClient.fetchCardStats(r).onSuccess { Store.setStatus(it) }
             MikrotikClient.fetchProfiles(r).onSuccess { Store.setProfiles(it) }
+
+            // نتنحّى حتى ينتهي الرفع الجاري (لو استُدعيت أثناءه)، بسقف أمان
+            var waited = 0
+            while (MikrotikClient.foregroundActive() && waited < 60) {
+                delay(1_000); waited++
+            }
+            if (!_cardsSyncing.value) {
+                _cardsSyncing.value = true
+                try {
+                    MikrotikClient.fetchAllCards(r).onSuccess { Store.mergeRouterCards(it) }
+                } finally {
+                    _cardsSyncing.value = false
+                }
+            }
         }
     }
 }

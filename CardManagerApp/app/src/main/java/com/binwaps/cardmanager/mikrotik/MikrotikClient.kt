@@ -79,6 +79,10 @@ object MikrotikClient {
 
     @Volatile private var session: ApiConnection? = null
     @Volatile private var sessionKey: String? = null
+    // إصدار اليوزر منجر مكتشفاً مرة واحدة لكل جلسة — كان يُكتشف بجولة شبكة في
+    // ٦ مواضع كل مرة، وبطريقة غير متسقة (موضع كان ينقل القائمة كاملة). يُصفّر
+    // حرفياً مع sessionKey فيرتبط بالجلسة نفسها؛ راوتر جديد ⇒ كشف جديد.
+    @Volatile private var umVariant: UmVariant? = null
     private val sessionLock = Mutex()
 
     // عدّاد العمليات الأمامية (رفع/توليد بضغطة المستخدم). المزامنة الدورية
@@ -105,6 +109,7 @@ object MikrotikClient {
         runCatching { session?.close() }
         session = null
         sessionKey = null
+        umVariant = null
     }
 
     /**
@@ -174,6 +179,7 @@ object MikrotikClient {
                 val old = session
                 session = null
                 sessionKey = null
+                umVariant = null
                 runCatching { old?.close() }
             }
         }
@@ -214,6 +220,41 @@ object MikrotikClient {
             // لا يمكن تمثيل قيمة فيها النوعان معاً — نحذف المزدوجة
             else -> "\"${clean.replace("\"", "")}\""
         }
+    }
+
+    // ===== كشف إصدار اليوزر منجر (موحّد ومخزّن) =====
+
+    /**
+     * v7 على المسار `/user-manager`، v6 على `/tool/user-manager`، وNONE إن لم
+     * تُثبّت الحزمة. الكشف مرة واحدة لكل جلسة (`umVariant`)، وكل الأوامر تبني
+     * مسارها عبر [umPath] فلا تكرار ولا تناقض بين المواضع.
+     */
+    internal enum class UmVariant { V7, V6, NONE }
+
+    /** جذر مسار جدول يوزر منجر حسب الإصدار — دالة نقية قابلة للاختبار */
+    internal fun umPath(v: UmVariant, table: String): String {
+        val base = when (v) {
+            UmVariant.V7 -> "/user-manager"
+            // NONE نادر (الحزمة غير مثبّتة) — نبني مسار v6 ليعطي خطأ «لا أمر»
+            // مفهوماً بدل مسارٍ فارغ
+            else -> "/tool/user-manager"
+        }
+        return "$base/$table"
+    }
+
+    /**
+     * يكتشف الإصدار مرة واحدة ويخزّنه للجلسة. **count-only دائماً** (لا ينقل
+     * القائمة كاملة). يجرّب v7 ثم v6؛ إن فشلا فالحزمة غير مثبّتة (NONE).
+     */
+    private fun userManagerVariant(con: ApiConnection): UmVariant {
+        umVariant?.let { return it }
+        val detected = when {
+            runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess -> UmVariant.V7
+            runCatching { con.execute("/tool/user-manager/user/print count-only") }.isSuccess -> UmVariant.V6
+            else -> UmVariant.NONE
+        }
+        umVariant = detected
+        return detected
     }
 
     /**
@@ -843,40 +884,24 @@ object MikrotikClient {
      * في v6 تكون العدادات على السجل نفسه (uptime-used, download-used…).
      */
     private fun readUserManager(con: ApiConnection): List<UserEntry> {
+        val variant = userManagerVariant(con)
+        // proplist v7 يضمّ حقول العدّاد المحتملة على user-profile؛ نقرأ ما يوجد
         val rows = con.tryPrintLight(
             ".id,name,username,customer,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
-            "/user-manager/user", "/tool/user-manager/user",
+            umPath(variant, "user"),
         )
         if (rows.isEmpty()) return emptyList()
 
-        // جدول الصلاحيات — v7 ثم v6
+        // جدول الصلاحيات/العدّادات — في v7 هنا يعيش state/end-time والاستهلاك
         val userProfiles = con.tryPrintLight(
-            "user,profile,end-time,state",
-            "/user-manager/user-profile", "/tool/user-manager/user-profile",
+            "user,profile,end-time,state,uptime,download,upload,total-bytes",
+            umPath(variant, "user-profile"),
         ).associateBy { it["user"].orEmpty() }
 
+        val now = System.currentTimeMillis()
         return rows.mapNotNull { row ->
             val name = row["name"] ?: row["username"] ?: return@mapNotNull null
             val up = userProfiles[name]
-            val endTime = up?.get("end-time").orEmpty()
-            val state = up?.get("state").orEmpty()
-
-            val usedUptime = row["uptime-used"].orEmpty()
-            val usedBytes = (row["download-used"]?.toLongOrNull() ?: 0) +
-                (row["upload-used"]?.toLongOrNull() ?: 0)
-
-            val status = when {
-                row["disabled"] == "true" -> CardStatus.DISABLED
-                state.equals("used", true) -> CardStatus.EXPIRED
-                endTime.isNotBlank() && endTime != "unlimited" &&
-                    parseRouterTime(endTime)?.let { it < System.currentTimeMillis() } == true -> CardStatus.EXPIRED
-                state.equals("running", true) -> CardStatus.IN_USE
-                usedUptime.isNotBlank() && parseUptime(usedUptime) > 0 -> CardStatus.IN_USE
-                usedBytes > 0 -> CardStatus.IN_USE
-                up == null || state.equals("waiting", true) -> CardStatus.UNUSED
-                else -> CardStatus.UNUSED
-            }
-
             UserEntry(
                 username = name,
                 password = row["password"].orEmpty(),
@@ -884,12 +909,64 @@ object MikrotikClient {
                 comment = row["comment"].orEmpty(),
                 routerId = row[".id"].orEmpty(),
                 source = CardSource.USER_MANAGER,
-                status = status,
-                uptime = usedUptime,
-                bytesUsed = usedBytes,
+                status = classifyUm(variant, row, up, now),
+                uptime = umUptimeUsed(variant, row, up),
+                bytesUsed = umBytesUsed(variant, row, up),
                 disabled = row["disabled"] == "true",
-                expiryText = endTime,
+                expiryText = up?.get("end-time").orEmpty(),
             )
+        }
+    }
+
+    // ===== تصنيف اليوزر منجر (دوال نقية قابلة للاختبار) =====
+    //
+    // في v6 العدّادات على سجل المستخدم (uptime-used/download-used/upload-used).
+    // في v7 ليست هناك، بل الحالة والاستهلاك في جدول user-profile — قراءتها
+    // بأسماء v6 كانت تعطي صفراً فيظهر كرت مستهلك على أنه UNUSED.
+
+    /** بايتات الاستهلاك حسب الإصدار — تقرأ الحقول المتاحة بأمان */
+    internal fun umBytesUsed(
+        variant: UmVariant,
+        userRow: Map<String, String>,
+        profileRow: Map<String, String>?,
+    ): Long = if (variant == UmVariant.V7) {
+        (profileRow?.get("download")?.toLongOrNull() ?: 0L) +
+            (profileRow?.get("upload")?.toLongOrNull() ?: 0L) +
+            (profileRow?.get("total-bytes")?.toLongOrNull() ?: 0L)
+    } else {
+        (userRow["download-used"]?.toLongOrNull() ?: 0L) +
+            (userRow["upload-used"]?.toLongOrNull() ?: 0L)
+    }
+
+    /** نص وقت الاستخدام حسب الإصدار */
+    internal fun umUptimeUsed(
+        variant: UmVariant,
+        userRow: Map<String, String>,
+        profileRow: Map<String, String>?,
+    ): String = if (variant == UmVariant.V7) profileRow?.get("uptime").orEmpty()
+    else userRow["uptime-used"].orEmpty()
+
+    /** حالة الكرت من صفَّي المستخدم والصلاحية — نقية بلا اتصال ولا وقت ضمني */
+    internal fun classifyUm(
+        variant: UmVariant,
+        userRow: Map<String, String>,
+        profileRow: Map<String, String>?,
+        now: Long,
+    ): CardStatus {
+        if (userRow["disabled"] == "true") return CardStatus.DISABLED
+        val state = profileRow?.get("state").orEmpty()
+        val endTime = profileRow?.get("end-time").orEmpty()
+        val expiredByTime = endTime.isNotBlank() && !endTime.equals("unlimited", true) &&
+            (parseRouterTime(endTime)?.let { it < now } == true)
+        val usedUptime = umUptimeUsed(variant, userRow, profileRow)
+        val usedBytes = umBytesUsed(variant, userRow, profileRow)
+        return when {
+            state.equals("used", true) -> CardStatus.EXPIRED
+            expiredByTime -> CardStatus.EXPIRED
+            state.equals("running", true) -> CardStatus.IN_USE
+            usedUptime.isNotBlank() && parseUptime(usedUptime) > 0 -> CardStatus.IN_USE
+            usedBytes > 0 -> CardStatus.IN_USE
+            else -> CardStatus.UNUSED
         }
     }
 
@@ -944,7 +1021,16 @@ object MikrotikClient {
                         .orEmpty(),
                 )
             }
-        val um = runCatching { readUserManager(con) }.getOrDefault(emptyList())
+        // دمج المصدرين لا يجب أن يسقط بفشل اليوزر منجر، لكن لا نبتلعه صامتاً:
+        // نسجّله في السجل ليعرف المستخدم أن مصدراً لم يُجلب (كان يظهر كأن لا كروت)
+        val um = runCatching { readUserManager(con) }.getOrElse { e ->
+            com.binwaps.cardmanager.data.EventLog.log(
+                "جلب",
+                "تعذّر جلب اليوزر منجر: ${e.message?.take(120) ?: "سبب غير معروف"}",
+                ok = false,
+            )
+            emptyList()
+        }
         hotspot + um
     }
 
@@ -1020,14 +1106,19 @@ object MikrotikClient {
             return list.count { it["profile"] == name }
         }
 
+        // كشف الإصدار مرة واحدة — كان يجرّب مسارَي v7 وv6 لكل باقة (نداءان لكل
+        // باقة). الآن نداء count-only واحد على المسار الصحيح فقط لكل باقة.
+        val umV = userManagerVariant(con)
         var umUsersFallback: List<Map<String, String>>? = null
         fun umCount(name: String): Int {
-            // v7: ربط المستخدم بالباقة في جدول user-profile — v6: حقل group على المستخدم
-            con.countOnly("/user-manager/user-profile", "profile=${q(name)}")?.let { return it }
-            // v6 لا يعرف group — ربط الباقة بعد التفعيل في حقل actual-profile
-            con.countOnly("/tool/user-manager/user", "actual-profile=${q(name)}")?.let { return it }
+            if (umV == UmVariant.V7) {
+                con.countOnly(umPath(umV, "user-profile"), "profile=${q(name)}")?.let { return it }
+            } else {
+                // v6: الباقة الفعلية بعد التفعيل في actual-profile على سجل المستخدم
+                con.countOnly(umPath(umV, "user"), "actual-profile=${q(name)}")?.let { return it }
+            }
             val list = umUsersFallback ?: con.tryPrintLight(
-                "group,actual-profile,profile", "/user-manager/user", "/tool/user-manager/user",
+                "group,actual-profile,profile", umPath(umV, "user"),
             ).also { umUsersFallback = it }
             return list.count { (it["group"] ?: it["actual-profile"] ?: it["profile"]) == name }
         }
@@ -1126,11 +1217,10 @@ object MikrotikClient {
         return buildString {
             append("$base/user/add ${if (isV7) "name" else "username"}=${q(u.username)}")
             if (u.password.isNotBlank()) append(" password=${q(u.password)}")
-            if (isV7) {
-                if (u.profile.isNotBlank()) append(" group=${q(u.profile)}")
-            } else {
-                append(" customer=${q(customer)}")
-            }
+            // v7: لا نرسل group= هنا. ربط الباقة يتم حصراً عبر جدول user-profile
+            // في umLinkProfileCommand — إرسالها في الموضعين كان ازدواجاً قد
+            // يُنشئ تخصيصاً مكرّراً أو متعارضاً. v6 يحتاج customer إلزامياً.
+            if (!isV7) append(" customer=${q(customer)}")
             if (u.comment.isNotBlank()) append(" comment=${q(u.comment)}")
         }
     }
@@ -1171,8 +1261,8 @@ object MikrotikClient {
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         onCreated: (UserEntry) -> Unit = {},
     ): Result<Int> = onRouter(r, foreground = true) { con ->
-        // فحص v7 بعدٍّ لا بجلب القائمة كاملة
-        val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
+        // كشف موحّد مخزّن للجلسة — count-only، لا يتكرر عبر المواضع
+        val isV7 = userManagerVariant(con) == UmVariant.V7
         val base = if (isV7) "/user-manager" else "/tool/user-manager"
         val customer = if (isV7) "" else umCustomer(con)
         com.binwaps.cardmanager.data.EventLog.log(
@@ -1265,9 +1355,7 @@ object MikrotikClient {
         onRouter(r) { con ->
             if (user.routerId.isBlank()) throw RouterLogicException("هذا الكرت غير موجود على الراوتر")
             val path = when (user.source) {
-                CardSource.USER_MANAGER ->
-                    if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
-                        "/user-manager/user" else "/tool/user-manager/user"
+                CardSource.USER_MANAGER -> umPath(userManagerVariant(con), "user")
                 else -> "/ip/hotspot/user"
             }
             con.execute("$path/set .id=${user.routerId} disabled=${!enabled}")
@@ -1284,9 +1372,9 @@ object MikrotikClient {
     private fun ApiConnection.hotspotPath() = "/ip/hotspot/user"
 
     private fun ApiConnection.userPathFor(source: CardSource): String = when (source) {
-        CardSource.USER_MANAGER ->
-            if (runCatching { execute("/user-manager/user/print") }.isSuccess) "/user-manager/user"
-            else "/tool/user-manager/user"
+        // كان يستعمل print بلا count-only فينقل القائمة كاملة لمجرد كشف المسار —
+        // الآن الكشف الموحّد المخزّن (count-only)
+        CardSource.USER_MANAGER -> umPath(userManagerVariant(this), "user")
         else -> "/ip/hotspot/user"
     }
 
@@ -1312,7 +1400,7 @@ object MikrotikClient {
     suspend fun bulkSetEnabled(
         r: RouterProfile?, cards: List<UserEntry>, enabled: Boolean,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         con.bulk(cards, onProgress) { u, path ->
             if (u.routerId.isBlank()) null else "$path/set .id=${u.routerId} disabled=${!enabled}"
         }
@@ -1322,7 +1410,7 @@ object MikrotikClient {
     suspend fun bulkDelete(
         r: RouterProfile?, cards: List<UserEntry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         val names = cards.map { it.username }.toSet()
         runCatching {
             con.printLight("/ip/hotspot/active", ".id,user")
@@ -1340,7 +1428,7 @@ object MikrotikClient {
     suspend fun bulkSetProfile(
         r: RouterProfile?, cards: List<UserEntry>, profile: String,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         val (um, hotspot) = cards.partition { it.source == CardSource.USER_MANAGER }
         var ok = 0
         var failed = 0
@@ -1353,7 +1441,7 @@ object MikrotikClient {
             onProgress(++done, cards.size)
         }
         if (um.isNotEmpty()) {
-            val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
+            val isV7 = userManagerVariant(con) == UmVariant.V7
             // صفوف الصلاحيات الحالية مرة واحدة — إعادة الربط تحتاج حذف القديم.
             // مجرد set group لا يغيّر الباقة الفعلية في v7
             val existing = if (isV7) {
@@ -1384,7 +1472,7 @@ object MikrotikClient {
     suspend fun bulkResetCounters(
         r: RouterProfile?, cards: List<UserEntry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
             if (u.routerId.isBlank()) null else "/ip/hotspot/user/reset-counters .id=${u.routerId}"
         }
@@ -1397,7 +1485,7 @@ object MikrotikClient {
     suspend fun bulkResetToUnused(
         r: RouterProfile?, cards: List<UserEntry>, restoreValidity: String,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         val names = cards.map { it.username }.toSet()
         runCatching {
             con.printLight("/ip/hotspot/cookie", ".id,user")
@@ -1422,7 +1510,7 @@ object MikrotikClient {
     suspend fun bulkSetPassword(
         r: RouterProfile?, cards: List<UserEntry>, password: (UserEntry) -> String,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         con.bulk(cards, onProgress) { u, path ->
             if (u.routerId.isBlank()) null else "$path/set .id=${u.routerId} password=${q(password(u))}"
         }
@@ -1432,7 +1520,7 @@ object MikrotikClient {
     suspend fun bulkExtendValidity(
         r: RouterProfile?, cards: List<UserEntry>, addSeconds: Long,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<BulkResult> = onRouter(r) { con ->
+    ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         con.bulk(cards.filter { it.source != CardSource.USER_MANAGER }, onProgress) { u, _ ->
             if (u.routerId.isBlank()) null else {
                 val current = parseUptime(u.limitUptime.takeIf { it.trim() != "1s" }.orEmpty())
@@ -1520,7 +1608,7 @@ object MikrotikClient {
     }
 
     /** حذف الكروت المنتهية أو المعطّلة من الهوتسبوت */
-    suspend fun removeExpiredUsers(r: RouterProfile?): Result<Int> = onRouter(r) { con ->
+    suspend fun removeExpiredUsers(r: RouterProfile?): Result<Int> = onRouter(r, foreground = true) { con ->
         var removed = 0
         for (row in con.execute("/ip/hotspot/user/print")) {
             val id = row[".id"] ?: continue
@@ -1536,15 +1624,14 @@ object MikrotikClient {
     suspend fun removeUser(r: RouterProfile?, user: UserEntry): Result<Unit> = onRouter(r) { con ->
         if (user.routerId.isBlank()) throw RouterLogicException("هذا الكرت غير موجود على الراوتر")
         val path = if (user.source == CardSource.USER_MANAGER) {
-            if (runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess)
-                "/user-manager/user/remove" else "/tool/user-manager/user/remove"
+            umPath(userManagerVariant(con), "user") + "/remove"
         } else "/ip/hotspot/user/remove"
         con.execute("$path .id=${user.routerId}")
         Unit
     }
 
     /** حذف دفعة كاملة حسب وسم الملاحظة الذي كُتب عند التوليد */
-    suspend fun removeBatchByComment(r: RouterProfile?, tag: String): Result<Int> = onRouter(r) { con ->
+    suspend fun removeBatchByComment(r: RouterProfile?, tag: String): Result<Int> = onRouter(r, foreground = true) { con ->
         var removed = 0
         for (row in con.execute("/ip/hotspot/user/print")) {
             if ((row["comment"] ?: "") != tag) continue
@@ -1603,8 +1690,8 @@ object MikrotikClient {
         if (user.routerId.isBlank()) error("لا يمكن تعديل هذا الكرت — لم يُجلب من الراوتر")
         if (user.source == CardSource.USER_MANAGER) {
             // اليوزر منجر: الحقول تختلف — group بدل profile، ولا يوجد limit-uptime
-            val isV7 = runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess
-            val path = if (isV7) "/user-manager/user" else "/tool/user-manager/user"
+            val isV7 = userManagerVariant(con) == UmVariant.V7
+            val path = umPath(if (isV7) UmVariant.V7 else UmVariant.V6, "user")
             val sets = buildString {
                 password?.let { append(" password=${q(it)}") }
                 comment?.let { append(" comment=${q(it)}") }
@@ -1794,7 +1881,7 @@ object MikrotikClient {
         r: RouterProfile?,
         cards: List<UserEntry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
-    ): Result<Int> = onRouter(r) { con ->
+    ): Result<Int> = onRouter(r, foreground = true) { con ->
         var ok = 0
         cards.forEachIndexed { i, c ->
             if (c.routerId.isNotBlank()) {

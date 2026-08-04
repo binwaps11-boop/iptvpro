@@ -1,6 +1,7 @@
 package com.binwaps.cardmanager
 
 import com.binwaps.cardmanager.mikrotik.MikrotikClient
+import com.binwaps.cardmanager.model.CardStatus
 import com.binwaps.cardmanager.model.UserEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,9 +54,10 @@ class MikrotikCommandsTest {
     }
 
     @Test
-    fun `الباقة في v7 تُرسل كـ group وفي v6 تُربط بأمر منفصل`() {
+    fun `الباقة تُربط بأمر منفصل في الإصدارين ولا تُرسل مع add`() {
+        // v7: لا group= مع add — الربط عبر جدول user-profile وحده (منع الازدواج)
         val v7 = MikrotikClient.umAddCommand(true, "", card(profile = "شهري 10 جيجا"))
-        assertTrue(v7.contains("group=\"شهري 10 جيجا\""))
+        assertFalse("v7 يجب ألا يرسل group= مع add", v7.contains("group="))
 
         // v6: الباقة لا تُرسل مع add بل عبر create-and-activate-profile
         val v6 = MikrotikClient.umAddCommand(false, "admin", card(profile = "شهري 10 جيجا"))
@@ -66,6 +68,10 @@ class MikrotikCommandsTest {
         assertTrue(link.contains("customer=\"admin\""))
         assertTrue(link.contains("numbers=\"777888\""))
         assertTrue(link.contains("profile=\"شهري 10 جيجا\""))
+
+        val linkV7 = MikrotikClient.umLinkProfileCommand(true, "", "777888", "شهري 10 جيجا")
+        assertTrue(linkV7.startsWith("/user-manager/user-profile/add"))
+        assertTrue(linkV7.contains("profile=\"شهري 10 جيجا\""))
     }
 
     @Test
@@ -73,6 +79,81 @@ class MikrotikCommandsTest {
         val link = MikrotikClient.umLinkProfileCommand(true, "", "777888", "باقة")
         assertTrue(link.startsWith("/user-manager/user-profile/add"))
         assertTrue(link.contains("user=\"777888\""))
+    }
+
+    // ===== كشف الإصدار الموحّد (umPath) =====
+
+    @Test
+    fun `umPath يبني مسار v7 بلا tool ومسار v6 بـ tool`() {
+        assertEquals("/user-manager/user", MikrotikClient.umPath(MikrotikClient.UmVariant.V7, "user"))
+        assertEquals("/tool/user-manager/user", MikrotikClient.umPath(MikrotikClient.UmVariant.V6, "user"))
+        assertEquals(
+            "/user-manager/user-profile",
+            MikrotikClient.umPath(MikrotikClient.UmVariant.V7, "user-profile"),
+        )
+        assertEquals(
+            "/tool/user-manager/customer",
+            MikrotikClient.umPath(MikrotikClient.UmVariant.V6, "customer"),
+        )
+    }
+
+    @Test
+    fun `umPath عند غياب الحزمة يبني مسار v6 ليعطي خطأ مفهوماً`() {
+        // NONE = الحزمة غير مثبّتة؛ مسار v6 يُنتج «لا أمر» واضحاً بدل مسار فارغ
+        assertEquals("/tool/user-manager/user", MikrotikClient.umPath(MikrotikClient.UmVariant.NONE, "user"))
+    }
+
+    // ===== تصنيف اليوزر منجر v6/v7 =====
+
+    private val NOW = 1_800_000_000_000L // مرجع زمني ثابت للاختبار
+
+    @Test
+    fun `v6 يقرأ الاستهلاك من سجل المستخدم`() {
+        val user = mapOf("download-used" to "500", "upload-used" to "300")
+        assertEquals(800L, MikrotikClient.umBytesUsed(MikrotikClient.UmVariant.V6, user, null))
+    }
+
+    @Test
+    fun `v7 يقرأ الاستهلاك من جدول user-profile لا من حقول v6`() {
+        // العطل: قراءة v7 بأسماء v6 كانت تعطي صفراً فيظهر المستهلك UNUSED
+        val user = mapOf<String, String>() // v7 لا يحمل العدّادات على سجل المستخدم
+        val profile = mapOf("download" to "1000", "upload" to "500")
+        assertEquals(1500L, MikrotikClient.umBytesUsed(MikrotikClient.UmVariant.V7, user, profile))
+    }
+
+    @Test
+    fun `v7 كرت مستهلك يُصنَّف مستخدَماً لا فارغاً`() {
+        val user = mapOf<String, String>()
+        val profile = mapOf("state" to "running", "download" to "2000")
+        assertEquals(
+            CardStatus.IN_USE,
+            MikrotikClient.classifyUm(MikrotikClient.UmVariant.V7, user, profile, NOW),
+        )
+    }
+
+    @Test
+    fun `المعطّل يُصنَّف معطّلاً في الإصدارين`() {
+        val user = mapOf("disabled" to "true")
+        assertEquals(CardStatus.DISABLED, MikrotikClient.classifyUm(MikrotikClient.UmVariant.V6, user, null, NOW))
+        assertEquals(CardStatus.DISABLED, MikrotikClient.classifyUm(MikrotikClient.UmVariant.V7, user, mapOf("state" to "running"), NOW))
+    }
+
+    @Test
+    fun `انتهاء الوقت يُصنَّف منتهياً`() {
+        val profile = mapOf("end-time" to "jan/01/2020 00:00:00")
+        assertEquals(
+            CardStatus.EXPIRED,
+            MikrotikClient.classifyUm(MikrotikClient.UmVariant.V7, emptyMap(), profile, NOW),
+        )
+    }
+
+    @Test
+    fun `كرت جديد بلا استهلاك يُصنَّف فارغاً`() {
+        val user = mapOf("download-used" to "0", "upload-used" to "0")
+        assertEquals(
+            CardStatus.UNUSED,
+            MikrotikClient.classifyUm(MikrotikClient.UmVariant.V6, user, mapOf("state" to "waiting"), NOW),
+        )
     }
 
     // ===== الاقتباس =====
