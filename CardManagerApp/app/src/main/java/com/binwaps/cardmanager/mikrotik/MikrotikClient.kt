@@ -27,6 +27,15 @@ object MikrotikClient {
 
     private fun open(r: RouterProfile): ApiConnection = openWith(r, r.useSsl)
 
+    // مهلة **الأوامر** (نقل النتائج) مستقلة عن مهلة **الاتصال** (فتح المقبس).
+    // كانت مربوطة بمهلة الاتصال (١٢ث افتراضاً) عبر setTimeout، فجلب قائمة كبيرة
+    // (كل الكروت/الباقات) يرمي «Command timed out» على راوتر فيه آلاف الكروت عن
+    // بُعد — وهو السبب الجذري لـ«لا بيانات/تعليق» بالكميات الكبيرة. الآن مهلة
+    // سخيّة، وتُضبط لكل عملية في onRouter (أطول للأمامية، أقصر للخلفية).
+    private const val CMD_TIMEOUT_DEFAULT_MS = 60_000
+    private const val CMD_TIMEOUT_FG_MS = 90_000   // عملية المستخدم: تُكمل نقل القوائم الكبيرة
+    private const val CMD_TIMEOUT_BG_MS = 30_000    // مزامنة خلفية: تفشل بسرعة وتفسح القفل
+
     private fun openWith(r: RouterProfile, ssl: Boolean): ApiConnection {
         val timeoutMs = (r.timeoutSec.coerceIn(3, 120)) * 1000
         val factory = if (ssl) trustAllSocketFactory() else javax.net.SocketFactory.getDefault()
@@ -34,7 +43,7 @@ object MikrotikClient {
         // فشل الدخول بعد نجاح فتح المقبس كان يترك المقبس وخيوط المكتبة مفتوحة —
         // ومع تجربة النوع الخاطئ عمداً صار ذلك مساراً معتاداً لا حالة نادرة
         try {
-            con.setTimeout(timeoutMs)
+            con.setTimeout(CMD_TIMEOUT_DEFAULT_MS)
             con.login(r.username, r.password)
         } catch (e: Throwable) {
             runCatching { con.close() }
@@ -151,20 +160,26 @@ object MikrotikClient {
                     // «جاري الجلب» عالقاً بلا نهاية عند المستخدم. نمنح مهلة معقولة
                     // (أطول للعمليات الأمامية) ثم نرمي خطأً عربياً مفهوماً. لا نلمس
                     // المقبس أبداً قبل امتلاك القفل، فلا خطر تداخل على الجلسة.
-                    val acquireBudgetMs = if (foreground) 40_000L else 15_000L
+                    // ميزانية اكتساب القفل: الأمامية تفوق أقصى زمن يحبس فيه القفل
+                    // في الخلفية (CMD_TIMEOUT_BG_MS=30ث) فلا يفشل رفع المستخدم زوراً
+                    // بـ«الراوتر مشغول» بينما مزامنة خلفية تجلب.
+                    val acquireBudgetMs = if (foreground) 45_000L else 15_000L
                     if (!acquireSessionWithin(acquireBudgetMs)) {
                         throw RouterLogicException(
                             "الراوتر مشغول بعملية أخرى (مزامنة أو رفع) — أعد المحاولة بعد ثوانٍ",
                         )
                     }
+                    // مهلة الأمر حسب نوع العملية: عملية المستخدم تأخذ ٩٠ث لتُكمل نقل
+                    // القوائم الكبيرة، والخلفية ٣٠ث لتفشل بسرعة وتفسح القفل فوراً
+                    val cmdTimeout = if (foreground) CMD_TIMEOUT_FG_MS else CMD_TIMEOUT_BG_MS
                     try {
                         try {
-                            block(obtain(r))
+                            block(obtain(r).also { runCatching { it.setTimeout(cmdTimeout) } })
                         } catch (e: Exception) {
                             if (isCommandError(e)) throw e
                             // الجلسة القديمة ماتت غالباً — اتصال جديد ومحاولة أخيرة
                             invalidateSession()
-                            block(obtain(r))
+                            block(obtain(r).also { runCatching { it.setTimeout(cmdTimeout) } })
                         }
                     } finally {
                         sessionLock.unlock()
@@ -275,13 +290,16 @@ object MikrotikClient {
      * القائمة كاملة). يجرّب v7 ثم v6؛ إن فشلا فالحزمة غير مثبّتة (NONE).
      */
     private fun userManagerVariant(con: ApiConnection): UmVariant {
-        umVariant?.let { return it }
+        // لا نُخزّن NONE: فشل الكشف قد يكون عابراً (الراوتر مشغول لحظتها)، وتخزينه
+        // كان يخفي كل كروت اليوزر منجر طوال الجلسة على راوتر v7 حقيقي. نخزّن
+        // V6/V7 فقط ونعيد الكشف في الاستدعاء التالي طالما لم يُثبَّت إصدار.
+        umVariant?.let { if (it != UmVariant.NONE) return it }
         val detected = when {
             runCatching { con.execute("/user-manager/user/print count-only") }.isSuccess -> UmVariant.V7
             runCatching { con.execute("/tool/user-manager/user/print count-only") }.isSuccess -> UmVariant.V6
             else -> UmVariant.NONE
         }
-        umVariant = detected
+        if (detected != UmVariant.NONE) umVariant = detected
         return detected
     }
 
@@ -473,7 +491,14 @@ object MikrotikClient {
      */
     internal fun ApiConnection.printLight(path: String, props: String): List<Map<String, String>> =
         runCatching { execute("$path/print return $props") }
-            .getOrElse { execute("$path/print") }
+            .getOrElse { e ->
+                // لا نصعّد إلى print الكامل (الأثقل) عند انتهاء المهلة — كان يضاعف
+                // الانتظار ثم يفشل ثانيةً. التصعيد فقط لأخطاء الأمر (راوتر قديم لا
+                // يدعم صيغة return props).
+                val msg = e.message ?: ""
+                if (msg.contains("timed out", true) || msg.contains("timeout", true)) throw e
+                execute("$path/print")
+            }
 
     internal fun ApiConnection.tryPrintLight(props: String, vararg paths: String): List<Map<String, String>> {
         for (p in paths) {

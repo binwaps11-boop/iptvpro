@@ -127,7 +127,7 @@ object SyncEngine {
         scope.launch {
             val r = Store.activeRouter() ?: return@launch
             MikrotikClient.fetchCardStats(r).onSuccess { Store.setStatus(it) }
-            MikrotikClient.fetchProfiles(r).onSuccess { Store.setProfiles(it) }
+            MikrotikClient.fetchProfiles(r, foreground = true).onSuccess { Store.setProfiles(it) }
 
             // نتنحّى حتى ينتهي الرفع الجاري (لو استُدعيت أثناءه)، بسقف أمان
             var waited = 0
@@ -137,7 +137,10 @@ object SyncEngine {
             if (!_cardsSyncing.value) {
                 _cardsSyncing.value = true
                 try {
-                    MikrotikClient.fetchAllCards(r).onSuccess { Store.mergeRouterCards(it) }
+                    // foreground=true: تحديث ما بعد الرفع يأخذ مهلة الأمر الطويلة
+                    // (٩٠ث) فيُكمل نقل قائمة كبيرة بدل أن يفشل فتبقى القائمة قديمة
+                    // ويظنّ المستخدم أن الرفع فشل فيعيده (وهم «التكرار»).
+                    MikrotikClient.fetchAllCards(r, foreground = true).onSuccess { Store.mergeRouterCards(it) }
                 } finally {
                     _cardsSyncing.value = false
                 }
