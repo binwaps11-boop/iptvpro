@@ -40,15 +40,23 @@ ubus call system board 2>/dev/null || true
 uname -a 2>/dev/null || true
 echo
 
-echo "# Module request and CR6608-only DTS gate"
+echo "# Module load + 38 dBm mechanism actually shipped"
 cat /etc/modules.d/mt7915e 2>/dev/null || true
-printf 'cr6608_rf_38dbm='
-cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm 2>/dev/null || echo "missing"
-printf 'dts_property='
-dts_property="$(find /sys/firmware/devicetree/base \
-	-name 'mediatek,cr6608-lab-txpower-38dbm' -print 2>/dev/null |
-	head -n 1)"
-[ -n "$dts_property" ] && echo "$dts_property" || echo "missing"
+# This build does NOT use a module parameter or a DTS property. The 38 dBm target is baked
+# into the driver itself: the from-source build carries a proof marker string, and the
+# overlay (binary-patched) build rewrites mt7915_eeprom_get_target_power to return 76. Prove
+# whichever one shipped by inspecting the on-disk module.
+KO="$(find /lib/modules/"$(uname -r)" -name 'mt7915e.ko' 2>/dev/null | head -n 1)"
+printf 'driver_module=%s\n' "${KO:-NONE}"
+if [ -n "$KO" ] && strings -a "$KO" 2>/dev/null | grep -q 'SMARTAP-Q20-RF-38DBM-LINEAR'; then
+	echo 'driver_38dbm=PRESENT (from-source proof marker)'
+elif [ -n "$KO" ] && od -An -tx1 "$KO" 2>/dev/null | tr -d ' \n' | grep -q '03e000082402004c'; then
+	echo 'driver_38dbm=PRESENT (binary-patched: jr $ra; li $v0,76)'
+elif [ -n "$KO" ]; then
+	echo 'driver_38dbm=NOT-DETECTED (neither marker nor return-76 signature found)'
+else
+	echo 'driver_38dbm=UNKNOWN (module not found on disk)'
+fi
 echo
 
 echo "# UCI wireless configuration"
@@ -140,15 +148,11 @@ dmesg 2>/dev/null |
 	true
 echo
 
-rate_completed="$(dmesg 2>/dev/null |
-	grep -c 'CR6608-LAB-38.*MCU rate-SKU command completed')"
-path_completed="$(dmesg 2>/dev/null |
-	grep -c 'CR6608-LAB-38.*MCU path-SKU command completed')"
-path_unconfigured="$(dmesg 2>/dev/null |
-	grep -c 'CR6608-LAB-38.*path-SKU not configured')"
-printf 'MCU_RATE_SKU_COMMAND_COMPLETED_COUNT=%s\n' "$rate_completed"
-printf 'MCU_PATH_SKU_COMMAND_COMPLETED_COUNT=%s\n' "$path_completed"
-printf 'MCU_PATH_SKU_NOT_CONFIGURED_COUNT=%s\n' "$path_unconfigured"
+# The stock mt76 driver emits no 'CR6608-LAB-38' MCU markers (that infrastructure was never
+# part of this build), so counting them always returned 0 — a permanent false negative. What
+# the driver DOES expose is the regulatory ceiling it enforces; report that instead.
+regdb_max="$(iw reg get 2>/dev/null | grep -oE '\(([0-9]+)(\.[0-9]+)? dBm' | grep -oE '[0-9]+(\.[0-9]+)?' | sort -nr | head -n1)"
+printf 'REG_MAX_EIRP_DBM=%s\n' "${regdb_max:-UNKNOWN}"
 echo "MCU_EFFECTIVE_RF_POWER=NOT_READ_BACK_BY_FIRMWARE"
 echo "RF_MEASURED_POWER=NOT_MEASURED"
 echo "NOTE=command-completed means transport status only; iw reports driver state, not conducted RF power"

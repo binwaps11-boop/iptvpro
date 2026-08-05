@@ -69,11 +69,15 @@ jobs:
             python3-setuptools rsync swig unzip zlib1g-dev file wget quilt \
             libelf-dev ecj fastjar java-propose-classpath squashfs-tools
 
-      - name: Clone OpenWrt (${{ github.event.inputs.openwrt_ref }})
+      - name: Clone OpenWrt
+        env:
+          # Pass the free-form dispatch input through the environment so the runner sets it
+          # verbatim — never interpolated into the shell text (avoids ${{ }} command injection).
+          OPENWRT_REF: ${{ github.event.inputs.openwrt_ref }}
         run: |
           git clone https://git.openwrt.org/openwrt/openwrt.git ow
           cd ow
-          git checkout "${{ github.event.inputs.openwrt_ref }}"
+          git checkout "$OPENWRT_REF"
           git log -1 --oneline
 
       - name: Update & install feeds
@@ -129,6 +133,18 @@ jobs:
           grep -q 'CONFIG_TARGET_ramips_mt7621_DEVICE_jcg_q20=y' .config \
             && echo "device profile selected" \
             || { echo "::error::jcg_q20 profile NOT selected"; exit 1; }
+          # `make defconfig` SILENTLY drops any CONFIG_PACKAGE_* symbol it can't resolve
+          # (renamed/removed package), so a curated feature could vanish with no error.
+          # Assert every explicitly-requested =y package survived the expansion.
+          missing=""
+          while IFS= read -r sym; do
+            grep -qxF "$sym" .config || missing="$missing ${sym%=y}"
+          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9._-]+=y' \
+                     "$GITHUB_WORKSPACE/router/jcg-q20/kernel-build/jcg-q20.seed.config")
+          if [ -n "$missing" ]; then
+            echo "::error::packages dropped by defconfig (renamed/unavailable at this ref):$missing"; exit 1
+          fi
+          echo "all curated packages survived defconfig"
 
       - name: Download sources
         run: cd ow && make download -j8 V=s

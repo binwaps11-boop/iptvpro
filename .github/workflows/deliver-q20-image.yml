@@ -34,6 +34,24 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: dl
 
+      - name: Re-prove the 38 dBm marker before shipping (fail-closed)
+        run: |
+          set -e
+          sudo apt-get update -qq && sudo apt-get install -y squashfs-tools binutils >/dev/null
+          BIN="$(ls dl/*sysupgrade.bin | head -1)"
+          [ -n "$BIN" ] || { echo "::error::no sysupgrade.bin in artifact"; exit 1; }
+          rm -rf /tmp/chk && mkdir -p /tmp/chk
+          tar -xf "$BIN" -C /tmp/chk 2>/dev/null || true
+          ROOT="$(find /tmp/chk -name root -type f | head -1)"
+          unsquashfs -q -d /tmp/chk/sq "$ROOT" >/dev/null 2>&1 || true
+          KO="$(find /tmp/chk/sq -name 'mt7915e.ko' | head -1)"
+          echo "in-image mt7915e.ko: ${KO:-NONE}"
+          if [ -n "$KO" ] && strings -a "$KO" | grep -q "SMARTAP-Q20-RF-38DBM-LINEAR"; then
+            echo "::notice::delivery gate OK — 38 dBm marker present in the image being shipped"
+          else
+            echo "::error::refusing to deliver — 38 dBm marker NOT in this artifact's driver"; exit 1
+          fi
+
       - name: Publish the image to the q20-delivery branch
         run: |
           set -e

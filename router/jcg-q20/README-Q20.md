@@ -44,8 +44,9 @@ Ubuntu runners have the open internet and toolchain this sandbox lacks. It:
   `mt7915_eeprom_get_target_power()` returns 76 (=38.0 dBm), with a `__attribute__((used))`
   proof marker the workflow greps out of the *final image* driver — so it **fails rather than
   ship an un-patched driver**.
-- bakes in the identical SmartAP overlay (verified 0-structural-diff against the overlay
-  build) and uploads a flashable `sysupgrade.bin` artifact.
+- bakes in the identical `files/` overlay tree — minus `lib/modules`, which is recompiled
+  from patched source rather than binary-patched — plus the curated package set below, then
+  uploads a flashable `sysupgrade.bin` artifact (gated on the 38 dBm proof marker above).
 - **stock kernel + device tree** — nothing risky is recompiled into the boot path, so a
   flashed unit always comes up.
 - ships a **curated feature set** cherry-picked from what independent builds (ImmortalWrt,
@@ -53,7 +54,8 @@ Ubuntu runners have the open internet and toolchain this sandbox lacks. It:
   **SQM** (bufferbloat/latency), **WireGuard VPN**, **UPnP/NAT-PMP** (gaming NAT), **DDNS**,
   **encrypted DNS over HTTPS**, **adblock** (light, not RAM-heavy AdGuardHome), **watchcat**
   connectivity watchdog, **Wake-on-LAN**, and admin tools (opkg UI, ttyd web terminal, htop,
-  nano, curl). Every daemon is installed but **idle until you enable it**, so the default
+  nano, curl). "opkg UI" is the LuCI **package-manager** app (apk-era name). Every daemon is
+  installed but **idle until you enable it**, so the default
   bridged-AP boot is unaffected. The placebo/risky "turbo" mods are deliberately excluded
   (see TUNING.md). Overlay-only builds can't add packages — this set is from-source only.
 
