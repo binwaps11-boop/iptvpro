@@ -22,9 +22,14 @@ import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -66,6 +71,20 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
     val connected by Store.connected.collectAsState()
     val status by Store.status.collectAsState()
     var testing by remember { mutableStateOf(false) }
+    // نص نسخة احتياطية بانتظار تأكيد الاستعادة (عملية تستبدل كل البيانات)
+    var pendingRestore by remember { mutableStateOf<String?>(null) }
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) {
+            val text = runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            if (text.isNullOrBlank()) {
+                Toast.makeText(context, "تعذّر قراءة الملف", Toast.LENGTH_LONG).show()
+            } else pendingRestore = text
+        }
+    }
 
     Column(
         Modifier
@@ -177,6 +196,42 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             }
             CheckRow("قص الورق تلقائياً بعد الطباعة", settings.autoCut) {
                 Store.updateSettings(settings.copy(autoCut = it))
+            }
+        }
+
+        // النسخ الاحتياطي والاستعادة — يحمي من فقدان كل شيء عند تغيير الجوال
+        GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.32f)) {
+            Text("النسخ الاحتياطي والاستعادة", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "احفظ كل بياناتك في ملف واحد (القوالب، الكروت المحلية، المبيعات، " +
+                    "الباقات، الراوترات، الإعدادات، وصور الخلفيات) واستعدها على أي جهاز.",
+                fontSize = 11.sp, color = TextMid,
+            )
+            Spacer(Modifier.height(11.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton("حفظ نسخة احتياطية", Modifier.weight(1f), Icons.Filled.Send, color = Lime) {
+                    runCatching {
+                        val f = Store.writeBackupFile()
+                        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
+                        context.startActivity(
+                            android.content.Intent.createChooser(
+                                android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "application/json"
+                                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                },
+                                "حفظ / مشاركة النسخة الاحتياطية",
+                            ),
+                        )
+                    }.onFailure {
+                        Toast.makeText(context, "تعذّر إنشاء النسخة: ${it.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+                GhostButton("استعادة من ملف", Modifier.weight(1f), Icons.Filled.Router) {
+                    runCatching { restoreLauncher.launch("*/*") }
+                        .onFailure { Toast.makeText(context, "تعذّر فتح منتقي الملفات", Toast.LENGTH_LONG).show() }
+                }
             }
         }
 
@@ -312,6 +367,37 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             fontSize = 11.sp, color = TextLow,
         )
         Spacer(Modifier.height(24.dp))
+    }
+
+    // تأكيد الاستعادة — عملية تستبدل كل البيانات الحالية، فلا بد من تأكيد صريح
+    pendingRestore?.let { text ->
+        AlertDialog(
+            onDismissRequest = { pendingRestore = null },
+            containerColor = com.binwaps.cardmanager.ui.theme.Panel,
+            titleContentColor = TextHi,
+            title = { Text("استعادة نسخة احتياطية", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Text(
+                    "سيُستبدل كل ما في التطبيق الآن (القوالب، الكروت المحلية، المبيعات، " +
+                        "الباقات، الراوترات، والإعدادات) ببيانات هذا الملف. لا يمكن التراجع. هل تتابع؟",
+                    fontSize = 12.5.sp, color = TextMid,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val ok = Store.restoreBackupJson(text)
+                    Toast.makeText(
+                        context,
+                        if (ok) "تمت الاستعادة ✓ — أغلق التطبيق وافتحه من جديد" else "الملف غير صالح",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    pendingRestore = null
+                }) { Text("استعادة", color = Danger, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestore = null }) { Text("إلغاء", color = TextLow) }
+            },
+        )
     }
 }
 

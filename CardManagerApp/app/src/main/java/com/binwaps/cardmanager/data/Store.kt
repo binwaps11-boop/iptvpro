@@ -440,4 +440,104 @@ object Store {
         "جدول مع رمز QR" to { id: Long -> qrTableTemplate(id) },
         "حر — سحب العناصر" to { id: Long -> defaultTemplate().copy(id = id, name = "قالب حر") },
     )
+
+    // ==================== نسخ احتياطي واستعادة كامل ====================
+    //
+    // يحمي المستخدم من فقدان كل شيء عند تغيير الجوال أو إعادة تثبيت التطبيق:
+    // ملف JSON واحد يضمّ القوالب والكروت المحلية والإعدادات والراوترات
+    // والدفعات والباقات والمبيعات — وصور خلفيات القوالب مضمّنة Base64 حتى
+    // تُستعاد كاملة على جهاز جديد بلا مسارات مكسورة.
+
+    @kotlinx.serialization.Serializable
+    data class BackupBundle(
+        val version: Int = 1,
+        val createdAt: Long = 0,
+        val templates: List<CardTemplate> = emptyList(),
+        val users: List<UserEntry> = emptyList(),
+        val settings: AppSettings = AppSettings(),
+        val routers: List<RouterProfile> = emptyList(),
+        val batches: List<PrintBatch> = emptyList(),
+        val profiles: List<HotspotProfile> = emptyList(),
+        val sales: List<com.binwaps.cardmanager.model.SaleEntry> = emptyList(),
+        /** اسم ملف الخلفية ← محتواه Base64 */
+        val backgrounds: Map<String, String> = emptyMap(),
+    )
+
+    /** يبني نسخة احتياطية كاملة كنص JSON (بما فيها صور الخلفيات مضمّنة) */
+    fun buildBackupJson(): String {
+        val bgs = HashMap<String, String>()
+        _templates.value.forEach { t ->
+            if (t.backgroundPath.isNotBlank()) runCatching {
+                val f = File(t.backgroundPath)
+                if (f.exists()) {
+                    bgs[f.name] = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+                }
+            }
+        }
+        val bundle = BackupBundle(
+            createdAt = System.currentTimeMillis(),
+            templates = _templates.value,
+            users = _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL },
+            settings = _settings.value,
+            routers = _routers.value,
+            batches = _batches.value,
+            profiles = _profiles.value,
+            sales = _sales.value,
+            backgrounds = bgs,
+        )
+        return json.encodeToString(bundle)
+    }
+
+    /**
+     * يكتب النسخة الاحتياطية إلى ملف داخل cache ويعيد مساره (لمشاركته).
+     * الكتابة على خيط الاستدعاء مقصودة — الحجم صغير والمستخدم ينتظر النتيجة.
+     */
+    fun writeBackupFile(): File {
+        // داخل exports لأن FileProvider يكشف هذا المسار فقط (file_paths.xml)
+        val dir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+            .format(java.util.Date())
+        val out = File(dir, "card-manager-backup-$stamp.json")
+        out.writeText(buildBackupJson())
+        return out
+    }
+
+    /**
+     * يستعيد نسخة احتياطية: يستبدل البيانات المحلية بما فيها، ويعيد كتابة صور
+     * الخلفيات في مجلد القوالب ويصحّح مساراتها لهذا الجهاز. يعيد true عند النجاح.
+     */
+    @Synchronized
+    fun restoreBackupJson(text: String): Boolean = runCatching {
+        val bundle = json.decodeFromString<BackupBundle>(text)
+        val dir = File(appContext.filesDir, "templates").apply { mkdirs() }
+        val nameToPath = HashMap<String, String>()
+        bundle.backgrounds.forEach { (name, b64) ->
+            runCatching {
+                val fileName = File(name).name // نحمي من أسماء تحوي مسارات
+                val bg = File(dir, fileName)
+                bg.writeBytes(android.util.Base64.decode(b64, android.util.Base64.NO_WRAP))
+                nameToPath[fileName] = bg.absolutePath
+            }
+        }
+        val fixedTemplates = bundle.templates.map { t ->
+            if (t.backgroundPath.isBlank()) t
+            else nameToPath[File(t.backgroundPath).name]
+                ?.let { t.copy(backgroundPath = it) } ?: t.copy(backgroundPath = "")
+        }
+        _templates.value = fixedTemplates.ifEmpty { listOf(defaultTemplate()) }
+        _settings.value = bundle.settings
+        _routers.value = bundle.routers
+        _batches.value = bundle.batches
+        _profiles.value = bundle.profiles
+        _sales.value = bundle.sales
+        save("templates.json", _templates.value)
+        save("settings.json", _settings.value)
+        save("routers.json", _routers.value)
+        save("batches.json", _batches.value)
+        save("profiles.json", _profiles.value)
+        save("sales.json", _sales.value)
+        // الكروت المحلية عبر setUsers (يحفظ نسخة LOCAL فقط)
+        setUsers(bundle.users)
+        true
+    }.getOrDefault(false)
 }
