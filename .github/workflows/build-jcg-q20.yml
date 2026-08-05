@@ -133,7 +133,7 @@ jobs:
       - name: Download sources
         run: cd ow && make download -j8 V=s
 
-      - name: Driver 38 dBm — patch mt76 source, prove before/after
+      - name: Driver 38 dBm — persist mt76 source patch, prove before/after
         run: |
           cd ow
           make package/kernel/mt76/prepare V=s QUILT=1 2>&1 | tail -3 || \
@@ -145,7 +145,24 @@ jobs:
           python3 "$GITHUB_WORKSPACE/router/jcg-q20/kernel-build/apply-mt76-38.py" "$MT76DIR"
           echo "=== eeprom.c DIFF ==="
           diff -u "$MT76DIR/mt7915/eeprom.c.orig" "$MT76DIR/mt7915/eeprom.c" || true
+          # Persist the edit as a REAL OpenWrt package patch so it is re-applied on EVERY
+          # (re)prepare of mt76. Enabling extra kmods (wireguard/cake/nft…) reconfigures the
+          # kernel, which forces out-of-tree modules like mt76 to re-prepare from pristine
+          # source during the full `make` — that silently wipes an in-place build_dir edit
+          # (the run #3 failure: marker absent from the shipped mt7915e.ko). A patch in
+          # package/kernel/mt76/patches/ survives any number of re-prepares.
+          mkdir -p package/kernel/mt76/patches
+          diff -u -L a/mt7915/eeprom.c -L b/mt7915/eeprom.c \
+            "$MT76DIR/mt7915/eeprom.c.orig" "$MT76DIR/mt7915/eeprom.c" \
+            > package/kernel/mt76/patches/999-smartap-q20-38dbm.patch || true
           rm -f "$MT76DIR/mt7915/eeprom.c.orig"
+          echo "=== persisted package patch (package/kernel/mt76/patches/999-smartap-q20-38dbm.patch) ==="
+          cat package/kernel/mt76/patches/999-smartap-q20-38dbm.patch
+          test -s package/kernel/mt76/patches/999-smartap-q20-38dbm.patch \
+            || { echo "::error::38 dBm patch is empty — refusing"; exit 1; }
+          # Clean so the full build re-extracts pristine mt76 and applies ALL patches,
+          # ours included — guaranteeing the marker lands in the compiled mt7915e.ko.
+          make package/kernel/mt76/clean V=s 2>&1 | tail -2 || true
 
       - name: Build firmware
         run: |
