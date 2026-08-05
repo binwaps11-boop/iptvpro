@@ -1546,7 +1546,17 @@ case "$action" in
       emit false "Administration" "Password update failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
       exit 0
     }
-    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nRoot password command completed. Confirm the matching Safe Apply transaction after verifying access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    # Point the dashboard/LuCI web login (rpcd config login) at the new password too.
+    # `passwd root` only rewrites /etc/shadow (SSH/console); the panel authenticates against
+    # the separate rpcd hash, so without this the password you actually log in with would
+    # never change. Copy the freshly-written root hash into rpcd and reload it. Guarded to a
+    # well-formed crypt hash so a malformed /etc/shadow field can never lock out the UI.
+    newhash="$(awk -F: '/^root:/{print $2; exit}' /etc/shadow 2>/dev/null)"
+    case "$newhash" in '$'*'$'*)
+      uci -q set rpcd.@login[0].password="$newhash" && uci -q commit rpcd && \
+        { /etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true; } ;;
+    esac
+    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nRoot password updated for the dashboard, LuCI and SSH. Confirm the matching Safe Apply transaction after verifying access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_admin_access)
     confirm_required "Administration"
     ssh_port="$(safe_port "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_port "$(param http_port)")"
