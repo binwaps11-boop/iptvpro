@@ -47,6 +47,9 @@ object SyncEngine {
         loop = scope.launch {
             var round = 0
             var cardsFetchedForRouter: Long? = null
+            // بصمة رخيصة لحالة الكروت (إجمالي + مستعمَل) — لا نُجري النقل الكامل
+            // الحاجز للقفل إلا إذا تغيّرت، فتندر مصادفته لعملية المستخدم الأمامية
+            var lastCardsSig: Long? = null
             while (isActive) {
                 // عملية أمامية جارية (رفع/توليد بضغطة المستخدم): نتنحّى تماماً
                 // عن القفل ونعيد الفحص قريباً. دورة المزامنة كانت تحتجز القفل
@@ -69,21 +72,36 @@ object SyncEngine {
                         .isSuccess
 
                     if (connected) {
-                        MikrotikClient.fetchCardStats(r).onSuccess { Store.setStatus(it) }
+                        val stats = MikrotikClient.fetchCardStats(r).getOrNull()?.also { Store.setStatus(it) }
                         MikrotikClient.fetchActiveUsers(r).onSuccess { Store.setActiveUsers(it) }
 
                         if (Store.profiles.value.isEmpty() || round % 5 == 0) {
                             MikrotikClient.fetchProfiles(r).onSuccess { Store.setProfiles(it) }
                         }
 
-                        val needCards = cardsFetchedForRouter != r.id || round % 8 == 0
-                        if (needCards && !_cardsSyncing.value) {
+                        // بوابة تغيّر رخيصة: النقل الكامل (يحبس القفل طوال جلب كل
+                        // الكروت) لا يُجرى إلا عند تغيّر الإجمالي/المستعمَل، أو أول
+                        // مرة للراوتر، أو احتياطياً كل ٤٠ دورة (~١٠ دقائق) لالتقاط
+                        // انتهاء اليوزر منجر بالتاريخ الذي لا يغيّر أي عدّاد.
+                        val sig = stats?.let {
+                            it.hotspotUsers.toLong() * 1_000_003L +
+                                it.userManagerUsers.toLong() * 31L + it.usedUsers.toLong()
+                        }
+                        val firstForRouter = cardsFetchedForRouter != r.id
+                        val changed = sig == null || sig != lastCardsSig
+                        val backstop = round % 40 == 0
+                        // إعادة فحص foreground مباشرة قبل النقل الطويل: عملية المستخدم
+                        // قد تكون بدأت بعد فحص رأس الحلقة خلال connect/stats/profiles،
+                        // فنُفسح لها القفل بدل حبسه بنقلٍ يمتد عشرات الثواني
+                        val needCards = firstForRouter || changed || backstop
+                        if (needCards && !_cardsSyncing.value && !MikrotikClient.foregroundActive()) {
                             _cardsSyncing.value = true
                             try {
                                 MikrotikClient.fetchAllCards(r)
                                     .onSuccess {
                                         Store.mergeRouterCards(it)
                                         cardsFetchedForRouter = r.id
+                                        lastCardsSig = sig
                                     }
                             } finally {
                                 // إلغاء الحلقة أثناء الجلب كان يترك العلم true للأبد فتتجمد المزامنة

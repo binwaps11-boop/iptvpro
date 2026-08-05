@@ -773,7 +773,8 @@ object MikrotikClient {
         val res = con.execute("/system/resource/print").firstOrNull() ?: emptyMap()
         val identity = runCatching { con.execute("/system/identity/print").firstOrNull()?.get("name") }
             .getOrNull().orEmpty()
-        val active = con.tryPrintLight(".id", "/ip/hotspot/active").size
+        // count-only بدل نقل صفٍّ لكل جلسة نشطة لمجرد عدّها — يتكرر كل دورة مزامنة
+        val active = con.countOnly("/ip/hotspot/active") ?: -1
 
         RouterStatus(
             identity = identity,
@@ -1125,31 +1126,27 @@ object MikrotikClient {
      * نفسه بـ count-only — لا يُنقل أي مستخدم عبر الشبكة إطلاقاً.
      */
     suspend fun fetchProfiles(r: RouterProfile?, foreground: Boolean = false): Result<List<HotspotProfile>> = onRouter(r, foreground = foreground) { con ->
-        // إن فشل count-only (راوتر قديم جداً) نجلب قائمة الحقول المختصرة مرة واحدة كخطة بديلة
-        var hotspotUsersFallback: List<Map<String, String>>? = null
-        fun hotspotCount(name: String): Int {
-            con.countOnly("/ip/hotspot/user", "profile=${q(name)}")?.let { return it }
-            val list = hotspotUsersFallback ?: runCatching { con.printLight("/ip/hotspot/user", "profile") }
-                .getOrDefault(emptyList()).also { hotspotUsersFallback = it }
-            return list.count { it["profile"] == name }
-        }
+        // عدّ الكروت لكل باقة بجولة **تجميع واحدة لكل مصدر** بدل جولة count-only
+        // منفصلة لكل باقة (كانت N جولة تسلسلية على راوتر بعيد = ثوانٍ تجمّد شاشة
+        // الباقات في كل بناء وبعد كل رفع). نجلب حقل الباقة لكل مستخدم مرة واحدة
+        // متدفقاً ونجمّعه محلياً — يهبط الإجمالي إلى جولتين مهما كثُرت الباقات.
+        val hsCounts: Map<String, Int> = runCatching {
+            con.printLight("/ip/hotspot/user", "profile")
+                .groupingBy { it["profile"].orEmpty() }.eachCount()
+        }.getOrDefault(emptyMap())
 
-        // كشف الإصدار مرة واحدة — كان يجرّب مسارَي v7 وv6 لكل باقة (نداءان لكل
-        // باقة). الآن نداء count-only واحد على المسار الصحيح فقط لكل باقة.
+        // كشف الإصدار مرة واحدة، ثم قراءة الجدول الصحيح حسب النكهة:
+        // v7 الباقة الفعلية في جدول user-profile، وv6 في actual-profile على المستخدم
         val umV = userManagerVariant(con)
-        var umUsersFallback: List<Map<String, String>>? = null
-        fun umCount(name: String): Int {
-            if (umV == UmVariant.V7) {
-                con.countOnly(umPath(umV, "user-profile"), "profile=${q(name)}")?.let { return it }
-            } else {
-                // v6: الباقة الفعلية بعد التفعيل في actual-profile على سجل المستخدم
-                con.countOnly(umPath(umV, "user"), "actual-profile=${q(name)}")?.let { return it }
+        val umCounts: Map<String, Int> = runCatching {
+            when (umV) {
+                UmVariant.V7 -> con.printLight(umPath(umV, "user-profile"), "profile")
+                    .groupingBy { it["profile"].orEmpty() }.eachCount()
+                UmVariant.V6 -> con.printLight(umPath(umV, "user"), "actual-profile")
+                    .groupingBy { it["actual-profile"].orEmpty() }.eachCount()
+                else -> emptyMap()
             }
-            val list = umUsersFallback ?: con.tryPrintLight(
-                "group,actual-profile,profile", umPath(umV, "user"),
-            ).also { umUsersFallback = it }
-            return list.count { (it["group"] ?: it["actual-profile"] ?: it["profile"]) == name }
-        }
+        }.getOrDefault(emptyMap())
 
         val hotspotProfiles = con.tryList("/ip/hotspot/user/profile/print").map { row ->
             val name = row["name"].orEmpty()
@@ -1160,7 +1157,7 @@ object MikrotikClient {
                 sessionTimeout = row["session-timeout"].orEmpty(),
                 sharedUsers = row["shared-users"] ?: "1",
                 source = CardSource.HOTSPOT,
-                userCount = hotspotCount(name),
+                userCount = hsCounts[name] ?: 0,
             )
         }
 
@@ -1175,7 +1172,7 @@ object MikrotikClient {
                     sessionTimeout = row["validity"] ?: row["session-timeout"].orEmpty(),
                     sharedUsers = row["shared-users"] ?: "1",
                     source = CardSource.USER_MANAGER,
-                    userCount = umCount(name),
+                    userCount = umCounts[name] ?: 0,
                 )
             }
 
@@ -1452,46 +1449,84 @@ object MikrotikClient {
         }
     }
 
-    /** تغيير باقة مجموعة كروت */
+    /**
+     * تغيير باقة مجموعة كروت — إرسال **متدفّق** (pipeline) لا أمراً-بعد-أمر.
+     * كانت هذه العملية الجماعية الوحيدة التسلسلية: تغيير باقة ٥٠٠ كرت على راوتر
+     * بعيد كان يستغرق دقائق (٥٠٠ × زمن الذهاب والإياب). الآن ثوانٍ.
+     * التقدّم يُسقَط دائماً على cards.size حتى يصل الشريط للنهاية.
+     */
     suspend fun bulkSetProfile(
         r: RouterProfile?, cards: List<UserEntry>, profile: String,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): Result<BulkResult> = onRouter(r, foreground = true) { con ->
         val (um, hotspot) = cards.partition { it.source == CardSource.USER_MANAGER }
+        val grand = cards.size
         var ok = 0
         var failed = 0
         var done = 0
-        hotspot.forEach { u ->
-            if (u.routerId.isBlank()) failed++
-            else runCatching {
-                con.execute("/ip/hotspot/user/set .id=${u.routerId} profile=${q(profile)}")
-            }.fold({ ok++ }, { failed++ })
-            onProgress(++done, cards.size)
+
+        // الهوتسبوت — نافذة واسعة (128) كبقية عملياته الجماعية
+        if (hotspot.isNotEmpty()) {
+            val hs = hotspot.filter { it.routerId.isNotBlank() }
+            failed += hotspot.size - hs.size
+            if (hs.isNotEmpty()) {
+                val base = done
+                val cmds = hs.map { "/ip/hotspot/user/set .id=${it.routerId} profile=${q(profile)}" }
+                val res = con.pipeline(cmds, onProgress = { d, _ -> onProgress((base + d).coerceAtMost(grand), grand) })
+                ok += res.ok; failed += res.failed
+            }
+            done += hotspot.size
+            onProgress(done.coerceAtMost(grand), grand)
         }
+
         if (um.isNotEmpty()) {
             val isV7 = userManagerVariant(con) == UmVariant.V7
-            // صفوف الصلاحيات الحالية مرة واحدة — إعادة الربط تحتاج حذف القديم.
-            // مجرد set group لا يغيّر الباقة الفعلية في v7
-            val existing = if (isV7) {
-                runCatching { con.printLight("/user-manager/user-profile", ".id,user") }.getOrDefault(emptyList())
-            } else emptyList()
-            um.forEach { u ->
-                runCatching {
-                    if (isV7) {
-                        con.execute("/user-manager/user/set .id=${u.routerId} group=${q(profile)}")
+            if (isV7) {
+                // صفوف الصلاحيات الحالية مرة واحدة — إعادة الربط تحتاج حذف القديم؛
+                // مجرد set group لا يغيّر الباقة الفعلية في v7
+                val existing = runCatching {
+                    con.printLight("/user-manager/user-profile", ".id,user")
+                }.getOrDefault(emptyList())
+                // المرحلة A (أفضل-جهد، متدفّقة وحاصرة): set group + حذف صفوف الباقة
+                // القديمة — تكتمل كلها قبل أي إضافة فلا يتداخل remove/add لنفس المستخدم
+                val phaseA = buildList {
+                    um.forEach { u ->
+                        if (u.routerId.isNotBlank()) add("/user-manager/user/set .id=${u.routerId} group=${q(profile)}")
                         existing.filter { it["user"] == u.username }.forEach { row ->
-                            row[".id"]?.let { con.execute("/user-manager/user-profile/remove .id=$it") }
+                            row[".id"]?.let { add("/user-manager/user-profile/remove .id=$it") }
                         }
-                        con.execute("/user-manager/user-profile/add user=${q(u.username)} profile=${q(profile)}")
-                    } else {
-                        con.execute(
-                            "/tool/user-manager/user/create-and-activate-profile customer=${q(umCustomer(con))} " +
-                                "numbers=${q(u.username)} profile=${q(profile)}"
-                        )
                     }
-                }.fold({ ok++ }, { failed++ })
-                onProgress(++done, cards.size)
+                }
+                if (phaseA.isNotEmpty()) con.pipeline(phaseA, window = 48)
+                // المرحلة B: ربط الباقة عبر user-profile — نجاحها هو نجاح الكرت في v7
+                val base = done
+                val addCmds = um.map { "/user-manager/user-profile/add user=${q(it.username)} profile=${q(profile)}" }
+                val res = con.pipeline(
+                    addCmds,
+                    onProgress = { d, _ -> onProgress((base + d).coerceAtMost(grand), grand) },
+                    treatErrorAsOk = { it.contains("already", true) },
+                    window = 48,
+                )
+                ok += res.ok; failed += res.failed
+            } else {
+                // v6: create-and-activate بنافذة ضيقة (٤) فلا نخنق قاعدة UM؛
+                // العميل يُحسب مرة واحدة لا لكل كرت (كان استعلاماً مكرراً لكل كرت)
+                val customer = umCustomer(con)
+                val base = done
+                val v6Cmds = um.map {
+                    "/tool/user-manager/user/create-and-activate-profile customer=${q(customer)} " +
+                        "numbers=${q(it.username)} profile=${q(profile)}"
+                }
+                val res = con.pipeline(
+                    v6Cmds,
+                    onProgress = { d, _ -> onProgress((base + d).coerceAtMost(grand), grand) },
+                    treatErrorAsOk = { it.contains("already", true) },
+                    window = 4,
+                )
+                ok += res.ok; failed += res.failed
             }
+            done += um.size
+            onProgress(done.coerceAtMost(grand), grand)
         }
         BulkResult(ok, failed)
     }
