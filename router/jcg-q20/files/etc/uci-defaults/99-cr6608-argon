@@ -1,0 +1,20 @@
+#!/bin/sh
+# Make Argon (Royal Obsidian) the default LuCI theme — but ONLY if its assets are
+# actually present in this image. An earlier revision set mediaurlbase unconditionally
+# while the argon files were absent on this board, which pointed LuCI at a nonexistent
+# /luci-static/argon and broke the LuCI UI. The theme is now shipped in the overlay
+# (www/luci-static/argon + usr/share/ucode/luci/template/themes/argon), so the guard
+# below succeeds here and still fails safe on any build that omits the assets.
+#
+# The SmartAP dashboard at / is unaffected either way — it is a standalone page and does
+# not use the LuCI theme. This only styles the LuCI pages behind the "OpenWrt" button.
+
+[ -f /www/luci-static/argon/css/cascade.css ] || exit 0
+[ -f /usr/share/ucode/luci/template/themes/argon/header.ut ] || exit 0
+
+uci -q batch <<UCI
+set luci.themes.Argon=/luci-static/argon
+set luci.main.mediaurlbase=/luci-static/argon
+commit luci
+UCI
+exit 0

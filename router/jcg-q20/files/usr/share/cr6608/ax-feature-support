@@ -1,0 +1,11 @@
+format=1
+board=jcg,q20
+wifi_stack=openwrt-upstream-mac80211-mt76-hostapd
+driver=mt7915e
+beamforming_su=enabled
+beamforming_dl_mu_mimo=enabled
+ofdma=enabled-driver-firmware-managed
+mu_mimo_dl=enabled
+mu_mimo_ul=not-advertised-by-driver
+runtime_gate=kernel-capability-plus-generated-hostapd-config
+airtime_proof=requires-compatible-clients-and-external-capture

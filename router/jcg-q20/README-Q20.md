@@ -24,7 +24,12 @@ byte-identical** — nothing here rebuilds it.
 - **2 LAN + WAN**: `br-lan` = lan1 + lan2; the gigabit WAN port stays free for router mode.
 - **LEDs**: red:status (boot/failsafe), blue:status (running) — the device-tree defaults,
   no spurious red light on a bridged AP.
-- **LuCI theme**: bootstrap (argon assets are not on this board).
+- **LuCI theme**: **Argon (Royal Obsidian)** — the same theme the CR6608 build ships, now
+  vendored into this overlay (`www/luci-static/argon` + the `themes/argon` ucode templates
+  + `/etc/config/argon`). `99-cr6608-argon` selects it at first boot, but only after
+  asserting the assets exist, so a build without them falls back to bootstrap instead of
+  pointing LuCI at a dead path. Bootstrap/-Dark/-Light stay installed and selectable.
+  The Smart AP dashboard at `/` is a standalone page and is unaffected by the LuCI theme.
 - The full **Smart AP dashboard**, MU-MIMO / beamforming / HE40+HE80, session auth, the
   login→Smart-AP redirect, and the five security/correctness fixes from the CR6608 audit.
 
