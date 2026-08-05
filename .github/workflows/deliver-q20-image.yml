@@ -4,18 +4,21 @@ name: Deliver Q20 image to a git branch
 # storage, which the assistant's egress policy blocks. This tiny job (no
 # compilation) downloads that artifact inside GitHub's network and pushes the
 # .bin to the `q20-delivery` branch, where it can be fetched over git.
+#
+# Triggered by pushing the `q20-deliver-trigger` branch (workflow_dispatch would
+# require this file on the default branch; a push trigger runs the pushed copy).
 
 on:
-  workflow_dispatch:
-    inputs:
-      run_id:
-        description: "Source workflow run id that produced the sysupgrade artifact"
-        required: true
-        default: "31044754321"
+  push:
+    branches:
+      - q20-deliver-trigger
 
 permissions:
   contents: write
   actions: read
+
+env:
+  SOURCE_RUN_ID: "31044754321"
 
 jobs:
   deliver:
@@ -27,7 +30,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: smartap-jcg-q20-sysupgrade-38dbm-fromsource
-          run-id: ${{ github.event.inputs.run_id }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: dl
 
@@ -45,5 +48,5 @@ jobs:
           cp "$BIN" dist/smartap-jcg-q20-sysupgrade-38dbm.bin
           sha256sum dist/smartap-jcg-q20-sysupgrade-38dbm.bin > dist/SHA256SUMS
           git add -f dist/smartap-jcg-q20-sysupgrade-38dbm.bin dist/SHA256SUMS
-          git commit -m "Deliver Q20 from-source sysupgrade image (source run ${{ github.event.inputs.run_id }})"
+          git commit -m "Deliver Q20 from-source sysupgrade image (source run ${SOURCE_RUN_ID})"
           git push -f origin q20-delivery
