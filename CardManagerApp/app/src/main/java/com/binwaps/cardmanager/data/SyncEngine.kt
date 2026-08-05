@@ -61,7 +61,11 @@ object SyncEngine {
                 if (r != null) {
                     val connected = MikrotikClient.connect(r)
                         .onSuccess { Store.setStatus(it); Store.setConnected(true) }
-                        .onFailure { Store.setConnected(false) }
+                        // لا نُعلن الانقطاع إن كانت عملية أمامية (رفع/جلب بضغطة)
+                        // تحتجز القفل: فشل الاكتساب هنا «مشغول» عابر لا انقطاع
+                        // فعلي. إعلانه كان يقلب المؤشر إلى «غير متصل» طوال رفعٍ
+                        // طويل مشروع ثم لا يعود حتى ينتهي الرفع.
+                        .onFailure { if (!MikrotikClient.foregroundActive()) Store.setConnected(false) }
                         .isSuccess
 
                     if (connected) {
