@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# Keep SSH/LuCI on a valid nine-field root record. Migrate only an empty,
+# locked, or known legacy Smart AP hash; preserve any other operator password.
+pinned_hash='$6$cr66sshd911cc74$WZZ5iq9xtlMFpdpUnTcWbiepXouW9aKbOK9IklLguXC4cH1IvbWlWQFdYwFP1T1vkmATIWo7ldWI4SiI0z102.'
+legacy_hash='$1$cr6608$hsZTRXI8QexbxMpGa9hxn/'
+cur="$(awk -F: '/^root:/{print $2; exit}' /etc/shadow 2>/dev/null)"
+next="$cur"
+
+case "$cur" in
+	""|"!"|"x"|"*"|"!*") next="$pinned_hash" ;;
+esac
+[ "$cur" = "$legacy_hash" ] && next="$pinned_hash"
+[ "$next" = "$cur" ] || logger -t cr6608 "migrated root SSH credential to the v24 default"
+
+# Normalize password aging so a malformed record cannot expire the account.
+days="$(( $(date +%s 2>/dev/null) / 86400 ))"
+[ "$days" -ge 10000 ] 2>/dev/null || days=20647
+tmp="/tmp/cr6608-shadow.$$"
+awk -F: -v OFS=: -v days="$days" -v hash="$next" '
+	$1 == "root" { print $1, hash, days, 0, 99999, 7, "", "", ""; found=1; next }
+	{ print }
+	END { if (!found) exit 1 }
+' /etc/shadow > "$tmp" && {
+	chmod 0600 "$tmp"
+	mv -f "$tmp" /etc/shadow
+}
+rm -f "$tmp"
+exit 0

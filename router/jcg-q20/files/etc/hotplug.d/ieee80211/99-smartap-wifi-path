@@ -1,0 +1,51 @@
+#!/bin/sh
+# SmartAP first-boot safety net for the wireless PCIe path.
+#
+# The shipped /etc/config/wireless pins each radio to the MT7621 pcie1 mt7915 path
+#   1e140000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0   (radio0, band0)
+#   ...0000:02:00.0+1                                    (radio1, band1)
+# which is the SAME enumeration the CR6608 uses, so on the JCG Q20 it binds directly.
+# This guard only matters if a future board revision enumerates the chip differently:
+# when a phy appears whose real device path does NOT match any configured radio, rewrite
+# the configured path to the phy's actual device path so the radio always comes up.
+#
+# Idempotent, correction-only: it does nothing on every normal boot (paths already match).
+
+[ "$ACTION" = "add" ] || exit 0
+[ -n "$PHYNBR" ] || exit 0
+
+phy="phy$PHYNBR"
+sysdev="$(readlink -f "/sys/class/ieee80211/$phy/device" 2>/dev/null)" || exit 0
+[ -n "$sysdev" ] || exit 0
+
+# OpenWrt's `path` is the device path with the /sys/devices/platform/ prefix stripped.
+real="$(printf '%s' "$sysdev" | sed -n 's#^/sys/devices/platform/##p')"
+[ -n "$real" ] || exit 0
+
+# Does any configured wifi-device already point at this phy (base path or +N band)?
+already=0
+for r in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	p="$(uci -q get "wireless.$r.path" 2>/dev/null)"
+	case "$p" in "$real"|"$real"+*) already=1 ;; esac
+done
+[ "$already" = "1" ] && exit 0
+
+# The phy that appeared is not referenced by any radio. Point the band-matched radio at
+# it. Band is read from the phy's own capabilities so 2.4/5 map to the right section.
+band=""
+if [ -d "/sys/class/ieee80211/$phy/device" ]; then
+	iw phy "$phy" info 2>/dev/null | grep -q "2412 MHz" && band="2g"
+	iw phy "$phy" info 2>/dev/null | grep -q "5180 MHz" && band="5g"
+fi
+[ -n "$band" ] || exit 0
+
+for r in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	[ "$(uci -q get "wireless.$r.band" 2>/dev/null)" = "$band" ] || continue
+	newpath="$real"
+	[ "$band" = "5g" ] && newpath="$real+1"
+	uci set "wireless.$r.path=$newpath"
+	uci commit wireless
+	logger -t smartap "corrected $r path -> $newpath for $phy" 2>/dev/null || true
+	break
+done
+exit 0

@@ -1,0 +1,133 @@
+
+# SmartAP Q20 RF baseline. The JCG Q20 uses the SAME radio topology as the CR6608:
+# one MT7915 DBDC chip behind MT7621 pcie1, so radio0 (2.4, band0) and radio1 (5, band1,
+# path +1) share the identical PCIe path below. Both radios request 38 dBm; the
+# driver-reported accepted value is shown separately - this is not an external RF
+# measurement and board/regulatory/firmware limits (the PA saturates ~26 dBm) remain in
+# force. A first-boot guard regenerates this config via `wifi config` if the path does
+# not bind, so a fresh unit always comes up even if enumeration differs.
+# Reliability-oriented additions:
+#   ldpc / tx_stbc / rx_stbc  -> stronger error-correction + antenna diversity: far clients
+#                                decode weak signals reliably (n/ac/ax all benefit)
+#   short_gi_*                -> short guard interval: higher rates for ac/n clients
+#   distance is omitted       -> netifd/driver default ACK timing; the invalid
+#                                legacy string "auto" is removed during apply
+#   he_spr_sr_control         -> advertise AX spatial-reuse support when the driver accepts it
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path '1e140000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'
+	option band '2g'
+	option channel '11'
+	option htmode 'HE40'
+	# 40 MHz on 2.4 GHz only holds if we skip the OBSS scan - otherwise hostapd
+	# falls back to 20 MHz as soon as it sees a neighbouring BSS. Set to 0 if you
+	# would rather be a good neighbour in a crowded band than have the width.
+	option noscan '1'
+	option country 'US'
+	option cell_density '0'
+	option antenna_gain '0'
+	option airtime_mode '1'
+	option he_su_beamformer '1'
+	option he_su_beamformee '1'
+	option he_mu_beamformer '1'
+	option he_bss_color '1'
+	option he_bss_color_enabled '1'
+	option he_spr_sr_control '3'
+	option he_spr_psr_enabled '0'
+	option he_spr_non_srg_obss_pd_max_offset '5'
+	option he_default_pe_duration '4'
+	option he_twt_required '0'
+	option ldpc '1'
+	option tx_stbc '1'
+	option rx_stbc '1'
+	option short_gi_20 '1'
+	option short_gi_40 '1'
+	option disabled '0'
+	option txpower '38'
+	# 802.11b CCK stays OFF. It was tried on 2.4 GHz to stretch the coverage edge,
+	# but on this unit it dragged beacons and management frames down to 1 Mbit/s
+	# and the link was seen sitting at 6 Mbit/s. The lowest OFDM rate reaches far
+	# enough; the airtime it costs is not worth the last couple of dB.
+	option legacy_rates '0'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path '1e140000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0+1'
+	option band '5g'
+	option channel '36'
+	option htmode 'HE80'
+	option country 'US'
+	option cell_density '0'
+	option antenna_gain '0'
+	option he_su_beamformer '1'
+	option he_su_beamformee '1'
+	option he_mu_beamformer '1'
+	option mu_beamformer '1'
+	option su_beamformer '1'
+	option su_beamformee '1'
+	option he_bss_color '1'
+	option he_bss_color_enabled '1'
+	option he_spr_sr_control '3'
+	option he_spr_psr_enabled '0'
+	option he_spr_non_srg_obss_pd_max_offset '5'
+	option he_default_pe_duration '4'
+	option he_twt_required '0'
+	option ldpc '1'
+	option tx_stbc '1'
+	option rx_stbc '1'
+	option short_gi_80 '1'
+	option short_gi_40 '1'
+	option short_gi_20 '1'
+	option airtime_mode '1'
+	option disabled '0'
+	option txpower '38'
+	option legacy_rates '0'
+
+config wifi-iface 'wifinet0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'Smart ap 2.4G'
+	option encryption 'none'
+	option mbo '1'
+	option ieee80211k '1'
+	# 802.11v is these two keys, not an 'ieee80211v' switch - that option does not
+	# exist in the schema and was doing nothing.
+	option bss_transition '1'
+	option wnm_sleep_mode '1'
+	option disassoc_low_ack '0'
+	option multicast_to_unicast '1'
+	option dtim_period '2'
+	option mcast_rate '6000'
+	# Cosmetic only: hostapd.sh writes wmm_enabled=1 unconditionally, so WMM/WME
+	# is always active. Kept so the LuCI checkbox reflects reality.
+	option wmm '1'
+	option isolate '0'
+	option uapsd '1'
+	option maxassoc '200'
+	option max_inactivity '3600'
+
+config wifi-iface 'wifinet1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'Smart ap 5G'
+	option encryption 'none'
+	option mbo '1'
+	option ieee80211k '1'
+	# 802.11v is these two keys, not an 'ieee80211v' switch - that option does not
+	# exist in the schema and was doing nothing.
+	option bss_transition '1'
+	option wnm_sleep_mode '1'
+	option disassoc_low_ack '0'
+	option multicast_to_unicast '1'
+	option dtim_period '2'
+	option mcast_rate '6000'
+	# Cosmetic only: hostapd.sh writes wmm_enabled=1 unconditionally, so WMM/WME
+	# is always active. Kept so the LuCI checkbox reflects reality.
+	option wmm '1'
+	option isolate '0'
+
+	option uapsd '1'
+	option maxassoc '200'
+	option max_inactivity '3600'

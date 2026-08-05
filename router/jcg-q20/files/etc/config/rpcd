@@ -1,0 +1,11 @@
+config rpcd
+	option socket /var/run/ubus/ubus.sock
+	option timeout 30
+
+config login
+	option username 'root'
+	# Dedicated web-interface credential. Keep /etc/shadow independent so SSH and
+	# console continue to use the operator's existing root password.
+	option password '$6$CR6608SmartAP$fP5546rp/hFS4daWksthh9.6.4brhcrcj055MoBVja331Cq32KOZyhedRjZ1q80yBtxpsUpwCbv2fWKhpH1LS.'
+	list read '*'
+	list write '*'

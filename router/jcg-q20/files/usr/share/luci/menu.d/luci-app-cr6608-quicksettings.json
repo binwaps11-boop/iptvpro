@@ -1,0 +1,14 @@
+{
+	"admin/initsetup": {
+		"title": "الإعدادات السريعة",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "cr6608/quicksettings"
+		},
+		"depends": {
+			"acl": [ "luci-app-cr6608-quicksettings" ],
+			"uci": { "cr6608quick": true }
+		}
+	}
+}

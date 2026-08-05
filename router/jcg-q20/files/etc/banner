@@ -1,0 +1,7 @@
+
+ =========================================================
+  SmartAP Q20   |  JCG Q20  (MT7621 + MT7915, DSA)
+  base OpenWrt 25.12.5  r33051-f5dae5ece4
+  RF: both radios request 38 dBm - custom 38.00 dBm
+      regulatory database (all 182 countries, 2.4 + 5 GHz)
+ =========================================================

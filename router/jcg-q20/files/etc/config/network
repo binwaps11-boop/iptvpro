@@ -1,0 +1,47 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option packet_steering '2'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	# JCG Q20 has two DSA LAN ports (switch port@1 = lan1, port@4 = lan2). The third
+	# gigabit jack is a dedicated WAN (gmac1) and is intentionally NOT in this bridge.
+	list ports 'lan1'
+	list ports 'lan2'
+	# Both DSA LAN ports forward immediately by default. STP remains available as an
+	# explicit loop-protection option for installations that need it.
+	option stp '0'
+	option igmp_snooping '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.1'
+	option netmask '255.255.255.0'
+	option delegate '0'
+	option ipv6 '0'
+
+# NOTE: there is deliberately NO DHCP client interface here. The device never requests
+# an address from anywhere and never hands one out. The physical WAN port is reserved for
+# an explicitly configured PPPoE client and is not part of the default LAN bridge.
+
+# Wi-Fi rescue IP (mirrors the reference source): 221.221.221.221 always answers on the
+# bridge — connect to ANY of the device's Wi-Fi networks, set a static IP like
+# 221.221.221.100/24 on your phone/laptop, and open http://221.221.221.221/ to reach the
+# programming page — no matter how the unit is programmed (VLAN/mesh/AP).
+config interface 'wlanrescue'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '221.221.221.221'
+	option netmask '255.255.255.0'
+	option ipv6 '0'
+
+# A clean install and factory reset start at 192.168.1.1. Quick Settings replaces
+# network.lan.ipaddr with the selected management address and creates no second alias.

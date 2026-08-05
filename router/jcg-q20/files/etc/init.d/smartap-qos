@@ -1,0 +1,4 @@
+#!/bin/sh /etc/rc.common
+# Re-apply saved per-client speed limits at boot.
+START=99
+start() { /usr/sbin/smartap-qos-apply >/dev/null 2>&1; }

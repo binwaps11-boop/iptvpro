@@ -1,0 +1,27 @@
+#!/bin/sh
+# Produce the acceptance-table skeleton from the channels exposed by iw.
+
+country="$(iw reg get 2>/dev/null | awk '/^country / { sub(/:/, "", $2); print $2; exit }')"
+[ -n "$country" ] || country=unknown
+
+echo "band,channel,frequency,bandwidth,country,dfs_status,requested_power_dbm,driver_effective_power_dbm,mcu_power,rf_measured_power,test_result"
+iw phy 2>/dev/null |
+awk -v country="$country" '
+	/Band 1:/ { band = "2.4GHz" }
+	/Band 2:/ { band = "5GHz" }
+	/ MHz \[[0-9]+\]/ {
+		line = $0
+		if (line ~ /disabled|no IR/) next
+		freq = $2
+		channel = line
+		sub(/^.*\[/, "", channel)
+		sub(/\].*$/, "", channel)
+		dfs = line ~ /radar detection|DFS/ ? "DFS" : "non-DFS"
+		max = "unknown"
+		if (match(line, /\([0-9]+([.][0-9]+)? dBm\)/)) {
+			max = substr(line, RSTART + 1, RLENGTH - 6)
+		}
+		printf "%s,%s,%s,NOT_TESTED_AFTER_GATE_FAILURE,%s,%s,38,driver-max-%s,NOT_READ_BACK_BY_FIRMWARE,NOT_MEASURED,FAIL\n",
+		       band, channel, freq, country, dfs, max
+	}
+'

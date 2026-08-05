@@ -1,0 +1,5 @@
+# SmartAP Q20: the 38 dBm change is a binary patch inside mt7915e.ko itself
+# (mt7915_eeprom_get_target_power returns 76 = 38.0 dBm), NOT a module parameter.
+# The stock Q20 driver has no cr6608_rf_38dbm option, so passing one would make
+# insmod fail and take both radios down. Load the module plain.
+mt7915e
