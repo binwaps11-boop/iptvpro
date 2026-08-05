@@ -208,10 +208,18 @@ class MainActivity : ComponentActivity() {
         com.binwaps.cardmanager.render.CardRenderer.init(this)
         com.binwaps.cardmanager.data.Backend.init(this)
         AdminStore.init(this)
+        AdminApi.init(this)
         handleLink(intent)
         setContent {
             CardManagerTheme {
-                AdminScreen(incoming = incoming.value, onConsumed = { incoming.value = null })
+                // اللوحة الموصولة بخادم التراخيص هي المصدر المركزي الواحد —
+                // ترى كل المشتركين والطلبات والأرقام والراوترات من قاعدة واحدة.
+                // الشاشة المحلية القديمة (AdminScreen) لم تعد المسار الافتراضي.
+                if (AdminApi.configured) {
+                    ServerAdminScreen()
+                } else {
+                    AdminScreen(incoming = incoming.value, onConsumed = { incoming.value = null })
+                }
             }
         }
     }

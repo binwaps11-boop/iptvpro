@@ -148,6 +148,16 @@ function check(name, cond, extra = '') {
   r = await post('/api/register', { email: 'لا-بريد', name: 'اسم', phone: '777111222', device: 'XX00-XX00', nonce: crypto.randomUUID() })
   check('بريد غير صالح مرفوض', r.code === 400)
 
+  // رفع الراوترات: المشترك يرفع ملخّص راوتراته فيراها الأدمن بلا كلمات مرور
+  n = crypto.randomUUID()
+  await post('/api/register', { email: 'router-user@gmail.com', name: 'صاحب راوتر', phone: '777333444', device: 'RT01-RT01', nonce: n })
+  r = await post('/api/routers', { email: 'router-user@gmail.com', device: 'RT01-RT01', routers: [{ name: 'راوتري', host: '192.168.88.1', password: 'SECRET' }] })
+  check('رفع الراوترات ينجح', r.code === 200 && r.json.ok === true)
+  const accs = (await get('/api/admin/accounts', { 'x-admin-token': ADMIN })).json.accounts
+  const ru = accs.find(a => a.id === 'router-user@gmail.com')
+  check('الأدمن يرى راوتر المشترك', !!ru && Array.isArray(ru.routers) && ru.routers[0].name === 'راوتري')
+  check('كلمة مرور الراوتر لا تُخزَّن على الخادم', !!ru && ru.routers[0].password === undefined)
+
   // 13) لوحة الأدمن تُخدَم من الخادم نفسه
   const page = await fetch(BASE + '/')
   const html = await page.text()

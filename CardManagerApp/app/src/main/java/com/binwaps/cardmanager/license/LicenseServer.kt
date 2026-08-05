@@ -236,6 +236,18 @@ object LicenseServer {
         }.onFailure { if (it !is Rejected) lastFailAt = System.currentTimeMillis() }
     }
 
+    /** يرفع ملخّص الراوترات (اسم + عنوان، بلا كلمات مرور) فيراها الأدمن */
+    suspend fun pushRouters(
+        email: String, device: String, routers: List<Pair<String, String>>,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val arr = org.json.JSONArray()
+            routers.forEach { arr.put(JSONObject().put("name", it.first).put("host", it.second)) }
+            request("/api/routers", JSONObject().put("email", email).put("device", device).put("routers", arr))
+            Unit
+        }
+    }
+
     suspend fun requestLicense(
         email: String, device: String, renewal: Boolean, note: String = "",
     ): Result<String> = withContext(Dispatchers.IO) {

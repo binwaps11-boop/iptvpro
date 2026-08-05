@@ -290,10 +290,23 @@ object LicenseManager {
                 onFailure = { e ->
                     // رفض صريح: قرار الخادم نافذ ولا تجربة محلية تلتفّ عليه
                     if (e is LicenseServer.Rejected) return e.message ?: "تعذّر التسجيل"
+                    // تعذّر الوصول (انقطاع/خادم متوقف): **لا تجربة محلية** — لأنها
+                    // تُمسح بإعادة التثبيت فتتجدد بلا حدّ. التفعيل أول مرة يتطلب
+                    // اتصالاً بالخادم الذي يمنع التجربة الثانية لكل جهاز. بعد
+                    // التفعيل الأول تعمل مهلة السماح ٧٢ ساعة بلا إنترنت.
+                    return "يتطلب التفعيل لأول مرة اتصالاً بالإنترنت — " +
+                        "تأكد من الشبكة وأعد المحاولة (${e.message ?: "تعذّر الوصول للخادم"})"
                 },
             )
         }
+        // لا خادم مُهيّأ إطلاقاً — الوضع المحلي القديم (بلا منع تجديد)
         return register(email, name, phone)
+    }
+
+    /** يرفع ملخّص راوترات المستخدم للخادم فيراها الأدمن (بلا كلمات مرور) */
+    suspend fun pushRouters(routers: List<Pair<String, String>>) {
+        if (!LicenseServer.configured || !isRegistered()) return
+        LicenseServer.pushRouters(customerEmail(), deviceCode(), routers)
     }
 
     /** إرسال طلب ترخيص/تجديد إلى الخادم */

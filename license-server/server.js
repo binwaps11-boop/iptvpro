@@ -341,6 +341,26 @@ const routes = {
     return { code: 200, json: { ok: true, message: 'وصل طلبك — بانتظار موافقة مزوّد الخدمة' } }
   },
 
+  /**
+   * المشترك يرفع **ملخّص** راوتراته (اسم + عنوان فقط، بلا كلمات مرور) فيراها
+   * الأدمن ضمن الحساب. لا نخزّن كلمات مرور الراوتر إطلاقاً على الخادم.
+   */
+  'POST /api/routers': (body) => {
+    const device = String(body.device || '').trim().toUpperCase()
+    const email = String(body.email || '').trim().toLowerCase()
+    const id = accountId(email, device)
+    const acc = db.accounts[id]
+    if (!acc) return { code: 404, json: { error: 'الحساب غير مسجّل' } }
+    const routers = Array.isArray(body.routers) ? body.routers.slice(0, 20).map((r) => ({
+      name: String(r.name || '').slice(0, 60),
+      host: String(r.host || '').slice(0, 80),
+    })) : []
+    acc.routers = routers
+    acc.lastSeen = now()
+    saveDb()
+    return { code: 200, json: { ok: true } }
+  },
+
   // ===== مسارات الأدمن (تتطلب رمز الأدمن) =====
 
   'GET /api/admin/accounts': () => ({

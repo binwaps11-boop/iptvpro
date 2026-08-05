@@ -139,6 +139,8 @@ function render(accounts){
       '<h3>' + esc(a.name || a.email) + '</h3>' +
       '<div class="meta">' + esc(a.email) + '</div>' +
       '<div class="meta">جوال: ' + esc(a.phone) + ' · جهاز: ' + esc(a.device) + '</div>' +
+      ((a.routers && a.routers.length) ? '<div class="meta">راوترات: ' +
+        esc(a.routers.map(function(x){ return x.name || x.host }).join('، ')) + '</div>' : '') +
       '<div style="margin-top:8px"><span class="pill ' + cls + '">' + esc(label + left) + '</span>' +
         (a.pending ? ' <span class="pill p-trial">طلب ' + (a.pending.renewal ? 'تجديد' : 'جديد') + '</span>' : '') +
       '</div>' +

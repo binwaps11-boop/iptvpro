@@ -123,6 +123,12 @@ class MainActivity : ComponentActivity() {
                 androidx.compose.runtime.LaunchedEffect(Unit) {
                     while (true) {
                         LicenseManager.syncOnline()
+                        // نرفع ملخّص الراوترات (اسم + عنوان فقط) فيراها الأدمن
+                        // في لوحته المركزية — بلا كلمات مرور
+                        runCatching {
+                            val routers = Store.routers.value.map { it.name to it.host }
+                            if (routers.isNotEmpty()) LicenseManager.pushRouters(routers)
+                        }
                         kotlinx.coroutines.delay(6 * 3600_000L)
                     }
                 }
