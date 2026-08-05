@@ -11,9 +11,9 @@ import com.binwaps.cardmanager.model.UploadTarget
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.legrange.mikrotik.ApiConnection
 
@@ -136,8 +136,8 @@ object MikrotikClient {
      */
     internal suspend fun <T> onRouter(
         r: RouterProfile?,
-        // عملية بدأها المستخدم (رفع/توليد): تُعلِّم نفسها أمامية فور استدعائها —
-        // قبل انتظار القفل — فتتنحّى المزامنة الدورية وتفسح لها القفل فوراً
+        // عملية بدأها المستخدم (رفع/توليد/جلب بضغطة): تُعلِّم نفسها أمامية فور
+        // استدعائها — قبل انتظار القفل — فتتنحّى المزامنة الدورية وتفسح القفل
         foreground: Boolean = false,
         block: (ApiConnection) -> T,
     ): Result<T> =
@@ -146,7 +146,18 @@ object MikrotikClient {
             if (foreground) foregroundOps.incrementAndGet()
             try {
                 runCatching {
-                    sessionLock.withLock {
+                    // اكتساب القفل بسقف زمني بدل انتظار لا نهائي: دورة المزامنة قد
+                    // تحتجز القفل وهي تجلب كل الكروت على راوتر كبير أو بعيد، فيبقى
+                    // «جاري الجلب» عالقاً بلا نهاية عند المستخدم. نمنح مهلة معقولة
+                    // (أطول للعمليات الأمامية) ثم نرمي خطأً عربياً مفهوماً. لا نلمس
+                    // المقبس أبداً قبل امتلاك القفل، فلا خطر تداخل على الجلسة.
+                    val acquireBudgetMs = if (foreground) 40_000L else 15_000L
+                    if (!acquireSessionWithin(acquireBudgetMs)) {
+                        throw RouterLogicException(
+                            "الراوتر مشغول بعملية أخرى (مزامنة أو رفع) — أعد المحاولة بعد ثوانٍ",
+                        )
+                    }
+                    try {
                         try {
                             block(obtain(r))
                         } catch (e: Exception) {
@@ -155,12 +166,29 @@ object MikrotikClient {
                             invalidateSession()
                             block(obtain(r))
                         }
+                    } finally {
+                        sessionLock.unlock()
                     }
                 }.recoverCatching { throw Exception(arabicError(it), it) }
             } finally {
                 if (foreground) foregroundOps.decrementAndGet()
             }
         }
+
+    /**
+     * يحاول امتلاك قفل الجلسة خلال ميزانية زمنية. يعود true إن نجح (وعندها على
+     * المستدعي فكّه)، أو false إن نفدت المهلة والقفل ما زال مشغولاً. آمن تماماً:
+     * لا يمسّ الجلسة إلا بعد الامتلاك.
+     */
+    private suspend fun acquireSessionWithin(budgetMs: Long): Boolean {
+        if (sessionLock.tryLock()) return true
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < budgetMs) {
+            delay(150)
+            if (sessionLock.tryLock()) return true
+        }
+        return false
+    }
 
     private val clientScope =
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
@@ -1096,7 +1124,7 @@ object MikrotikClient {
      * جداول الباقات صغيرة فتصل فوراً، وعدّ كروت كل باقة يتم على الراوتر
      * نفسه بـ count-only — لا يُنقل أي مستخدم عبر الشبكة إطلاقاً.
      */
-    suspend fun fetchProfiles(r: RouterProfile?): Result<List<HotspotProfile>> = onRouter(r) { con ->
+    suspend fun fetchProfiles(r: RouterProfile?, foreground: Boolean = false): Result<List<HotspotProfile>> = onRouter(r, foreground = foreground) { con ->
         // إن فشل count-only (راوتر قديم جداً) نجلب قائمة الحقول المختصرة مرة واحدة كخطة بديلة
         var hotspotUsersFallback: List<Map<String, String>>? = null
         fun hotspotCount(name: String): Int {

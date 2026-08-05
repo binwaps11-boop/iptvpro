@@ -75,7 +75,7 @@ fun ProfilesScreen() {
     fun refresh() {
         busy = true; message = null
         scope.launch {
-            MikrotikClient.fetchProfiles(Store.activeRouter())
+            MikrotikClient.fetchProfiles(Store.activeRouter(), foreground = true)
                 .onSuccess {
                     Store.setProfiles(it)
                     val hs = it.count { p -> p.source == CardSource.HOTSPOT }

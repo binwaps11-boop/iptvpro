@@ -234,7 +234,7 @@ fun ExpressScreen() {
             ) {
                 loadingProfiles = true; profilesError = null
                 scope.launch {
-                    MikrotikClient.fetchProfiles(Store.activeRouter())
+                    MikrotikClient.fetchProfiles(Store.activeRouter(), foreground = true)
                         .onSuccess { list ->
                             Store.setProfiles(list)
                             list.firstOrNull()?.let { p ->
