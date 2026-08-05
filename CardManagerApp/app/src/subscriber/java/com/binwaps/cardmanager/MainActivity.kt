@@ -34,7 +34,6 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.binwaps.cardmanager.data.Store
 import com.binwaps.cardmanager.license.LicenseManager
-import com.binwaps.cardmanager.license.LicenseState
 import com.binwaps.cardmanager.ui.screens.ConnectScreen
 import com.binwaps.cardmanager.ui.screens.DashboardScreen
 import com.binwaps.cardmanager.ui.screens.ExpressScreen
@@ -98,11 +97,12 @@ class MainActivity : ComponentActivity() {
                 val navController = rememberNavController()
                 val backStack by navController.currentBackStackEntryAsState()
                 val currentRoute = backStack?.destination?.route.orEmpty()
-                val licenseState by LicenseManager.state.collectAsState()
 
-                val blocked = licenseState is LicenseState.TrialEnded || licenseState is LicenseState.Expired ||
-                    licenseState is LicenseState.NeedsRegister || licenseState is LicenseState.Suspended ||
-                    licenseState is LicenseState.ClockInvalid
+                // الترخيص لا يحجب التطبيق أبداً: يفتح مباشرةً ويعمل بالكامل
+                // (اتصال/جلب/رفع/طباعة) دون أي اعتماد على خادم خارجي. شاشة
+                // الترخيص تبقى متاحة اختيارياً من الإعدادات لمن يريد التفعيل
+                // أونلاين لاحقاً، لكنها لم تعد بوابة حجب. هذا يزيل العائق الذي
+                // كان يقفل المستخدم خارج تطبيقه عندما يتعذّر الوصول للخادم.
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً
@@ -112,14 +112,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // القفل نافذ لحظياً على تطبيق مفتوح: عند إيقاف عن بعد أو انتهاء
-                // أثناء الجلسة تتوقف المزامنة فوراً ولا يبقى شيء يعمل بالخلفية
-                androidx.compose.runtime.LaunchedEffect(blocked) {
-                    if (blocked) com.binwaps.cardmanager.data.SyncEngine.stop()
-                }
-
-                // نبضة التحقق الأونلاين: عند الفتح ثم كل ٦ ساعات ما دام مفتوحاً.
-                // بدونها يبقى قرار الخادم (إيقاف أو انتهاء) بلا أثر حتى إعادة التشغيل.
+                // نبضة تحقق/رفع اختيارية: تعمل فقط عند ضبط خادم تراخيص. بلا
+                // خادم مضبوط (الوضع الافتراضي) لا تفعل شيئاً ولا تحجب أي شيء.
                 androidx.compose.runtime.LaunchedEffect(Unit) {
                     while (true) {
                         LicenseManager.syncOnline()
@@ -131,21 +125,6 @@ class MainActivity : ComponentActivity() {
                         }
                         kotlinx.coroutines.delay(6 * 3600_000L)
                     }
-                }
-
-                if (blocked) {
-                    // بوابة بنيوية لا تنقّلية: عند القفل لا تُبنى شجرة التطبيق
-                    // أصلاً، فلا مكدس خلفي يُرجع إليه ولا سباق مع إعادة بناء
-                    // الغراف. الاعتماد على navigate/popUpTo كان يترك اللوحة تحت
-                    // شاشة الترخيص فتفلت بضغطة «رجوع» واحدة.
-                    LicenseScreen(
-                        blocking = true,
-                        incomingKey = incomingKey.value,
-                        onIncomingConsumed = { incomingKey.value = null },
-                        onActivated = {},
-                        onBack = null,
-                    )
-                    return@CardManagerTheme
                 }
 
                 Scaffold(
