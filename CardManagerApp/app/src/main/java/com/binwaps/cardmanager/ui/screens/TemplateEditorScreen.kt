@@ -118,6 +118,10 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
         }
     }
 
+    // منتقي اللون الحرّ: يحمل اللون الابتدائي ودالة التطبيق على الهدف المختار
+    var pickerInit by remember { mutableStateOf(0xFF000000L) }
+    var pickerCb by remember { mutableStateOf<((Long) -> Unit)?>(null) }
+
     fun updateField(f: CardField) {
         template = template.copy(fields = template.fields.map { if (it.id == f.id) f else it })
     }
@@ -358,6 +362,9 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                         textColors.forEach { c ->
                             ColorDot(c, selected.color == c) { updateField(selected.copy(color = c)) }
                         }
+                        com.binwaps.cardmanager.ui.components.CustomColorDot {
+                            pickerInit = selected.color; pickerCb = { updateField(selected.copy(color = it)) }
+                        }
                     }
                 }
             }
@@ -421,6 +428,9 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 cardColors.forEach { c ->
                     ColorDot(c, template.backgroundColor == c) { template = template.copy(backgroundColor = c) }
                 }
+                com.binwaps.cardmanager.ui.components.CustomColorDot {
+                    pickerInit = template.backgroundColor; pickerCb = { template = template.copy(backgroundColor = it) }
+                }
             }
 
             Spacer(Modifier.height(11.dp))
@@ -429,6 +439,9 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 textColors.forEach { c ->
                     ColorDot(c, template.borderColor == c) { template = template.copy(borderColor = c) }
+                }
+                com.binwaps.cardmanager.ui.components.CustomColorDot {
+                    pickerInit = template.borderColor; pickerCb = { template = template.copy(borderColor = it) }
                 }
             }
 
@@ -453,6 +466,9 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     textColors.forEach { c ->
                         ColorDot(c, template.gridColor == c) { template = template.copy(gridColor = c) }
+                    }
+                    com.binwaps.cardmanager.ui.components.CustomColorDot {
+                        pickerInit = template.gridColor; pickerCb = { template = template.copy(gridColor = it) }
                     }
                 }
             }
@@ -512,6 +528,12 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             }
         }
         Spacer(Modifier.height(30.dp))
+    }
+
+    pickerCb?.let { cb ->
+        com.binwaps.cardmanager.ui.components.ColorPickerDialog(
+            pickerInit, onPick = cb, onDismiss = { pickerCb = null },
+        )
     }
 
     if (showAddField) {
@@ -588,6 +610,15 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                 )
             }
         }
+    }
+
+    // منتقي اللون الحرّ لخلية الجدول
+    var cellPickerInit by remember { mutableStateOf(0xFF000000L) }
+    var cellPickerCb by remember { mutableStateOf<((Long) -> Unit)?>(null) }
+    cellPickerCb?.let { cb ->
+        com.binwaps.cardmanager.ui.components.ColorPickerDialog(
+            cellPickerInit, onPick = cb, onDismiss = { cellPickerCb = null },
+        )
     }
 
     GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.3f)) {
@@ -738,6 +769,9 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             textColors.forEach { c ->
                                 ColorDot(c, cell.color == c) { updateCell(row.id, cell.copy(color = c)) }
+                            }
+                            com.binwaps.cardmanager.ui.components.CustomColorDot {
+                                cellPickerInit = cell.color; cellPickerCb = { updateCell(row.id, cell.copy(color = it)) }
                             }
                         }
                     }
