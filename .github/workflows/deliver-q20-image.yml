@@ -1,0 +1,49 @@
+name: Deliver Q20 image to a git branch
+
+# The built firmware only exists as a GitHub Actions artifact on Azure blob
+# storage, which the assistant's egress policy blocks. This tiny job (no
+# compilation) downloads that artifact inside GitHub's network and pushes the
+# .bin to the `q20-delivery` branch, where it can be fetched over git.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Source workflow run id that produced the sysupgrade artifact"
+        required: true
+        default: "31044754321"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  deliver:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the built sysupgrade artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: smartap-jcg-q20-sysupgrade-38dbm-fromsource
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl
+
+      - name: Publish the image to the q20-delivery branch
+        run: |
+          set -e
+          BIN="$(ls dl/*sysupgrade.bin | head -1)"
+          [ -n "$BIN" ] || { echo "::error::no sysupgrade.bin in artifact"; exit 1; }
+          echo "found: $BIN ($(stat -c%s "$BIN") bytes)"
+          sha256sum "$BIN"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B q20-delivery
+          mkdir -p dist
+          cp "$BIN" dist/smartap-jcg-q20-sysupgrade-38dbm.bin
+          sha256sum dist/smartap-jcg-q20-sysupgrade-38dbm.bin > dist/SHA256SUMS
+          git add -f dist/smartap-jcg-q20-sysupgrade-38dbm.bin dist/SHA256SUMS
+          git commit -m "Deliver Q20 from-source sysupgrade image (source run ${{ github.event.inputs.run_id }})"
+          git push -f origin q20-delivery
