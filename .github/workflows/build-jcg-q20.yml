@@ -26,7 +26,7 @@ on:
       openwrt_ref:
         description: 'OpenWrt git ref to build (branch or tag that has jcg_q20 on kernel 6.12)'
         required: true
-        default: 'main'
+        default: 'v25.12.5'
 
 permissions:
   contents: read
@@ -92,6 +92,10 @@ jobs:
           cd ow
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/router/jcg-q20/files/." files/
+          # The overlay's binary-patched mt7915e.ko belongs ONLY to the no-toolchain
+          # overlay build. Here the driver is compiled from patched SOURCE — the stale
+          # .ko must not override it (it lacks the proof marker and would fail the gate).
+          rm -rf files/lib/modules
           # bootstrap-dark/light must remain symlinks -> bootstrap
           for t in bootstrap-dark bootstrap-light; do
             d="files/usr/share/ucode/luci/template/themes/$t"
