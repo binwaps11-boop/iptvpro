@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -576,6 +577,16 @@ fun UsersScreen() {
                                     )
                                 }
                                 Text(u.source.labelAr, fontSize = 9.sp, color = TextLow, modifier = Modifier.padding(top = 3.dp))
+                            }
+                            IconButton(onClick = {
+                                val tpl = Store.defaultTemplateOrFirst()
+                                if (tpl != null) {
+                                    com.binwaps.cardmanager.print.PdfExporter.shareCardImage(context, tpl, u, settings)
+                                } else {
+                                    android.widget.Toast.makeText(context, "أنشئ قالباً أولاً", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Icon(Icons.Filled.Share, "مشاركة كصورة", tint = Lime, modifier = Modifier.size(17.dp))
                             }
                             IconButton(onClick = { editCard = u }) {
                                 Icon(Icons.Filled.Edit, "تعديل", tint = Neon, modifier = Modifier.size(17.dp))

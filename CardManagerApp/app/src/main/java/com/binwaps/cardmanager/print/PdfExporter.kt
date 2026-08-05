@@ -408,6 +408,38 @@ object PdfExporter {
         name
     }.getOrNull()
 
+    /**
+     * يرسم كرتاً واحداً كصورة PNG ويشاركه (واتساب/أي تطبيق) — لبيع كرت مفرد
+     * للزبون مباشرة بلا طباعة. يستعمل نفس محرّك الرسم فيخرج مطابقاً للطباعة.
+     */
+    fun shareCardImage(context: Context, template: CardTemplate, user: UserEntry, settings: AppSettings) {
+        runCatching {
+            val now = java.util.Date()
+            val bmp = CardRenderer.renderSafe(
+                template, user, settings, 1000,
+                RenderInfo(
+                    pageNumber = 1, cardNumber = 1, printNo = settings.printCounter,
+                    dateText = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(now),
+                    timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now),
+                ),
+            )
+            val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+            val file = File(dir, "card_${user.username}_${System.currentTimeMillis()}.png")
+            FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            context.startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    "مشاركة الكرت",
+                ),
+            )
+        }
+    }
+
     /** مشاركة عدة ملفات دفعة واحدة — تظهر عند تقسيم الدفعات الضخمة */
     fun shareAll(context: Context, files: List<File>) {
         if (files.isEmpty()) return
