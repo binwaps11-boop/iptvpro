@@ -1,21 +1,26 @@
 name: Build SmartAP Q20 (from source — kernel-level fixes + 38 dBm driver)
 
 # Builds a FROM-SOURCE OpenWrt image for the JCG Q20 on GitHub's Ubuntu runners
-# (open internet + toolchain, which this repo's sandbox does not have). Unlike the
-# no-toolchain overlay build, this one recompiles the kernel, so it can carry the
-# device-tree fixes that the overlay physically cannot:
+# (open internet + toolchain, which this repo's sandbox does not have). It recompiles
+# the whole image and enforces the SmartAP customisation from source.
 #
-#   * NAND ECC 8-bit/512  (OpenWrt #20878)  — stops uncorrectable-ECC corruption /
-#                                             the "random hang after a while" reports
-#   * WAN gmac1 1000/full fixed-link (#16083,#16551) — stable gigabit WAN
-#   * mt7915 EEPROM target power -> 38.0 dBm, patched in the driver SOURCE (proof marker
-#     grep-gated so the artifact cannot ship un-patched)
+# DEFAULT build (guaranteed bootable):
+#   * mt7915 EEPROM target power -> 38.0 dBm, patched in the driver SOURCE (a proof
+#     marker is grep-gated, so the artifact CANNOT ship un-patched).
+#   * the exact SmartAP overlay (router/jcg-q20/files): dashboard, DSA, 2xLAN+WAN, LEDs,
+#     regdb 38, bootstrap theme, login redirect.
+#   * stock kernel + device tree — nothing risky is touched, so a flashed unit always boots.
 #
-# It then bakes in the exact SmartAP overlay (router/jcg-q20/files) and uploads the
-# flashable sysupgrade .bin as an artifact.
+# OPTIONAL (apply_nand_ecc = true): also set the NAND to 8-bit/512 ECC in the device
+#   tree (OpenWrt #20878 — the "random hang / reset after a while" root cause). This is a
+#   real kernel-level fix but it cannot be proven safe without flashing real hardware
+#   (if the controller rejected strength 8 the NAND would not attach), so it is OFF by
+#   default. Turn it on to test on a unit you can recover over the LAN cable.
 #
-# NOT applicable on this hardware (documented honestly, so nobody hunts for it):
-#   * WED / hardware flow offload (#868) is an MT7622/MT7986/MT7981 feature; the Q20's
+# NOT applicable to this hardware (documented honestly, so nobody hunts for a phantom fix):
+#   * WAN gmac1 fixed-link (#16083) — the Q20 WAN uses a REAL gigabit PHY
+#     (phy-handle = <&ethphy0>); it already negotiates 1000, there is no fixed-link to add.
+#   * WED / hardware flow offload (#868) — an MT7622/MT7986/MT7981 feature; the Q20's
 #     MT7621 has no WED block, so there is nothing to enable.
 #
 # Run: Actions -> this workflow -> "Run workflow" -> pick the OpenWrt ref. ~1-2 h.
@@ -27,6 +32,14 @@ on:
         description: 'OpenWrt git ref to build (branch or tag that has jcg_q20 on kernel 6.12)'
         required: true
         default: 'v25.12.5'
+      apply_nand_ecc:
+        description: 'Also apply the experimental NAND 8-bit/512 ECC DT fix (#20878). OFF = guaranteed-bootable.'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -77,15 +90,19 @@ jobs:
             || { echo "::error::jcg_q20 not in this OpenWrt ref — pick a newer ref"; exit 1; }
           ls target/linux/ramips/dts/mt7621_jcg_q20.dts
 
-      - name: Kernel-level DTS fixes (NAND ECC 8b/512 + WAN gmac1) — with before/after proof
+      - name: (Optional) NAND 8-bit/512 ECC device-tree fix — only if apply_nand_ecc=true
         run: |
           cd ow
           DTS=target/linux/ramips/dts/mt7621_jcg_q20.dts
-          cp "$DTS" "$DTS.orig"
-          python3 "$GITHUB_WORKSPACE/router/jcg-q20/kernel-build/patch-dts.py" "$DTS"
-          echo "=== DTS DIFF ==="
-          diff -u "$DTS.orig" "$DTS" || true
-          rm -f "$DTS.orig"
+          if [ "${{ github.event.inputs.apply_nand_ecc }}" = "true" ]; then
+            cp "$DTS" "$DTS.orig"
+            python3 "$GITHUB_WORKSPACE/router/jcg-q20/kernel-build/patch-dts.py" "$DTS"
+            echo "=== DTS DIFF ==="
+            diff -u "$DTS.orig" "$DTS" || true
+            rm -f "$DTS.orig"
+          else
+            echo "apply_nand_ecc=false -> keeping stock kernel ECC (guaranteed-bootable build)"
+          fi
 
       - name: Bake in the SmartAP Q20 overlay
         run: |

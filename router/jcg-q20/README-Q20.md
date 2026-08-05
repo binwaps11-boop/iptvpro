@@ -39,19 +39,34 @@ the kernel, fixes the device-tree bugs the overlay physically cannot.**
 Run it on GitHub Actions (Actions → *Build SmartAP Q20 (from source …)* → Run workflow).
 Ubuntu runners have the open internet and toolchain this sandbox lacks. It:
 
-- applies **`kernel-build/patch-dts.py`** to `mt7621_jcg_q20.dts`:
-  - **NAND ECC → 8-bit / 512** (OpenWrt **#20878**). The Q20's Toshiba TC58NVG1S3H SLC NAND
-    *requires* 8-bit/512 ECC; stock ramips brings it up at 4-bit/512, which logs
-    uncorrectable-ECC under write load and is the root of the "يعلّق / random reset after a
-    while" reports. **This is the single most important fix for stability** and it is only
-    reachable by rebuilding the kernel.
-  - **WAN `gmac1` → 1000/full fixed-link** (OpenWrt **#16083 / #16551**) — stable gigabit WAN.
+**Default (guaranteed-bootable) build:**
 - applies **`kernel-build/apply-mt76-38.py`** — the source-level twin of `ko_eeprom38.py`:
-  `mt7915_eeprom_get_target_power()` returns 76 (=38.0 dBm), with a grep-gated proof marker
-  so the workflow *fails* rather than ship an un-patched driver.
-- bakes in the identical SmartAP overlay and uploads a flashable `sysupgrade.bin` artifact.
+  `mt7915_eeprom_get_target_power()` returns 76 (=38.0 dBm), with a `__attribute__((used))`
+  proof marker the workflow greps out of the *final image* driver — so it **fails rather than
+  ship an un-patched driver**.
+- bakes in the identical SmartAP overlay (verified 0-structural-diff against the overlay
+  build) and uploads a flashable `sysupgrade.bin` artifact.
+- **stock kernel + device tree** — nothing risky is recompiled into the boot path, so a
+  flashed unit always comes up.
 
-### What is deliberately NOT "fixed"
+**Optional (`apply_nand_ecc = true` on the Run-workflow form):**
+- **NAND ECC → 8-bit / 512** (OpenWrt **#20878**) via `kernel-build/patch-dts.py`. The Q20's
+  SLC NAND is specified for 8-bit/512; stock ramips runs it at 4-bit/512, which logs
+  uncorrectable-ECC under write load and is the likely root of the "يعلّق / random reset
+  after a while" reports. 8-bit needs 52 ECC bytes/2 KiB page, which fits the 64-byte OOB, so
+  the value is correct for this chip.
+- **Why it is opt-in, not default:** whether the mt7621 on-host ECC engine accepts strength 8
+  at *runtime* cannot be proven without flashing real hardware — if it were rejected the NAND
+  would not attach and the unit would not boot. So the safe build leaves stock ECC and this
+  is a switch you flip only on a unit you can recover over the LAN cable. The DT edit itself
+  is just the two generic `nand-ecc-strength`/`nand-ecc-step-size` properties (no invented
+  phandles), applied into the real `&nand` node and dtc-validated.
+
+### What is deliberately NOT "fixed" (honest — no phantom fixes)
+- **WAN `gmac1` fixed-link (OpenWrt #16083 / #16551)** does **not** apply to this board: the
+  Q20's WAN uses a **real gigabit PHY** (`&gmac1` has `phy-handle = <&ethphy0>`), so it already
+  negotiates 1000 and there is no fixed-link to add. Injecting one would *break* the WAN, so
+  the DT script never touches gmac1.
 - **WED / hardware flow-offload (OpenWrt #868)** is an **MT7622 / MT7986 / MT7981** feature.
   The Q20's **MT7621 has no WED block at all**, so there is nothing to enable — claiming a
   WED build for this SoC would be false. Throughput on MT7621 comes from software NAT

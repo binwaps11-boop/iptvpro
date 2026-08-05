@@ -1,79 +1,65 @@
 #!/usr/bin/env python3
-"""Fix the JCG Q20 device tree for a from-source OpenWrt build.
+"""Optional NAND-ECC device-tree tweak for the JCG Q20 (OpenWrt #20878).
 
-Two independent, well-documented Q20 hardware problems live in the device tree and
-therefore cannot be fixed by the no-toolchain overlay build — they need the kernel
-recompiled. This script edits the target DTS in place before the kernel is built.
+BACKGROUND
+----------
+The Q20's SLC NAND (Toshiba TC58NVG1S3H / Winbond W29N01HV, 2 KiB page, 64-byte OOB)
+is specified for 8-bit ECC per 512 bytes. Stock ramips brings the mt7621 NAND up at
+4-bit/512. Reports of "hang / random reset after a while" (#20878) trace to
+uncorrectable-ECC events accumulating under write load.
 
-  1. NAND ECC too weak  (OpenWrt #20878)
-     The Q20 carries a Toshiba TC58NVG1S3H (or Winbond W29N01HV) SLC NAND whose
-     datasheet REQUIRES 8-bit ECC per 512 bytes. Stock ramips brings the controller
-     up at 4-bit/512. Under real write load this logs uncorrectable-ECC and, over
-     time, corrupts the overlay ("تعليق"/hangs and random resets after a while).
-     Fix: pin the NAND node to 8-bit/512 software-BCH ECC.
+The generic NAND DT bindings the kernel core reads are exactly two properties:
 
-  2. WAN port capped / unstable at gigabit  (OpenWrt #16083, #16551)
-     gmac1 (the dedicated WAN jack) needs its fixed-link + rgmii delay spelled out or
-     it can negotiate wrong and sit at 100 Mbit or flap. Fix: force gmac1 to a
-     1000/full fixed-link.  (Harmless on units that were already fine.)
+    nand-ecc-strength = <8>;
+    nand-ecc-step-size = <512>;
 
-The script is idempotent: it does nothing if the properties are already present, and
-it prints a unified before/after so the CI log proves exactly what changed. If it
-cannot find the target node it exits non-zero so the build fails loudly rather than
-silently shipping the unfixed tree.
+placed inside the board's `&nand { ... }` override. 8-bit BCH per 512 needs 13 ECC
+bytes/512 -> 52 bytes for a 2 KiB page, which fits the 64-byte OOB, so it is the
+right value for this chip.
+
+WHY THIS IS OPT-IN
+------------------
+Whether the mt7621 on-host ECC engine + OOB layout accept strength 8 at runtime cannot
+be proven without flashing real hardware. If the controller rejected it the NAND would
+fail to attach and the unit would not boot. So the from-source workflow keeps this OFF
+by default (a guaranteed-bootable image) and only calls this script when the operator
+explicitly opts in. Only then is the two-property tweak applied.
+
+This script deliberately does **nothing else** — it does NOT touch gmac1 (the Q20 WAN
+uses a real gigabit PHY via `phy-handle = <&ethphy0>`, so the #16083 fixed-link change
+does not apply to this board and would break WAN), and it never invents phandles.
+
+It is idempotent and, by design, NON-FATAL: if it cannot find `&nand {` it prints a
+warning and leaves the tree untouched so the build still succeeds with stock ECC.
 
 Usage:  patch-dts.py <openwrt-tree>/target/linux/ramips/dts/mt7621_jcg_q20.dts
 """
 import re, sys, os
 
-def die(m): sys.exit(f"patch-dts: {m}")
-
 def main(path):
     if not os.path.isfile(path):
-        die(f"DTS not found: {path}")
-    src = open(path).read()
-    orig = src
-    changed = []
-
-    # ---- 1. NAND ECC 8-bit / 512 ------------------------------------------------
-    # Match the SPI-NAND (or raw NAND) flash node. On mt7621 ramips the Q20 uses a
-    # spi-nand child of the spi controller, node label usually "spi_nand@0"/"flash@0".
-    m = re.search(r'((?:spi[_-]?nand|flash)@0\s*\{)', src)
-    if not m:
-        die("could not locate the NAND flash node (spi_nand@0 / flash@0)")
-    if 'nand-ecc-strength' in src:
-        changed.append("NAND ECC: already present, left as-is")
-    else:
-        inject = (m.group(1) +
-                  "\n\t\tnand-ecc-engine = <&bch>;"
-                  "\n\t\tnand-ecc-mode = \"hw\";"
-                  "\n\t\tnand-ecc-strength = <8>;"
-                  "\n\t\tnand-ecc-step-size = <512>;")
-        src = src[:m.start()] + inject + src[m.end():]
-        changed.append("NAND ECC: set 8-bit / 512-byte")
-
-    # ---- 2. gmac1 (WAN) fixed 1000/full ----------------------------------------
-    if re.search(r'&gmac1\s*\{', src):
-        if 'fixed-link' in re.search(r'&gmac1\s*\{.*?\}', src, re.S).group(0):
-            changed.append("gmac1 fixed-link: already present, left as-is")
-        else:
-            src = re.sub(r'(&gmac1\s*\{)',
-                         r'\1\n\tfixed-link {\n\t\tspeed = <1000>;\n\t\tfull-duplex;\n\t};',
-                         src, count=1)
-            changed.append("gmac1: forced 1000/full fixed-link")
-    else:
-        # gmac1 may be described inline in the &ethernet block; note it, don't fail.
-        changed.append("gmac1: no &gmac1 override node found — check &ethernet mac@1 manually")
-
-    if src == orig:
-        print("patch-dts: nothing to change (already patched)")
+        print(f"patch-dts: WARNING DTS not found ({path}); leaving stock ECC")
         return
+    src = open(path).read()
+
+    if 'nand-ecc-strength' in src:
+        print("patch-dts: nand-ecc-strength already present — nothing to do")
+        return
+
+    m = re.search(r'&nand\s*\{', src)
+    if not m:
+        print("patch-dts: WARNING &nand node not found; leaving stock ECC (build continues)")
+        return
+
+    inject = (m.group(0) +
+              "\n\t/* #20878: Toshiba/Winbond SLC NAND wants 8-bit/512 ECC */"
+              "\n\tnand-ecc-strength = <8>;"
+              "\n\tnand-ecc-step-size = <512>;")
+    src = src[:m.start()] + inject + src[m.end():]
     open(path, 'w').write(src)
-    print("patch-dts: applied ->")
-    for c in changed:
-        print("  -", c)
+    print("patch-dts: applied NAND ECC 8-bit / 512-byte to &nand")
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
-        die("usage: patch-dts.py <path to mt7621_jcg_q20.dts>")
+        sys.exit("usage: patch-dts.py <path to mt7621_jcg_q20.dts>")
     main(sys.argv[1])

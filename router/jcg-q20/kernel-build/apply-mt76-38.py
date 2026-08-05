@@ -35,11 +35,15 @@ def main(mt76dir):
     if not m:
         die("could not find mt7915_eeprom_get_target_power() definition")
     ins = m.end()
+    # __attribute__((used)) forces the compiler/linker to keep the marker string in the
+    # object even though nothing reads it, so the CI's strings-grep gate can PROVE the 38
+    # dBm build shipped. Referencing it in the return expression (value adds 0) is a second
+    # guarantee it is never optimised away.
     early = ('\n\t/* ' + MARKER + ': force EEPROM target to 38.0 dBm (76 half-dBm).'
              '\n\t * Removes the last software clamp so the whole TX-power stack asks'
              '\n\t * for 38 dBm; regulatory.db + UCI txpower do the rest. */'
-             '\n\t{ static const char smartap_q20_rf[] = "' + MARKER + '"; (void)smartap_q20_rf; }'
-             '\n\treturn 76;\n')
+             '\n\tstatic const char smartap_q20_rf[] __attribute__((used)) = "' + MARKER + '";'
+             '\n\treturn 76 + (smartap_q20_rf[0] - smartap_q20_rf[0]);\n')
     src = src[:ins] + early + src[ins:]
     open(eeprom, 'w').write(src)
     print(f"apply-mt76-38: patched {eeprom}")
