@@ -504,7 +504,9 @@ const server = http.createServer((req, res) => {
   })
 })
 
-server.listen(PORT, () => {
+// الاستماع على 0.0.0.0 صراحةً (IPv4 على كل الواجهات) — بلا host قد يستمع
+// بعض تكوينات Node على IPv6 فقط فيتعذّر الوصول من الجوال عبر IPv4
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`✓ خادم التراخيص يعمل على المنفذ ${PORT}`)
   console.log(`  الحسابات المسجّلة: ${Object.keys(db.accounts).length}`)
   console.log(`  المفتاح العام: ${publicKeyB64().slice(0, 40)}…`)

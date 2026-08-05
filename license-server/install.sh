@@ -10,7 +10,8 @@ set -euo pipefail
 
 APP_DIR=/opt/license-server
 SERVICE=cardlicense
-PORT="${PORT:-8090}"
+# المنفذ ٨٠ القياسي افتراضياً — المنافذ غير القياسية تحجبها بعض مزوّدات الـVPS
+PORT="${PORT:-80}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "✗ شغّله بصلاحية الجذر:  sudo bash install.sh" >&2
