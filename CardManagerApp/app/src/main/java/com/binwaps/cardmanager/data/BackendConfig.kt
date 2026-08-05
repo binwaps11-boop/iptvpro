@@ -42,7 +42,8 @@ object BackendConfig {
      * زرع مفتاحه فتُقبل تراخيصه المزوّرة بعدها. ملؤه هنا يُغلق الباب لأن
      * المفتاح لا يمرّ بالشبكة أصلاً.
      */
-    const val SERVER_PUBLIC_KEY = ""
+    const val SERVER_PUBLIC_KEY =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEgN+H22nSKhPPMdaHak5Uvx3D/9SMjNeBzHcl5Gk6UtpSIHger3U3snwahjDoyl+750plA2LwinXcX4PjbxufvQ=="
 
     val licenseServerEnabled: Boolean get() = LICENSE_SERVER.isNotBlank()
 }
