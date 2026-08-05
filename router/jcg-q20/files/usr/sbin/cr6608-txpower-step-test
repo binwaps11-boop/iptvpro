@@ -1,0 +1,48 @@
+#!/bin/sh
+# Exercise normal cfg80211 requests without modifying calibration data.
+
+set -u
+
+failures=0
+saved0="$(uci -q get wireless.radio0.txpower 2>/dev/null)"
+saved1="$(uci -q get wireless.radio1.txpower 2>/dev/null)"
+[ -n "$saved0" ] || saved0=38
+[ -n "$saved1" ] || saved1=38
+
+restore() {
+	uci -q set wireless.radio0.txpower="$saved0"
+	uci -q set wireless.radio1.txpower="$saved1"
+	uci -q commit wireless
+	wifi reload >/dev/null 2>&1 || true
+}
+trap restore EXIT INT TERM
+
+echo "requested_dbm,interface,driver_accepted_dbm,result"
+for requested in 10 20 30 38; do
+	uci -q set wireless.radio0.txpower="$requested"
+	uci -q set wireless.radio1.txpower="$requested"
+	uci -q commit wireless
+	wifi reload >/dev/null 2>&1 || true
+	sleep 4
+	seen=0
+	for iface in $(iw dev 2>/dev/null |
+		awk '$1 == "Interface" { print $2 }'); do
+		type="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "type" { print $2; exit }')"
+		[ "$type" = AP ] || continue
+		seen=$((seen + 1))
+		accepted="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "txpower" { print $2; exit }')"
+		result=FAIL
+		[ "$accepted" = "${requested}.00" ] && result=PASS
+		[ "$result" = PASS ] || failures=$((failures + 1))
+		printf '%s,%s,%s,%s\n' "$requested" "$iface" "${accepted:-unknown}" "$result"
+	done
+	if [ "$seen" -lt 2 ]; then
+		printf '%s,%s,%s,%s\n' "$requested" "missing-radio" "unknown" "FAIL"
+		failures=$((failures + 1))
+	fi
+done
+
+echo "RF measurement is external and is not synthesized by this script." >&2
+[ "$failures" -eq 0 ] || exit 1

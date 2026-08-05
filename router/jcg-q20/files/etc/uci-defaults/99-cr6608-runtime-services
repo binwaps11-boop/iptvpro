@@ -1,0 +1,12 @@
+#!/bin/sh
+
+# Overlay-provided init scripts are not package-owned, so OpenWrt will not
+# create their rc.d links automatically on a clean flash. Enable every service
+# whose state must survive reboot; each command is idempotent on upgrades.
+for service in smartap-qos cr6608-rescue-guard cr6608-quicksettings; do
+	[ -x "/etc/init.d/$service" ] || exit 1
+	"/etc/init.d/$service" enable || exit 1
+	"/etc/init.d/$service" start || exit 1
+done
+
+exit 0

@@ -1,0 +1,16 @@
+#!/bin/sh
+# JCG Q20 has only two device-tree LEDs: red:status (boot/failsafe/upgrade) and
+# blue:status (running). It has NO per-port ethernet LEDs. The CR6608 reused blue:net /
+# yellow:net for LAN links; those sysfs names DO NOT EXIST here, so this script must NOT
+# recreate them (doing so on the Xiaomi build fabricated broken LED config every boot).
+#
+# Correct Q20 behaviour comes straight from the device tree: blue steady = up, red only
+# during boot/failsafe. So all we do is REMOVE any stale/wrong LED sections a previous
+# image may have left in UCI, and leave the DTS defaults untouched.
+for s in $(uci -q show system 2>/dev/null | sed -n 's/^system\.\([^.=]*\)=led$/\1/p'); do
+	case "$(uci -q get "system.$s.sysfs" 2>/dev/null)" in
+		blue:net|yellow:net|blue:sys|yellow:sys|green:*) uci -q delete "system.$s" ;;
+	esac
+done
+uci -q commit system
+exit 0

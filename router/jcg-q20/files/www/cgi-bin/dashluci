@@ -1,0 +1,199 @@
+#!/bin/sh
+
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+ACL_HELPER="${CR6608_LUCI_ACL_HELPER:-/usr/libexec/cr6608-luci-acl-names.uc}"
+NEW_LUCI_SID=""
+SET_COOKIE=""
+CLEAR_COOKIE_ROOT=""
+CLEAR_COOKIE_LEGACY=""
+
+reply() {
+	status="$1"
+	payload="$2"
+	[ -n "$status" ] && printf 'Status: %s\r\n' "$status"
+	[ "$status" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+	printf 'Content-Type: application/json\r\n'
+	printf 'Cache-Control: no-store\r\n'
+	printf 'Pragma: no-cache\r\n'
+	printf 'X-Content-Type-Options: nosniff\r\n'
+	printf 'Referrer-Policy: no-referrer\r\n'
+	printf 'X-Frame-Options: SAMEORIGIN\r\n'
+	[ -n "$CLEAR_COOKIE_ROOT" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_ROOT"
+	[ -n "$CLEAR_COOKIE_LEGACY" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_LEGACY"
+	[ -n "$SET_COOKIE" ] && printf 'Set-Cookie: %s\r\n' "$SET_COOKIE"
+	printf '\r\n%s\n' "$payload"
+	exit 0
+}
+
+destroy_luci_session() {
+	destroy_sid="$1"
+	case "$destroy_sid" in
+		????????????????????????????????)
+			case "$destroy_sid" in *[!A-Fa-f0-9]*) return 0 ;; esac
+			;;
+		*) return 0 ;;
+	esac
+	json_init
+	json_add_string ubus_rpc_session "$destroy_sid"
+	ubus call session destroy "$(json_dump)" >/dev/null 2>&1 || true
+}
+
+fail_after_create() {
+	[ -n "$NEW_LUCI_SID" ] && destroy_luci_session "$NEW_LUCI_SID"
+	reply "500 Internal Server Error" '{"ok":false,"error":"luci_session_creation_failed"}'
+}
+
+grant_pairs() {
+	grant_scope="$1"
+	shift
+	json_init
+	json_add_string ubus_rpc_session "$NEW_LUCI_SID"
+	json_add_string scope "$grant_scope"
+	json_add_array objects
+	while [ "$#" -ge 2 ]; do
+		json_add_array ""
+		json_add_string "" "$1"
+		json_add_string "" "$2"
+		json_close_array
+		shift 2
+	done
+	json_close_array
+	ubus call session grant "$(json_dump)" >/dev/null 2>&1
+}
+
+grant_access_groups() {
+	json_init
+	json_add_string ubus_rpc_session "$NEW_LUCI_SID"
+	json_add_string scope access-group
+	json_add_array objects
+	acl_count=0
+	while IFS= read -r acl_name; do
+		case "$acl_name" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+		json_add_array ""
+		json_add_string "" "$acl_name"
+		json_add_string "" read
+		json_close_array
+		json_add_array ""
+		json_add_string "" "$acl_name"
+		json_add_string "" write
+		json_close_array
+		acl_count=$((acl_count + 1))
+	done <<EOF
+$("$ACL_HELPER" 2>/dev/null)
+EOF
+	json_close_array
+	[ "$acl_count" -gt 0 ] 2>/dev/null || return 1
+	ubus call session grant "$(json_dump)" >/dev/null 2>&1
+}
+
+luci_session_has_write() {
+	check_sid="$1"
+	case "$check_sid" in
+		????????????????????????????????)
+			case "$check_sid" in *[!A-Fa-f0-9]*) return 1 ;; esac
+			;;
+		*) return 1 ;;
+	esac
+	json_init
+	json_add_string ubus_rpc_session "$check_sid"
+	json_add_string scope access-group
+	json_add_string object luci-base
+	json_add_string function write
+	access_reply="$(ubus call session access "$(json_dump)" 2>/dev/null)" || return 1
+	[ "$(jsonfilter -s "$access_reply" -e '@.access' 2>/dev/null)" = true ]
+}
+
+set_luci_cookie() {
+	if [ "${HTTPS:-off}" = on ]; then
+		CLEAR_COOKIE_ROOT="sysauth_https=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+		CLEAR_COOKIE_LEGACY="sysauth_https=; Path=/cgi-bin/luci/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+		SET_COOKIE="sysauth_https=$NEW_LUCI_SID; Path=/cgi-bin/luci; Secure; HttpOnly; SameSite=Strict"
+	else
+		CLEAR_COOKIE_ROOT="sysauth_http=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+		CLEAR_COOKIE_LEGACY="sysauth_http=; Path=/cgi-bin/luci/; Max-Age=0; HttpOnly; SameSite=Strict"
+		SET_COOKIE="sysauth_http=$NEW_LUCI_SID; Path=/cgi-bin/luci; HttpOnly; SameSite=Strict"
+	fi
+}
+
+[ "${REQUEST_METHOD:-GET}" = POST ] || reply "405 Method Not Allowed" '{"ok":false,"error":"method"}'
+body_len="${CONTENT_LENGTH:-0}"
+case "$body_len" in ''|*[!0-9]*) reply "400 Bad Request" '{"ok":false,"error":"content_length"}' ;; esac
+[ "${#body_len}" -le 3 ] 2>/dev/null && [ "$body_len" -le 256 ] 2>/dev/null ||
+	reply "413 Payload Too Large" '{"ok":false,"error":"payload_too_large"}'
+POST_DATA=""
+if [ "$body_len" -gt 0 ] 2>/dev/null; then
+	POST_DATA="$(head -c "$body_len" 2>/dev/null)"
+fi
+
+[ -r "$SESSION_AUTH_LIB" ] || reply "500 Internal Server Error" '{"ok":false,"error":"session_helper"}'
+. "$SESSION_AUTH_LIB" || reply "500 Internal Server Error" '{"ok":false,"error":"session_helper"}'
+. /usr/share/libubox/jshn.sh || reply "500 Internal Server Error" '{"ok":false,"error":"json_helper"}'
+
+# The Smart AP bearer is accepted only from its HttpOnly SameSite cookie. It
+# is never returned to, stored by, or supplied from browser JavaScript.
+request_sid="$(cr6608_session_from_request)"
+cr6608_valid_hex32 "$request_sid" ||
+	reply "403 Forbidden" '{"ok":false,"error":"session_missing"}'
+cr6608_session_valid "$request_sid" || reply "403 Forbidden" '{"ok":false,"error":"session_expired"}'
+cr6608_luci_session_lock || reply "503 Service Unavailable" '{"ok":false,"error":"session_lock"}'
+# Logout uses the same lock and removes the Smart AP session first. Rechecking
+# here closes the validate-then-create race with a concurrent logout request.
+cr6608_session_valid "$request_sid" || reply "403 Forbidden" '{"ok":false,"error":"session_expired"}'
+
+[ -x "$ACL_HELPER" ] || reply "500 Internal Server Error" '{"ok":false,"error":"acl_helper"}'
+
+timeout="$(uci -q get luci.sauth.sessiontime 2>/dev/null)"
+case "$timeout" in ''|*[!0-9]*) timeout=3600 ;; esac
+[ "$timeout" -ge 300 ] 2>/dev/null || timeout=300
+[ "$timeout" -le 43200 ] 2>/dev/null || timeout=43200
+
+map_dir=/tmp/dashluci
+cr6608_map_storage_prepare ||
+	reply "500 Internal Server Error" '{"ok":false,"error":"session_storage"}'
+
+map_file="$map_dir/$request_sid"
+if [ -f "$map_file" ] && [ ! -L "$map_file" ] && cr6608_path_owned_by_root "$map_file"; then
+	read -r old_luci_sid extra < "$map_file" 2>/dev/null || true
+	if luci_session_has_write "$old_luci_sid"; then
+		NEW_LUCI_SID="$old_luci_sid"
+		set_luci_cookie
+		reply "" '{"ok":true}'
+	fi
+	destroy_luci_session "$old_luci_sid"
+fi
+rm -f "$map_file"
+
+json_init
+json_add_int timeout "$timeout"
+created="$(ubus call session create "$(json_dump)" 2>/dev/null)" || fail_after_create
+NEW_LUCI_SID="$(jsonfilter -s "$created" -e '@.ubus_rpc_session' 2>/dev/null)"
+case "$NEW_LUCI_SID" in
+	????????????????????????????????) case "$NEW_LUCI_SID" in *[!A-Fa-f0-9]*) fail_after_create ;; esac ;;
+	*) fail_after_create ;;
+esac
+
+grant_pairs cgi-io '*' '*' || fail_after_create
+grant_pairs file '*' '*' || fail_after_create
+grant_pairs ubus '*' '*' || fail_after_create
+grant_pairs uci '*' read '*' write || fail_after_create
+
+grant_access_groups || fail_after_create
+luci_session_has_write "$NEW_LUCI_SID" || fail_after_create
+
+token="$(cr6608_random_hex32)" || fail_after_create
+json_init
+json_add_string ubus_rpc_session "$NEW_LUCI_SID"
+json_add_object values
+json_add_string username root
+json_add_string token "$token"
+json_close_object
+ubus call session set "$(json_dump)" >/dev/null 2>&1 || fail_after_create
+
+tmp_map="$map_file.$$"
+printf '%s\n' "$NEW_LUCI_SID" > "$tmp_map" 2>/dev/null || fail_after_create
+chmod 0600 "$tmp_map" 2>/dev/null
+mv -f "$tmp_map" "$map_file" 2>/dev/null || fail_after_create
+
+set_luci_cookie
+
+reply "" '{"ok":true}'

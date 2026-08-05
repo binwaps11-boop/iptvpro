@@ -1,0 +1,30 @@
+#!/bin/sh
+
+# Run on both a clean install and a sysupgrade that preserved /etc/config.
+# Every Dropbear instance is pinned to the single management port requested
+# for this device, so a saved port 22 cannot silently survive an upgrade.
+rollback_and_fail() {
+	uci -q revert dropbear >/dev/null 2>&1 || true
+	exit 1
+}
+
+sections="$(
+	uci -q show dropbear 2>/dev/null |
+		sed -n 's/^dropbear\.\([^.=]*\)=dropbear$/\1/p'
+)"
+
+if [ -z "$sections" ]; then
+	section="$(uci -q add dropbear dropbear 2>/dev/null)" || rollback_and_fail
+	[ -n "$section" ] || rollback_and_fail
+	sections="$section"
+fi
+
+for section in $sections; do
+	uci -q set "dropbear.${section}.enable=1" || rollback_and_fail
+	uci -q set "dropbear.${section}.Port=2003" || rollback_and_fail
+	[ "$(uci -q get "dropbear.${section}.Port" 2>/dev/null)" = 2003 ] ||
+		rollback_and_fail
+done
+
+uci -q commit dropbear || rollback_and_fail
+exit 0

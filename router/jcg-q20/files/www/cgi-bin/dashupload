@@ -1,0 +1,55 @@
+#!/bin/sh
+# Receive a sysupgrade image from the Smart AP dashboard and land it at
+# /tmp/firmware.bin for the dashctl `flash_firmware` action to validate and flash.
+#
+# WHY THIS EXISTS: the dashboard used to POST the image to cgi-io (/cgi-bin/cgi-upload)
+# with sessionid="cookie" - a UI marker, not a ubus session id - so cgi-io always
+# answered 403 and the flash never started. This CGI authenticates the same way as
+# every other dashboard endpoint: the HttpOnly, SameSite cr6608_sid bearer cookie,
+# never a value supplied from browser JavaScript.
+. /usr/libexec/cr6608-session-auth
+
+reply() {
+	[ -n "$1" ] && printf 'Status: %s\r\n' "$1"
+	[ "$1" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+	printf 'Content-Type: application/json; charset=utf-8\r\n'
+	printf 'Cache-Control: no-store\r\n'
+	printf 'Pragma: no-cache\r\n'
+	printf 'X-Content-Type-Options: nosniff\r\n'
+	printf 'Referrer-Policy: no-referrer\r\n'
+	printf 'X-Frame-Options: SAMEORIGIN\r\n'
+	printf '\r\n%s\n' "$2"
+	exit 0
+}
+
+[ "${REQUEST_METHOD:-GET}" = POST ] || reply "405 Method Not Allowed" '{"ok":false,"error":"method"}'
+
+# Bearer comes only from the cookie; a forged/missing/expired session is rejected before
+# a single byte of the body is read.
+sid="$(cr6608_session_from_request)"
+cr6608_valid_hex32 "$sid" || reply "403 Forbidden" '{"ok":false,"error":"session_missing"}'
+cr6608_session_valid "$sid" || reply "403 Forbidden" '{"ok":false,"error":"session_expired"}'
+
+clen="${CONTENT_LENGTH:-0}"
+case "$clen" in ''|*[!0-9]*) reply "400 Bad Request" '{"ok":false,"error":"content_length"}' ;; esac
+# A CR6608 sysupgrade image is ~11 MiB. Accept 1..32 MiB and reject anything else before
+# writing, so a stray form post cannot fill tmpfs.
+[ "$clen" -ge 1048576 ]  2>/dev/null || reply "400 Bad Request"        '{"ok":false,"error":"too_small"}'
+[ "$clen" -le 33554432 ] 2>/dev/null || reply "413 Payload Too Large"  '{"ok":false,"error":"too_large"}'
+
+dst=/tmp/firmware.bin
+tmp="$dst.$$"
+rm -f "$tmp" 2>/dev/null
+# Read EXACTLY Content-Length bytes (do not wait for EOF, which can hang a keep-alive
+# worker) into a private temp, then mv into place. mv replaces a symlink planted at the
+# destination rather than following it - tmpfs is world-writable and this runs as root.
+head -c "$clen" > "$tmp" 2>/dev/null
+got="$(wc -c < "$tmp" 2>/dev/null)"; case "$got" in ''|*[!0-9]*) got=0 ;; esac
+if [ "$got" != "$clen" ]; then
+	rm -f "$tmp" 2>/dev/null
+	reply "400 Bad Request" '{"ok":false,"error":"truncated"}'
+fi
+chmod 0600 "$tmp" 2>/dev/null
+mv -f "$tmp" "$dst" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; reply "500 Internal Server Error" '{"ok":false,"error":"write_failed"}'; }
+
+reply "" "$(printf '{"ok":true,"bytes":%s}' "$got")"

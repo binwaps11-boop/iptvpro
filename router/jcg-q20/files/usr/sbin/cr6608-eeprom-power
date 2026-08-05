@@ -1,0 +1,181 @@
+#!/bin/sh
+# Read-only Factory/EEPROM inspector and backup helper.
+# CR6608 RF power control is implemented in the driver and UCI; this helper never writes MTD.
+
+set -u
+
+ACTION="${1:-status}"
+STATE=/overlay/cr6608-eeprom-power
+ORIG="$STATE/factory.orig"
+ORIG_SHA="$ORIG.sha256"
+ROOT_COPY=/root/factory.orig
+ROOT_SHA="$ROOT_COPY.sha256"
+LOG="$STATE/guard.log"
+
+mkdir -p "$STATE" 2>/dev/null
+
+log() {
+	echo "$(date) $*" >>"$LOG" 2>/dev/null
+	logger -t cr6608eeprom "$*" 2>/dev/null || true
+}
+
+die() {
+	log "ABORT: $*"
+	echo "ABORT: $*" >&2
+	exit 1
+}
+
+find_factory() {
+	FACT_PART=""
+	for n in factory Factory; do
+		grep -q "\"$n\"" /proc/mtd 2>/dev/null && { FACT_PART="$n"; break; }
+	done
+	[ -n "$FACT_PART" ] || die "no Factory partition in /proc/mtd"
+	IDX="$(sed -n "s/^mtd\([0-9]\+\):.*\"$FACT_PART\".*/\1/p" /proc/mtd)"
+	[ -n "$IDX" ] || die "could not resolve Factory MTD index"
+	MTD="/dev/mtd$IDX"
+	HEX_SIZE="$(sed -n "s/^mtd$IDX: *\([0-9a-fA-F]*\).*/\1/p" /proc/mtd)"
+	[ -n "$HEX_SIZE" ] || die "could not read Factory size"
+	PSIZE=$((0x$HEX_SIZE))
+	[ "$PSIZE" -ge $((0xE00)) ] || die "Factory partition is unexpectedly small"
+}
+
+file_size() {
+	wc -c <"$1" 2>/dev/null | tr -d ' '
+}
+
+valid_digest() {
+	[ "${#1}" -eq 64 ] 2>/dev/null || return 1
+	case "$1" in *[!0-9A-Fa-f]*) return 1 ;; esac
+	return 0
+}
+
+verify_backup_pair() {
+	verify_data="$1"
+	verify_sidecar="$2"
+	verify_label="$3"
+	VERIFY_ERROR=""
+	VERIFIED_SHA=""
+
+	if [ ! -f "$verify_data" ] || [ -L "$verify_data" ]; then
+		VERIFY_ERROR="$verify_label data is missing or is not a regular file"
+		return 1
+	fi
+	verify_size="$(file_size "$verify_data")"
+	case "$verify_size" in ''|*[!0-9]*) VERIFY_ERROR="$verify_label size is unreadable"; return 1 ;; esac
+	if [ "$verify_size" != "$PSIZE" ]; then
+		VERIFY_ERROR="$verify_label size mismatch (expected $PSIZE, got $verify_size)"
+		return 1
+	fi
+	if [ ! -f "$verify_sidecar" ] || [ -L "$verify_sidecar" ]; then
+		VERIFY_ERROR="$verify_label SHA-256 sidecar is missing or is not a regular file"
+		return 1
+	fi
+	verify_lines="$(wc -l < "$verify_sidecar" 2>/dev/null | tr -d '[:space:]')"
+	if [ "$verify_lines" != 1 ]; then
+		VERIFY_ERROR="$verify_label SHA-256 sidecar must contain exactly one line"
+		return 1
+	fi
+	verify_expected="$(sed -n '1{s/[[:space:]].*//;p;}' "$verify_sidecar" 2>/dev/null)"
+	if ! valid_digest "$verify_expected"; then
+		VERIFY_ERROR="$verify_label SHA-256 sidecar is invalid"
+		return 1
+	fi
+	verify_sum_line="$(sha256sum "$verify_data" 2>/dev/null)" || {
+		VERIFY_ERROR="$verify_label SHA-256 could not be calculated"
+		return 1
+	}
+	verify_actual="${verify_sum_line%% *}"
+	if [ "$verify_actual" != "$verify_expected" ]; then
+		VERIFY_ERROR="$verify_label SHA-256 mismatch"
+		return 1
+	fi
+	VERIFIED_SHA="$verify_actual"
+	return 0
+}
+
+write_sidecar() {
+	write_digest="$1"
+	write_target="$2"
+	write_sidecar="$3"
+	printf '%s  %s\n' "$write_digest" "$write_target" > "$write_sidecar" 2>/dev/null
+}
+
+persist_root_copy() {
+	canonical_sha="$1"
+	[ ! -L "$ROOT_COPY" ] && [ ! -L "$ROOT_SHA" ] || die "refusing symlinked /root Factory backup path"
+	root_tmp="$ROOT_COPY.tmp.$$"
+	root_sha_tmp="$ROOT_SHA.tmp.$$"
+	rm -f "$root_tmp" "$root_sha_tmp"
+	cp "$ORIG" "$root_tmp" 2>/dev/null || { rm -f "$root_tmp" "$root_sha_tmp"; die "could not copy Factory backup to /root"; }
+	chmod 0600 "$root_tmp" 2>/dev/null || { rm -f "$root_tmp" "$root_sha_tmp"; die "could not protect /root Factory backup"; }
+	write_sidecar "$canonical_sha" "$ROOT_COPY" "$root_sha_tmp" || { rm -f "$root_tmp" "$root_sha_tmp"; die "could not write /root Factory checksum"; }
+	chmod 0600 "$root_sha_tmp" 2>/dev/null || { rm -f "$root_tmp" "$root_sha_tmp"; die "could not protect /root Factory checksum"; }
+	mv -f "$root_tmp" "$ROOT_COPY" 2>/dev/null || { rm -f "$root_tmp" "$root_sha_tmp"; die "could not persist /root Factory backup"; }
+	mv -f "$root_sha_tmp" "$ROOT_SHA" 2>/dev/null || { rm -f "$ROOT_COPY" "$root_sha_tmp"; die "could not persist /root Factory checksum"; }
+	verify_backup_pair "$ROOT_COPY" "$ROOT_SHA" "/root Factory backup" || die "$VERIFY_ERROR"
+	[ "$VERIFIED_SHA" = "$canonical_sha" ] || die "/root Factory backup does not match the canonical backup"
+}
+
+do_backup() {
+	find_factory
+	created=0
+	if [ -e "$ORIG" ] || [ -L "$ORIG" ] || [ -e "$ORIG_SHA" ] || [ -L "$ORIG_SHA" ]; then
+		verify_backup_pair "$ORIG" "$ORIG_SHA" "existing Factory backup" || die "$VERIFY_ERROR"
+	else
+		umask 077
+		tmp="$ORIG.tmp.$$"
+		tmp_sha="$ORIG_SHA.tmp.$$"
+		rm -f "$tmp" "$tmp_sha"
+		dd if="$MTD" of="$tmp" bs="$PSIZE" count=1 2>/dev/null || { rm -f "$tmp" "$tmp_sha"; die "Factory backup read failed"; }
+		[ "$(file_size "$tmp")" = "$PSIZE" ] || { rm -f "$tmp" "$tmp_sha"; die "Factory backup is not the exact partition size"; }
+		sum_line="$(sha256sum "$tmp" 2>/dev/null)" || { rm -f "$tmp" "$tmp_sha"; die "Factory backup SHA-256 failed"; }
+		digest="${sum_line%% *}"
+		valid_digest "$digest" || { rm -f "$tmp" "$tmp_sha"; die "Factory backup SHA-256 is invalid"; }
+		write_sidecar "$digest" "$ORIG" "$tmp_sha" || { rm -f "$tmp" "$tmp_sha"; die "could not write Factory checksum"; }
+		verify_backup_pair "$tmp" "$tmp_sha" "new Factory backup" || { reason="$VERIFY_ERROR"; rm -f "$tmp" "$tmp_sha"; die "$reason"; }
+		chmod 0600 "$tmp" "$tmp_sha" 2>/dev/null || { rm -f "$tmp" "$tmp_sha"; die "could not protect Factory backup"; }
+		mv -f "$tmp" "$ORIG" 2>/dev/null || { rm -f "$tmp" "$tmp_sha"; die "could not persist Factory backup"; }
+		mv -f "$tmp_sha" "$ORIG_SHA" 2>/dev/null || { rm -f "$ORIG" "$tmp_sha"; die "could not persist Factory checksum"; }
+		verify_backup_pair "$ORIG" "$ORIG_SHA" "new Factory backup" || { reason="$VERIFY_ERROR"; rm -f "$ORIG" "$ORIG_SHA"; die "$reason"; }
+		created=1
+	fi
+	canonical_sha="$VERIFIED_SHA"
+	persist_root_copy "$canonical_sha"
+	if [ "$created" = 1 ]; then
+		log "Factory backup created and verified read-only ($PSIZE bytes; sha256=$canonical_sha)"
+	else
+		log "Factory backup verified ($PSIZE bytes; sha256=$canonical_sha)"
+	fi
+	rm -f /www/factory.orig 2>/dev/null
+	echo "BACKUP OK ($PSIZE bytes; SHA-256 verified; stored in /overlay and /root; not web-exposed)"
+}
+
+case "$ACTION" in
+	status)
+		find_factory
+		echo "partition=$FACT_PART mtd=$MTD size=$PSIZE"
+		if [ -e "$ORIG" ] || [ -L "$ORIG" ] || [ -e "$ORIG_SHA" ] || [ -L "$ORIG_SHA" ]; then
+			verify_backup_pair "$ORIG" "$ORIG_SHA" "existing Factory backup" || die "$VERIFY_ERROR"
+			echo "backup=present"
+			echo "backup_verified=yes"
+			echo "backup_sha256=$VERIFIED_SHA"
+		else
+			echo "backup=none"
+		fi
+		echo "factory_write=disabled"
+		;;
+	backup)
+		do_backup
+		;;
+	apply|restore)
+		log "refused $ACTION request: Factory/EEPROM writes are disabled"
+		echo "REFUSED: Factory/EEPROM writes are disabled; calibration was not modified" >&2
+		exit 2
+		;;
+	*)
+		die "unknown action '$ACTION'"
+		;;
+esac
+
+exit 0

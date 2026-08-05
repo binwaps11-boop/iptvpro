@@ -1,0 +1,256 @@
+#!/bin/sh
+
+# Runtime capability report. "active" is used only for settings confirmed in
+# the generated hostapd configuration; multi-client scheduling remains
+# unverified until compatible stations are connected.
+
+set -u
+
+status=0
+support_manifest=/usr/share/cr6608/ax-feature-support
+
+result() {
+	printf '%-34s %s\n' "$1" "$2"
+}
+
+verify_support_manifest() {
+	local required
+
+	result "official support manifest" "${support_manifest}"
+	if [ ! -f "${support_manifest}" ]; then
+		result "official support manifest state" "missing"
+		status=1
+		return
+	fi
+
+	for required in \
+		'board=jcg,q20' \
+		'wifi_stack=openwrt-upstream-mac80211-mt76-hostapd' \
+		'driver=mt7915e' \
+		'beamforming_su=enabled' \
+		'beamforming_dl_mu_mimo=enabled' \
+		'ofdma=enabled-driver-firmware-managed' \
+		'mu_mimo_dl=enabled' \
+		'mu_mimo_ul=not-advertised-by-driver' \
+		'runtime_gate=kernel-capability-plus-generated-hostapd-config' \
+		'airtime_proof=requires-compatible-clients-and-external-capture'; do
+		grep -Fqx "${required}" "${support_manifest}" || {
+			result "official support manifest state" "invalid: ${required}"
+			status=1
+			return
+		}
+	done
+
+	result "official support manifest state" "valid"
+	result "official Wi-Fi stack" "OpenWrt mac80211 + mt76/mt7915e + hostapd"
+	result "supported feature set" "SU beamforming, DL MU-MIMO, HE OFDMA"
+	result "runtime evidence boundary" "airtime scheduling requires compatible clients/capture"
+}
+
+radio_sections() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+radio_interfaces() {
+	local radio="$1"
+
+	ubus -S call network.wireless status 2>/dev/null |
+		jsonfilter -e "@.${radio}.interfaces[*].ifname" 2>/dev/null
+}
+
+radio_ap_interfaces() {
+	local radio="$1" iface type
+
+	for iface in $(radio_interfaces "$radio"); do
+		type="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "type" { print $2; exit }')"
+		[ "$type" = AP ] && printf '%s\n' "$iface"
+	done
+}
+
+interface_phy() {
+	local iface="$1" index
+
+	index="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "wiphy" { print $2; exit }')"
+	[ -n "$index" ] && printf 'phy%s\n' "$index"
+}
+
+find_hostapd_config() {
+	local iface="$1" candidate
+
+	for candidate in \
+		"/var/run/hostapd-${iface}.conf" \
+		/var/run/hostapd/*.conf \
+		/var/run/hostapd-*.conf; do
+		[ -f "${candidate}" ] || continue
+		if grep -qx "interface=${iface}" "${candidate}" 2>/dev/null; then
+			printf '%s\n' "${candidate}"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+capability_state() {
+	local info="$1" pattern="$2"
+
+	if printf '%s\n' "$info" | grep -Eq "$pattern"; then
+		printf 'supported\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+config_state() {
+	local conf="$1" pattern="$2"
+
+	if [ -n "$conf" ] && grep -Eq "$pattern" "$conf" 2>/dev/null; then
+		printf 'advertised\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+ap_he_capabilities() {
+	awk '
+		/^[[:space:]]*HE Iftypes:[[:space:]]*AP([[:space:]]|$)/ {
+			in_ap = 1
+			print
+			next
+		}
+		in_ap && /^[[:space:]]*HE Iftypes:/ { exit }
+		in_ap { print }
+	'
+}
+
+check_radio() {
+	local radio="$1" iface phy info conf requested runtime htmode
+	local hostapd_raw hostapd_state
+	local ap_he_info runtime_width expected_width
+	local he_cap su_bfer su_bfee mu_bfer mu_bfee ru_cap
+	local he_runtime mu_edca_runtime he_su_bfer_runtime he_su_bfee_runtime
+	local he_mu_bfer_runtime bss_color_runtime spatial_reuse_runtime
+
+	iface="$(radio_ap_interfaces "$radio" | head -n 1)"
+	phy=""
+	[ -z "$iface" ] || phy="$(interface_phy "$iface")"
+	requested="$(uci -q get "wireless.${radio}.txpower" 2>/dev/null || true)"
+	htmode="$(uci -q get "wireless.${radio}.htmode" 2>/dev/null || true)"
+
+	printf '\n[%s / %s]\n' "$radio" "${phy:-unmapped}"
+	result "interface" "${iface:-missing}"
+	result "configured_htmode" "${htmode:-missing}"
+	result "requested_power_dbm" "${requested:-missing}"
+
+	if [ -z "$phy" ] || [ -z "$iface" ]; then
+		result "runtime_state" "radio/interface unavailable"
+		status=1
+		return
+	fi
+
+	info="$(iw phy "$phy" info 2>/dev/null || true)"
+	ap_he_info="$(printf '%s\n' "$info" | ap_he_capabilities)"
+	conf="$(find_hostapd_config "$iface" 2>/dev/null || true)"
+	hostapd_raw="$(ubus -S call "hostapd.${iface}" get_status 2>/dev/null || true)"
+	hostapd_state="$(printf '%s\n' "$hostapd_raw" |
+		jsonfilter -e '@.status' 2>/dev/null)"
+	runtime="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "txpower" { print $2; exit }')"
+	runtime_width="$(iw dev "$iface" info 2>/dev/null |
+		sed -n 's/.*width: \([0-9][0-9]*\) MHz.*/\1/p' | head -n 1)"
+	case "$htmode" in
+		HE20) expected_width=20 ;;
+		HE40) expected_width=40 ;;
+		HE80) expected_width=80 ;;
+		*) expected_width="" ;;
+	esac
+
+	result "runtime_power_dbm" "${runtime:-unknown}"
+	result "runtime_channel_width_mhz" "${runtime_width:-unknown}"
+	result "hostapd_runtime_status" "${hostapd_state:-unavailable}"
+	result "hostapd_config" "${conf:-missing}"
+
+	he_cap="$(capability_state "$ap_he_info" 'HE Iftypes:[[:space:]]*AP')"
+	su_bfer="$(capability_state "$ap_he_info" 'SU Beamformer')"
+	su_bfee="$(capability_state "$ap_he_info" 'SU Beamformee')"
+	mu_bfer="$(capability_state "$ap_he_info" 'MU Beamformer')"
+	mu_bfee="$(capability_state "$ap_he_info" 'MU Beamformee')"
+	ru_cap="$(capability_state "$ap_he_info" '242 tone RUs|PPE Threshold Present|BSR')"
+
+	result "802.11n" "$(capability_state "$info" 'HT20|HT40|HT RX MCS|HT TX/RX MCS')"
+	result "802.11ac" "$(capability_state "$info" 'VHT Capabilities')"
+	result "802.11ax" "$he_cap"
+	result "HE20 capability hint" "$he_cap"
+	result "HE40 capability hint" "$he_cap"
+	case "$htmode" in
+		HE80) result "HE80" "$he_cap" ;;
+		*) result "HE80" "not-configured-on-this-radio" ;;
+	esac
+	result "SU Beamformer capability" "$su_bfer"
+	result "SU Beamformee capability" "$su_bfee"
+	result "MU Beamformer capability" "$mu_bfer"
+	result "MU Beamformee capability" "$mu_bfee"
+	result "OFDMA RU capability" "$ru_cap"
+	result "HE MCS" "$(capability_state "$info" 'HE RX MCS and NSS set')"
+	result "PPE Thresholds" "$(capability_state "$info" 'PPE Threshold')"
+	result "1024-QAM capability hint" "$(capability_state "$ap_he_info" '1024-QAM')"
+	result "TWT capability" "$(capability_state "$info" 'TWT Requester|TWT Responder')"
+
+	he_runtime="$(config_state "$conf" '^ieee80211ax=1$')"
+	mu_edca_runtime="$(config_state "$conf" '^he_mu_edca_')"
+	he_su_bfer_runtime="$(config_state "$conf" '^he_su_beamformer=1$')"
+	he_su_bfee_runtime="$(config_state "$conf" '^he_su_beamformee=1$')"
+	he_mu_bfer_runtime="$(config_state "$conf" '^he_mu_beamformer=1$')"
+	bss_color_runtime="$(config_state "$conf" '^he_bss_color=[1-9][0-9]*$')"
+	spatial_reuse_runtime="$(config_state "$conf" '^he_spr_')"
+
+	result "802.11ax hostapd advertisement" "$he_runtime"
+	result "Beamforming SU advertisement" "beamformer=$he_su_bfer_runtime beamformee=$he_su_bfee_runtime"
+	result "Beamforming MU advertisement" "beamformer=$he_mu_bfer_runtime"
+	result "BSS Color advertisement" "$bss_color_runtime"
+	result "Spatial Reuse advertisement" "$spatial_reuse_runtime"
+	result "HE MU-EDCA advertisement" "$mu_edca_runtime"
+	result "DL OFDMA support gate" "capability_hint=$ru_cap hostapd=$mu_edca_runtime observed_airtime=not-measured"
+	result "UL OFDMA support gate" "capability_hint=$ru_cap hostapd=$mu_edca_runtime observed_trigger_use=not-measured"
+	result "DL MU-MIMO support gate" "capability_hint=$mu_bfer hostapd=$he_mu_bfer_runtime observed_scheduling=not-measured"
+	result "UL MU-MIMO support gate" "driver/firmware scheduling telemetry unavailable; observed_scheduling=not-measured"
+
+	if [ "$hostapd_state" != ENABLED ] ||
+	   [ "$he_cap" != supported ] || [ "$he_runtime" != advertised ] ||
+	   [ "$su_bfer" != supported ] || [ "$su_bfee" != supported ] ||
+	   [ "$he_su_bfer_runtime" != advertised ] ||
+	   [ "$he_su_bfee_runtime" != advertised ] ||
+	   [ "$mu_bfer" != supported ] ||
+	   [ "$he_mu_bfer_runtime" != advertised ] ||
+	   [ "$ru_cap" != supported ] ||
+	   [ "$mu_edca_runtime" != advertised ] ||
+	   { [ -n "$expected_width" ] && [ "$runtime_width" != "$expected_width" ]; }; then
+		status=1
+	fi
+}
+
+printf 'CR6608 AX feature verification\n'
+printf 'Capability and hostapd configuration are reported separately from over-air scheduling.\n'
+verify_support_manifest
+
+radios="$(radio_sections)"
+if [ -z "$radios" ]; then
+	printf 'No wifi-device sections found.\n' >&2
+	exit 1
+fi
+
+for radio in $radios; do
+	check_radio "$radio"
+done
+
+printf '\n'
+if [ "$status" -eq 0 ]; then
+	printf 'RESULT_AX_CONFIGURATION=DRIVER_GATE_PASS_AIRTIME_UNVERIFIED\n'
+	exit 0
+fi
+
+printf 'RESULT_AX_CONFIGURATION=FAIL\n'
+exit 1

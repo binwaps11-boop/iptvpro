@@ -1,0 +1,33 @@
+#!/bin/sh
+
+# First-boot defaults only. Never overwrite a country or power value that came
+# from retained settings or that the user later selected.
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+if [ -z "$board" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	board="$(ubus call system board 2>/dev/null | jsonfilter -e '@.board_name' 2>/dev/null)"
+fi
+[ "$board" = "jcg,q20" ] || exit 0
+
+radios="$(uci -q show wireless 2>/dev/null |
+	sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+if [ -z "$radios" ]; then
+	/sbin/wifi config >/dev/null 2>&1 || exit 1
+	radios="$(uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+fi
+
+changed=0
+for radio in $radios; do
+	if ! uci -q get "wireless.${radio}.country" >/dev/null 2>&1; then
+		uci set "wireless.${radio}.country=US" || exit 1
+		changed=1
+	fi
+	if ! uci -q get "wireless.${radio}.txpower" >/dev/null 2>&1; then
+		default_txpower=38
+		uci set "wireless.${radio}.txpower=${default_txpower}" || exit 1
+		changed=1
+	fi
+done
+
+[ "$changed" -eq 0 ] || uci commit wireless
+exit 0

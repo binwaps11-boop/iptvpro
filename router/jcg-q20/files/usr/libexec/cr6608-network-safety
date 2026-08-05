@@ -1,0 +1,70 @@
+#!/bin/sh
+# Shared allowlist for the dashboard's generic L3-interface editor.
+#
+# Core CR6608 devices are owned by Quick Settings/netifd/DSA and must never be
+# assigned to an extra UCI interface.  In particular, assigning L3 directly to
+# a DSA slave (lan1/lan2), its CPU/master port (eth0), or the reserved WAN
+# device can break bridge forwarding even though the UCI commit itself succeeds.
+# Only documented standalone virtual-device families are accepted here.
+
+cr6608_safe_l3_device() {
+	local device="$1"
+	local sys_class_net="${CR6608_SYS_CLASS_NET:-/sys/class/net}"
+
+	case "$device" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+		br-lan|br-lan.*|lan1|lan2|wan|eth0|lo|phy*-ap*|phy*-sta*) return 1 ;;
+	esac
+
+	[ -d "$sys_class_net/$device" ] || return 1
+	# A device enslaved to another master must be configured at its master.
+	[ ! -e "$sys_class_net/$device/master" ] || return 1
+	[ ! -L "$sys_class_net/$device/master" ] || return 1
+	# Physical devices and DSA/CPU ports expose a device link.  The generic
+	# editor accepts virtual L3 endpoints only.
+	[ ! -e "$sys_class_net/$device/device" ] || return 1
+	[ ! -L "$sys_class_net/$device/device" ] || return 1
+
+	case "$device" in
+		br-*|wg[0-9]*|tun[0-9]*|tap[0-9]*|gre[0-9]*|gretap[0-9]*|sit[0-9]*|dummy[0-9]*) return 0 ;;
+	esac
+	return 1
+}
+
+cr6608_l3_device_available() {
+	local device="$1" owner="$2"
+	local uci_bin="${CR6608_UCI_BIN:-uci}"
+	local network_dump iface
+
+	cr6608_safe_l3_device "$device" || return 1
+	network_dump="$("$uci_bin" -q show network 2>/dev/null)" || return 1
+	for iface in $(printf '%s\n' "$network_dump" |
+		sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
+		[ "$iface" = "$owner" ] && continue
+		[ "$("$uci_bin" -q get "network.${iface}.device" 2>/dev/null)" != "$device" ] || return 1
+	done
+	return 0
+}
+
+# Validate an entire bridge-port request before the caller starts a guarded
+# transaction.  Empty means "leave the current bridge membership unchanged".
+# A non-empty request is all-or-nothing: one unknown token rejects the whole
+# list, and valid duplicates are removed while preserving the first order.
+cr6608_normalize_bridge_ports() {
+	local raw="$1" port normalized=""
+
+	[ -n "$raw" ] || return 0
+	[ "${#raw}" -le 160 ] || return 1
+	# Prevent pathname expansion before splitting the submitted whitespace list.
+	case "$raw" in *'*'*|*'?'*|*'['*) return 1 ;; esac
+
+	for port in $raw; do
+		case "$port" in lan1|lan2) : ;; *) return 1 ;; esac
+		case " $normalized " in
+			*" $port "*) : ;;
+			*) normalized="${normalized:+$normalized }$port" ;;
+		esac
+	done
+	[ -n "$normalized" ] || return 1
+	printf '%s\n' "$normalized"
+}
