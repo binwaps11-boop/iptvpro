@@ -48,6 +48,14 @@ Ubuntu runners have the open internet and toolchain this sandbox lacks. It:
   build) and uploads a flashable `sysupgrade.bin` artifact.
 - **stock kernel + device tree** — nothing risky is recompiled into the boot path, so a
   flashed unit always comes up.
+- ships a **curated feature set** cherry-picked from what independent builds (ImmortalWrt,
+  Lean, gl.inet, istoreOS) are actually loved for — see `kernel-build/jcg-q20.seed.config`:
+  **SQM** (bufferbloat/latency), **WireGuard VPN**, **UPnP/NAT-PMP** (gaming NAT), **DDNS**,
+  **encrypted DNS over HTTPS**, **adblock** (light, not RAM-heavy AdGuardHome), **watchcat**
+  connectivity watchdog, **Wake-on-LAN**, and admin tools (opkg UI, ttyd web terminal, htop,
+  nano, curl). Every daemon is installed but **idle until you enable it**, so the default
+  bridged-AP boot is unaffected. The placebo/risky "turbo" mods are deliberately excluded
+  (see TUNING.md). Overlay-only builds can't add packages — this set is from-source only.
 
 **Optional (`apply_nand_ecc = true` on the Run-workflow form):**
 - **NAND ECC → 8-bit / 512** (OpenWrt **#20878**) via `kernel-build/patch-dts.py`. The Q20's
