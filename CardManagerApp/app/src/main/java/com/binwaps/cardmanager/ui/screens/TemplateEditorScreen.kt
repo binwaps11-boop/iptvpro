@@ -105,6 +105,19 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
         }
     }
 
+    // منتقي صورة حقل الشعار — يضبط صورة الحقل المحدّد وقت الاختيار
+    val fieldImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val fid = selectedFieldId
+        if (uri != null && fid != null) {
+            Store.importBackground(uri)?.let { path ->
+                com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                template = template.copy(
+                    fields = template.fields.map { if (it.id == fid) it.copy(imagePath = path) else it },
+                )
+            }
+        }
+    }
+
     fun updateField(f: CardField) {
         template = template.copy(fields = template.fields.map { if (it.id == f.id) f else it })
     }
@@ -243,10 +256,28 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                     }) { Icon(Icons.Filled.Delete, "حذف", tint = Danger, modifier = Modifier.size(19.dp)) }
                 }
                 Spacer(Modifier.height(6.dp))
-                // الرمز والباركود عنصران رسوميان — لا نص بادئة ولا تنسيق خط لهما
-                val graphic = selected.type == FieldType.QR_CODE || selected.type == FieldType.BARCODE
+                // الرمز والباركود والصورة عناصر رسومية — لا نص بادئة ولا تنسيق خط لها
+                val graphic = selected.type == FieldType.QR_CODE || selected.type == FieldType.BARCODE ||
+                    selected.type == FieldType.IMAGE
                 if (selected.type == FieldType.CUSTOM_TEXT) {
                     AppField(selected.customText, { updateField(selected.copy(customText = it)) }, "النص", Modifier.fillMaxWidth())
+                } else if (selected.type == FieldType.IMAGE) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        GhostButton(
+                            if (selected.imagePath.isBlank()) "اختر صورة الشعار" else "تغيير الصورة",
+                            icon = Icons.Filled.Image,
+                        ) { fieldImagePicker.launch("image/*") }
+                        if (selected.imagePath.isNotBlank()) {
+                            GhostButton("إزالة الصورة", color = Danger) {
+                                com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                                updateField(selected.copy(imagePath = ""))
+                            }
+                        }
+                    }
+                    if (selected.imagePath.isBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("لم تُختر صورة بعد — لن يظهر الحقل حتى تختار صورة", fontSize = 10.5.sp, color = TextLow)
+                    }
                 } else if (!graphic) {
                     AppField(selected.prefix, { updateField(selected.copy(prefix = it)) }, "نص قبل القيمة (مثل: المستخدم:)", Modifier.fillMaxWidth())
                 }
@@ -505,6 +536,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                                         sizeFrac = when (type) {
                                             FieldType.QR_CODE -> 0.45f
                                             FieldType.BARCODE -> 0.6f // الباركود عريض
+                                            FieldType.IMAGE -> 0.3f // شعار متوسط
                                             else -> 0.10f
                                         },
                                         customText = if (type == FieldType.CUSTOM_TEXT) "نص جديد" else "",
@@ -540,6 +572,23 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
             if (r.id != rowId) r else r.copy(cells = r.cells.map { if (it.id == cell.id) cell else it })
         }
     )
+
+    // منتقي صورة خلية — يحفظ الهدف (صف، خلية) ثم يضبط الصورة عند العودة
+    var cellImageTarget by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+    val cellImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val target = cellImageTarget
+        if (uri != null && target != null) {
+            Store.importBackground(uri)?.let { path ->
+                com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                setRows(
+                    template.rows.map { r ->
+                        if (r.id != target.first) r
+                        else r.copy(cells = r.cells.map { if (it.id == target.second) it.copy(imagePath = path) else it })
+                    },
+                )
+            }
+        }
+    }
 
     GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.3f)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -638,6 +687,19 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                         Spacer(Modifier.height(6.dp))
                         if (cell.type == FieldType.CUSTOM_TEXT) {
                             AppField(cell.customText, { updateCell(row.id, cell.copy(customText = it)) }, "النص", Modifier.fillMaxWidth())
+                        } else if (cell.type == FieldType.IMAGE) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                GhostButton(
+                                    if (cell.imagePath.isBlank()) "اختر صورة" else "تغيير الصورة",
+                                    icon = Icons.Filled.Image,
+                                ) { cellImageTarget = row.id to cell.id; cellImagePicker.launch("image/*") }
+                                if (cell.imagePath.isNotBlank()) {
+                                    GhostButton("إزالة", color = Danger) {
+                                        com.binwaps.cardmanager.render.CardRenderer.clearCache()
+                                        updateCell(row.id, cell.copy(imagePath = ""))
+                                    }
+                                }
+                            }
                         } else if (cell.type != FieldType.QR_CODE) {
                             AppField(cell.prefix, { updateCell(row.id, cell.copy(prefix = it)) }, "نص قبل القيمة", Modifier.fillMaxWidth())
                         }

@@ -463,14 +463,23 @@ object Store {
         val backgrounds: Map<String, String> = emptyMap(),
     )
 
-    /** يبني نسخة احتياطية كاملة كنص JSON (بما فيها صور الخلفيات مضمّنة) */
+    /** كل مسارات الصور التي يشير إليها قالب: الخلفية وصور الحقول والخلايا */
+    private fun templateImagePaths(t: CardTemplate): List<String> = buildList {
+        if (t.backgroundPath.isNotBlank()) add(t.backgroundPath)
+        t.fields.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) }
+        t.rows.forEach { r -> r.cells.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) } }
+    }
+
+    /** يبني نسخة احتياطية كاملة كنص JSON (بما فيها صور الخلفيات والشعارات مضمّنة) */
     fun buildBackupJson(): String {
         val bgs = HashMap<String, String>()
         _templates.value.forEach { t ->
-            if (t.backgroundPath.isNotBlank()) runCatching {
-                val f = File(t.backgroundPath)
-                if (f.exists()) {
-                    bgs[f.name] = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+            templateImagePaths(t).forEach { path ->
+                runCatching {
+                    val f = File(path)
+                    if (f.exists() && !bgs.containsKey(f.name)) {
+                        bgs[f.name] = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+                    }
                 }
             }
         }
@@ -519,10 +528,15 @@ object Store {
                 nameToPath[fileName] = bg.absolutePath
             }
         }
+        // يعيد ربط مسار صورة بالمسار الجديد على هذا الجهاز (أو يفرّغه إن غابت)
+        fun remap(path: String): String =
+            if (path.isBlank()) "" else nameToPath[File(path).name] ?: ""
         val fixedTemplates = bundle.templates.map { t ->
-            if (t.backgroundPath.isBlank()) t
-            else nameToPath[File(t.backgroundPath).name]
-                ?.let { t.copy(backgroundPath = it) } ?: t.copy(backgroundPath = "")
+            t.copy(
+                backgroundPath = remap(t.backgroundPath),
+                fields = t.fields.map { it.copy(imagePath = remap(it.imagePath)) },
+                rows = t.rows.map { r -> r.copy(cells = r.cells.map { it.copy(imagePath = remap(it.imagePath)) }) },
+            )
         }
         _templates.value = fixedTemplates.ifEmpty { listOf(defaultTemplate()) }
         _settings.value = bundle.settings

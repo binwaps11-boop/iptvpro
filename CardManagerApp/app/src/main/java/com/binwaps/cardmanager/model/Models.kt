@@ -92,6 +92,7 @@ enum class FieldType(val labelAr: String) {
     SERIAL("الرقم التسلسلي"),
     QR_CODE("رمز QR"),
     BARCODE("باركود"),
+    IMAGE("شعار / صورة"),
     CUSTOM_TEXT("نص ثابت"),
     // حقول تُحسب لحظة الطباعة
     BATCH_NO("رقم الدفعة"),
@@ -147,6 +148,8 @@ data class CardField(
     val visible: Boolean = true,
     /** خط هذا الحقل — null يعني استخدام خط القالب */
     val font: CardFont? = null,
+    /** مسار صورة/شعار داخل مجلد التطبيق — يُستخدم فقط مع FieldType.IMAGE */
+    val imagePath: String = "",
 )
 
 /** طريقة بناء الكرت */
@@ -182,6 +185,8 @@ data class CardCell(
     val font: CardFont? = null,
     val border: Boolean = true,
     val align: CellAlign = CellAlign.CENTER,
+    /** مسار صورة/شعار — يُستخدم فقط مع FieldType.IMAGE في خلية الجدول */
+    val imagePath: String = "",
 )
 
 /** صف واحد في الكرت — ارتفاعه بالمليمتر وخلاياه تتقاسم العرض */

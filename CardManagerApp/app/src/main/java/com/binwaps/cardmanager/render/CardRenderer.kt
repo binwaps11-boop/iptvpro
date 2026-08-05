@@ -69,12 +69,27 @@ object CardRenderer {
         return bgBitmap
     }
 
-    /** تُستدعى عند تغيير خلفية القالب */
+    /** ذاكرة صور الشعارات/الحقول المصوّرة — بمفتاح المسار، فلا تُفكّ الصورة لكل كرت في الدفعة */
+    private val imageCache = HashMap<String, Bitmap?>()
+
+    @Synchronized
+    private fun image(path: String): Bitmap? {
+        if (path.isBlank()) return null
+        if (imageCache.containsKey(path)) return imageCache[path]
+        // حدّ للذاكرة: قوالب قليلة الشعارات عادةً، لكن لا نترك الخريطة تنمو بلا سقف
+        if (imageCache.size > 8) imageCache.clear()
+        val bmp = if (File(path).exists()) runCatching { BitmapFactory.decodeFile(path) }.getOrNull() else null
+        imageCache[path] = bmp
+        return bmp
+    }
+
+    /** تُستدعى عند تغيير خلفية القالب أو صورة حقل */
     @Synchronized
     fun clearCache() {
         bgBitmap?.recycle()
         bgBitmap = null
         bgPath = null
+        imageCache.clear()
     }
 
     /** نسخة آمنة لا تُسقط التطبيق أبداً — تعيد صورة بسيطة عند أي خطأ */
@@ -163,6 +178,8 @@ object CardRenderer {
                     drawQr(canvas, field, template, user, settings, widthPx, heightPx)
                 FieldType.BARCODE ->
                     drawBarcode(canvas, field, user, settings, widthPx, heightPx)
+                FieldType.IMAGE ->
+                    drawImage(canvas, field, widthPx, heightPx)
                 else ->
                     drawText(canvas, field, user, settings, widthPx, heightPx, template.font, info)
             }
@@ -262,6 +279,8 @@ object CardRenderer {
 
                 if (cell.type == FieldType.QR_CODE) {
                     drawCellQr(canvas, cellRect, template, user, settings)
+                } else if (cell.type == FieldType.IMAGE) {
+                    drawCellImage(canvas, cellRect, cell)
                 } else if (fieldAppliesTo(cell.type, settings.cardMode)) {
                     drawCellText(canvas, cellRect, cell, user, settings, template.font, pxPerMm, info)
                 }
@@ -379,6 +398,35 @@ object CardRenderer {
         val left = field.xFrac * widthPx - bw / 2f
         val top = field.yFrac * heightPx - bh / 2f
         canvas.drawBitmap(bmp, left, top, null)
+    }
+
+    /** يرسم شعاراً/صورة في النمط الحر: المركز عند (xFrac,yFrac) والارتفاع sizeFrac من ارتفاع الكرت */
+    private fun drawImage(canvas: Canvas, field: CardField, widthPx: Int, heightPx: Int) {
+        val bmp = image(field.imagePath) ?: return
+        val targetH = (field.sizeFrac * heightPx).coerceAtLeast(6f)
+        val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1)
+        var w = targetH * aspect
+        var h = targetH
+        val maxW = widthPx * 0.92f
+        if (w > maxW) { h *= maxW / w; w = maxW }
+        val left = field.xFrac * widthPx - w / 2f
+        val top = field.yFrac * heightPx - h / 2f
+        canvas.drawBitmap(bmp, null, RectF(left, top, left + w, top + h), Paint(Paint.FILTER_BITMAP_FLAG))
+    }
+
+    /** يرسم شعاراً/صورة داخل خلية جدول محافظاً على نسبة أبعادها */
+    private fun drawCellImage(canvas: Canvas, r: RectF, cell: CardCell) {
+        val bmp = image(cell.imagePath) ?: return
+        val pad = minOf(r.width(), r.height()) * 0.08f
+        val boxW = (r.width() - 2 * pad).coerceAtLeast(1f)
+        val boxH = (r.height() - 2 * pad).coerceAtLeast(1f)
+        val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1)
+        var w = boxH * aspect
+        var h = boxH
+        if (w > boxW) { h *= boxW / w; w = boxW }
+        val left = r.centerX() - w / 2f
+        val top = r.centerY() - h / 2f
+        canvas.drawBitmap(bmp, null, RectF(left, top, left + w, top + h), Paint(Paint.FILTER_BITMAP_FLAG))
     }
 
     /** Code128 — يقبل الأرقام والحروف اللاتينية. يعيد صورة أو null عند الفشل */
