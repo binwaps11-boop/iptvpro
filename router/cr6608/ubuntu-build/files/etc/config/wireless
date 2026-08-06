@@ -14,13 +14,17 @@ config wifi-device 'radio0'
 	option path '1e140000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'
 	option band '2g'
 	option channel '11'
-	option htmode 'HE40'
+	option htmode 'HE20'
 	# 40 MHz on 2.4 GHz only holds if we skip the OBSS scan - otherwise hostapd
 	# falls back to 20 MHz as soon as it sees a neighbouring BSS. Set to 0 if you
 	# would rather be a good neighbour in a crowded band than have the width.
 	option noscan '1'
 	option country 'US'
 	option cell_density '0'
+	# Coverage class / ACK timeout: extend so genuinely distant clients (up to ~1 km)
+	# are not dropped by a too-short ACK window. Numeric only — the legacy 'auto'
+	# string was invalid and is what had to be avoided.
+	option distance '1000'
 	option antenna_gain '0'
 	option airtime_mode '1'
 	option he_su_beamformer '1'
@@ -55,6 +59,10 @@ config wifi-device 'radio1'
 	option htmode 'HE80'
 	option country 'US'
 	option cell_density '0'
+	# Coverage class / ACK timeout: extend so genuinely distant clients (up to ~1 km)
+	# are not dropped by a too-short ACK window. Numeric only — the legacy 'auto'
+	# string was invalid and is what had to be avoided.
+	option distance '1000'
 	option antenna_gain '0'
 	option he_su_beamformer '1'
 	option he_su_beamformee '1'
