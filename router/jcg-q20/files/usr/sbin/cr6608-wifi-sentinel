@@ -70,6 +70,27 @@ pgrep -f cr6608-security-apply >/dev/null 2>&1 && exit 0
 ST=/tmp/cr6608-wifi-sentinel
 mkdir -p "$ST"
 
+# Escalation for the DBDC zombie state (mt76 #1083: a reconfigure can kill both
+# radios of the single-function MT7915 and a targeted `wifi up` does not always
+# revive them). When the targeted heal has failed twice in a row, apply the
+# community-documented recovery — full driver reload. Radios are bound by PCIe
+# *path* in uci, so re-enumeration rebinds cleanly. At most once per hour.
+escalate_driver() {
+	last_esc="$(cat "$ST/escalate" 2>/dev/null || echo 0)"
+	case "$last_esc" in ''|*[!0-9]*) last_esc=0 ;; esac
+	[ $(( UP - last_esc )) -lt 3600 ] && return 0
+	echo "$UP" > "$ST/escalate"
+	logger -t cr6608-sentinel "targeted heal failed twice -> full mt7915e reload (mt76#1083 DBDC recovery); radios rebind by path"
+	wifi down >/dev/null 2>&1
+	sleep 2
+	rmmod mt7915e >/dev/null 2>&1 || true
+	sleep 1
+	modprobe mt7915e >/dev/null 2>&1 || true
+	sleep 3
+	wifi up >/dev/null 2>&1
+	rm -f "$ST/radio0.miss" "$ST/radio1.miss" "$ST/radio0.healcount" "$ST/radio1.healcount"
+}
+
 check_radio() { # $1=radioX  $2=phyX
 	radio="$1"; phy="$2"
 	# owner intentionally disabled it -> nothing to heal
@@ -92,16 +113,23 @@ check_radio() { # $1=radioX  $2=phyX
 			' && radio_up=1
 	fi
 	if [ "$radio_up" = "1" ]; then
-		rm -f "$ST/$radio.miss"
+		rm -f "$ST/$radio.miss" "$ST/$radio.healcount"
 		return 0
 	fi
 	miss=$(( $(cat "$ST/$radio.miss" 2>/dev/null || echo 0) + 1 ))
 	echo "$miss" > "$ST/$radio.miss"
 	[ "$miss" -lt 2 ] && return 0
 	last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
 	[ $(( UP - last )) -lt 600 ] && return 0
 	echo "$UP" > "$ST/$radio.heal"
 	rm -f "$ST/$radio.miss"
+	hc=$(( $(cat "$ST/$radio.healcount" 2>/dev/null || echo 0) + 1 ))
+	echo "$hc" > "$ST/$radio.healcount"
+	if [ "$hc" -ge 2 ]; then
+		escalate_driver
+		return 0
+	fi
 	logger -t cr6608-sentinel "$radio ($phy) down for 2 checks -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
 	wifi up "$radio" >/dev/null 2>&1
 }
