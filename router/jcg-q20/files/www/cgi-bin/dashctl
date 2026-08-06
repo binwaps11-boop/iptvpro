@@ -27,7 +27,7 @@ ubus() { run_limit 3 /bin/ubus "$@" 2>/dev/null; }
 iwinfo() { run_limit 4 /usr/bin/iwinfo "$@" 2>/dev/null; }
 iw() { run_limit 4 /usr/sbin/iw "$@" 2>/dev/null; }
 reject_body() {
-  printf 'Status: 413 Payload Too Large\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
+  printf 'Status: 413 Payload Too Large\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\r\n'
   printf '{"ok":false,"error":"payload_too_large","message":"request body exceeds 65536 bytes"}\n'
   exit 0
 }
@@ -49,12 +49,12 @@ param() {
   {gsub(/\+/," ");n=split($0,a,"%");o=a[1];for(i=2;i<=n;i++){c=substr(a[i],1,2);if(c in h)o=o h[c] substr(a[i],3);else o=o "%" a[i]}printf "%s",o}'
 }
 deny_auth() {
-  printf 'Status: 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
-  printf '{"ok":false,"error":"forbidden","message":"valid Xiaomi CR6608 session required"}\n'
+  printf 'Status: 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\r\n'
+  printf '{"ok":false,"error":"forbidden","message":"valid Smart AP session required"}\n'
   exit 0
 }
 deny_method() {
-  printf 'Status: 405 Method Not Allowed\r\nAllow: POST\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
+  printf 'Status: 405 Method Not Allowed\r\nAllow: POST\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\r\n'
   printf '{"ok":false,"error":"method","message":"POST required for actions"}\n'
   exit 0
 }
@@ -64,7 +64,19 @@ sid="$(cr6608_session_from_request "$session_hint")"
 cr6608_session_valid "$sid" || deny_auth
 [ -z "$(qparam action)" ] || [ "${REQUEST_METHOD:-GET}" = POST ] || deny_method
 
-printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n'
+# CSRF defence-in-depth: on a mutating POST, if the browser sent an Origin (or Referer),
+# its host MUST equal ours. An absent value is allowed (SameSite=Strict stays the primary
+# guard); a present cross-origin value is a forgery attempt and is refused.
+if [ "${REQUEST_METHOD:-GET}" = "POST" ]; then
+  _csrc="${HTTP_ORIGIN:-${HTTP_REFERER:-}}"
+  if [ -n "$_csrc" ]; then
+    _csh="${_csrc#*://}"; _csh="${_csh%%/*}"; _csh="${_csh%%:*}"
+    _cth="${HTTP_HOST:-}"; _cth="${_cth%%:*}"
+    [ "$_csh" = "$_cth" ] || deny_auth
+  fi
+fi
+
+printf 'Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n\r\n'
 
 rollback_token=""
 wireless_plain_backup=""

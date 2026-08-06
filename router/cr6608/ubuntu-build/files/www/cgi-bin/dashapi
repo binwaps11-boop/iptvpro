@@ -23,7 +23,7 @@ deny_auth() {
   printf 'Content-Type: application/json\r\n'
   printf 'Cache-Control: no-store\r\n'
   printf 'X-Content-Type-Options: nosniff\r\n'
-  printf 'Referrer-Policy: no-referrer\r\n'
+  printf 'Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n'
   printf '\r\n'
   printf '{"ok":false,"error":"forbidden","message":"valid Xiaomi CR6608 session required"}\n'
   exit 0
@@ -34,7 +34,7 @@ cr6608_session_valid "$sid" || deny_auth
 printf 'Content-Type: application/json\r\n'
 printf 'Cache-Control: no-store\r\n'
 printf 'X-Content-Type-Options: nosniff\r\n'
-printf 'Referrer-Policy: no-referrer\r\n'
+printf 'Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n'
 printf '\r\n'
 gv() { echo "$1" | jsonfilter -e "$2" 2>/dev/null; }
 board=$(ubus call system board 2>/dev/null)

@@ -16,7 +16,7 @@ reply() {
 	printf 'Cache-Control: no-store\r\n'
 	printf 'Pragma: no-cache\r\n'
 	printf 'X-Content-Type-Options: nosniff\r\n'
-	printf 'Referrer-Policy: no-referrer\r\n'
+	printf 'Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n'
 	printf 'X-Frame-Options: SAMEORIGIN\r\n'
 	[ -n "$CLEAR_COOKIE_ROOT" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_ROOT"
 	[ -n "$CLEAR_COOKIE_LEGACY" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_LEGACY"
