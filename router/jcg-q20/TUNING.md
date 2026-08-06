@@ -102,6 +102,15 @@ Applied, evidence-backed, upstream-blessed:
 - **mt7915 "message timed out" radio wedge (the biggest 7915 stability bug).** Fixed by
   recovery patches long since merged into mt76; the v25.12.5 tree (kernel 6.12) and the
   stock driver both already carry them. freifunk-gluon#3436.
+- **Warm-reboot Wi-Fi death (openwrt#17895 / mt76#644).** mt7915e can fail init
+  ("Message timeout") after a warm reboot because the stock `pcie-mt7621` PERST/init
+  delays (100 ms) are too short for the chip's reset — Wi-Fi then stays dead until a
+  power cycle. The from-source builds carry
+  `kernel-build/patches/399-pcie-mt7621-longer-reset-delays.patch` (100 → 500 ms, pure
+  timing, ~1.2 s slower boot) — the community-verified workaround, still unmerged
+  upstream. On top of that, the Wi-Fi sentinel escalates to a full mt7915e module
+  reload if a targeted heal fails twice (mt76#1083 DBDC zombie recovery), so even an
+  undiagnosed radio wedge self-heals without a reboot.
 - **Thermal-mutex throughput regression on MT7621 (openwrt/mt76#1059).** Reverting the
   mutex restores ~200→440 Mbps, but only matters if something reads the *mt7915* thermal
   sysfs at high frequency — and it reintroduces an MCU-access race. **This build avoids the

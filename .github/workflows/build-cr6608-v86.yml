@@ -61,6 +61,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Kernel warm-reboot fix — longer PCIe reset delays (openwrt#17895 / mt76#644)
+        run: |
+          # mt7915e can fail to init ("Message timeout" / dead Wi-Fi) after a WARM
+          # reboot: the stock pcie-mt7621 PERST/init delays (100 ms) are too short for
+          # the chip's reset. Community-verified fix is 100 -> 500 ms. Pure timing
+          # change (~1.2 s slower boot), no functional code touched. Quilt applies it
+          # during kernel prepare; a context mismatch fails the build loudly rather
+          # than shipping unpatched.
+          install -m 0644 \
+            "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/399-pcie-mt7621-longer-reset-delays.patch" \
+            ow/target/linux/ramips/patches-6.12/399-pcie-mt7621-longer-reset-delays.patch
+          ls -l ow/target/linux/ramips/patches-6.12/ | grep 399-pcie
+
       - name: Bake in the v92 overlay
         run: |
           cd ow
