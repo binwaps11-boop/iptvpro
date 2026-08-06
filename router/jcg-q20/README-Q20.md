@@ -17,16 +17,15 @@ byte-identical** — nothing here rebuilds it.
 
 ## Security posture (first boot)
 
-- **Wi-Fi is secured automatically.** On first boot, if the radios are still at the shipped
-  open default, `99zz-smartap-secure-defaults` sets **WPA2-PSK with a unique random
-  passphrase per unit**. It never overrides Wi-Fi you already secured. The key is surfaced
-  on the boot console, in `/etc/smartap-credentials` (root, 0600), and in **Quick Settings**
-  (read it over the wired LAN at `http://192.168.1.1`). Upgrade to WPA3 in Quick Settings.
+- **Wi-Fi ships OPEN — no password (operator's choice).** Both radios ship with
+  `encryption 'none'`; there is no automatic WPA securing. Anyone in range can connect.
+  To add a password later, set WPA2/WPA3 in **Quick Settings** over the wired LAN
+  (`http://192.168.1.1`).
 - **Recovery paths are never closed:** the wired LAN (`192.168.1.1`) and the Wi-Fi rescue
-  IP `221.221.221.221` are aliases on `br-lan` and stay reachable by cable regardless of
-  Wi-Fi encryption; SSH and the panel password are untouched by the hardening. The root SSH
-  password is the **same shared default on every unit** (uniform SSH across the fleet by
-  design) — change it after deployment if you want a per-unit secret.
+  IP `221.221.221.221` are aliases on `br-lan` and stay reachable by cable; SSH and the
+  panel password are untouched. The root SSH password is the **same shared default on
+  every unit** (uniform SSH across the fleet by design) — change it after deployment if
+  you want a per-unit secret.
 - **Panel login** stays `root` / `admin` by default and is now genuinely changeable from the
   panel (the change actually updates the credential you log in with). **Change it after first
   login.** The audit found no command injection, auth bypass or XSS in the panel/CGI code.
