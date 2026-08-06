@@ -10,11 +10,16 @@
 #
 # 1) Lock every CPU to the "performance" governor so the forwarding path never
 #    pays a ramp-up penalty on a burst of traffic.
-# 2) Split interrupt load across the MT7621's cores: keep the wired MAC IRQ on
-#    CPU0 and move the MT7915 Wi-Fi / PCIe IRQ to CPU1, so heavy Wi-Fi RX and
-#    heavy Ethernet RX are serviced by different cores instead of contending
-#    for one. Software RPS (packet steering) already spreads the softirq work;
-#    this spreads the hard-IRQ work underneath it.
+# 2) Split interrupt load ACROSS PHYSICAL CORES: keep the wired MAC IRQ on CPU0
+#    and move the MT7915 Wi-Fi / PCIe IRQ to a CPU on a DIFFERENT physical core,
+#    so heavy Wi-Fi RX and heavy Ethernet RX never contend for one core. The
+#    target CPU is resolved from topology at runtime (on MT7621's 2-core / 4-VPE
+#    layout, cpu0 and cpu1 are the two threads of the SAME core, so a fixed
+#    mask 2 would NOT split across cores — we pick the first CPU whose core_id
+#    differs from cpu0's). Software RPS (packet steering) spreads the softirq
+#    work; this spreads the hard-IRQ work underneath it.
+# 3) Complete Receive Flow Steering: the rps_sock_flow_entries sysctl is inert
+#    until each RX queue's rps_flow_cnt is written — do that here.
 
 START=94
 
@@ -27,6 +32,31 @@ _set_governor() {
 	done
 }
 
+# Echo the index of a CPU on a DIFFERENT physical core than cpu0 (for the Wi-Fi
+# IRQ). Falls back to the highest online CPU when topology is unavailable.
+_other_core_cpu() {
+	c0="$(cat /sys/devices/system/cpu/cpu0/topology/core_id 2>/dev/null)"
+	last=0
+	for d in /sys/devices/system/cpu/cpu[0-9]*; do
+		n="${d##*/cpu}"
+		case "$n" in ''|*[!0-9]*) continue ;; esac
+		[ "$n" -gt "$last" ] 2>/dev/null && last="$n"
+		[ "$n" = 0 ] && continue
+		ci="$(cat "$d/topology/core_id" 2>/dev/null)"
+		if [ -n "$c0" ] && [ -n "$ci" ] && [ "$ci" != "$c0" ]; then
+			echo "$n"; return 0
+		fi
+	done
+	echo "$last"
+}
+
+# Hex CPU affinity mask for CPU index $1 (1<<N; ash has no shift, so double).
+_cpu_mask() {
+	n="$1"; m=1; i=0
+	while [ "$i" -lt "$n" ] 2>/dev/null; do m=$((m * 2)); i=$((i + 1)); done
+	printf '%x' "$m"
+}
+
 # Write $2 (a hex CPU mask) to the smp_affinity of every IRQ whose action name
 # matches the extended-regex $1. Returns 0 if at least one IRQ was pinned.
 _pin_irq() {
@@ -37,6 +67,26 @@ _pin_irq() {
 		echo "$mask" > "$aff" 2>/dev/null && hit=0
 	done
 	return $hit
+}
+
+# Complete RFS: rps_sock_flow_entries only takes effect once each RX queue's
+# rps_flow_cnt is set. Distribute the global table across each netdev's RX
+# queues (kernel networking/scaling.rst). Best-effort; a missing knob is a no-op.
+_setup_rfs() {
+	total="$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null)"
+	case "$total" in ''|*[!0-9]*|0) return 0 ;; esac
+	for qd in /sys/class/net/*/queues; do
+		[ -d "$qd" ] || continue
+		qn=0
+		for q in "$qd"/rx-*; do [ -d "$q" ] && qn=$((qn + 1)); done
+		[ "$qn" -gt 0 ] 2>/dev/null || continue
+		per=$(( total / qn ))
+		[ "$per" -gt 0 ] 2>/dev/null || per=1
+		for q in "$qd"/rx-*; do
+			[ -w "$q/rps_flow_cnt" ] || continue
+			echo "$per" > "$q/rps_flow_cnt" 2>/dev/null || true
+		done
+	done
 }
 
 start() {
@@ -59,8 +109,15 @@ start() {
 
 	# Wired MAC on CPU0. MT7621's SoC ethernet registers as "mtk_soc_eth"/"fe".
 	_pin_irq 'mtk_soc_eth|1e100000\.ethernet|^fe$' 1 || true
-	# MT7915 Wi-Fi (PCIe-attached) on CPU1.
-	_pin_irq 'mt7915|mt76|1e1[45]0000\.pcie|PCIe PME' 2 || true
+	# MT7915 Wi-Fi (PCIe-attached) on a CPU that is on a DIFFERENT physical core
+	# than cpu0, so it genuinely splits from the Ethernet IRQ.
+	wifi_cpu="$(_other_core_cpu)"
+	wifi_mask="$(_cpu_mask "$wifi_cpu")"
+	[ -n "$wifi_mask" ] || wifi_mask=2
+	_pin_irq 'mt7915|mt76|1e1[45]0000\.pcie|PCIe PME' "$wifi_mask" || true
+
+	# Complete Receive Flow Steering (rps_flow_cnt) now that RPS masks are up.
+	_setup_rfs
 
 	return 0
 }
