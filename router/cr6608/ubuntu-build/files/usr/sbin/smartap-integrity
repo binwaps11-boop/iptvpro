@@ -1,0 +1,39 @@
+#!/bin/sh
+# SmartAP integrity / tamper self-check — a passive, operator-driven premium feature.
+# Records a baseline of the SHA-256 of the critical config + panel/auth code on first
+# run, then reports on demand whether any of them changed since. Purely local and
+# read-only except for its own baseline file; it never blocks boot, never alters the
+# system, and is not scheduled — the operator runs it (`smartap-integrity check`) or the
+# dashboard calls it. This is SmartAP's own code, not an OpenWrt component.
+BASELINE=/etc/smartap-integrity.sha256
+FILES="/etc/config/smartap /etc/config/wireless /etc/config/network /etc/config/firewall
+/etc/config/dropbear /etc/config/rpcd /etc/config/uhttpd /www/index.html /www/dashboard.js
+/www/cgi-bin/dashctl /www/cgi-bin/dashlogin /www/cgi-bin/dashupload
+/usr/libexec/cr6608-session-auth /usr/sbin/cr6608-quicksettings-apply"
+manifest() { for f in $FILES; do [ -f "$f" ] && sha256sum "$f"; done; }
+case "${1:-check}" in
+  baseline)
+    manifest > "$BASELINE" 2>/dev/null && chmod 0600 "$BASELINE" 2>/dev/null
+    echo "baseline recorded: $BASELINE ($(wc -l < "$BASELINE" 2>/dev/null) files)" ;;
+  check)
+    [ -f "$BASELINE" ] || { echo "no baseline yet — run: smartap-integrity baseline"; exit 2; }
+    cur="$(manifest)"
+    if printf '%s\n' "$cur" | diff -q "$BASELINE" - >/dev/null 2>&1; then
+      echo "OK: all $(wc -l < "$BASELINE") tracked files match the baseline"
+    else
+      echo "CHANGED since baseline:"
+      printf '%s\n' "$cur" | diff "$BASELINE" - 2>/dev/null | awk '/^>/{print "  modified: "$3}'
+      exit 1
+    fi ;;
+  json)
+    # machine-readable for the dashboard
+    [ -f "$BASELINE" ] || { echo '{"state":"no-baseline"}'; exit 0; }
+    cur="$(manifest)"
+    if printf '%s\n' "$cur" | diff -q "$BASELINE" - >/dev/null 2>&1; then
+      echo '{"state":"ok"}'
+    else
+      echo '{"state":"changed"}'
+    fi ;;
+  *) echo "usage: smartap-integrity {baseline|check|json}"; exit 2 ;;
+esac
+exit 0

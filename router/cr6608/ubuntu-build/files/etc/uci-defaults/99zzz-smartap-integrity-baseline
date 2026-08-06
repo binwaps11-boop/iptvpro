@@ -1,0 +1,6 @@
+#!/bin/sh
+# Record the SmartAP integrity baseline once, at the very end of first boot, after
+# 99zz-smartap-secure-defaults has settled the Wi-Fi/credentials — so the baseline
+# reflects the real shipped state of this unit. Passive: only writes the baseline file.
+[ -x /usr/sbin/smartap-integrity ] && /usr/sbin/smartap-integrity baseline >/dev/null 2>&1
+exit 0
