@@ -20,6 +20,10 @@ deny_auth() {
 sid="$(cr6608_session_from_request "$(qparam sid)")"
 cr6608_session_valid "$sid" || deny_auth
 
+# Atomic state-file writer (private temp + mv -f; refuses to follow a symlink). Defined
+# BEFORE the fast-path case below so the lite branch, which returns early, can use it.
+sput() { _sf="$1"; _st="$1.$$"; if cat > "$_st" 2>/dev/null; then mv -f "$_st" "$_sf" 2>/dev/null || rm -f "$_st" 2>/dev/null; else rm -f "$_st" 2>/dev/null; fi; }
+
 printf 'Content-Type: application/json; charset=utf-8\r\n'
 printf 'Cache-Control: no-store\r\n'
 printf 'X-Content-Type-Options: nosniff\r\n'
@@ -78,7 +82,6 @@ esac
 # session code (cr6608-session-auth) already refuses symlinked state; apply the same
 # rule here. sput() lands content via a private temp then mv -f, so a symlink sitting at
 # the target is replaced, never followed (rename() does not traverse the final symlink).
-sput() { _sf="$1"; _st="$1.$$"; if cat > "$_st" 2>/dev/null; then mv -f "$_st" "$_sf" 2>/dev/null || rm -f "$_st" 2>/dev/null; else rm -f "$_st" 2>/dev/null; fi; }
 # One-time sweep at start: drop any fixed state path that is a symlink or not a
 # root-owned regular file, so a stale planted link from a prior boot cannot be read back.
 for _s in /tmp/dashapi2.lite.cpu /tmp/dashapi2.cpu /tmp/dashapi2.traffic /tmp/dashapi2.perf \
@@ -709,7 +712,7 @@ if [ -r "$perf_cache" ]; then
   [ "$((uptime_s - ${pc_ts:-0}))" -lt 60 ] 2>/dev/null && perf="$(sed -n '2p' "$perf_cache" 2>/dev/null)"
 fi
 if [ -z "$perf" ]; then
-  drv_banner="$(dmesg 2>/dev/null | grep -oiE 'CR6608-LAB-38[A-Za-z0-9-]*' | tail -1)"; [ -n "$drv_banner" ] || drv_banner="$(logread 2>/dev/null | grep -oiE 'CR6608-LAB-38[A-Za-z0-9-]*' | tail -1)"
+  drv_banner="$(grep -a -o -m1 -E 'SMARTAP-(Q20|CR6608)-RF-38DBM-LINEAR' /lib/modules/*/mt7915e.ko 2>/dev/null | head -1)"; [ -n "$drv_banner" ] || drv_banner="$(dmesg 2>/dev/null | grep -oiE 'CR6608-LAB-38[A-Za-z0-9-]*' | tail -1)"
   perf="{\"driver_banner\":$(jstr "$drv_banner"),\"txpower\":$(jnum "$(pget wireless.radio1.txpower)"),\"dynack\":$([ "$(pget wireless.radio0.distance)" = "auto" ] && echo true || echo false),\"ldpc\":$(pb "$(pget wireless.radio1.ldpc)"),\"stbc\":$(pb "$(pget wireless.radio1.tx_stbc)"),\"sgi\":$(pb "$(pget wireless.radio1.short_gi_80)"),\"su_bf\":$(pb "$(pget wireless.radio1.he_su_beamformer)"),\"mu_bf_he\":$(pb "$(pget wireless.radio1.he_mu_beamformer)"),\"mu_bf_vht\":$(pb "$(pget wireless.radio1.mu_beamformer)"),\"spatial_reuse\":$([ -n "$(pget wireless.radio1.he_spr_sr_control)" ] && echo true || echo false),\"bss_color\":$(pb "$(pget wireless.radio1.he_bss_color)"),\"airtime\":$(pb "$(pget wireless.radio0.airtime_mode)"),\"kv\":$(pb "$(pget wireless.wifinet0.ieee80211k)"),\"m2u\":$(pb "$(pget wireless.wifinet0.multicast_to_unicast)"),\"maxassoc\":$(jnum "$(pget wireless.wifinet0.maxassoc)"),\"max_inact\":$(jnum "$(pget wireless.wifinet0.max_inactivity)"),\"keep_weak\":$([ "$(pget wireless.wifinet0.disassoc_low_ack)" = "0" ] && echo true || echo false),\"hw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading_hw)"),\"sw_offload\":$(pb "$(pget firewall.@defaults[0].flow_offloading)"),\"rps\":$(pb "$(pget network.globals.packet_steering)"),\"dns_cache\":$(jnum "$(pget dhcp.@dnsmasq[0].cachesize)"),\"fastopen\":$([ "$(cat /proc/sys/net/ipv4/tcp_fastopen 2>/dev/null)" = "3" ] && echo true || echo false),\"backlog\":$(jnum "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)")}"
   { echo "$uptime_s"; echo "$perf"; } | sput "$perf_cache"
 fi
@@ -717,7 +720,7 @@ fi
 # Customer/device identity advertised to MikroTik Neighbor Discovery (MNDP).
 identity_enabled="$(pget smartap.identity.enabled)"; [ -n "$identity_enabled" ] || identity_enabled=1
 identity_customer="$(pget smartap.identity.customer_name)"
-identity_device="$(pget smartap.identity.device_name)"; [ -n "$identity_device" ] || identity_device="${host:-CR6608}"
+identity_device="$(pget smartap.identity.device_name)"; [ -n "$identity_device" ] || identity_device="${host:-SmartAP-Q20}"
 identity_phone="$(pget smartap.identity.phone)"
 identity_interval="$(pget smartap.identity.interval)"; [ -n "$identity_interval" ] || identity_interval=30
 neighbor_identity="$(sed -n '1p' /tmp/cr6608-mndp.fields 2>/dev/null)"

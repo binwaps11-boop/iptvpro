@@ -1555,7 +1555,10 @@ case "$action" in
       action_reload "Administration" "Dropbear enable failed" /etc/init.d/dropbear enable || exit 0
       action_reload "Administration" "Dropbear restart failed" /etc/init.d/dropbear restart || exit 0
     fi
-    action_reload "Administration" "uhttpd reload failed" /etc/init.d/uhttpd reload || exit 0
+    # Reply BEFORE reloading uhttpd: an HTTP-port change tears down this connection, so the
+    # rollback_token would never reach the browser and the guarded change would always
+    # auto-revert. Reload uhttpd detached, after the response is on the wire.
+    ( sleep 1; /etc/init.d/uhttpd reload >/dev/null 2>&1 ) >/dev/null 2>&1 </dev/null &
     emit true "Administration" "Access services saved" "[]" "Backup: $backup\nuhttpd/dropbear access settings saved." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   opkg_update|opkg_install|opkg_remove)
     confirm_required "Software"

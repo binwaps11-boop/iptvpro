@@ -1187,7 +1187,7 @@ case "$action" in
     active_qvid="$(uci -q get network.cr6608_vlan.device 2>/dev/null | sed -n 's/^br-lan\.\([0-9][0-9]*\)$/\1/p')"
     valid_vlan_id "$active_qvid" || active_qvid=""
     active_trunks=0
-    for n in 1 2 3; do
+    for n in 1 2; do
       pen="$(safe_num "$(param lan${n}_enabled)")"; pil="$(safe_num "$(param lan${n}_isolate)")"; pvl="$(safe_num "$(param lan${n}_vlan)")"
       valid_bool "$pen" || pen=1; valid_bool "$pil" || pil=0; valid_port_vlan "$pvl" || pvl=1
       pvm="$(param lan${n}_vlan_mode)"
@@ -1574,8 +1574,15 @@ case "$action" in
       action_reload "Administration" "Dropbear enable failed" /etc/init.d/dropbear enable || exit 0
       action_reload "Administration" "Dropbear restart failed" /etc/init.d/dropbear restart || exit 0
     fi
-    action_reload "Administration" "uhttpd reload failed" /etc/init.d/uhttpd reload || exit 0
-    emit true "Administration" "Access services saved" "[]" "Backup: $backup\nuhttpd/dropbear access settings saved." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    # Emit BEFORE reloading uhttpd. If the operator changed the HTTP port, reloading uhttpd
+    # tears down THIS connection (it was accepted on the old port), so the rollback_token in
+    # the reply would never reach the browser — the guarded change could then never be
+    # confirmed and Safe Apply would always auto-revert it. Reply first, then reload uhttpd
+    # from a detached subshell once the response is on the wire (same pattern as
+    # system_reboot). The config was already committed above, so only the socket rebind is
+    # deferred.
+    ( sleep 1; /etc/init.d/uhttpd reload >/dev/null 2>&1 ) >/dev/null 2>&1 </dev/null &
+    emit true "Administration" "Access services saved" "[]" "Backup: $backup\nuhttpd/dropbear access settings saved. If you changed the HTTP port, reconnect on the new port and then confirm to keep the change." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   opkg_update|opkg_install|opkg_remove)
     confirm_required "Software"
     command -v apk >/dev/null 2>&1 || { emit false "Software" "Package manager unavailable" "[]" "apk is not installed in this image; package actions are unsupported." "[]" "[]"; exit 0; }
