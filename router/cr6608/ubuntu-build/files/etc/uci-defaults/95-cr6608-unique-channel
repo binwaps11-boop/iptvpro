@@ -1,0 +1,8 @@
+#!/bin/sh
+# Seed a deterministic clean-install channel without overwriting retained or
+# operator-selected wireless settings during a kept-settings sysupgrade.
+if ! uci -q get wireless.radio0.channel >/dev/null 2>&1; then
+	uci set wireless.radio0.channel='11' || exit 1
+	uci commit wireless || exit 1
+fi
+exit 0

@@ -1,0 +1,70 @@
+#!/bin/sh
+. /usr/libexec/cr6608-session-auth
+# --- safety: no system command may hang the API ---
+run_limit() {
+  sec="$1"; shift
+  "$@" & pid=$!
+  ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  guard_children="$(pgrep -P "$guard" 2>/dev/null)"
+  kill "$guard" 2>/dev/null
+  [ -n "$guard_children" ] && kill $guard_children 2>/dev/null
+  wait "$guard" 2>/dev/null
+  return "$rc"
+}
+ubus() { run_limit 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { run_limit 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 6 /usr/sbin/iw "$@" 2>/dev/null; }
+qparam() {
+  printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1 | sed 's/[^A-Fa-f0-9]//g'
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf 'X-Content-Type-Options: nosniff\r\n'
+  printf 'Referrer-Policy: no-referrer\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"error":"forbidden","message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+sid="$(cr6608_session_from_request "$(qparam sid)")"
+cr6608_session_valid "$sid" || deny_auth
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf 'Referrer-Policy: no-referrer\r\n'
+printf '\r\n'
+gv() { echo "$1" | jsonfilter -e "$2" 2>/dev/null; }
+board=$(ubus call system board 2>/dev/null)
+info=$(ubus call system info 2>/dev/null)
+host=$(cat /proc/sys/kernel/hostname)
+model=$(gv "$board" '@.model')
+osver=$(gv "$board" '@.release.version')
+kernel=$(gv "$board" '@.kernel')
+uptime=$(gv "$info" '@.uptime'); uptime=${uptime:-0}
+l1=$(gv "$info" '@.load[0]'); l1=${l1:-0}
+l5=$(gv "$info" '@.load[1]'); l5=${l5:-0}
+l15=$(gv "$info" '@.load[2]'); l15=${l15:-0}
+mt=$(gv "$info" '@.memory.total'); mt=${mt:-0}
+mf=$(gv "$info" '@.memory.free'); mf=${mf:-0}
+ma=$(gv "$info" '@.memory.available'); ma=${ma:-0}
+set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{print $2*1024,$3*1024,$4*1024}')
+st=${1:-0}; su=${2:-0}; sa=${3:-0}
+lanip=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | head -1)
+clients=$(grep -c "" /tmp/dhcp.leases 2>/dev/null); clients=${clients:-0}
+wifi="["; first=1
+for IF in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
+  d=$(iwinfo "$IF" info 2>/dev/null)
+  ssid=$(echo "$d" | grep -o 'ESSID: "[^"]*"' | sed 's/ESSID: "//;s/"$//')
+  ch=$(echo "$d" | grep -o 'Channel: [0-9]*' | grep -o '[0-9]*$')
+  sta=$(iwinfo "$IF" assoclist 2>/dev/null | grep -c dBm)
+  [ "$first" = 1 ] || wifi="$wifi,"
+  wifi="$wifi{\"iface\":\"$IF\",\"ssid\":\"$ssid\",\"channel\":\"${ch:-0}\",\"clients\":${sta:-0}}"
+  first=0
+done
+wifi="$wifi]"
+cat <<JEOF
+{"hostname":"$host","model":"$model","os":"$osver","kernel":"$kernel","uptime":$uptime,"load":[$l1,$l5,$l15],"mem":{"total":$mt,"free":$mf,"available":$ma},"storage":{"total":$st,"used":$su,"available":$sa},"lan_ip":"$lanip","clients":$clients,"wifi":$wifi}
+JEOF

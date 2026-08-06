@@ -1,0 +1,57 @@
+#!/bin/sh
+
+# Migrate settings which may be retained from an older CR6608 image by
+# sysupgrade.  This is deliberately board-scoped and does not touch the root
+# account, LAN addressing, DHCP, calibration data, or flash partitions.
+
+UCI_BIN="${CR6608_MIGRATION_UCI_BIN:-uci}"
+LOGGER_BIN="${CR6608_MIGRATION_LOGGER_BIN:-logger}"
+BOARD_NAME_FILE="${CR6608_MIGRATION_BOARD_NAME_FILE:-/tmp/sysinfo/board_name}"
+ADMIN_HASH='$6$CR6608SmartAP$fP5546rp/hFS4daWksthh9.6.4brhcrcj055MoBVja331Cq32KOZyhedRjZ1q80yBtxpsUpwCbv2fWKhpH1LS.'
+MARKER='smartap.migration.preserved_config_version'
+VERSION='2'
+
+[ "$(cat "$BOARD_NAME_FILE" 2>/dev/null)" = 'xiaomi,mi-router-cr6608' ] || exit 0
+[ "$("$UCI_BIN" -q get "$MARKER" 2>/dev/null)" = "$VERSION" ] && exit 0
+
+find_section_by_option() {
+	package="$1"
+	type="$2"
+	option="$3"
+	expected="$4"
+	index=0
+
+	while [ "$index" -lt 64 ]; do
+		section="@${type}[${index}]"
+		value="$("$UCI_BIN" -q get "${package}.${section}.${option}" 2>/dev/null)" || break
+		if [ "$value" = "$expected" ]; then
+			printf '%s\n' "$section"
+			return 0
+		fi
+		index=$((index + 1))
+	done
+
+	return 1
+}
+
+root_login="$(find_section_by_option rpcd login username root)" || exit 1
+lan_bridge="$(find_section_by_option network device name br-lan)" || exit 1
+[ "$("$UCI_BIN" -q get smartap.security 2>/dev/null)" = 'smartap' ] || exit 1
+
+"$UCI_BIN" -q set "rpcd.${root_login}.password=${ADMIN_HASH}" || exit 1
+"$UCI_BIN" -q set "network.${lan_bridge}.stp=0" || exit 1
+"$UCI_BIN" -q delete "network.${lan_bridge}.forward_delay" 2>/dev/null || true
+"$UCI_BIN" -q set smartap.security.loop_guard=0 || exit 1
+
+"$UCI_BIN" -q commit rpcd || exit 1
+"$UCI_BIN" -q commit network || exit 1
+"$UCI_BIN" -q commit smartap || exit 1
+
+# Write the marker only after every required package was committed.  If an
+# earlier commit fails, uci-defaults will retry this idempotent migration.
+"$UCI_BIN" -q set smartap.migration=migration || exit 1
+"$UCI_BIN" -q set "$MARKER=$VERSION" || exit 1
+"$UCI_BIN" -q commit smartap || exit 1
+
+"$LOGGER_BIN" -t cr6608-migration "applied preserved-config migration v${VERSION}"
+exit 0

@@ -1,0 +1,33 @@
+
+config dnsmasq
+	option domainneeded '1'
+	option boguspriv '1'
+	option filterwin2k '0'
+	option localise_queries '1'
+	option rebind_protection '1'
+	option rebind_localhost '1'
+	option local '/lan/'
+	option domain 'lan'
+	option expandhosts '1'
+	option nonegcache '0'
+	option cachesize '4000'
+	option authoritative '1'
+	option readethers '1'
+	option leasefile '/tmp/dhcp.leases'
+	option resolvfile '/tmp/resolv.conf.d/resolv.conf.auto'
+	option nonwildcard '1'
+	option localservice '1'
+	option ednspacket_max '1232'
+	option filter_aaaa '1'
+	option filter_a '0'
+
+# DHCP is HARD-OFF on this Access Point: there is deliberately NO dhcp pool section here, so
+# nothing appears in LuCI's DHCP page and dnsmasq generates no --dhcp-range at all. dnsmasq
+# runs purely as a DNS resolver. The boot enforcer (95-cr6608-dhcp-off) deletes any pool that
+# a UI action might create, so a DHCP server can never come back. The upstream Mikrotik is
+# the only DHCP server on the network.
+
+# DHCPv6 / RA daemon is disabled here AND the odhcpd binary is not even shipped in this build.
+config odhcpd 'odhcpd'
+	option disabled '1'
+	option maindhcp '0'

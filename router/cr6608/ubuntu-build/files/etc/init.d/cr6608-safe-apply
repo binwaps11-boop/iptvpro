@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+
+START=96
+STOP=05
+
+start() {
+	/usr/sbin/cr6608-safe-apply boot >/dev/null 2>&1
+}
+
+status() {
+	/usr/sbin/cr6608-safe-apply status
+}
+

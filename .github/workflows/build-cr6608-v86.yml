@@ -10,6 +10,11 @@ name: Build CR6608 v92 (38 dBm from source, real mt76 driver)
 
 on:
   workflow_dispatch:
+    inputs:
+      openwrt_ref:
+        description: 'OpenWrt git ref to build (the shipped SmartAP CR6608 images are 25.12.5)'
+        required: true
+        default: 'v25.12.5'
 
 permissions:
   contents: read
@@ -39,11 +44,15 @@ jobs:
             python3-setuptools rsync swig unzip zlib1g-dev file wget quilt \
             libelf-dev ecj fastjar java-propose-classpath
 
-      - name: Clone OpenWrt 24.10.6
+      - name: Clone OpenWrt
+        env:
+          # Passed through the environment, never interpolated into the shell text, so a
+          # crafted dispatch input cannot inject commands.
+          OPENWRT_REF: ${{ github.event.inputs.openwrt_ref || 'v25.12.5' }}
         run: |
           git clone https://git.openwrt.org/openwrt/openwrt.git ow
           cd ow
-          git checkout v24.10.6
+          git checkout "$OPENWRT_REF"
           git log -1 --oneline
 
       - name: Update & install feeds
@@ -70,6 +79,18 @@ jobs:
           grep -q 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y' .config \
             && echo "device profile selected" \
             || { echo "device profile NOT selected"; exit 1; }
+          # `make defconfig` SILENTLY drops any CONFIG_PACKAGE_* it cannot resolve (renamed
+          # or removed at this ref), so a curated feature can vanish with no error. Assert
+          # every explicitly requested =y package survived the expansion.
+          missing=""
+          while IFS= read -r sym; do
+            grep -qxF "$sym" .config || missing="$missing ${sym%=y}"
+          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9._-]+=y' \
+                     "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/cr6608.seed.config")
+          if [ -n "$missing" ]; then
+            echo "::error::packages dropped by defconfig (renamed/unavailable at this ref):$missing"; exit 1
+          fi
+          echo "all curated packages survived defconfig"
 
       - name: Download sources
         run: cd ow && make download -j8 V=s
@@ -83,18 +104,32 @@ jobs:
           echo "===MT76DIR=== ${MT76DIR:-NONE}"
           [ -n "$MT76DIR" ] || { echo "no mt76 dir"; exit 1; }
           export MT76DIR
-          cp "$MT76DIR/mt7915/mcu.c"  "$MT76DIR/mt7915/mcu.c.orig"
-          cp "$MT76DIR/mt7915/init.c" "$MT76DIR/mt7915/init.c.orig"
-          echo "===BEFORE: power-related lines in mt7915==="
-          grep -RIn "CR6608-RF\|38DBM\|la.cck\|la.ofdm\|la.mcs\|la.ru\|max_power\|max_reg_power\|orig_mpwr\|sku_path_en" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
-          python3 "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/apply-mt76-38.py"
-          echo "===AFTER: 76/72/68 + banner in mt7915==="
-          grep -RIn "CR6608-RF-38DBM-LINEAR\|= 76\|= 72\|= 68\|max_power < 38\|max_reg_power < 38" "$MT76DIR/mt7915/mcu.c" "$MT76DIR/mt7915/init.c" | head -40
-          echo "===DIFF mt7915/mcu.c==="
-          diff -u "$MT76DIR/mt7915/mcu.c.orig"  "$MT76DIR/mt7915/mcu.c"  || true
-          echo "===DIFF mt7915/init.c==="
-          diff -u "$MT76DIR/mt7915/init.c.orig" "$MT76DIR/mt7915/init.c" || true
-          rm -f "$MT76DIR/mt7915/mcu.c.orig" "$MT76DIR/mt7915/init.c.orig"
+          # Same mechanism as the Q20 build (proven end to end): patch the EEPROM target-power
+          # accessor in mt7915/eeprom.c so it returns 76 half-dBm (= 38.0 dBm), carrying a
+          # proof marker the gate below greps out of the final compiled module.
+          cp "$MT76DIR/mt7915/eeprom.c" "$MT76DIR/mt7915/eeprom.c.orig"
+          echo "===BEFORE: target-power accessor==="
+          grep -n "mt7915_eeprom_get_target_power" "$MT76DIR/mt7915/eeprom.c" | head -5
+          python3 "$GITHUB_WORKSPACE/router/cr6608/ubuntu-build/apply-mt76-38.py" "$MT76DIR"
+          echo "===DIFF mt7915/eeprom.c==="
+          diff -u "$MT76DIR/mt7915/eeprom.c.orig" "$MT76DIR/mt7915/eeprom.c" || true
+          # Persist the edit as a REAL package patch so it is re-applied on EVERY (re)prepare
+          # of mt76. Enabling extra kmods reconfigures the kernel, which re-prepares
+          # out-of-tree modules like mt76 from pristine source during the full `make` — that
+          # silently wipes an in-place build_dir edit and the marker gate then (correctly)
+          # refuses the image. A patch in package/kernel/mt76/patches/ survives re-prepares.
+          mkdir -p package/kernel/mt76/patches
+          diff -u -L a/mt7915/eeprom.c -L b/mt7915/eeprom.c \
+            "$MT76DIR/mt7915/eeprom.c.orig" "$MT76DIR/mt7915/eeprom.c" \
+            > package/kernel/mt76/patches/999-smartap-cr6608-38dbm.patch || true
+          rm -f "$MT76DIR/mt7915/eeprom.c.orig"
+          echo "===persisted package patch==="
+          cat package/kernel/mt76/patches/999-smartap-cr6608-38dbm.patch
+          test -s package/kernel/mt76/patches/999-smartap-cr6608-38dbm.patch \
+            || { echo "::error::38 dBm patch is empty — refusing"; exit 1; }
+          # Clean so the full build re-extracts pristine mt76 and applies ALL patches, ours
+          # included — guaranteeing the marker lands in the compiled mt7915e.ko.
+          make package/kernel/mt76/clean V=s 2>&1 | tail -2 || true
 
       - name: Build firmware
         run: |
@@ -117,7 +152,7 @@ jobs:
           echo "-- CR6608 via strings -a --"; strings -a "$KO" | grep -Ei "CR6608|35DBM|38DBM" || true
           echo "-- CR6608 via raw grep -a --"; grep -a -oE "CR6608[A-Za-z0-9-]*" "$KO" | sort -u | head || true
           # gate: use strings -a (scan the WHOLE file, not just loaded sections)
-          if ! strings -a "$KO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
+          if ! strings -a "$KO" | grep -qE "SMARTAP-CR6608-RF-38DBM-LINEAR"; then
             echo "::error::38 banner NOT in compiled .ko — refusing"; exit 1
           fi
           if strings -a "$KO" | grep -qiE "CR6608-RF-35DBM"; then
@@ -136,7 +171,7 @@ jobs:
             unsquashfs -q -d /tmp/imgchk/sq "$ROOT" >/dev/null 2>&1 || true
             IMGKO="$(find /tmp/imgchk/sq -name 'mt7915e.ko' 2>/dev/null | head -1)"
             echo "mt7915e.ko INSIDE final image: ${IMGKO:-NONE}"
-            if [ -n "$IMGKO" ] && strings -a "$IMGKO" | grep -qiE "CR6608-RF-38DBM-LINEAR"; then
+            if [ -n "$IMGKO" ] && strings -a "$IMGKO" | grep -qE "SMARTAP-CR6608-RF-38DBM-LINEAR"; then
               echo "::notice::CONFIRMED — CR6608-RF-38DBM-LINEAR is inside the FINAL firmware .ko"
               strings -a "$IMGKO" | grep -Ei "CR6608|38DBM|35DBM"
             else

@@ -1,0 +1,179 @@
+#!/bin/sh
+# cr6608-vlan-lib — the SINGLE owner of wired-port VLAN membership on br-lan (DSA).
+# Port model (owner spec — any combination must work):
+#   smartap.<port>.vlan_mode = 'plain'  -> PLAIN  : untagged management switch port;
+#                                                   never auto-joins the Quick Settings VLAN
+#   smartap.<port>.vlan  =  ''/1        -> NORMAL : untagged member of management VLAN 1
+#   smartap.<port>.vlan  =  N (2..4094) -> ACCESS : untagged+PVID member of VLAN N —
+#                                          a plain device plugged in lands INSIDE the VLAN
+#   smartap.<port>.vlan_mode = 'trunk'  -> TRUNK  : management untagged + VLAN N tagged
+#                                          (toward the Mikrotik / a VLAN-aware switch)
+#   missing/invalid vlan_mode           -> AUTO   : ACCESS for an explicit VLAN N;
+#                                                    otherwise follow the active Quick VLAN as TRUNK
+# LAN1/LAN2/LAN3 default to TRUNK for the active Quick Settings VLAN, so the
+# MikroTik uplink may use any LAN port. WAN remains reserved for PPPoE.
+# Management guarantee: VLAN 1 keeps the dashboard reachable on every NORMAL/TRUNK port;
+# Wi-Fi rescue 221.221.221.221 covers the case where every port is put in the VLAN.
+
+cr6608_bridge_config() {
+	local section
+	section="$(uci -q show network 2>/dev/null | sed -n "s/^\(network\.[^.=]*\)\.name='br-lan'$/\1/p" | head -n 1)"
+	[ -n "$section" ] || return 1
+	[ "$(uci -q get "$section" 2>/dev/null)" = "device" ] || return 1
+	printf '%s\n' "$section"
+}
+
+cr6608_clear_port_vlans() {
+	local section victim device
+	uci -q show network >/dev/null 2>&1 || return 1
+	# This library is the single owner of br-lan VLAN membership. Remove every
+	# previous br-lan bridge-vlan section, including LuCI-created or legacy
+	# sections whose names do not start with SmartAP. Sections for another
+	# bridge are left untouched.
+	while :; do
+		victim=""
+		for section in $(uci -q show network 2>/dev/null |
+			sed -n "s/^\(network\.[^.=]*\)=bridge-vlan$/\1/p"); do
+			device="$(uci -q get "$section.device" 2>/dev/null)"
+			[ "$device" = "br-lan" ] || continue
+			victim="$section"
+			break
+		done
+		[ -n "$victim" ] || break
+		uci -q delete "$victim" || return 1
+	done
+	return 0
+}
+
+cr6608_delete_if_present() {
+	uci -q get "$1" >/dev/null 2>&1 || return 0
+	uci -q delete "$1"
+}
+
+cr6608_apply_port_vlans() { # $1 = active quick-settings client VID, $2=1 ignores security-page per-port policy
+	local qvid="$1" ignore_policy="${2:-0}" sys_class_net="${SYS_CLASS_NET:-/sys/class/net}" p pen pv pm s v rec rest bridge
+	local vids="" records="" mgmt_ports="" trunk_vids="" access_vids="" any_client=0 quick_trunks=0
+
+	case "$qvid" in
+		'') ;;
+		*[!0-9]*) return 2 ;;
+		*) [ "$qvid" -ge 2 ] 2>/dev/null && [ "$qvid" -le 4094 ] 2>/dev/null || return 2 ;;
+	esac
+	case "$ignore_policy" in 0|1) ;; *) return 2 ;; esac
+	bridge="$(cr6608_bridge_config)" || return 1
+
+	# WAN is reserved exclusively for an explicit PPPoE client.
+	for p in lan1 lan2 lan3; do
+		[ -d "$sys_class_net/$p" ] || continue
+		if [ "$ignore_policy" = "1" ]; then
+			pen="1"; pv=""; pm=""
+		else
+			pen="$(uci -q get smartap.$p.enabled)"; [ -n "$pen" ] || pen="1"
+			case "$pen" in 0) continue ;; 1) ;; *) return 2 ;; esac
+			pv="$(uci -q get smartap.$p.vlan)"
+			pm="$(uci -q get smartap.$p.vlan_mode)"
+		fi
+		case "$pv" in ''|1|0|*[!0-9]*) pv="" ;; esac
+		[ -n "$pv" ] && { [ "$pv" -ge 2 ] 2>/dev/null && [ "$pv" -le 4094 ] 2>/dev/null || pv=""; }
+		case "$pm" in
+			plain|none) pm="plain"; pv="" ;;
+			trunk)
+				# VLAN 1 on a trunk means "follow the active Quick VLAN".
+				[ -n "$pv" ] || [ -z "$qvid" ] || pv="$qvid"
+				;;
+			access)
+				# VLAN 1 is not an access VLAN. Preserve the implicit Quick VLAN uplink.
+				if [ -z "$pv" ]; then
+					if [ -n "$qvid" ]; then pm="trunk"; pv="$qvid"; else pm="plain"; fi
+				fi
+				;;
+			*)
+				if [ -n "$pv" ]; then
+					pm="access"
+				elif [ -n "$qvid" ]; then
+					pm="trunk"; pv="$qvid"
+				else
+					pm="plain"
+				fi
+				;;
+		esac
+		if [ -n "$qvid" ] && [ "$pm" = "trunk" ] && [ "$pv" = "$qvid" ]; then
+			quick_trunks=$((quick_trunks + 1))
+		fi
+		records="$records $p:$pv:$pm"
+		if [ -z "$pv" ]; then
+			mgmt_ports="$mgmt_ports $p"
+		elif [ "$pm" = "trunk" ]; then
+			mgmt_ports="$mgmt_ports $p"
+			echo " $vids " | grep -q " $pv " || vids="$vids $pv"
+			echo " $trunk_vids " | grep -q " $pv " || trunk_vids="$trunk_vids $pv"
+			any_client=1
+		else
+			echo " $vids " | grep -q " $pv " || vids="$vids $pv"
+			echo " $access_vids " | grep -q " $pv " || access_vids="$access_vids $pv"
+			any_client=1
+		fi
+	done
+	# Every access VLAN needs a tagged path to the upstream switch. Otherwise a
+	# client associates but DHCP can never leave the CR6608.
+	for v in $access_vids; do
+		echo " $trunk_vids " | grep -q " $v " || return 3
+	done
+	# the quick VLAN must exist even with zero wired members (Wi-Fi lives inside it)
+	if [ -n "$qvid" ]; then
+		# A tagged MikroTik/uplink path is mandatory. Without it Wi-Fi clients
+		# associate but DHCP remains stuck at "obtaining address".
+		[ "$quick_trunks" -gt 0 ] 2>/dev/null || return 3
+		echo " $vids " | grep -q " $qvid " || vids="$vids $qvid"
+		any_client=1
+	fi
+
+	# Validation above must finish before touching the existing bridge-VLAN model.
+	# In particular, a missing tagged uplink returns 3 without leaving destructive
+	# UCI deltas behind that a later, unrelated `uci commit network` could persist.
+	# All old br-lan bridge-vlan sections are removed here, so a separate WAN-strip
+	# pass is both redundant and unsafe for bridge-vlan sections owned by another
+	# bridge device.
+	cr6608_clear_port_vlans || return 1
+
+	if [ "$any_client" = "0" ]; then
+		# nothing asks for a VLAN -> plain bridge, management everywhere (original state)
+		cr6608_delete_if_present "$bridge.vlan_filtering" || return 1
+		uci set network.lan.device='br-lan' || return 1
+		if uci -q get network.recovery >/dev/null 2>&1; then
+			uci set network.recovery.device='@lan' || return 1
+		fi
+		return 0
+	fi
+
+	uci set "$bridge.vlan_filtering=1" || return 1
+	# management VLAN 1, untagged on every NORMAL/TRUNK port
+	s="$(uci add network bridge-vlan)" || return 1
+	[ -n "$s" ] || return 1
+	uci set "network.$s.name=SmartAP-pv-mgmt" || return 1
+	uci set "network.$s.device=br-lan" || return 1
+	uci set "network.$s.vlan=1" || return 1
+	for p in $mgmt_ports; do uci add_list "network.$s.ports=$p:u*" || return 1; done
+	uci set network.lan.device='br-lan.1' || return 1
+	if uci -q get network.recovery >/dev/null 2>&1; then
+		uci set network.recovery.device='br-lan.1' || return 1
+	fi
+
+	for v in $vids; do
+		s="$(uci add network bridge-vlan)" || return 1
+		[ -n "$s" ] || return 1
+		uci set "network.$s.name=SmartAP-pv-$v" || return 1
+		uci set "network.$s.device=br-lan" || return 1
+		uci set "network.$s.vlan=$v" || return 1
+		for rec in $records; do
+			p="${rec%%:*}"; rest="${rec#*:}"; pv="${rest%%:*}"; pm="${rest#*:}"
+			[ "$pv" = "$v" ] || continue
+			if [ "$pm" = "trunk" ]; then
+				uci add_list "network.$s.ports=$p:t" || return 1
+			else
+				uci add_list "network.$s.ports=$p:u*" || return 1
+			fi
+		done
+	done
+	return 0
+}
