@@ -79,42 +79,26 @@ if uci -q get smartap.quick >/dev/null 2>&1; then
 	uci -q commit smartap
 fi
 
-# Mint a UNIQUE per-device root SSH password to replace the shared, image-extractable
-# default hash. Only the shipped default / an empty / a locked record is replaced — an
-# operator-set password is never touched. SSH stays enabled with password auth exactly as
-# configured; this only removes the shared-secret weakness (anyone who extracts the image
-# otherwise has root on every unit). On ANY failure the existing valid record is left
-# untouched, so the account is never emptied or locked, and the panel (root/admin over the
-# wired LAN) plus the LAN cable remain as recovery paths regardless.
-root_pw_line=""
-_pinned='$6$cr66sshd911cc74$WZZ5iq9xtlMFpdpUnTcWbiepXouW9aKbOK9IklLguXC4cH1IvbWlWQFdYwFP1T1vkmATIWo7ldWI4SiI0z102.'
-_curroot="$(awk -F: '/^root:/{print $2; exit}' /etc/shadow 2>/dev/null)"
-case "$_curroot" in
-	"$_pinned"|""|"!"|"x"|"*"|"!*")
-		_rpw="$(head -c 12 /dev/urandom 2>/dev/null | hexdump -v -e '/1 "%02x"' 2>/dev/null | cut -c1-20)"
-		if [ "${#_rpw}" -ge 16 ] && printf '%s\n%s\n' "$_rpw" "$_rpw" | passwd root >/dev/null 2>&1; then
-			root_pw_line="root_ssh_password=$_rpw"
-			logger -t smartap-secure "minted a unique per-device root SSH password (see /etc/smartap-credentials)" 2>/dev/null || true
-		fi
-		;;
-esac
+# NOTE: the root SSH password is intentionally the SAME shared default on every unit
+# (operator's choice — uniform SSH across the fleet). 99-cr6608-root-pass owns that
+# credential; this script does NOT touch the root password. Only the Wi-Fi key below is
+# per-device. Change the shared root password after deployment if you want.
 
 ssid24="$(uci -q get wireless.wifinet0.ssid 2>/dev/null)"
 ssid5="$(uci -q get wireless.wifinet1.ssid 2>/dev/null)"
 {
-	echo "# SmartAP first-boot credentials (unique to THIS unit). Keep it safe."
-	echo "# View or change them in the panel over the wired LAN: http://192.168.1.1"
+	echo "# SmartAP first-boot Wi-Fi credential (unique to THIS unit). Keep it safe."
+	echo "# View or change it in the panel over the wired LAN: http://192.168.1.1"
 	echo "# (default panel password: admin — change it after first login)."
 	echo "wifi_ssid_2g=$ssid24"
 	echo "wifi_ssid_5g=$ssid5"
 	echo "wifi_security=WPA2-PSK"
 	echo "wifi_key=$key"
-	[ -n "$root_pw_line" ] && echo "$root_pw_line"
 } > /etc/smartap-credentials 2>/dev/null
 chmod 0600 /etc/smartap-credentials 2>/dev/null
 
 logger -t smartap-secure "Wi-Fi secured with a unique per-device WPA2 key (see /etc/smartap-credentials)" 2>/dev/null || true
-printf '\n==== SmartAP: Wi-Fi secured with a UNIQUE key ====\n  SSID : %s / %s\n  Key  : %s\n  Also saved to /etc/smartap-credentials (incl. a unique root SSH password).\n  Change it in the panel over the LAN cable (http://192.168.1.1).\n==================================================\n\n' \
+printf '\n==== SmartAP: Wi-Fi secured with a UNIQUE key ====\n  SSID : %s / %s\n  Key  : %s\n  Also saved to /etc/smartap-credentials.\n  Change it in the panel over the LAN cable (http://192.168.1.1).\n==================================================\n\n' \
 	"$ssid24" "$ssid5" "$key" > /dev/console 2>/dev/null || true
 
 mark_done

@@ -22,16 +22,11 @@ byte-identical** — nothing here rebuilds it.
   passphrase per unit**. It never overrides Wi-Fi you already secured. The key is surfaced
   on the boot console, in `/etc/smartap-credentials` (root, 0600), and in **Quick Settings**
   (read it over the wired LAN at `http://192.168.1.1`). Upgrade to WPA3 in Quick Settings.
-- **Root SSH password is unique per unit.** On first boot `99zz-smartap-secure-defaults`
-  also replaces the shared, image-extractable default root hash with a **random per-device
-  password** (only when the account still carries that default — an operator-set password is
-  never touched). SSH stays enabled with password auth exactly as before; this just closes
-  the shared-secret hole. The password is written to `/etc/smartap-credentials` (root, 0600)
-  next to the Wi-Fi key — read it in the panel over the wired LAN. If minting ever fails the
-  prior valid record is left in place, so the account is never locked.
 - **Recovery paths are never closed:** the wired LAN (`192.168.1.1`) and the Wi-Fi rescue
   IP `221.221.221.221` are aliases on `br-lan` and stay reachable by cable regardless of
-  Wi-Fi encryption; the panel (`root`/`admin` over the LAN) is always available as recovery.
+  Wi-Fi encryption; SSH and the panel password are untouched by the hardening. The root SSH
+  password is the **same shared default on every unit** (uniform SSH across the fleet by
+  design) — change it after deployment if you want a per-unit secret.
 - **Panel login** stays `root` / `admin` by default and is now genuinely changeable from the
   panel (the change actually updates the credential you log in with). **Change it after first
   login.** The audit found no command injection, auth bypass or XSS in the panel/CGI code.
