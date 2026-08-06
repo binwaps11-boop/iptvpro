@@ -2311,7 +2311,8 @@ EOF
     channel5_target="$(uci -q get wireless.radio1.channel 2>/dev/null)"
     uci set wireless.radio0.channel="$channel24_target"
     for ifc in wifinet0 wifinet1; do uci set wireless."$ifc".wmm='1'; uci set wireless."$ifc".dtim_period='2'; uci set wireless."$ifc".ieee80211k='1'; uci set wireless."$ifc".bss_transition='1'; uci set wireless."$ifc".wnm_sleep_mode='1'; done
-    uci set wireless.radio0.legacy_rates='0'; uci set wireless.radio1.legacy_rates='0'
+    # Range policy (legacy_rates) is the operator's call via smartap-range-mode /
+    # the Wi-Fi page - Auto optimize must not silently override it.
     arm_rollback "$backup" || { uci -q revert wireless >/dev/null 2>&1 || true; emit false "Auto optimize" "Rollback guard failed" "[]" "Nothing was committed because Safe Apply could not be armed." "[]" "[]"; exit 0; }
     stage_channel_metadata "$channel24_target" "$channel5_target" || { uci -q revert wireless >/dev/null 2>&1 || true; uci -q revert cr6608quick >/dev/null 2>&1 || true; uci -q revert smartap >/dev/null 2>&1 || true; action_rollback_pending; emit false "Auto optimize" "Channel metadata failed" "[]" "$_action_rollback_text" "[]" "[]"; exit 0; }
     action_commit cr6608quick "Auto optimize" || exit 0

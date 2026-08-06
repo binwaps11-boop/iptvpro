@@ -1,0 +1,49 @@
+#!/bin/sh
+
+# SmartAP Max-Range mode — operator-controlled reach/speed trade for 2.4 GHz.
+#
+#   smartap-range-mode on      # maximum JOIN range: allow 802.11b CCK rates
+#   smartap-range-mode off     # maximum throughput (shipped default)
+#   smartap-range-mode status
+#
+# Physics of the knob: with legacy_rates=0 (default) the 2.4 GHz radio is
+# OFDM-only, so beacons/management go at 6 Mb/s — fast, airtime-cheap, but a
+# client must decode 6 Mb/s OFDM to even SEE the network. legacy_rates=1
+# re-admits the 1/2/5.5/11 Mb/s CCK rates; 1 Mb/s CCK decodes ~6-8 dB deeper
+# into the noise, so far/weak clients can find, join and hold the network from
+# considerably farther away. The cost is real: management/multicast frames get
+# slower and total cell throughput drops when b-rates are in play — which is
+# why this ships OFF and is a one-command operator choice, not a default.
+# 5 GHz never had CCK, so only radio0 is touched. Survives reboot (uci commit).
+
+RADIO=radio0
+
+usage() { echo "usage: smartap-range-mode on|off|status" >&2; exit 1; }
+
+uci -q get wireless.$RADIO >/dev/null || { echo "error: wireless.$RADIO not configured" >&2; exit 1; }
+
+cur="$(uci -q get wireless.$RADIO.legacy_rates)"
+case "$1" in
+on)
+	uci set wireless.$RADIO.legacy_rates='1'
+	uci commit wireless
+	wifi reload >/dev/null 2>&1 || wifi >/dev/null 2>&1
+	echo "Max-Range mode ON: 2.4 GHz now admits CCK (1-11 Mb/s) — far clients can join from farther; peak throughput reduced."
+	;;
+off)
+	uci set wireless.$RADIO.legacy_rates='0'
+	uci commit wireless
+	wifi reload >/dev/null 2>&1 || wifi >/dev/null 2>&1
+	echo "Max-Range mode OFF: 2.4 GHz is OFDM-only — maximum throughput (default)."
+	;;
+status)
+	if [ "$cur" = 1 ]; then
+		echo "Max-Range mode: ON (legacy_rates=1 on $RADIO)"
+	else
+		echo "Max-Range mode: OFF (legacy_rates=${cur:-0} on $RADIO)"
+	fi
+	;;
+*)
+	usage
+	;;
+esac

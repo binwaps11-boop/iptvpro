@@ -39,7 +39,7 @@ Validated against community consensus; every one of these is already in
 | `country 'US'` | permissive-but-legal per-channel ceilings | legitimate EIRP lever |
 | `htmode HE80` (5 GHz) / `HE40` (2.4) | 80 MHz, **not** 160 | 160 MHz on a 2×2 7915 has no spare chain for DFS radar → unreliable; removed upstream. mt76#748 |
 | `cell_density '0'` | normal basic-rate floor = **largest cell** | raising it *shrinks* range; keep 0 for distance. patchwork ozlabs cell_density |
-| `legacy_rates '0'` | drops 802.11b; mgmt/beacon frames stay on robust OFDM | consensus |
+| `legacy_rates '0'` | drops 802.11b; mgmt/beacon frames stay on robust OFDM | consensus. **Operator switch:** `smartap-range-mode on` re-admits CCK on 2.4 GHz — 1 Mb/s beacons decode ~6-8 dB deeper, so far/weak clients can *join* from much farther, at a real cell-throughput cost. `off` restores this default; Auto-optimize never overrides the choice |
 | `ieee80211k '1'` + `bss_transition '1'` (802.11v) | neighbor reports + BSS-transition hints | safe, no downside |
 | `ldpc / tx_stbc / rx_stbc / short_gi` | error-correction + antenna diversity + rate | small real SNR edge on supported clients |
 | `he_su/mu_beamformer` + `mu_beamformer` (MU-MIMO) | focus energy toward clients | small real gain; on where useful |
