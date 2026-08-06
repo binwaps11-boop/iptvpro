@@ -1615,9 +1615,24 @@
         say(ar ? "تم الرفع. جاري التثبيت — قد ينقطع الاتصال عدة دقائق..."
                : "Uploaded. Flashing now — the connection will drop for a few minutes...");
         var keep = $("fwKeep") && $("fwKeep").checked ? "1" : "0";
-        await fetch(CTL, { method: "POST", cache: "no-store",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: "section=system&action=flash_firmware&keep=" + keep + "&confirm=1&" + sidQuery() + "&_=" + Date.now() });
+        // flash_firmware validates with `sysupgrade --test` and returns {ok:false} for a
+        // rejected image (wrong device / truncated) BEFORE it starts flashing. Check that
+        // verdict so a rejection is shown as a failure instead of a false "Flashing started".
+        // A genuine flash instead drops the link mid-request; an abort/network error there
+        // therefore means success, not failure.
+        var fctl = new AbortController();
+        var fkill = setTimeout(function () { fctl.abort(); }, 20000);
+        try {
+          var fr = await fetch(CTL, { method: "POST", cache: "no-store", signal: fctl.signal,
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: "section=system&action=flash_firmware&keep=" + keep + "&confirm=1&" + sidQuery() + "&_=" + Date.now() });
+          clearTimeout(fkill);
+          var fj = null; try { fj = await fr.json(); } catch (e2) { fj = null; }
+          if (fj && fj.ok === false) throw new Error(fj.summary || fj.text || (ar ? "رُفض الملف" : "image rejected"));
+        } catch (e3) {
+          clearTimeout(fkill);
+          if (e3 && e3.name !== "AbortError" && !/NetworkError|Failed to fetch|load failed/i.test(e3.message || "")) throw e3;
+        }
         say(ar ? "بدأ التثبيت. انتظر ثم أعد تحميل الصفحة." : "Flashing started. Wait, then reload the page.");
       } catch (e) {
         btn.disabled = false;
@@ -2335,7 +2350,12 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
           body:"section=" + encodeURIComponent(section) + "&action=" + encodeURIComponent(actionName) + (params || "") + "&" + sidQuery() + "&_=" + Date.now()
         };
       }
-      var res = await fetch(url, fetchOptions);
+      // Bound the control call so a hung dashctl never parks the panel on "Running control…".
+      var cctl = new AbortController();
+      var ckill = setTimeout(function () { cctl.abort(); }, 20000);
+      fetchOptions.signal = cctl.signal;
+      var res;
+      try { res = await fetch(url, fetchOptions); } finally { clearTimeout(ckill); }
       if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول SmartAP Q20.");
       var data = await res.json();
       if (data && /^[0-9a-f]{32}$/.test(data.rollback_token || ""))

@@ -443,6 +443,13 @@ safe_arm_transaction() {
 			52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144)
 				safe_timeout=720
 				;;
+			auto|''|0)
+				# 'auto' on the 5 GHz radio can land on a DFS channel whose CAC takes up
+				# to ~10 min; give the rollback the same wide window so a valid auto-DFS
+				# selection is not rolled back mid-CAC. 2.4 GHz auto never picks DFS, so
+				# only radio1 needs the extension.
+				[ "$radio" = "radio1" ] && safe_timeout=720
+				;;
 		esac
 	done
 	SAFE_TOKEN="$("$CR6608_SBIN_DIR/cr6608-safe-apply" arm "$TX_ARCHIVE" \

@@ -37,6 +37,9 @@ printf 'X-Content-Type-Options: nosniff\r\n'
 printf 'Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n'
 printf '\r\n'
 gv() { echo "$1" | jsonfilter -e "$2" 2>/dev/null; }
+# JSON string escaper: backslash + double-quote, and strip control bytes. A model
+# name or SSID containing a `"`/`\` would otherwise break or restructure the response.
+je() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'; }
 board=$(ubus call system board 2>/dev/null)
 info=$(ubus call system info 2>/dev/null)
 host=$(cat /proc/sys/kernel/hostname)
@@ -61,10 +64,11 @@ for IF in $(iwinfo 2>/dev/null | awk '/ESSID:/{print $1}'); do
   ch=$(echo "$d" | grep -o 'Channel: [0-9]*' | grep -o '[0-9]*$')
   sta=$(iwinfo "$IF" assoclist 2>/dev/null | grep -c dBm)
   [ "$first" = 1 ] || wifi="$wifi,"
-  wifi="$wifi{\"iface\":\"$IF\",\"ssid\":\"$ssid\",\"channel\":\"${ch:-0}\",\"clients\":${sta:-0}}"
+  wifi="$wifi{\"iface\":\"$(je "$IF")\",\"ssid\":\"$(je "$ssid")\",\"channel\":\"${ch:-0}\",\"clients\":${sta:-0}}"
   first=0
 done
 wifi="$wifi]"
+host="$(je "$host")"; model="$(je "$model")"; osver="$(je "$osver")"; kernel="$(je "$kernel")"; lanip="$(je "$lanip")"
 cat <<JEOF
 {"hostname":"$host","model":"$model","os":"$osver","kernel":"$kernel","uptime":$uptime,"load":[$l1,$l5,$l15],"mem":{"total":$mt,"free":$mf,"available":$ma},"storage":{"total":$st,"used":$su,"available":$sa},"lan_ip":"$lanip","clients":$clients,"wifi":$wifi}
 JEOF

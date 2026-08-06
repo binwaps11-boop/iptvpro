@@ -1943,8 +1943,8 @@ EOF
     # destructive actions (delete/reboot/reset/raw-uci/ports).
     ipaddr="$(param lan_ipaddr)"; netmask="$(param netmask)"; start="$(safe_num "$(param start)")"; limit="$(safe_num "$(param limit)")"; leasetime="$(param leasetime)"; enabled="$(safe_num "$(param dhcp_enabled)")"
     valid_management_host "$ipaddr" "$netmask" || { emit false "LAN / DHCP" "Invalid LAN IP or netmask" "[]" "Use a usable host address with a contiguous IPv4 netmask; network and broadcast addresses are rejected." "[]" "[]"; exit 0; }
-    [ -n "$start" ] && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
-    [ -n "$limit" ] && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
+    [ -n "$start" ] && [ "$start" -ge 1 ] 2>/dev/null && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
+    [ -n "$limit" ] && [ "$limit" -ge 1 ] 2>/dev/null && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
     # dnsmasq accepts 12h / 720m / 30s / infinite. Reject anything else rather than
     # committing a value dnsmasq will refuse at restart.
     case "$leasetime" in

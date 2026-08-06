@@ -1477,24 +1477,33 @@ case "$action" in
     confirm_required "Firewall"
     action_backup firewall-edit || exit 0
     if [ "$action" = "save_firewall_zone" ]; then
-      zname="$(safe_word "$(param zone_name)")"; znet="$(param zone_networks | cut -c1-120)"; zin="$(safe_word "$(param zone_input)")"; zout="$(safe_word "$(param zone_output)")"; zfwd="$(safe_word "$(param zone_forward)")"; zmasq="$(safe_num "$(param zone_masq)")"
+      zname="$(safe_word "$(param zone_name)")"; znet="$(printf '%s' "$(param zone_networks)" | sed 's/[^A-Za-z0-9_ .:-]//g' | cut -c1-120)"; zin="$(safe_word "$(param zone_input)")"; zout="$(safe_word "$(param zone_output)")"; zfwd="$(safe_word "$(param zone_forward)")"; zmasq="$(safe_num "$(param zone_masq)")"
       [ -n "$zname" ] || { emit false "Firewall" "Missing zone" "[]" "Zone name is required." "[]" "[]"; exit 0; }
       # the 'lan' zone carries the management networks (input ACCEPT). Editing it here could
       # flip input to REJECT or drop lan/wlanrescue from its network list -> dashboard unreachable.
       case "$zname" in lan) emit false "Firewall" "Protected zone" "[]" "منطقة lan (الإدارة) محمية — تعديلها قد يقطع الوصول للوحة. استخدم العزل/الإعدادات السريعة." "[]" "[]"; exit 0 ;; esac
-      zsec="$(uci show firewall | awk -F'[.=]' -v n="$zname" '$0 ~ "\\.name=.?"n".?" {print $2; exit}')"; [ -n "$zsec" ] || zsec="$(uci add firewall zone)"
+      # Reject a bad policy string before it is committed (previously zin/zout/zfwd went
+      # straight to uci; only the fallbacks were sane, so 'ACCEPTx' would have been written).
+      for _pol in "$zin" "$zout" "$zfwd"; do
+        case "$_pol" in ''|ACCEPT|REJECT|DROP) : ;; *) emit false "Firewall" "Invalid policy" "[]" "Zone input/output/forward must be ACCEPT, REJECT or DROP." "[]" "[]"; exit 0 ;; esac
+      done
+      # EXACT name match, not an unanchored regex. The old `$0 ~ ".name=.?"n".?"` matched any
+      # substring of a real zone name (zone_name=la resolved to the protected 'lan' zone and
+      # slipped past the guard above); match only zone-type sections whose name equals zname.
+      zsec=""; for _z in $(uci show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do [ "$(uci -q get firewall."$_z".name 2>/dev/null)" = "$zname" ] && { zsec="$_z"; break; }; done; [ -n "$zsec" ] || zsec="$(uci add firewall zone)"
       uci set firewall."$zsec".name="$zname"; uci set firewall."$zsec".network="$znet"; uci set firewall."$zsec".input="${zin:-REJECT}"; uci set firewall."$zsec".output="${zout:-ACCEPT}"; uci set firewall."$zsec".forward="${zfwd:-REJECT}"
       [ "$zmasq" = "1" ] && uci set firewall."$zsec".masq='1' || uci delete firewall."$zsec".masq 2>/dev/null
     elif [ "$action" = "add_forwarding" ]; then
       fsrc="$(safe_word "$(param fwd_src)")"; fdst="$(safe_word "$(param fwd_dest)")"; [ -n "$fsrc" ] && [ -n "$fdst" ] || { emit false "Firewall" "Missing zones" "[]" "Source and destination zones are required." "[]" "[]"; exit 0; }
       fs="$(uci add firewall forwarding)"; uci set firewall."$fs".src="$fsrc"; uci set firewall."$fs".dest="$fdst"
     else
-      rname="$(param rule_name | cut -c1-64)"; [ -n "$rname" ] || { emit false "Firewall" "Missing rule name" "[]" "Rule name is required." "[]" "[]"; exit 0; }
+      rname="$(safe_word "$(param rule_name)" | cut -c1-64)"; [ -n "$rname" ] || { emit false "Firewall" "Missing rule name" "[]" "Rule name is required." "[]" "[]"; exit 0; }
       case "$rname" in lan|wan|loopback) emit false "Firewall" "Protected name" "[]" "لا يمكن حذف lan/wan/loopback من هنا." "[]" "[]"; exit 0 ;; esac
-      # delete ONLY rule sections (not zones/forwardings) that carry this name, so a rule
-      # named like a zone can't nuke the management zone.
-      for s in $(uci show firewall | awk -F'[.=]' -v n="$rname" '$0 ~ "\\.name=.?"n".?" {print $2}'); do
-        [ "$(uci -q get firewall."$s" 2>/dev/null)" = "rule" ] && uci delete firewall."$s" 2>/dev/null
+      # delete ONLY rule-type sections whose name matches EXACTLY. The old unanchored regex
+      # let rule_name='.' (or any substring) match every section line and sweep all rules;
+      # now a literal name comparison per rule section is used instead.
+      for s in $(uci show firewall | sed -n 's/^firewall\.\([^.=]*\)=rule$/\1/p'); do
+        [ "$(uci -q get firewall."$s".name 2>/dev/null)" = "$rname" ] && uci delete firewall."$s" 2>/dev/null
       done
     fi
     action_arm_rollback "Firewall" || exit 0
@@ -1549,7 +1558,17 @@ case "$action" in
       emit false "Administration" "Password update failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
       exit 0
     }
-    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nRoot password command completed. Confirm the matching Safe Apply transaction after verifying access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    # Point the dashboard/LuCI web login (rpcd config login) at the new password too.
+    # `passwd root` only rewrites /etc/shadow (SSH/console); the panel authenticates against
+    # the separate rpcd hash, so without this the password you actually log in with would
+    # never change. Copy the freshly-written root hash into rpcd and reload it. Guarded to a
+    # well-formed crypt hash so a malformed /etc/shadow field can never lock out the UI.
+    newhash="$(awk -F: '/^root:/{print $2; exit}' /etc/shadow 2>/dev/null)"
+    case "$newhash" in '$'*'$'*)
+      uci -q set rpcd.@login[0].password="$newhash" && uci -q commit rpcd && \
+        { /etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true; } ;;
+    esac
+    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nRoot password updated for the dashboard, LuCI and SSH. Confirm the matching Safe Apply transaction after verifying access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_admin_access)
     confirm_required "Administration"
     ssh_port="$(safe_port "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_port "$(param http_port)")"
@@ -1920,8 +1939,8 @@ EOF
     # destructive actions (delete/reboot/reset/raw-uci/ports).
     ipaddr="$(param lan_ipaddr)"; netmask="$(param netmask)"; start="$(safe_num "$(param start)")"; limit="$(safe_num "$(param limit)")"; leasetime="$(param leasetime)"; enabled="$(safe_num "$(param dhcp_enabled)")"
     valid_management_host "$ipaddr" "$netmask" || { emit false "LAN / DHCP" "Invalid LAN IP or netmask" "[]" "Use a usable host address with a contiguous IPv4 netmask; network and broadcast addresses are rejected." "[]" "[]"; exit 0; }
-    [ -n "$start" ] && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
-    [ -n "$limit" ] && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
+    [ -n "$start" ] && [ "$start" -ge 1 ] 2>/dev/null && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
+    [ -n "$limit" ] && [ "$limit" -ge 1 ] 2>/dev/null && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
     action_backup lan-dhcp || exit 0
     uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
     uci -q set smartap.quick.lan_ipaddr="$ipaddr"; uci -q set smartap.quick.lan_netmask="$netmask"

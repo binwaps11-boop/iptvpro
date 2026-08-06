@@ -82,6 +82,10 @@ acquire_apply_lock() {
 }
 
 cleanup_exit() {
+  # Discard any UNcommitted staged deltas if we were interrupted before the commit
+  # block ran, so a signal between staging and commit never leaves partial channel
+  # changes for a later `uci commit` to flush. No-op once COMMITTED=1.
+  [ "${COMMITTED:-0}" = 1 ] || { uci -q revert wireless 2>/dev/null; uci -q revert cr6608quick 2>/dev/null; uci -q revert smartap 2>/dev/null; }
   release_apply_lock
   if [ "$KEEP_WIRELESS_BACKUP" != "1" ] && [ -n "$wireless_backup" ]; then
     rm -f "$wireless_backup"
@@ -252,6 +256,7 @@ apply_failed=0
 [ "$wireless_changed" = 0 ] || uci commit wireless || apply_failed=1
 [ "$quick_changed" = 0 ] || uci commit cr6608quick || apply_failed=1
 [ "$smart_changed" = 0 ] || uci commit smartap || apply_failed=1
+COMMITTED=1
 
 if [ "$apply_failed" = 0 ] && {
   [ "$wireless_changed" = 0 ] ||

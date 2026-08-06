@@ -83,7 +83,8 @@ case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
 case "$window" in ''|*[!0-9]*) window="$now" ;; esac
 [ $((now - window)) -le 60 ] 2>/dev/null || { fails=0; window="$now"; }
 if [ "$fails" -ge 5 ] 2>/dev/null; then
-	sleep 2
+	# Reply immediately — never sleep while holding a uhttpd script slot and the flock,
+	# or a few throttled unauth requests can starve the whole management plane.
 	reply "429 Too Many Requests" '{"ok":false,"message":"too many failed attempts; retry later"}'
 fi
 

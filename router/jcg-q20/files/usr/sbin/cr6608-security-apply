@@ -130,23 +130,28 @@ apply_firewall() {
 	flood="$(g $STATE.security.flood_guard)"; flood="${flood:-1}"
 	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
 
-	clear_smartap_fw || return 1
+	# Revert staged firewall deltas on ANY staging failure so a partial rule set is never
+	# left uncommitted for a later unrelated `uci commit firewall` to flush (mirrors the
+	# apply_vlan revert). Post-commit reload failures need no revert — the tree is clean.
+	_fw_fail() { uci -q revert firewall 2>/dev/null; return 1; }
+
+	clear_smartap_fw || { _fw_fail; return 1; }
 
 	if [ "$enabled" = "1" ]; then
 		if [ "$flood" = "1" ]; then
 			# Rate-limit dashboard/web hits from the LAN, then drop the flood overflow.
 			add_fw_rule "SmartAP-Web-RateLimit" src=lan proto=tcp dest_port="80 443" \
-				limit="1200/minute" limit_burst=240 target=ACCEPT || return 1
-			add_fw_rule "SmartAP-Web-FloodDrop" src=lan proto=tcp dest_port="80 443" target=DROP || return 1
+				limit="1200/minute" limit_burst=240 target=ACCEPT || { _fw_fail; return 1; }
+			add_fw_rule "SmartAP-Web-FloodDrop" src=lan proto=tcp dest_port="80 443" target=DROP || { _fw_fail; return 1; }
 		fi
 		if [ "$rogue" = "1" ]; then
 			# Defensive L3 drop: nothing on the LAN may act as a DHCP server toward the
 			# router / upstream. Core guarantee is DHCP-server-off + isolation + STP.
-			add_fw_rule "SmartAP-RogueDHCP-In" src=lan proto=udp src_port=67 dest_port=68 target=DROP || return 1
-			add_fw_rule "SmartAP-RogueDHCP-Boot" src=lan proto=udp src_port=68 dest_port=67 family=ipv4 target=ACCEPT || return 1
+			add_fw_rule "SmartAP-RogueDHCP-In" src=lan proto=udp src_port=67 dest_port=68 target=DROP || { _fw_fail; return 1; }
+			add_fw_rule "SmartAP-RogueDHCP-Boot" src=lan proto=udp src_port=68 dest_port=67 family=ipv4 target=ACCEPT || { _fw_fail; return 1; }
 		fi
 	fi
-	uci commit firewall || return 1
+	uci commit firewall || { _fw_fail; return 1; }
 	if [ "$enabled" = "1" ]; then
 		/etc/init.d/firewall enable >/dev/null 2>&1 || return 1
 		/etc/init.d/firewall start >/dev/null 2>&1 || return 1
@@ -241,13 +246,15 @@ apply_loop_guard() {
 	[ "$enabled" = "1" ] && [ "$loop" = "1" ] && want=1
 	bridge="$(bridge_config_ref)"; [ -n "$bridge" ] || return 1
 	before="$(uci -q get "$bridge.stp" 2>/dev/null)/$(uci -q get "$bridge.forward_delay" 2>/dev/null)"
-	uci set "$bridge.stp=$want" 2>/dev/null || return 1
+	# Revert staged network deltas on any staging failure (mirrors apply_vlan) so a
+	# half-applied STP change is never left for a later `uci commit network` to flush.
+	uci set "$bridge.stp=$want" 2>/dev/null || { uci -q revert network 2>/dev/null; return 1; }
 	if [ "$want" = "1" ]; then
-		uci set "$bridge.forward_delay=2" 2>/dev/null || return 1
+		uci set "$bridge.forward_delay=2" 2>/dev/null || { uci -q revert network 2>/dev/null; return 1; }
 	else
 		uci -q delete "$bridge.forward_delay"
 	fi
-	uci commit network || return 1
+	uci commit network || { uci -q revert network 2>/dev/null; return 1; }
 	after="$(uci -q get "$bridge.stp" 2>/dev/null)/$(uci -q get "$bridge.forward_delay" 2>/dev/null)"
 	[ "$before" = "$after" ] || NETWORK_POLICY_CHANGED=1
 	return 0
@@ -265,13 +272,15 @@ apply_wifi_isolation() {
 	case "$iso24" in 1) iso24=1 ;; *) iso24=0 ;; esac
 	case "$iso5" in 1) iso5=1 ;; *) iso5=0 ;; esac
 	before="$(wifi_isolation_snapshot)"
+	# Revert staged wireless deltas on any staging failure (mirrors apply_vlan) so a
+	# partial isolate change is never left for a later `uci commit wireless` to flush.
 	for section in $(configured_ap_sections radio0); do
-		uci set "wireless.${section}.isolate=$iso24" || return 1
+		uci set "wireless.${section}.isolate=$iso24" || { uci -q revert wireless 2>/dev/null; return 1; }
 	done
 	for section in $(configured_ap_sections radio1); do
-		uci set "wireless.${section}.isolate=$iso5" || return 1
+		uci set "wireless.${section}.isolate=$iso5" || { uci -q revert wireless 2>/dev/null; return 1; }
 	done
-	uci commit wireless || return 1
+	uci commit wireless || { uci -q revert wireless 2>/dev/null; return 1; }
 	after="$(wifi_isolation_snapshot)"
 	if [ "$before" != "$after" ]; then wifi reload >/dev/null 2>&1 || return 1; fi
 	log "wifi isolation applied radio0=$iso24 radio1=$iso5"

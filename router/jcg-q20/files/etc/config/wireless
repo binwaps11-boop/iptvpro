@@ -19,10 +19,10 @@ config wifi-device 'radio0'
 	option band '2g'
 	option channel '11'
 	option htmode 'HE20'
-	# 40 MHz on 2.4 GHz only holds if we skip the OBSS scan - otherwise hostapd
-	# falls back to 20 MHz as soon as it sees a neighbouring BSS. Set to 0 if you
-	# would rather be a good neighbour in a crowded band than have the width.
-	option noscan '1'
+	# htmode is HE20 (20 MHz) for maximum 2.4 GHz range, so there is no 40 MHz
+	# OBSS-coexistence decision to make: 'noscan' would be inert here and is omitted.
+	# If you switch radio0 to HE40 for throughput, add `option noscan '1'` to hold the
+	# width against a neighbouring BSS (at the cost of being a worse 2.4 GHz neighbour).
 	option country 'US'
 	option cell_density '0'
 	# Coverage class / ACK timeout: extend so genuinely distant clients (up to ~1 km)

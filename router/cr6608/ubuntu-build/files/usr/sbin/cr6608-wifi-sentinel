@@ -99,9 +99,15 @@ any_iface_up() { iw dev 2>/dev/null | grep -q Interface; }
 # touches the other radio, never the driver module. Rate-limited to once / 10min.
 heal_radio() {
 	radio="$1"; phy="$2"
-	last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
-	case "$last" in ''|*[!0-9]*) last=0 ;; esac
-	[ $(( UP - last )) -lt 600 ] && return 0
+	# Only rate-limit when we have actually healed before. The stamp file's ABSENCE
+	# means "never healed" — the 180s boot guard already gates the first attempt, so
+	# don't let the default 0 read as "healed at uptime 0" and suppress the very first
+	# heal for a full 600s window.
+	if [ -f "$ST/$radio.heal" ]; then
+		last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
+		case "$last" in ''|*[!0-9]*) last=0 ;; esac
+		[ $(( UP - last )) -lt 600 ] && return 0
+	fi
 	echo "$UP" > "$ST/$radio.heal"
 	logger -t cr6608-sentinel "$radio ($phy) down -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
 	wifi up "$radio" >/dev/null 2>&1
@@ -120,9 +126,14 @@ heal_radio() {
 # instead of being locked out for an hour; targeted per-radio heals also keep
 # running in the meantime.
 escalate_reload() {
-	last_esc="$(cat "$ST/escalate" 2>/dev/null || echo 0)"
-	case "$last_esc" in ''|*[!0-9]*) last_esc=0 ;; esac
-	[ $(( UP - last_esc )) -lt 900 ] && return 0
+	# Only rate-limit when a prior escalation was actually stamped; the stamp's absence
+	# means "never escalated", and the both-radios-down-twice precondition + 180s boot
+	# guard already gate the first run — don't let the default 0 suppress it for 900s.
+	if [ -f "$ST/escalate" ]; then
+		last_esc="$(cat "$ST/escalate" 2>/dev/null || echo 0)"
+		case "$last_esc" in ''|*[!0-9]*) last_esc=0 ;; esac
+		[ $(( UP - last_esc )) -lt 900 ] && return 0
+	fi
 	# Re-verify right before acting: an apply/reload may have started during the
 	# ubus/iw round-trips above, and racing it with `wifi down` is exactly what
 	# wedges the driver.
