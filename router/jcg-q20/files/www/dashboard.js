@@ -1589,6 +1589,10 @@
     var btn = $("fwFlashBtn"), file = $("fwFile"), msg = $("fwMsg");
     if (!btn || !file || btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
+    // While a firmware file is selected or an upload is running, freeze the Actions
+    // re-render (renderLiveSection above) so the 3 s poll cannot wipe the chosen file or
+    // the flashing progress. Cleared automatically when the file is deselected.
+    if (file) file.onchange = function () { state.flashBusy = !!(file.files && file.files[0]); };
     var ar = state.lang === "ar";
     function say(t, bad) { if (msg) { msg.textContent = t; msg.style.color = bad ? "var(--weak)" : "var(--muted)"; } }
     btn.onclick = async function () {
@@ -2170,7 +2174,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     else if (id === "wifi") $("wifi").innerHTML = renderWifi(data);
     else if (id === "insights" && $("insights") && (!data.lite || !$("insights").innerHTML)) $("insights").innerHTML = renderProInsights(data);
     else if (id === "system") $("system").innerHTML = renderSystem(data);
-    else if (id === "actions") { $("actions").innerHTML = renderActions(); bindFirmwareUpload(); }
+    else if (id === "actions") { if (!state.flashBusy) { $("actions").innerHTML = renderActions(); bindFirmwareUpload(); } }
     bindDynamic();
   }
   function render(data) {
