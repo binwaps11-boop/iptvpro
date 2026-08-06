@@ -1,0 +1,16 @@
+#!/bin/sh
+# EEE on the MT7621/MT7530 internal gigabit PHYs is broken (MediaTek-confirmed):
+# against a 100 Mbps link partner the port can flap every few seconds or fail
+# autonegotiation (openwrt #16083/#16551/#22464 — regressed again in the 25.12
+# line; the driver-side fix, PR #22647, is still unmerged upstream). Disable EEE
+# on every switch port as it registers. Best-effort by design: if ethtool is
+# absent or the PHY rejects the op (e.g. the DTS eee-broken marking already
+# handled it), this exits silently and the port works as before.
+[ "$ACTION" = add ] || exit 0
+case "$DEVICENAME" in
+	lan[0-9]*|wan)
+		command -v ethtool >/dev/null 2>&1 || exit 0
+		ethtool --set-eee "$DEVICENAME" eee off >/dev/null 2>&1 || true
+		;;
+esac
+exit 0

@@ -86,10 +86,16 @@ Ubuntu runners have the open internet and toolchain this sandbox lacks. It:
   the value is correct for this chip.
 - **Why it is opt-in, not default:** whether the mt7621 on-host ECC engine accepts strength 8
   at *runtime* cannot be proven without flashing real hardware — if it were rejected the NAND
-  would not attach and the unit would not boot. So the safe build leaves stock ECC and this
-  is a switch you flip only on a unit you can recover over the LAN cable. The DT edit itself
-  is just the two generic `nand-ecc-strength`/`nand-ecc-step-size` properties (no invented
-  phandles), applied into the real `&nand` node and dtc-validated.
+  would not attach and the unit would not boot. **Worse (community finding, Aug 2026):** the
+  stock/pb-boot bootloader reads the kernel partition assuming the 4-bit layout, so a kernel
+  *written* under an 8-bit layout may become unreadable to the bootloader — a brick that
+  needs TTL serial (3.3 V, press `4` for the U-Boot console, `tftpboot` an initramfs) to
+  recover. Also per-batch NAND differs: Winbond W29N01HV units are fine at 4-bit and gain
+  nothing; only Toshiba TC58NVG1S3H units are spec'd for 8-bit — check your chip before
+  even considering this. So the safe build leaves stock ECC and this is a switch you flip
+  only on a bench unit with TTL access. The DT edit itself is just the two generic
+  `nand-ecc-strength`/`nand-ecc-step-size` properties (no invented phandles), applied into
+  the real `&nand` node and dtc-validated.
 
 ### What is deliberately NOT "fixed" (honest — no phantom fixes)
 - **WAN `gmac1` fixed-link (OpenWrt #16083 / #16551)** does **not** apply to this board: the
@@ -112,3 +118,15 @@ placement, not the number. `tools/ko_eeprom38.py --dbm N` lets you sweep the tar
 
 If a build misbehaves, flash the stock JCG Q20 image back over the LAN cable. This build
 never touches the bootloader or the Factory/EEPROM partition.
+
+**Before any cross-firmware conversion, back up the `Factory` partition**
+(`dd if=/dev/mtd2 of=/tmp/factory.bin` — it holds the Wi-Fi calibration and both MACs at
+`0x3fff4`/`0x3fffa`). Third-party firmwares (Padavan/iKuai conversions) have been seen
+overwriting it; without the backup that means permanently dead Wi-Fi and garbage MACs.
+For recovery prefer **pb-boot web recovery** (power off → hold reset → power on → release
+after ~5 s → http://192.168.1.1) — at least one OEM-modified stock U-Boot has been reported
+to *erase NAND* when entering its own recovery mode, so avoid it.
+
+The WAN/LAN ports also carry a runtime fix for the MT7530 broken-EEE link flapping against
+100 Mbps partners (openwrt #22464): `50-smartap-eee-off` disables EEE per port as it
+registers, with a boot-time sweep in `smartap-perf` as backup.

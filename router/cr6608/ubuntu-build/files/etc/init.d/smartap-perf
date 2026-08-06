@@ -42,6 +42,16 @@ _pin_irq() {
 start() {
 	_set_governor
 
+	# Belt-and-braces for ports that registered before hotplug could act (the
+	# 50-smartap-eee-off hotplug script owns the steady state): EEE on the
+	# MT7621/MT7530 PHYs is broken and flaps 100 Mbps links (openwrt #22464).
+	if command -v ethtool >/dev/null 2>&1; then
+		for dev in /sys/class/net/lan[0-9]* /sys/class/net/wan; do
+			[ -d "$dev" ] || continue
+			ethtool --set-eee "${dev##*/}" eee off >/dev/null 2>&1 || true
+		done
+	fi
+
 	# Only bother splitting IRQs when the SoC actually has more than one CPU.
 	ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"
 	case "$ncpu" in ''|*[!0-9]*) ncpu=1 ;; esac
