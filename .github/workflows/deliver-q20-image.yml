@@ -12,6 +12,16 @@ on:
   push:
     branches:
       - q20-deliver-trigger
+  workflow_dispatch:
+    inputs:
+      q20_run_id:
+        description: "Q20 build run id (blank = use the env default below)"
+        required: false
+        default: ""
+      cr6608_run_id:
+        description: "CR6608 build run id (blank = use the env default below)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -31,7 +41,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: smartap-jcg-q20-sysupgrade-38dbm-fromsource
-          run-id: ${{ env.Q20_RUN_ID }}
+          run-id: ${{ github.event.inputs.q20_run_id != '' && github.event.inputs.q20_run_id || env.Q20_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: dl/q20
         continue-on-error: true
@@ -40,7 +50,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: cr6608-v92-sysupgrade-38dbm-realdriver
-          run-id: ${{ env.CR6608_RUN_ID }}
+          run-id: ${{ github.event.inputs.cr6608_run_id != '' && github.event.inputs.cr6608_run_id || env.CR6608_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: dl/cr6608
         continue-on-error: true
