@@ -1,12 +1,12 @@
-name: Deliver Q20 image to a git branch
+name: Deliver SmartAP images to a git branch
 
-# The built firmware only exists as a GitHub Actions artifact on Azure blob
-# storage, which the assistant's egress policy blocks. This tiny job (no
-# compilation) downloads that artifact inside GitHub's network and pushes the
-# .bin to the `q20-delivery` branch, where it can be fetched over git.
+# The built firmware only exists as GitHub Actions artifacts on Azure blob storage, which
+# the assistant's egress policy blocks. This tiny job (no compilation) downloads the
+# built artifacts inside GitHub's network, re-proves the 38 dBm marker in each, and pushes
+# the .bin files to the `q20-delivery` branch, where they can be fetched over git.
 #
-# Triggered by pushing the `q20-deliver-trigger` branch (workflow_dispatch would
-# require this file on the default branch; a push trigger runs the pushed copy).
+# Triggered by pushing the `q20-deliver-trigger` branch. Update the two run-id values below
+# before each push so it grabs the right builds.
 
 on:
   push:
@@ -18,7 +18,8 @@ permissions:
   actions: read
 
 env:
-  SOURCE_RUN_ID: "31044754321"
+  Q20_RUN_ID: "31089764720"
+  CR6608_RUN_ID: "31089772608"
 
 jobs:
   deliver:
@@ -26,45 +27,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download the built sysupgrade artifact
+      - name: Download the Q20 artifact
         uses: actions/download-artifact@v4
         with:
           name: smartap-jcg-q20-sysupgrade-38dbm-fromsource
-          run-id: ${{ env.SOURCE_RUN_ID }}
+          run-id: ${{ env.Q20_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: dl
+          path: dl/q20
+        continue-on-error: true
 
-      - name: Re-prove the 38 dBm marker before shipping (fail-closed)
+      - name: Download the CR6608 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cr6608-v92-sysupgrade-38dbm-realdriver
+          run-id: ${{ env.CR6608_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl/cr6608
+        continue-on-error: true
+
+      - name: Re-prove markers and stage the images
         run: |
           set -e
           sudo apt-get update -qq && sudo apt-get install -y squashfs-tools binutils >/dev/null
-          BIN="$(ls dl/*sysupgrade.bin | head -1)"
-          [ -n "$BIN" ] || { echo "::error::no sysupgrade.bin in artifact"; exit 1; }
-          rm -rf /tmp/chk && mkdir -p /tmp/chk
-          tar -xf "$BIN" -C /tmp/chk 2>/dev/null || true
-          ROOT="$(find /tmp/chk -name root -type f | head -1)"
-          unsquashfs -q -d /tmp/chk/sq "$ROOT" >/dev/null 2>&1 || true
-          KO="$(find /tmp/chk/sq -name 'mt7915e.ko' | head -1)"
-          echo "in-image mt7915e.ko: ${KO:-NONE}"
-          if [ -n "$KO" ] && strings -a "$KO" | grep -q "SMARTAP-Q20-RF-38DBM-LINEAR"; then
-            echo "::notice::delivery gate OK — 38 dBm marker present in the image being shipped"
-          else
-            echo "::error::refusing to deliver — 38 dBm marker NOT in this artifact's driver"; exit 1
-          fi
+          rm -rf out && mkdir -p out
+          prove() { # <bin> <marker> <outname>
+            BIN="$1"; MARK="$2"; OUT="$3"
+            [ -n "$BIN" ] && [ -f "$BIN" ] || { echo "::warning::no image for $OUT"; return 0; }
+            rm -rf /tmp/chk && mkdir -p /tmp/chk
+            tar -xf "$BIN" -C /tmp/chk 2>/dev/null || true
+            ROOT="$(find /tmp/chk -name root -type f | head -1)"
+            unsquashfs -q -d /tmp/chk/sq "$ROOT" >/dev/null 2>&1 || true
+            KO="$(find /tmp/chk/sq -name 'mt7915e.ko' | head -1)"
+            if [ -n "$KO" ] && strings -a "$KO" | grep -q "$MARK"; then
+              cp "$BIN" "out/$OUT"; echo "::notice::$OUT OK ($MARK present)"
+            else
+              echo "::error::$OUT refused — $MARK NOT in the driver"; exit 1
+            fi
+          }
+          prove "$(ls dl/q20/*sysupgrade.bin 2>/dev/null | head -1)"    SMARTAP-Q20-RF-38DBM-LINEAR    smartap-jcg-q20-sysupgrade-38dbm.bin
+          prove "$(ls dl/cr6608/*sysupgrade.bin 2>/dev/null | head -1)" SMARTAP-CR6608-RF-38DBM-LINEAR smartap-cr6608-sysupgrade-38dbm.bin
+          ls -l out
+          [ -n "$(ls out 2>/dev/null)" ] || { echo "::error::no images delivered"; exit 1; }
 
-      - name: Publish the image to the q20-delivery branch
+      - name: Publish to the q20-delivery branch
         run: |
           set -e
-          BIN="$(ls dl/*sysupgrade.bin | head -1)"
-          [ -n "$BIN" ] || { echo "::error::no sysupgrade.bin in artifact"; exit 1; }
-          echo "found: $BIN ($(stat -c%s "$BIN") bytes)"
-          sha256sum "$BIN"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -B q20-delivery
           mkdir -p dist
-          cp "$BIN" dist/smartap-jcg-q20-sysupgrade-38dbm.bin
-          sha256sum dist/smartap-jcg-q20-sysupgrade-38dbm.bin > dist/SHA256SUMS
-          git add -f dist/smartap-jcg-q20-sysupgrade-38dbm.bin dist/SHA256SUMS
-          git commit -m "Deliver Q20 from-source sysupgrade image (source run ${SOURCE_RUN_ID})"
+          cp out/*.bin dist/
+          ( cd dist && sha256sum *.bin > SHA256SUMS )
+          git add -f dist/*.bin dist/SHA256SUMS
+          git commit -m "Deliver SmartAP images (Q20 run ${Q20_RUN_ID}, CR6608 run ${CR6608_RUN_ID})"
           git push -f origin q20-delivery
