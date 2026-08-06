@@ -70,70 +70,112 @@ pgrep -f cr6608-security-apply >/dev/null 2>&1 && exit 0
 ST=/tmp/cr6608-wifi-sentinel
 mkdir -p "$ST"
 
-# Escalation for the DBDC zombie state (mt76 #1083: a reconfigure can kill both
-# radios of the single-function MT7915 and a targeted `wifi up` does not always
-# revive them). When the targeted heal has failed twice in a row, apply the
-# community-documented recovery — full driver reload. Radios are bound by PCIe
-# *path* in uci, so re-enumeration rebinds cleanly. At most once per hour.
-escalate_driver() {
-	last_esc="$(cat "$ST/escalate" 2>/dev/null || echo 0)"
-	case "$last_esc" in ''|*[!0-9]*) last_esc=0 ;; esac
-	[ $(( UP - last_esc )) -lt 3600 ] && return 0
-	echo "$UP" > "$ST/escalate"
-	logger -t cr6608-sentinel "targeted heal failed twice -> full mt7915e reload (mt76#1083 DBDC recovery); radios rebind by path"
-	wifi down >/dev/null 2>&1
-	sleep 2
-	rmmod mt7915e >/dev/null 2>&1 || true
-	sleep 1
-	modprobe mt7915e >/dev/null 2>&1 || true
-	sleep 3
-	wifi up >/dev/null 2>&1
-	rm -f "$ST/radio0.miss" "$ST/radio1.miss" "$ST/radio0.healcount" "$ST/radio1.healcount"
-}
-
-check_radio() { # $1=radioX  $2=phyX
+# Is radio $1 (phy $2) live right now? echoes nothing; returns 0=up, 1=down.
+# owner-disabled counts as "up" (nothing to heal).
+radio_is_up() {
 	radio="$1"; phy="$2"
-	# owner intentionally disabled it -> nothing to heal
-	[ "$(uci -q get wireless.$radio.disabled)" = "1" ] && { rm -f "$ST/$radio.miss"; return 0; }
+	[ "$(uci -q get wireless.$radio.disabled)" = "1" ] && return 0
 	status="$(ubus call network.wireless status 2>/dev/null)"
 	ifnames="$(printf '%s\n' "$status" | jsonfilter -e "@.$radio.interfaces[*].ifname" 2>/dev/null)"
-	radio_up=0
 	for ifname in $ifnames; do
-		if [ -d "/sys/class/net/$ifname" ] && iw dev "$ifname" info >/dev/null 2>&1; then
-			radio_up=1
-			break
-		fi
+		[ -d "/sys/class/net/$ifname" ] && iw dev "$ifname" info >/dev/null 2>&1 && return 0
 	done
-	if [ "$radio_up" = "0" ] && [ -z "$ifnames" ]; then
-		iw phy "$phy" info >/dev/null 2>&1 &&
-			iw dev 2>/dev/null | awk -v target="${phy#phy}" '
-				/^phy#[0-9]+/ { current=$1; sub(/^phy#/, "", current) }
-				$1=="Interface" && current==target { found=1 }
-				END { exit !found }
-			' && radio_up=1
+	# no ifname yet: accept the radio if the phy exists AND owns any interface.
+	if [ -z "$ifnames" ] && iw phy "$phy" info >/dev/null 2>&1; then
+		iw dev 2>/dev/null | awk -v target="${phy#phy}" '
+			/^phy#[0-9]+/ { current=$1; sub(/^phy#/, "", current) }
+			$1=="Interface" && current==target { found=1 }
+			END { exit !found }
+		' && return 0
 	fi
-	if [ "$radio_up" = "1" ]; then
-		rm -f "$ST/$radio.miss" "$ST/$radio.healcount"
-		return 0
-	fi
-	miss=$(( $(cat "$ST/$radio.miss" 2>/dev/null || echo 0) + 1 ))
-	echo "$miss" > "$ST/$radio.miss"
-	[ "$miss" -lt 2 ] && return 0
+	return 1
+}
+
+# any_iface_up: true if at least one wifi client interface exists — used to
+# confirm an escalation actually brought the radios back before we trust it.
+any_iface_up() { iw dev 2>/dev/null | grep -q Interface; }
+
+# targeted, non-destructive heal for ONE radio: `wifi up radioX` only. Never
+# touches the other radio, never the driver module. Rate-limited to once / 10min.
+heal_radio() {
+	radio="$1"; phy="$2"
 	last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
 	case "$last" in ''|*[!0-9]*) last=0 ;; esac
 	[ $(( UP - last )) -lt 600 ] && return 0
 	echo "$UP" > "$ST/$radio.heal"
-	rm -f "$ST/$radio.miss"
-	hc=$(( $(cat "$ST/$radio.healcount" 2>/dev/null || echo 0) + 1 ))
-	echo "$hc" > "$ST/$radio.healcount"
-	if [ "$hc" -ge 2 ]; then
-		escalate_driver
-		return 0
-	fi
-	logger -t cr6608-sentinel "$radio ($phy) down for 2 checks -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
+	logger -t cr6608-sentinel "$radio ($phy) down -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
 	wifi up "$radio" >/dev/null 2>&1
 }
 
-check_radio radio0 phy0
-check_radio radio1 phy1
+# Escalation for the DBDC zombie state (mt76 #1083: a reconfigure can wedge BOTH
+# radios of the single-function MT7915 and per-radio `wifi up` doesn't revive
+# them). This is a full netifd reconfigure — `wifi down` then `wifi up`, which
+# tears down and re-binds hostapd/netifd for every radio WITHOUT unloading the
+# kernel module. It deliberately does NOT rmmod/modprobe mt7915e: on MT7621 an
+# unbind can drop the PCIe endpoint so it never re-probes without a bus rescan,
+# which would turn a recoverable glitch into a hard brick. Preconditions: it
+# fires ONLY when BOTH radios have been down across two consecutive checks, and
+# only after re-verifying no apply/reload is in flight. The cooldown is stamped
+# ONLY on verified success, so a failed attempt is retried on the next tick
+# instead of being locked out for an hour; targeted per-radio heals also keep
+# running in the meantime.
+escalate_reload() {
+	last_esc="$(cat "$ST/escalate" 2>/dev/null || echo 0)"
+	case "$last_esc" in ''|*[!0-9]*) last_esc=0 ;; esac
+	[ $(( UP - last_esc )) -lt 900 ] && return 0
+	# Re-verify right before acting: an apply/reload may have started during the
+	# ubus/iw round-trips above, and racing it with `wifi down` is exactly what
+	# wedges the driver.
+	pgrep -f cr6608-quicksettings-apply >/dev/null 2>&1 && return 0
+	pgrep -f cr6608-safe-wifi-reload    >/dev/null 2>&1 && return 0
+	pgrep -f cr6608-security-apply       >/dev/null 2>&1 && return 0
+	[ -e /etc/smartap-pending-rollback ] && return 0
+	[ -e /tmp/smartap-rollback-armed ] && return 0
+	logger -t cr6608-sentinel "BOTH radios down for 2 checks -> full netifd reconfigure (wifi down/up, no module unload; mt76#1083 recovery)"
+	wifi down >/dev/null 2>&1
+	sleep 3
+	wifi up >/dev/null 2>&1
+	sleep 5
+	if any_iface_up; then
+		echo "$UP" > "$ST/escalate"
+		rm -f "$ST/radio0.down" "$ST/radio1.down"
+		logger -t cr6608-sentinel "netifd reconfigure restored at least one radio"
+	else
+		# Do NOT stamp the cooldown: leave it retryable next tick. Never rmmod,
+		# never reboot from here — the box may still be reachable over the wired
+		# LAN (192.168.1.1) which this service never touches.
+		logger -t cr6608-sentinel "netifd reconfigure did not restore a radio yet; will retry (wired LAN 192.168.1.1 unaffected)"
+	fi
+}
+
+# --- main: evaluate both radios, then decide targeted vs escalation ----------
+r0_up=1; r1_up=1
+radio_is_up radio0 phy0 || r0_up=0
+radio_is_up radio1 phy1 || r1_up=0
+
+# Persist a "down for N consecutive checks" counter per radio (reset on recovery).
+bump_down() { # $1=radio  $2=up(1/0) ; echoes the new down-streak
+	if [ "$2" = 1 ]; then
+		rm -f "$ST/$1.down" "$ST/$1.heal"
+		echo 0
+	else
+		prev="$(cat "$ST/$1.down" 2>/dev/null || echo 0)"
+		case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+		prev=$(( prev + 1 ))
+		echo "$prev" > "$ST/$1.down"
+		echo "$prev"
+	fi
+}
+r0_down="$(bump_down radio0 "$r0_up")"
+r1_down="$(bump_down radio1 "$r1_up")"
+
+if [ "$r0_down" -ge 2 ] && [ "$r1_down" -ge 2 ]; then
+	# Both bands persistently dead — the DBDC zombie. Escalate (safe reload).
+	escalate_reload
+else
+	# At most one band down (or a single missed check): heal it in isolation,
+	# never disturbing a working radio.
+	[ "$r0_up" = 0 ] && [ "$r0_down" -ge 2 ] && heal_radio radio0 phy0
+	[ "$r1_up" = 0 ] && [ "$r1_down" -ge 2 ] && heal_radio radio1 phy1
+fi
 exit 0

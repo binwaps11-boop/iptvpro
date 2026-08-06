@@ -1,6 +1,20 @@
 #!/bin/sh
-# Record the SmartAP integrity baseline once, at the very end of first boot, after
-# 99zz-smartap-secure-defaults has settled the Wi-Fi/credentials — so the baseline
-# reflects the real shipped state of this unit. Passive: only writes the baseline file.
+# Record the SmartAP integrity baseline once, at the very end of first boot — but ONLY
+# after every other uci-defaults script has drained. uci-defaults removes a script as soon
+# as it exits 0, so anything still on disk here (besides ourself) is a sibling that
+# returned non-zero and is re-queued for the NEXT boot. Baselining now would freeze a
+# half-provisioned state and then flag that sibling's legitimate boot-2 changes as
+# tampering. So if any other numbered uci-defaults script is still pending, defer
+# (exit 1 → re-run next boot) and baseline only once provisioning has truly completed.
+self="/etc/uci-defaults/99zzz-smartap-integrity-baseline"
+pending=0
+for f in /etc/uci-defaults/[0-9]*; do
+	[ "$f" = "$self" ] && continue
+	[ -f "$f" ] && pending=$((pending + 1))
+done
+if [ "$pending" -gt 0 ]; then
+	logger -t smartap-integrity "deferring baseline: $pending uci-defaults still pending" 2>/dev/null || true
+	exit 1
+fi
 [ -x /usr/sbin/smartap-integrity ] && /usr/sbin/smartap-integrity baseline >/dev/null 2>&1
 exit 0

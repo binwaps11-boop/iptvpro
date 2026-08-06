@@ -322,7 +322,12 @@ apply_vlan() {
 	qvid="$(uci -q get network.cr6608_vlan.device 2>/dev/null | sed -n 's/^br-lan\.\([0-9]\+\)$/\1/p')"
 	dev_before="$(uci -q get network.lan.device 2>/dev/null)"
 	network_before="$(uci -q show network 2>/dev/null)"
-	cr6608_apply_port_vlans "$qvid" "$ignore_policy" || { log "port vlan staging failed"; return 1; }
+	# cr6608_apply_port_vlans stages `uci delete` of every bridge-vlan section first, then a
+	# re-add. A mid-run failure leaves partial UNCOMMITTED deltas in /tmp/.uci/network
+	# (vlans deleted, lan.device/vlan_filtering not yet fixed); the next unrelated
+	# `uci commit network` from any tool would then flush a half-built bridge and drop wired
+	# connectivity. Revert the staged network tree on failure so nothing partial survives.
+	cr6608_apply_port_vlans "$qvid" "$ignore_policy" || { uci -q revert network 2>/dev/null; log "port vlan staging failed"; return 1; }
 	uci commit network || { log "network commit failed"; return 1; }
 	network_after="$(uci -q show network 2>/dev/null)"
 	if [ "$NETWORK_POLICY_CHANGED" = "1" ] || [ "$network_before" != "$network_after" ]; then

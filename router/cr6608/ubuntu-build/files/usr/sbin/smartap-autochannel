@@ -112,7 +112,11 @@ enabled_channels() {
 }
 
 allowed24="$(enabled_channels phy0 | awk '$1 == 1 || $1 == 6 || $1 == 11' | tr '\n' ' ')"
-allowed5="$(enabled_channels phy1 | awk '$1 == 36 || $1 == 40 || $1 == 44 || $1 == 48 || $1 == 149 || $1 == 153 || $1 == 157 || $1 == 161 || $1 == 165' | tr '\n' ' ')"
+# Channel 165 is a lone 20 MHz US allocation that cannot anchor the configured HE80 primary
+# — hostapd refuses to start on it, causing a 5 GHz outage and a safe-wifi-reload rollback
+# on every autochannel run that picks it. 36/40/44/48 and 149/153/157/161 are all valid
+# HE80 primaries — never nominate 165.
+allowed5="$(enabled_channels phy1 | awk '$1 == 36 || $1 == 40 || $1 == 44 || $1 == 48 || $1 == 149 || $1 == 153 || $1 == 157 || $1 == 161' | tr '\n' ' ')"
 [ -n "$allowed24" ] || { log "no enabled 2.4 GHz candidate channels"; exit 1; }
 [ -n "$allowed5" ] || { log "no enabled non-DFS 5 GHz candidate channels"; exit 1; }
 

@@ -32,9 +32,14 @@ fi
 # Unique 64-bit passphrase from the kernel CSPRNG (16 hex chars: WPA-valid, easy to read).
 key="$(head -c 8 /dev/urandom 2>/dev/null | hexdump -v -e '/1 "%02x"' 2>/dev/null)"
 [ "${#key}" = "16" ] || key="$(od -An -tx1 -N8 /dev/urandom 2>/dev/null | tr -d ' \n')"
-# Last-resort deterministic fallback (still unique per unit) if the CSPRNG is unreadable.
-[ "${#key}" = "16" ] || key="ap$(cat /sys/class/net/br-lan/address 2>/dev/null | tr -d ':' | tr 'A-Z' 'a-z')"
-[ ${#key} -ge 8 ] || key="smartap-changeme"
+# If the CSPRNG is unreadable, a MAC-derived or literal key would be PUBLIC (the BSSID is
+# in every beacon; a literal is shared across units). Never ship a guessable PSK: bail so
+# uci-defaults re-runs this on the next boot, when entropy is available. The radios stay in
+# their current state (recoverable over the wired LAN) rather than "secured" with a weak key.
+if [ "${#key}" != "16" ]; then
+	logger -t smartap-secure "CSPRNG unavailable at first boot; deferring Wi-Fi secure step to next boot" 2>/dev/null || true
+	exit 1
+fi
 
 # Apply WPA2-PSK + the key to both radios (only the ones still open are changed in spirit,
 # but setting both keeps the pair consistent; an already-secured radio was handled above).
@@ -42,7 +47,14 @@ for ifc in wifinet0 wifinet1; do
 	uci -q set "wireless.$ifc.encryption=psk2"
 	uci -q set "wireless.$ifc.key=$key"
 done
-uci -q commit wireless
+# The commit MUST succeed before we announce the network as secured. If it fails (transient
+# flash/RO or a concurrent writer), bail with exit 1 so the whole step re-runs next boot
+# instead of shipping an OPEN radio while the console/credentials claim it is secured.
+uci -q commit wireless || {
+	uci -q revert wireless 2>/dev/null || true
+	logger -t smartap-secure "wireless commit failed at first boot; deferring secure step to next boot" 2>/dev/null || true
+	exit 1
+}
 
 # Mirror into Quick Settings so the operator SEES the key in the panel and a later
 # Save & Apply stays consistent instead of reverting to open.

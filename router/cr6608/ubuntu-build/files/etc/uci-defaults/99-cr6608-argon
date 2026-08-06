@@ -1,8 +1,16 @@
 #!/bin/sh
-# Force the Argon (Royal Obsidian) LuCI theme as default on first boot.
+# Make Argon (Royal Obsidian) the default LuCI theme — but ONLY if its assets are actually
+# present in this image. Setting mediaurlbase to a nonexistent /luci-static/argon points
+# LuCI at a dead path and breaks the LuCI UI, so guard on the real files first and fail
+# safe (leave the stock theme) on any build that omits them. The SmartAP dashboard at / is
+# a standalone page and is unaffected either way.
+
+[ -f /www/luci-static/argon/css/cascade.css ] || exit 0
+[ -f /usr/share/ucode/luci/template/themes/argon/header.ut ] || exit 0
+
 uci -q batch <<UCI
-set luci.main.mediaurlbase=/luci-static/argon
 set luci.themes.Argon=/luci-static/argon
+set luci.main.mediaurlbase=/luci-static/argon
 commit luci
 UCI
 exit 0
