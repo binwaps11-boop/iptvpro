@@ -1,0 +1,10 @@
+# Hardened ttyd: the stock package ships `command '/bin/login -f root'`, i.e. an
+# AUTO-LOGIN root shell with NO password on TCP 7681 — reachable by anyone on the
+# (open) Wi-Fi/LAN. Force a real interactive /bin/login instead so the web terminal
+# demands the root credential, and expose it only on the LAN interface. The panel's
+# own OpenWrt/LuCI button reaches it behind the authenticated LuCI session.
+config ttyd 'ttyd'
+	option interface '@lan'
+	option port '7681'
+	option command '/bin/login'
+	option ipv6 '0'

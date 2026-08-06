@@ -1522,7 +1522,7 @@
   }
   function renderBranchDetail(groupId, item) {
     var kind = item[2] || "", section = item[0], ctlId = "ctl_" + sid(section);
-    var note = kind === "protected" || kind === "danger" ? tr("sensitiveNote") : item[0] === "dashboard" ? tr("newDashboard") : "Live controls and status are loaded from the Xiaomi CR6608 router.";
+    var note = kind === "protected" || kind === "danger" ? tr("sensitiveNote") : item[0] === "dashboard" ? tr("newDashboard") : "Live controls and status are loaded from the SmartAP Q20 router.";
     return '<div class="branch-detail" data-control-section="' + esc(section) + '">' +
       '<div class="chip ' + (kind === "danger" ? "bad" : kind === "protected" ? "warn" : "ok") + '">' + esc(kind === "danger" || kind === "protected" ? tr("protectedPage") : "Live CR6608 control") + '</div>' +
       '<h3>' + esc(item[1]) + '</h3>' +
@@ -1538,7 +1538,7 @@
     if (!group) return "";
     var idx = state.adminSelection[groupId] || 0;
     var first = group.items[idx] || group.items[0];
-    return sectionHead(group.title, group.desc, "Xiaomi CR6608") +
+    return sectionHead(group.title, group.desc, "SmartAP Q20") +
       '<div class="branch-layout">' +
       '<aside class="branch-menu">' + group.items.map(function (item, i) {
         var kind = item[2] || "";
@@ -1622,7 +1622,7 @@
     };
   }
   function renderIsolation() {
-    return sectionHead(tr("isolation"), tr("isolationHint"), "Xiaomi CR6608") +
+    return sectionHead(tr("isolation"), tr("isolationHint"), "SmartAP Q20") +
       '<div class="branch-detail" data-control-section="isolation">' +
       '<h3>' + esc(tr("isolationTitle")) + '</h3>' +
       '<p>' + esc(tr("isolationNote")) + '</p>' +
@@ -1631,7 +1631,7 @@
       '</div>';
   }
   function renderQuick() {
-    return sectionHead(tr("quick"), tr("quickHint"), "Xiaomi CR6608") +
+    return sectionHead(tr("quick"), tr("quickHint"), "SmartAP Q20") +
       '<div class="branch-detail" data-control-section="wizard">' +
       '<div class="chip warn"><span>' + esc(tr("protected")) + '</span></div>' +
       '<h3>' + esc(tr("quickTitle")) + '</h3>' +
@@ -2152,8 +2152,8 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     // just the combined MNDP string — the backend already emits all three fields.
     var identityBody = '<div class="kv"><div><span>' + (state.lang === "ar" ? "اسم العميل" : "Customer name") + '</span><b>' + esc(identity.customer_name || "—") + '</b></div>' +
       '<div><span>' + (state.lang === "ar" ? "رقم الجوال" : "Phone") + '</span><b class="latin">' + esc(identity.phone || "—") + '</b></div>' +
-      '<div><span>' + (state.lang === "ar" ? "الجهاز" : "Device") + '</span><b>' + esc(identity.device_name || data.hostname || "CR6608") + '</b></div>' +
-      '<div><span>' + (state.lang === "ar" ? "هوية Neighbors" : "Neighbors identity") + '</span><b>' + esc(identity.neighbor_identity || identity.device_name || data.hostname || "CR6608") + '</b></div>' +
+      '<div><span>' + (state.lang === "ar" ? "الجهاز" : "Device") + '</span><b>' + esc(identity.device_name || data.hostname || "SmartAP-Q20") + '</b></div>' +
+      '<div><span>' + (state.lang === "ar" ? "هوية Neighbors" : "Neighbors identity") + '</span><b>' + esc(identity.neighbor_identity || identity.device_name || data.hostname || "SmartAP-Q20") + '</b></div>' +
       '<div><span>' + (state.lang === "ar" ? "الحالة" : "State") + '</span><b style="color:' + (identityEnabled && identity.state === "active" ? "var(--excellent)" : "var(--mid)") + '">' + esc(identityEnabled ? (identity.state || "starting") : "disabled") + '</b></div>' +
       '<div><span>' + (state.lang === "ar" ? "البروتوكول" : "Protocol") + '</span><b class="latin">MNDP · UDP 5678</b></div></div>';
     return sectionHead(tr("overview"), tr("subtitle"), nowTime()) + '<div class="grid two">' +
@@ -2210,7 +2210,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       var res = await fetch(authUrl(full ? API : API + "?lite=1"), { credentials:"same-origin", cache:"no-store", headers:authHeaders(), signal: ctrl ? ctrl.signal : undefined });
       var text = await res.text();
       state.lastLatency = Math.max(1, performance.now() - start);
-      if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول Xiaomi CR6608.");
+      if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول SmartAP Q20.");
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = JSON.parse(text);
       if (data.lite && state.latest) data = Object.assign({}, state.latest, data);
@@ -2238,7 +2238,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     for (var i = 0; i < 5; i++) {
       var t0 = performance.now();
       var r = await fetch(authUrl(API + "?speed=" + i), { credentials:"same-origin", cache:"no-store", headers:authHeaders() });
-      if (r.status === 403) { requireLogin("انتهت الجلسة أو يلزم تسجيل دخول Xiaomi CR6608."); return; }
+      if (r.status === 403) { requireLogin("انتهت الجلسة أو يلزم تسجيل دخول SmartAP Q20."); return; }
       var tx = await r.text();
       pings.push(performance.now() - t0);
       bytesRead += tx.length;
@@ -2266,7 +2266,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         headers:authHeaders({ "Content-Type":"application/x-www-form-urlencoded" }),
         body:"action=" + encodeURIComponent(name) + "&confirm=1&" + sidQuery()
       });
-      if (r.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول Xiaomi CR6608.");
+      if (r.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول SmartAP Q20.");
       var j = await r.json();
       toast(j.message || tr("ok"));
       event(name + ": " + (j.message || ""));
@@ -2332,7 +2332,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         };
       }
       var res = await fetch(url, fetchOptions);
-      if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول Xiaomi CR6608.");
+      if (res.status === 403) return requireLogin("انتهت الجلسة أو يلزم تسجيل دخول SmartAP Q20.");
       var data = await res.json();
       if (data && /^[0-9a-f]{32}$/.test(data.rollback_token || ""))
         state.controlTokens[section] = data.rollback_token;

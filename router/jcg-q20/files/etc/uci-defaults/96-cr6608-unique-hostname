@@ -1,11 +1,11 @@
 #!/bin/sh
 # Give each unit a unique hostname derived from its LAN MAC, so multiple identical
-# CR6608 units on the same network are distinguishable (CR6608-XXYYZZ). The management
+# units on the same network are distinguishable (SmartAP-Q20-XXYYZZ). The management
 # IP itself is set per-unit by the operator via Quick Settings; this only fixes the name.
 mac="$(cat /sys/class/net/br-lan/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null)"
 if [ -n "$mac" ]; then
 	suf="$(printf '%s' "$mac" | tr -d ':' | tr 'a-z' 'A-Z' | tail -c 6)"
-	host="CR6608-$suf"
+	host="SmartAP-Q20-$suf"
 	uci -q set system.@system[0].hostname="$host"
 	uci -q commit system
 	printf '%s\n' "$host" > /proc/sys/kernel/hostname 2>/dev/null || true

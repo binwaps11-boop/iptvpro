@@ -38,7 +38,9 @@ build_fields() {
   tmp="${FIELDS}.$$"
   umask 077
   interval="$(read_interval)"
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$identity" "SmartAP CR6608" "OpenWrt $release" "Xiaomi CR6608" "$enabled" "$interval" > "$tmp" || return 1
+  # Platform/model advertised to neighbours. These were the CR6608's strings; on the Q20
+  # they made the unit announce itself as a Xiaomi CR6608 on the LAN.
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$identity" "SmartAP Q20" "OpenWrt $release" "JCG Q20" "$enabled" "$interval" > "$tmp" || return 1
   mv "$tmp" "$FIELDS"
 }
 

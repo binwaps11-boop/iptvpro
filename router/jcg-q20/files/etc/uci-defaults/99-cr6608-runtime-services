@@ -9,4 +9,14 @@ for service in smartap-qos cr6608-rescue-guard cr6608-quicksettings; do
 	"/etc/init.d/$service" start || exit 1
 done
 
+# cron drives the scheduled maintenance in /etc/crontabs/root: the session reaper
+# (root-equivalent LuCI child sessions leak without it), the Wi-Fi sentinel, nightly
+# auto-channel and the self-test. It is a stock package but not enabled by default, and
+# an overlay crontab does nothing unless crond is actually running — so enable+start it
+# here. Non-fatal (|| true) so a build without the busybox cron applet still boots.
+if [ -x /etc/init.d/cron ]; then
+	/etc/init.d/cron enable  >/dev/null 2>&1 || true
+	/etc/init.d/cron start   >/dev/null 2>&1 || true
+fi
+
 exit 0

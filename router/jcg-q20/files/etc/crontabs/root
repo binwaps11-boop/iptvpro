@@ -1,0 +1,6 @@
+# SmartAP Q20 scheduled maintenance (matches the CR6608 reference schedule).
+# cron is enabled at first boot by 99-cr6608-runtime-services.
+* * * * * /usr/sbin/cr6608-session-reaper >/dev/null 2>&1
+*/5 * * * * /usr/sbin/cr6608-wifi-sentinel >/dev/null 2>&1
+30 3 * * * /usr/sbin/smartap-autochannel >/dev/null 2>&1
+0 4 * * * /usr/sbin/smartap-selftest >/dev/null 2>&1

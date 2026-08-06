@@ -1,0 +1,5 @@
+# SmartAP CR6608 scheduled maintenance. cron is enabled at first boot.
+* * * * * /usr/sbin/cr6608-session-reaper >/dev/null 2>&1
+*/5 * * * * /usr/sbin/cr6608-wifi-sentinel >/dev/null 2>&1
+30 3 * * * /usr/sbin/smartap-autochannel >/dev/null 2>&1
+0 4 * * * /usr/sbin/smartap-selftest >/dev/null 2>&1
