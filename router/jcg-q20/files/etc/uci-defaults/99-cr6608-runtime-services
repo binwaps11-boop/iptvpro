@@ -19,4 +19,12 @@ if [ -x /etc/init.d/cron ]; then
 	/etc/init.d/cron start   >/dev/null 2>&1 || true
 fi
 
+# Runtime performance tuning (CPU governor + IRQ affinity). Entirely best-effort:
+# every knob it touches is optional silicon-dependent hardware, so a failure must
+# never abort first-boot provisioning — hence non-fatal, unlike the block above.
+if [ -x /etc/init.d/smartap-perf ]; then
+	/etc/init.d/smartap-perf enable >/dev/null 2>&1 || true
+	/etc/init.d/smartap-perf start  >/dev/null 2>&1 || true
+fi
+
 exit 0

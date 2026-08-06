@@ -1,0 +1,56 @@
+#!/bin/sh /etc/rc.common
+
+# SmartAP runtime performance tuning — CPU governor + IRQ affinity.
+#
+# Everything here is BEST-EFFORT and non-fatal: on silicon that lacks a knob
+# (e.g. the MT7621 usually exposes no cpufreq governor) the write simply fails
+# and is ignored, so this service never blocks or breaks a boot. The sysctl
+# packet-path tuning lives in /etc/sysctl.d/99-smartap-perf.conf; this covers
+# the two levers sysctl cannot reach.
+#
+# 1) Lock every CPU to the "performance" governor so the forwarding path never
+#    pays a ramp-up penalty on a burst of traffic.
+# 2) Split interrupt load across the MT7621's cores: keep the wired MAC IRQ on
+#    CPU0 and move the MT7915 Wi-Fi / PCIe IRQ to CPU1, so heavy Wi-Fi RX and
+#    heavy Ethernet RX are serviced by different cores instead of contending
+#    for one. Software RPS (packet steering) already spreads the softirq work;
+#    this spreads the hard-IRQ work underneath it.
+
+START=94
+
+_set_governor() {
+	for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+		[ -w "$g" ] || continue
+		if grep -qw performance "${g%scaling_governor}scaling_available_governors" 2>/dev/null; then
+			echo performance > "$g" 2>/dev/null || true
+		fi
+	done
+}
+
+# Write $2 (a hex CPU mask) to the smp_affinity of every IRQ whose action name
+# matches the extended-regex $1. Returns 0 if at least one IRQ was pinned.
+_pin_irq() {
+	pat="$1"; mask="$2"; hit=1
+	for line in $(awk -v p="$pat" '$NF ~ p || $0 ~ p {gsub(/:/,"",$1); print $1}' /proc/interrupts 2>/dev/null); do
+		aff="/proc/irq/$line/smp_affinity"
+		[ -w "$aff" ] || continue
+		echo "$mask" > "$aff" 2>/dev/null && hit=0
+	done
+	return $hit
+}
+
+start() {
+	_set_governor
+
+	# Only bother splitting IRQs when the SoC actually has more than one CPU.
+	ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"
+	case "$ncpu" in ''|*[!0-9]*) ncpu=1 ;; esac
+	[ "$ncpu" -ge 2 ] 2>/dev/null || return 0
+
+	# Wired MAC on CPU0. MT7621's SoC ethernet registers as "mtk_soc_eth"/"fe".
+	_pin_irq 'mtk_soc_eth|1e100000\.ethernet|^fe$' 1 || true
+	# MT7915 Wi-Fi (PCIe-attached) on CPU1.
+	_pin_irq 'mt7915|mt76|1e1[45]0000\.pcie|PCIe PME' 2 || true
+
+	return 0
+}
