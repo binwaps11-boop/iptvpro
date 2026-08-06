@@ -18,8 +18,8 @@ permissions:
   actions: read
 
 env:
-  Q20_RUN_ID: "31105047760"
-  CR6608_RUN_ID: "31105054750"
+  Q20_RUN_ID: "31106473646"
+  CR6608_RUN_ID: "31106476100"
 
 jobs:
   deliver:
