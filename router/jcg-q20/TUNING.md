@@ -74,6 +74,19 @@ Applied, evidence-backed, upstream-blessed:
   SQM/QoS, has a history of PPPoE/firewall4 breakage on mt7621, and gives **zero** Wi-Fi
   benefit. Software offload is the safe baseline. (openwrt commit 424a9ae; #10354, #8837,
   #9241; gl-inet HW-accel docs.)
+- **Conntrack sizing (`/etc/sysctl.d/11-nf-conntrack.conf`)** — when the box is used as a
+  *router* for the full fleet (maxassoc 200/radio), the stock table can exhaust and drop
+  NEW connections ("nf_conntrack: table full"). Raised to 32768 with the 5-day ESTABLISHED
+  timeout cut to 1 day so the table stays lean. No-op on a pure bridge AP (module absent).
+- **Stability net (`kernel.panic=3`, `panic_on_oops=1`, `vm.min_free_kbytes=8192`)** — a
+  headless AP must self-recover: a kernel panic/oops now reboots in 3 s instead of hanging
+  dead, and an ~8 MB atomic-allocation reserve removes the random-RX-drop failure mode that
+  GFP_ATOMIC starvation causes on a 256 MB SoC under burst. Pure safety, no throughput cost.
+
+**Deliberately NOT added (would risk the "zero problems" mandate):** *threaded NAPI* for
+mt76 (real but workload-dependent — sometimes neutral/negative, so not a safe default),
+SFE/Shortcut-FE, MT7621 DTS overclock, and full-cone NAT. The discipline of knowing what
+*not* to bolt on is what keeps this build stable.
 
 **Deliberately rejected as placebo/risky on this SoC:**
 - **Shortcut-FE / SFE** (the coolsnowwolf/Turboacc headline) — redundant with the in-tree
