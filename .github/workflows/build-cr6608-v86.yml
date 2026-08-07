@@ -50,7 +50,8 @@ jobs:
           # crafted dispatch input cannot inject commands.
           OPENWRT_REF: ${{ github.event.inputs.openwrt_ref || 'v25.12.5' }}
         run: |
-          git clone https://git.openwrt.org/openwrt/openwrt.git ow
+          retry(){ n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; echo "retry $n/5: $*"; sleep $((n*10)); done; }
+          retry git clone https://git.openwrt.org/openwrt/openwrt.git ow
           cd ow
           git checkout "$OPENWRT_REF"
           git log -1 --oneline
@@ -58,8 +59,18 @@ jobs:
       - name: Update & install feeds
         run: |
           cd ow
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          retry(){ n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; echo "retry $n/5: $*"; sleep $((n*10)); done; }
+          # Feed clones are network-dependent. A transient failure previously left
+          # feeds/luci and feeds/routing missing, which silently broke defconfig and the
+          # device-target assertion. Retry the update, then PROVE the core feeds actually
+          # landed before installing — a partial fetch now fails loudly right here.
+          retry ./scripts/feeds update -a
+          for f in luci routing packages; do
+            [ -d "feeds/$f" ] || { echo "feed $f missing after update — retrying"; retry ./scripts/feeds update -a; break; }
+          done
+          [ -d feeds/luci ] && [ -d feeds/routing ] && [ -d feeds/packages ] \
+            || { echo "::error::core feeds (luci/routing/packages) still missing after retries"; exit 1; }
+          retry ./scripts/feeds install -a
 
       - name: Kernel warm-reboot fix — longer PCIe reset delays (openwrt#17895 / mt76#644)
         run: |
