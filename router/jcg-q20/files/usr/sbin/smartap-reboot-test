@@ -1,0 +1,93 @@
+#!/bin/sh
+# smartap-reboot-test — warm-reboot Wi-Fi re-probe QA harness.
+#
+# The build's headline reliability claim (399-pcie-mt7621 100->500 ms delay + the sentinel)
+# is that Wi-Fi survives a warm reboot. That path is exercised fleet-wide by dashctl's daily
+# scheduled reboot, yet nothing verifies it. This harness proves it on a REAL device across
+# many warm-reboot cycles. It is FLAG-GATED and never armed in a shipped image — you run it
+# by hand on a TEST unit only.
+#
+#   smartap-reboot-test arm [cycles] [--reload]   # start (default 20 cycles); --reload = Phase B
+#   smartap-reboot-test status
+#   smartap-reboot-test disarm                     # stop and clean up
+#
+# Phase A: pure warm reboot each cycle. Phase B (--reload): `wifi reload` ~5s before each
+# reboot to stress the reload-then-reboot race. A cycle with <2 phys or <2 wifi interfaces
+# is a FAIL that halts the loop (leaves the box up for inspection). Wi-Fi ships OPEN, so
+# 2 interfaces present == both SSIDs are beaconing.
+FLAG=/etc/smartap-reboot-test.on
+ST=/etc/smartap-reboot-test.state     # persisted across reboots (config partition)
+LOG=/etc/smartap-reboot-test.log
+INITD=/etc/init.d/smartap-reboot-test
+
+now() { cut -d. -f1 /proc/uptime; }
+kv()  { sed -n "s/^$1=//p" "$ST" 2>/dev/null | head -n1; }
+setkv() { # key val
+	tmp="$ST.tmp"; { grep -v "^$1=" "$ST" 2>/dev/null; echo "$1=$2"; } > "$tmp" && mv "$tmp" "$ST"
+}
+
+phys_count() { ls /sys/class/ieee80211 2>/dev/null | wc -l | tr -d ' '; }
+iface_count() { iw dev 2>/dev/null | grep -c Interface; }
+
+cmd_arm() {
+	cycles="${1:-20}"; mode="A"
+	case "$1" in --reload) cycles=20; mode="B" ;; esac
+	case "$2" in --reload) mode="B" ;; esac
+	case "$cycles" in ''|*[!0-9]*) cycles=20 ;; esac
+	: > "$LOG"
+	rm -f "$ST"; setkv cycles "$cycles"; setkv done 0; setkv mode "$mode"; setkv result running
+	touch "$FLAG"
+	"$INITD" enable >/dev/null 2>&1 || true
+	echo "$(date 2>/dev/null): ARM cycles=$cycles mode=$mode" >> "$LOG"
+	echo "Armed: $cycles warm-reboot cycles (mode $mode). Rebooting to begin — watch: smartap-reboot-test status"
+	sync; sleep 2; reboot
+}
+
+cmd_disarm() {
+	rm -f "$FLAG"
+	"$INITD" disable >/dev/null 2>&1 || true
+	echo "Disarmed. State kept at $ST, log at $LOG."
+}
+
+# Called at boot by the init.d (only when armed).
+cmd_run() {
+	[ -f "$FLAG" ] || exit 0
+	sleep 45   # let mt76 probe + hostapd bring both SSIDs up
+	p="$(phys_count)"; i="$(iface_count)"
+	mcu="$(logread 2>/dev/null | grep -Ec 'mt7915.*([Mm]essage.*timeout|fail)')"
+	d="$(kv done)"; case "$d" in ''|*[!0-9]*) d=0 ;; esac
+	c="$(kv cycles)"; case "$c" in ''|*[!0-9]*) c=20 ;; esac
+	mode="$(kv mode)"
+	d=$((d + 1)); setkv done "$d"
+	echo "$(date 2>/dev/null): cycle $d/$c phys=$p ifaces=$i mcu_errs=$mcu" >> "$LOG"
+	if [ "${p:-0}" -lt 2 ] || [ "${i:-0}" -lt 2 ]; then
+		setkv result "FAIL@cycle$d (phys=$p ifaces=$i)"
+		rm -f "$FLAG"; "$INITD" disable >/dev/null 2>&1 || true
+		echo "$(date 2>/dev/null): FAIL — Wi-Fi did not re-probe. Halting for inspection." >> "$LOG"
+		exit 0
+	fi
+	if [ "$d" -ge "$c" ]; then
+		setkv result "PASS ($c/$c cycles)"
+		rm -f "$FLAG"; "$INITD" disable >/dev/null 2>&1 || true
+		echo "$(date 2>/dev/null): PASS — Wi-Fi re-probed on all $c cycles." >> "$LOG"
+		exit 0
+	fi
+	[ "$mode" = "B" ] && { wifi reload >/dev/null 2>&1; sleep 5; }
+	sync; sleep 1; reboot
+}
+
+cmd_status() {
+	echo "armed  : $([ -f "$FLAG" ] && echo yes || echo no)"
+	echo "mode   : $(kv mode)   cycles: $(kv cycles)   done: $(kv done)"
+	echo "result : $(kv result)"
+	echo "phys now: $(phys_count)   wifi ifaces now: $(iface_count)"
+	[ -f "$LOG" ] && { echo "--- log ---"; tail -n 25 "$LOG"; }
+}
+
+case "${1:-status}" in
+	arm)    shift; cmd_arm "$@" ;;
+	run)    cmd_run ;;
+	status) cmd_status ;;
+	disarm) cmd_disarm ;;
+	*) echo "usage: smartap-reboot-test {arm [cycles] [--reload]|status|disarm}"; exit 1 ;;
+esac

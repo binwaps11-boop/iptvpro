@@ -1,0 +1,10 @@
+#!/bin/sh /etc/rc.common
+# Boot hook for the warm-reboot QA harness. Runs the per-cycle check ONLY when the operator
+# has armed it (the /etc/smartap-reboot-test.on flag exists). Never enabled in a shipped
+# image — `smartap-reboot-test arm` enables it on a test unit and disarm/pass/fail disables
+# it. START is very late so the full Wi-Fi stack has come up first.
+START=99
+start() {
+	[ -f /etc/smartap-reboot-test.on ] || return 0
+	/usr/sbin/smartap-reboot-test run >/dev/null 2>&1 &
+}
