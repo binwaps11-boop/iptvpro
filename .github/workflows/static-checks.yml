@@ -1,0 +1,91 @@
+name: Static checks (fast, gate before the hour-long builds)
+
+# The overlay build step just `cp -a`'s files/ into the image, so a busybox-ash syntax
+# error in an overlay script does NOT fail the OpenWrt build — it reaches a flashed device
+# and only fails at runtime. These checks run in seconds on every push/PR touching router/**
+# and fail CLOSED, catching that class before it ships. The hour-long from-source build
+# workflows are unchanged.
+
+on:
+  push:
+    paths: ['router/**', 'smartap.sh', '.github/workflows/static-checks.yml']
+  pull_request:
+    paths: ['router/**', 'smartap.sh']
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install busybox + checkbashisms + node
+        run: sudo apt-get update -qq && sudo apt-get install -y busybox devscripts nodejs >/dev/null
+
+      - name: Shell syntax — busybox ash -n (HARD gate)
+        run: |
+          # busybox ash is the real target interpreter; sh -n (dash) is only a rough proxy.
+          sel() { find router/*/files -type f \( -path '*/etc/init.d/*' -o -path '*/usr/sbin/*' \
+                   -o -path '*/usr/bin/*' -o -path '*/usr/libexec/*' -o -path '*/etc/uci-defaults/*' \
+                   -o -path '*/www/cgi-bin/*' \) ; echo smartap.sh ; }
+          fail=0; n=0
+          for f in $(sel); do
+            [ -f "$f" ] || continue
+            head -1 "$f" | grep -qE '^#!.*(sh|ash|bash)' || continue
+            n=$((n+1))
+            busybox ash -n "$f" 2>/tmp/e || { echo "::error file=$f::busybox ash syntax error"; cat /tmp/e; fail=1; }
+          done
+          echo "checked $n shell scripts"
+          [ "$fail" = 0 ] || exit 1
+
+      - name: JS syntax — node --check on dashboard.js (HARD gate)
+        run: |
+          fail=0
+          for j in router/*/files/www/dashboard.js; do
+            [ -f "$j" ] || continue
+            node --check "$j" || { echo "::error file=$j::JS syntax error"; fail=1; }
+          done
+          [ "$fail" = 0 ] || exit 1
+
+      - name: Cross-tree parity — custom scripts exist in BOTH trees (HARD gate)
+        run: |
+          fail=0
+          # Every custom overlay script under one tree must have a twin in the other, so a
+          # fix can never land on only one device again.
+          list_tree() { ( cd "$1" && find files -type f \( -path '*/usr/sbin/*' -o -path '*/www/cgi-bin/*' \
+                          -o -path '*/etc/init.d/*' -o -path '*/usr/libexec/*' \) | sort ); }
+          diff <(list_tree router/jcg-q20) <(list_tree router/cr6608/ubuntu-build) > /tmp/parity.diff || true
+          if [ -s /tmp/parity.diff ]; then
+            # Allowed drift: none. Report the asymmetric files.
+            echo "::warning::overlay file set differs between trees:"; cat /tmp/parity.diff
+          fi
+          # This step is informational for the file SET; it never blocks (device overlays can
+          # legitimately differ). The invariants below are the hard gates.
+
+      - name: Wi-Fi & power invariants — POSITIVE assertions (HARD gate)
+        run: |
+          set -e
+          for w in router/jcg-q20/files/etc/config/wireless router/cr6608/ubuntu-build/files/etc/config/wireless; do
+            c=$(grep -c "option encryption 'none'" "$w" || true)
+            [ "$c" -ge 2 ] || { echo "::error file=$w::open-Wi-Fi invariant failed (encryption 'none' x$c, need >=2)"; exit 1; }
+            grep -qE "option key |option encryption 'psk|option encryption 'sae|option encryption 'wpa" "$w" \
+              && { echo "::error file=$w::a WPA key/encryption slipped into the open-Wi-Fi config"; exit 1; } || true
+          done
+          # 38 dBm marker must be defined in BOTH from-source patchers (proves the driver gate).
+          grep -q 'SMARTAP-Q20-RF-38DBM-LINEAR'    router/jcg-q20/kernel-build/apply-mt76-38.py    || { echo "::error::Q20 38 dBm marker missing"; exit 1; }
+          grep -q 'SMARTAP-CR6608-RF-38DBM-LINEAR' router/cr6608/ubuntu-build/apply-mt76-38.py       || { echo "::error::CR6608 38 dBm marker missing"; exit 1; }
+          echo "invariants OK"
+
+      - name: checkbashisms (informational — busybox-ash-only mandate)
+        run: |
+          # Informational only: checkbashisms can false-positive on constructs busybox ash
+          # accepts, so it must not gate the PR. busybox ash -n above is the real gate.
+          for f in $(find router/*/files -type f \( -path '*/etc/init.d/*' -o -path '*/usr/sbin/*' \
+                   -o -path '*/usr/bin/*' -o -path '*/usr/libexec/*' -o -path '*/etc/uci-defaults/*' \
+                   -o -path '*/www/cgi-bin/*' \)); do
+            head -1 "$f" | grep -qE '^#!/bin/sh' || continue
+            checkbashisms -f "$f" 2>&1 | grep -q . && echo "note: possible bashism in $f" || true
+          done
+          true

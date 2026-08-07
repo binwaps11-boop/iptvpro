@@ -450,7 +450,9 @@ fi
 channel_supported radio0 "$c24" || fail_request "400 Bad Request" "channel24" "The selected 2.4 GHz channel is unavailable or restricted for the active country"
 channel_supported radio1 "$c5" || fail_request "400 Bad Request" "channel5" "The selected 5 GHz channel is unavailable or restricted for the active country"
 case "$ht24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) fail_request "400 Bad Request" "htmode24" "Unsupported 2.4 GHz width" ;; esac
-case "$ht5" in HE160|VHT160) ht5='HE80' ;; HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) ;; *) fail_request "400 Bad Request" "htmode5" "Unsupported 5 GHz width" ;; esac
+# 160 MHz is an operator-selectable option (the executor validate/apply and the 720s
+# safe-arm window already handle it); accept it instead of silently downgrading to HE80.
+case "$ht5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) ;; *) fail_request "400 Bad Request" "htmode5" "Unsupported 5 GHz width" ;; esac
 case "$meshrole" in sender|receiver) ;; *) fail_request "400 Bad Request" "mesh_role" "Invalid mesh role" ;; esac
 case "$mode" in mesh|mesh_vlan) [ -n "$meshid" ] || meshid='CR6608-Mesh' ;; esac
 case "$mode" in wds_receiver|wds_receiver_vlan) [ -n "$wds" ] || wds="$ssid" ;; esac
@@ -537,7 +539,12 @@ if [ "$rc" = "0" ]; then
 	rollback_token="$(printf '%s\n' "$safe_status" | sed -n 's/^token=//p' | head -n1)"
 	case "$rollback_token" in ''|*[!0-9a-f]*) reply_json "500 Internal Server Error" '{"ok":false,"applied":true,"error":"rollback_guard","detail":"Apply completed but its rollback token is invalid"}' ;; esac
 	[ "${#rollback_token}" -eq 32 ] 2>/dev/null || reply_json "500 Internal Server Error" '{"ok":false,"applied":true,"error":"rollback_guard","detail":"Apply completed but its rollback token is invalid"}'
-	reply_json "" "{\"ok\":true,\"applied\":true,\"pending_confirmation\":true,\"rollback_token\":\"$rollback_token\",\"management_ip\":\"$ip\"}"
+	# Pass the server's armed rollback window to the client so its countdown is honest
+	# (120s normal, up to 720s for DFS/HE160/auto-5G). Clamp to a sane 30..900 range.
+	safe_timeout="$(printf '%s\n' "$safe_status" | sed -n 's/^timeout=//p' | head -n1)"
+	case "$safe_timeout" in ''|*[!0-9]*) safe_timeout=120 ;; esac
+	[ "$safe_timeout" -ge 30 ] 2>/dev/null && [ "$safe_timeout" -le 900 ] 2>/dev/null || safe_timeout=120
+	reply_json "" "{\"ok\":true,\"applied\":true,\"pending_confirmation\":true,\"rollback_token\":\"$rollback_token\",\"management_ip\":\"$ip\",\"rollback_seconds\":$safe_timeout}"
 fi
 
 tail_text="$(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ' | tr -cd '\11\40-\176' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-300)"

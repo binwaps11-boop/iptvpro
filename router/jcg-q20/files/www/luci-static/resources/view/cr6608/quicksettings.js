@@ -99,18 +99,24 @@ return view.extend({
 			return { deferred: true };
 		}).then(function(j) {
 			if (j && j.deferred) return;
-			if (j && j.ok)
+			if (j && j.ok) {
 				ui.addNotification(null, E('p', _('تم الحفظ والتطبيق الفعلي على الشبكة والواي فاي.')), 'info');
-			else
-				ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((j && (j.detail || j.code)) || '?')), 'warning');
-			window.setTimeout(function() { window.location.reload(); }, 1800);
+				// Only reload on success — a reload would discard typed input and the error.
+				window.setTimeout(function() { window.location.reload(); }, 1800);
+			} else {
+				// Apply was REJECTED / not applied. Keep the form and typed values intact.
+				ui.addNotification(null, E('p', _('لم يُطبَّق الإعداد — رُفض الطلب: ') + ((j && (j.detail || j.error || j.code)) || '?')), 'warning');
+			}
 		}).catch(function(e) {
 			ui.addNotification(null, E('p', _('تعذّر إرسال التطبيق: ') + e), 'error');
 		});
 	},
 
 	showReachabilityConfirmation: function(result) {
-		var remaining = 120;
+		// Honour the server's actually-armed window (120s normal, up to 720s for
+		// DFS / HE160 / 5 GHz-auto) instead of a hardcoded 120 that lies mid-CAC.
+		var remaining = Number(result && result.rollback_seconds);
+		if (!Number.isFinite(remaining) || remaining <= 0) remaining = 120;
 		var counter = E('strong', {}, String(remaining));
 		var token = String((result && result.rollback_token) || '');
 		var targetIp = String((result && result.management_ip) || '');
@@ -371,6 +377,7 @@ return view.extend({
 
 		o = s.taboption('device', form.ListValue, 'htmode5', _('5G width'));
 		o.value('HE80', 'HE80');
+		o.value('HE160', _('HE160 - 160 MHz (guarded ~12 min safe-apply)'));
 		o.value('HE40', 'HE40');
 		o.value('HE20', 'HE20');
 		o.value('VHT80', 'VHT80');

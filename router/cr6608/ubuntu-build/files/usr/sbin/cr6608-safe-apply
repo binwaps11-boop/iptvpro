@@ -460,7 +460,9 @@ case "${1:-status}" in
 		;;
 	status)
 		if load_state; then
-			printf 'state=armed\ntoken=%s\nbackup=%s\n' "$token" "$backup"
+			# Emit the persisted rollback window so the client countdown can match it
+			# (120s normal, up to 720s for DFS/HE160/auto-5G) instead of assuming 120.
+			printf 'state=armed\ntoken=%s\nbackup=%s\ntimeout=%s\n' "$token" "$backup" "$timeout"
 		elif [ -e "$STATE" ] || [ -L "$STATE" ] || [ -e "$ARMED" ] || [ -L "$ARMED" ]; then
 			printf 'state=invalid\n'
 			exit 1
