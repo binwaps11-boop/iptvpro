@@ -111,3 +111,8 @@ temp/
 
 # Manus version file (auto-generated, not part of source)
 client/public/__manus__/version.json
+
+# Generated SmartAP delivery artifacts (source of truth is router/*)
+jcg-q20-SmartAP-source.tar.gz
+cr6608-source-package-*.tar.gz
+*-sysupgrade-38dbm*.bin
