@@ -37,7 +37,7 @@ Validated against community consensus; every one of these is already in
 | `disassoc_low_ack '0'` | AP does **not** kick weak/distant clients on ACK loss | **Highest-value single "range" toggle.** luci#5781, #5771 |
 | `antenna_gain '0'` | gain is *subtracted* from the conducted limit; 0 lets the driver push the board-cap max | correct in-spec way to maximize EIRP. mt76 power-limits |
 | `country 'US'` | permissive-but-legal per-channel ceilings | legitimate EIRP lever |
-| `htmode HE80` (5 GHz) / `HE40` (2.4) | 80 MHz default; **160 MHz is now a selectable operator choice** | The default stays 80 MHz for stability, but the firmware no longer force-downgrades a 160 MHz request — set `htmode5 HE160` in Quick Settings/LuCI to opt in. Caveats made safe: 160 MHz on a 2×2 7915 is the flaky width upstream (mt76#748) and always spans DFS sub-channels (ch36 → 36-64), so it needs a full CAC; Safe Apply's rollback window is auto-extended to 720 s for HE160 so a valid bring-up isn't reverted mid-CAC, and if the radio can't bring 160 up it rolls back to the prior width automatically. Note 160 MHz is a **throughput** choice — it *reduces* range (opposite of `smartap-range-mode`) |
+| `htmode HE80` (5 GHz) / `HE40` (2.4) | 80 MHz, **not** 160 | 160 MHz on a 2×2 7915 has no spare chain for DFS radar → unreliable; removed upstream. mt76#748 |
 | `cell_density '0'` | normal basic-rate floor = **largest cell** | raising it *shrinks* range; keep 0 for distance. patchwork ozlabs cell_density |
 | `legacy_rates '0'` / `htmode HE80` (5 GHz) | throughput-first shipped defaults | **Operator range switch — `smartap-range-mode {off\|on\|max\|status}`.** The single biggest range lever is 5 GHz **channel width**: narrower = lower receiver noise floor (N=kTB, ~3 dB per halving) **and** higher power-spectral-density per subcarrier, i.e. a stronger link **both** directions (AP→client and the AP hearing a weak far client). `on` = 5 GHz **HE40** + 2.4 GHz CCK/1 Mb/s beacons (~+3 dB, 5 GHz peak ~halved). `max` = 5 GHz **HE20** + CCK (~+6 dB, peak ~quartered). `off` = HE80 + OFDM-only (default). HE20/HE40 are the most-tested MT7915 widths (instability is 160 MHz-only), so this is real, not placebo. The choice survives reboot and is mirrored into Quick Settings so a later Save & Apply keeps it. Always-on reliability settings (LDPC, STBC, beamforming, `distance=1000`, `mcast_rate 6000`, `disassoc_low_ack=0`, `cell_density=0`, no RSSI-reject) already maximise weak-client reach for free — only the throughput-costly width/CCK moves are gated behind this switch |
 | `ieee80211k '1'` + `bss_transition '1'` (802.11v) | neighbor reports + BSS-transition hints | safe, no downside |
@@ -53,7 +53,7 @@ Validated against community consensus; every one of these is already in
 - **802.11r fast roaming** — only helps with *multiple* APs and can cause reconnect/band
   flapping with mixed clients; it is **not a range feature** and does nothing on a single
   AP. openwrt#9767.
-- **160 MHz** — no longer force-blocked; it is an opt-in operator choice (default stays 80 MHz for stability). See the htmode row above for the DFS-CAC / rollback safeguards. mt76#748.
+- **160 MHz** — see above; stability-first stays at 80 MHz. mt76#748.
 - **RSSI-based kick scripts** — these *reduce* reach (push weak clients off); only for
   multi-AP band-steering. Not used. barbieri wifi-disconnect-low-signal.
 

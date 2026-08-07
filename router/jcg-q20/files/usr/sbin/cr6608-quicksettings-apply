@@ -451,12 +451,6 @@ safe_arm_transaction() {
 				[ "$radio" = "radio1" ] && safe_timeout=720
 				;;
 		esac
-		# A 160 MHz block on 5 GHz always pulls in DFS sub-channels (e.g. ch36 spans
-		# 36-64, which includes DFS 52-64), so it needs the full CAC window even on a
-		# non-DFS anchor channel — don't roll a valid HE160 bring-up back mid-CAC.
-		case "$(qget wireless."$radio".htmode)" in
-			HE160|VHT160) [ "$radio" = "radio1" ] && safe_timeout=720 ;;
-		esac
 	done
 	SAFE_TOKEN="$("$CR6608_SBIN_DIR/cr6608-safe-apply" arm "$TX_ARCHIVE" \
 		"$TX_OLD_FIREWALL" "$TX_OLD_FIREWALL_RUNTIME" "$TX_RESET_ORIG_EXISTED" "$TX_SMARTAP_EXISTED" \
@@ -906,7 +900,7 @@ apply_config() {
 	channel_supported radio0 "$ch24" || { log "unavailable or restricted 2.4 GHz channel"; return 2; }
 	channel_supported radio1 "$ch5" || { log "unavailable or restricted 5 GHz channel"; return 2; }
 	case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) ;; *) log "invalid 2.4 GHz width"; return 2 ;; esac
-	case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) ;; *) log "invalid 5 GHz width"; return 2 ;; esac
+	case "$htmode5" in HE160|VHT160) htmode5='HE80' ;; HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) ;; *) log "invalid 5 GHz width"; return 2 ;; esac
 	case "$mesh_role" in sender|receiver) ;; *) log "invalid mesh role"; return 2 ;; esac
 	case "$pppoe_port" in wan) ;; *) log "PPPoE is reserved for the WAN port"; return 2 ;; esac
 	case "$reset_mode" in ''|factory|reboot|disabled) ;; *) log "invalid reset mode"; return 2 ;; esac
