@@ -1,0 +1,27 @@
+#!/bin/sh
+# First-boot: pre-create the SmartAP Gaming SQM/cake section so it is present and
+# visible in LuCI SQM out of the box — DISABLED, because cake needs the operator's
+# real line speed to shape correctly (a wrong number would cap throughput). Arm it
+# with:  smartap-gaming set <down_mbps> <up_mbps>
+# Idempotent: does nothing if the section already exists.
+[ -x /etc/init.d/sqm ] || exit 0
+if ! uci -q get sqm.gaming >/dev/null 2>&1; then
+	uci -q batch <<-EOF
+		set sqm.gaming=queue
+		set sqm.gaming.enabled='0'
+		set sqm.gaming.interface='wan'
+		set sqm.gaming.qdisc='cake'
+		set sqm.gaming.script='layer_cake.qos'
+		set sqm.gaming.qdisc_advanced='1'
+		set sqm.gaming.qdisc_really_really_advanced='1'
+		set sqm.gaming.ingress_ecn='ECN'
+		set sqm.gaming.egress_ecn='ECN'
+		set sqm.gaming.iqdisc_opts='diffserv4 ack-filter nat dual-dsthost'
+		set sqm.gaming.eqdisc_opts='diffserv4 ack-filter nat dual-srchost'
+		set sqm.gaming.linklayer='none'
+		set sqm.gaming.download='0'
+		set sqm.gaming.upload='0'
+	EOF
+	uci commit sqm
+fi
+exit 0

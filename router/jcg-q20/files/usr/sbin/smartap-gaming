@@ -1,0 +1,127 @@
+#!/bin/sh
+# SmartAP Gaming mode — low-latency bufferbloat control (SQM/cake) for gamers and
+# interactive apps. This is the piece that makes a router "feel" like a gaming AP:
+# it holds ping FLAT while the line is busy, instead of letting a download spike
+# everyone's latency to hundreds of ms.
+#
+# What is ALWAYS on (baked defaults, no config needed): fq_codel qdisc, Wi-Fi
+# airtime fairness, WMM access categories, multicast->unicast, DTIM 2. Those give
+# the wireless-side latency win for free.
+#
+# What THIS tool adds: cake shaping on the WAN with diffserv prioritisation +
+# ACK filtering, which is the real download/upload bufferbloat killer. cake can
+# only shape correctly once it knows your line speed — a wrong number would CAP
+# your throughput — so it ships READY but disabled, and you arm it with one line:
+#
+#   smartap-gaming set <down_mbps> <up_mbps>   # e.g. smartap-gaming set 100 20
+#   smartap-gaming on            # re-enable with the saved speeds
+#   smartap-gaming off           # disable shaping (wireless latency wins stay)
+#   smartap-gaming status
+#
+# Set the speeds to ~90-95% of a speed-test result for best bufferbloat control.
+# On a pure bridged AP (no WAN internet path) shaping does nothing useful — run
+# it on the box that actually routes to the internet.
+
+CFG=sqm
+Q=gaming            # named sqm section: sqm.gaming
+
+msg() { echo "$@"; }
+err() { echo "smartap-gaming: $*" >&2; }
+
+# Resolve the real WAN L3 device (DSA port / eth) at runtime; fall back sensibly.
+_wan_dev() {
+	d="$(ubus call network.interface.wan status 2>/dev/null \
+	     | sed -n 's/.*"l3_device"[ \t]*:[ \t]*"\([^"]*\)".*/\1/p' | head -n1)"
+	[ -n "$d" ] || d="$(uci -q get network.wan.device 2>/dev/null)"
+	[ -n "$d" ] || d="$(uci -q get network.wan.ifname 2>/dev/null)"
+	[ -n "$d" ] || d=wan
+	echo "$d"
+}
+
+_has_sqm() { [ -x /etc/init.d/sqm ] && command -v tc >/dev/null 2>&1; }
+
+_ensure_section() {
+	# Create the sqm.gaming section once, with gaming-tuned cake parameters that
+	# do NOT depend on bandwidth (diffserv4 = honour DSCP priority, ack-filter =
+	# trim bulk ACKs, dual-*host = per-device fairness so one client can't hog it).
+	uci -q get "$CFG.$Q" >/dev/null 2>&1 && return 0
+	uci -q batch >/dev/null 2>&1 <<-EOF
+		set $CFG.$Q=queue
+		set $CFG.$Q.enabled='0'
+		set $CFG.$Q.qdisc='cake'
+		set $CFG.$Q.script='layer_cake.qos'
+		set $CFG.$Q.qdisc_advanced='1'
+		set $CFG.$Q.qdisc_really_really_advanced='1'
+		set $CFG.$Q.ingress_ecn='ECN'
+		set $CFG.$Q.egress_ecn='ECN'
+		set $CFG.$Q.iqdisc_opts='diffserv4 ack-filter nat dual-dsthost'
+		set $CFG.$Q.eqdisc_opts='diffserv4 ack-filter nat dual-srchost'
+		set $CFG.$Q.linklayer='none'
+		set $CFG.$Q.download='0'
+		set $CFG.$Q.upload='0'
+	EOF
+	uci commit "$CFG"
+}
+
+_apply() {
+	dev="$(_wan_dev)"
+	uci set "$CFG.$Q.interface=$dev"
+	uci commit "$CFG"
+	/etc/init.d/sqm enabled || /etc/init.d/sqm enable >/dev/null 2>&1
+	/etc/init.d/sqm restart >/dev/null 2>&1
+}
+
+cmd_set() {
+	dn="$1"; up="$2"
+	case "$dn" in ''|*[!0-9]*) err "download Mbit must be a number"; return 2 ;; esac
+	case "$up" in ''|*[!0-9]*) err "upload Mbit must be a number"; return 2 ;; esac
+	[ "$dn" -ge 1 ] 2>/dev/null && [ "$up" -ge 1 ] 2>/dev/null || { err "speeds must be >= 1 Mbit"; return 2; }
+	_has_sqm || { err "sqm-scripts/cake not present in this image"; return 1; }
+	_ensure_section
+	# sqm stores rates in kbit/s.
+	uci set "$CFG.$Q.download=$((dn * 1000))"
+	uci set "$CFG.$Q.upload=$((up * 1000))"
+	uci set "$CFG.$Q.enabled=1"
+	uci commit "$CFG"
+	_apply
+	msg "Gaming mode ON — cake shaping ${dn}/${up} Mbit on $(_wan_dev) (diffserv + ack-filter)."
+	msg "Tip: set ~90-95% of your real speed-test result for the flattest ping."
+}
+
+cmd_on() {
+	_has_sqm || { err "sqm-scripts/cake not present in this image"; return 1; }
+	_ensure_section
+	dn="$(uci -q get $CFG.$Q.download)"; up="$(uci -q get $CFG.$Q.upload)"
+	if [ "${dn:-0}" -lt 1000 ] 2>/dev/null || [ "${up:-0}" -lt 1000 ] 2>/dev/null; then
+		err "no line speed saved yet — run:  smartap-gaming set <down_mbps> <up_mbps>"
+		return 2
+	fi
+	uci set "$CFG.$Q.enabled=1"; uci commit "$CFG"; _apply
+	msg "Gaming mode ON (cake $((dn/1000))/$((up/1000)) Mbit)."
+}
+
+cmd_off() {
+	uci -q get "$CFG.$Q" >/dev/null 2>&1 || { msg "Gaming mode already off."; return 0; }
+	uci set "$CFG.$Q.enabled=0"; uci commit "$CFG"
+	/etc/init.d/sqm restart >/dev/null 2>&1
+	msg "Gaming shaping OFF. Wireless latency wins (fq_codel/airtime/WMM) stay on."
+}
+
+cmd_status() {
+	dev="$(_wan_dev)"
+	en="$(uci -q get $CFG.$Q.enabled 2>/dev/null)"
+	dn="$(uci -q get $CFG.$Q.download 2>/dev/null)"; up="$(uci -q get $CFG.$Q.upload 2>/dev/null)"
+	msg "WAN device : $dev"
+	msg "SQM present: $(_has_sqm && echo yes || echo no)"
+	msg "Gaming SQM : ${en:-unset} (download ${dn:-0} kbit / upload ${up:-0} kbit)"
+	msg "Live qdisc : $(tc qdisc show dev "$dev" 2>/dev/null | head -n1 || echo n/a)"
+	msg "Always-on  : fq_codel + airtime fairness + WMM + DTIM2 (baked defaults)"
+}
+
+case "${1:-status}" in
+	set)    shift; cmd_set "$@" ;;
+	on)     cmd_on ;;
+	off)    cmd_off ;;
+	status) cmd_status ;;
+	*) echo "usage: smartap-gaming {set <down_mbps> <up_mbps>|on|off|status}"; exit 1 ;;
+esac
