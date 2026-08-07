@@ -83,6 +83,18 @@ Applied, evidence-backed, upstream-blessed:
   dead, and an ~8 MB atomic-allocation reserve removes the random-RX-drop failure mode that
   GFP_ATOMIC starvation causes on a 256 MB SoC under burst. Pure safety, no throughput cost.
 
+- **Gaming / low-latency mode (`smartap-gaming`, `/etc/uci-defaults/96-smartap-gaming`)** —
+  a gaming-router-class latency layer baked into the image. The wireless-side wins are
+  always-on defaults (fq_codel, `airtime_mode 1`, WMM, DTIM 2, multicast→unicast). The
+  WAN-side win — **cake** shaping with `diffserv4` + `ack-filter` + per-host fairness, the
+  real download/upload **bufferbloat** killer that holds ping flat under load — ships as a
+  pre-created SQM section (`sqm.gaming`, visible in LuCI) that is **disabled** until the
+  operator arms it: `smartap-gaming set <down_mbps> <up_mbps>`. It ships off *on purpose* —
+  cake must know the line speed to shape, and a wrong fixed number would **cap** throughput,
+  so a blind default would hurt. One command (≈90–95 % of a speed-test) unlocks it. No-op on
+  a pure bridge AP (no WAN internet path — shape on the box that actually routes). Package:
+  `sqm-scripts` + `kmod-sched-cake` (in the seed).
+
 **Deliberately NOT added (would risk the "zero problems" mandate):** *threaded NAPI* for
 mt76 (real but workload-dependent — sometimes neutral/negative, so not a safe default),
 SFE/Shortcut-FE, MT7621 DTS overclock, and full-cone NAT. The discipline of knowing what
