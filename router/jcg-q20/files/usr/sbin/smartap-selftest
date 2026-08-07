@@ -61,8 +61,13 @@ score=100; notes=""
 [ -n "$notes" ] || notes="|لا ملاحظات — كل شيء سليم"
 
 jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-printf '{"ok":true,"time":"%s","uptime_s":%s,"score":%s,"temp_c":%s,"mem_pct":%s,"busy_pct":%s,"clients":%s,"tx_errors":%s,"overlay_pct":%s,"notes":"%s"}\n' \
-  "$(jesc "$ts")" "$up" "$score" "${temp:-null}" "$mem_pct" "$busy_max" "$clients" "$err_sum" "$ov" "$(jesc "${notes#|}")" \
+# Surface tamper/integrity state (read-only; json mode changes nothing). Do NOT dock the
+# score on "changed": the baseline is captured once at first boot with no re-baseline path,
+# so "changed" is the EXPECTED state after any legitimate reconfiguration and docking would
+# be a permanent nightly false alarm. Informational only.
+intg="$(/usr/sbin/smartap-integrity json 2>/dev/null | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')"; intg="${intg:-unknown}"
+printf '{"ok":true,"time":"%s","uptime_s":%s,"score":%s,"temp_c":%s,"mem_pct":%s,"busy_pct":%s,"clients":%s,"tx_errors":%s,"overlay_pct":%s,"integrity":"%s","notes":"%s"}\n' \
+  "$(jesc "$ts")" "$up" "$score" "${temp:-null}" "$mem_pct" "$busy_max" "$clients" "$err_sum" "$ov" "$(jesc "$intg")" "$(jesc "${notes#|}")" \
   > /tmp/smartap-report.json 2>/dev/null
 cat /tmp/smartap-report.json
 exit 0

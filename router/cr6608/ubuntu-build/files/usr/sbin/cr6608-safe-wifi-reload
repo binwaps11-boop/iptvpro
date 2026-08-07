@@ -205,7 +205,7 @@ case "$min_timeout" in ''|*[!0-9]*) min_timeout=20 ;; esac
 [ "$timeout" -ge "$min_timeout" ] 2>/dev/null || timeout="$min_timeout"
 
 adjust_timeout_for_channels() {
-	local radio channel
+	local radio channel htmode
 	for radio in radio0 radio1; do
 		channel="$(uci -q get wireless."$radio".channel 2>/dev/null)"
 		case "$channel" in
@@ -215,6 +215,14 @@ adjust_timeout_for_channels() {
 				;;
 		esac
 	done
+	# A 160 MHz width on radio1 always spans DFS sub-channels even off a non-DFS anchor
+	# (ch36 -> 36-64 pulls in DFS 52-64), so it needs the full CAC window. Without this the
+	# 20s in-process verify reverts a sanctioned HE160 while hostapd is still in CAC — even
+	# though safe_arm_transaction's persistent 720s guard was armed. Mirror that here.
+	htmode="$(uci -q get wireless.radio1.htmode 2>/dev/null)"
+	case "$htmode" in
+		*160) [ "$timeout" -ge 660 ] 2>/dev/null || timeout=660 ;;
+	esac
 }
 
 apply_wifi_scope() {

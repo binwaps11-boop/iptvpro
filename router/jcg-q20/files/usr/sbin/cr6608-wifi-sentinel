@@ -159,6 +159,32 @@ escalate_reload() {
 	fi
 }
 
+# Firmware-wedge detector for the MT7915 MCU message-timeout class (mt76). `iw dev info`
+# is a cfg80211-cached query with no MCU round-trip, so radio_is_up() cannot see a radio
+# that is present but wedged. Use ONLY the logread MCU-error signal (tx counters / hostapd
+# get_status / survey active-time all false-positive on a bridged idle MT7915, so they are
+# deliberately NOT used). Freshness-bounded: act only on a NEW error line since last tick,
+# and a dropping count (log-ring rotation) clamps to no-fire so recovery can't re-trigger.
+# Gated on zero associated stations so a safe reload never disrupts working clients (a wedge
+# with live clients is left to the both-radios-down path). Does NOT flip radio_is_up.
+firmware_wedge_detected() {
+	cnt="$(logread 2>/dev/null | grep -Ec 'mt7915.*([Mm]essage.*timeout|Failed to get response|[Mm][Cc][Uu].*timeout)')"
+	case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+	prev="$(cat "$ST/mcuerr" 2>/dev/null || echo 0)"
+	case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+	echo "$cnt" > "$ST/mcuerr"
+	[ "$cnt" -gt "$prev" ] 2>/dev/null || return 1
+	wstatus="$(ubus call network.wireless status 2>/dev/null)"
+	for r in radio0 radio1; do
+		for ifname in $(printf '%s\n' "$wstatus" | jsonfilter -e "@.$r.interfaces[*].ifname" 2>/dev/null); do
+			n="$(iw dev "$ifname" station dump 2>/dev/null | grep -c '^Station')"
+			[ "${n:-0}" -gt 0 ] 2>/dev/null && return 1
+		done
+	done
+	logger -t cr6608-sentinel "mt7915 MCU error detected (fresh=$((cnt - prev)), no clients associated) -> safe netifd reconfigure"
+	return 0
+}
+
 # --- main: evaluate both radios, then decide targeted vs escalation ----------
 r0_up=1; r1_up=1
 radio_is_up radio0 phy0 || r0_up=0
@@ -182,6 +208,10 @@ r1_down="$(bump_down radio1 "$r1_up")"
 
 if [ "$r0_down" -ge 2 ] && [ "$r1_down" -ge 2 ]; then
 	# Both bands persistently dead — the DBDC zombie. Escalate (safe reload).
+	escalate_reload
+elif firmware_wedge_detected; then
+	# Radios present but the MCU wedged (message-timeout) and no clients are associated:
+	# the same safe netifd reconfigure recovers it (rate-limited by escalate_reload).
 	escalate_reload
 else
 	# At most one band down (or a single missed check): heal it in isolation,
