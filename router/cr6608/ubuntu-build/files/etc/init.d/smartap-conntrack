@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# Re-apply the conntrack sysctls AFTER the firewall has demand-loaded nf_conntrack.
+#
+# Why this exists: /etc/init.d/boot runs `sysctl -e -p` early, and `-e` SILENTLY SKIPS
+# keys whose /proc node does not exist yet — but nf_conntrack is loaded on demand by fw4,
+# which starts LATER. So the raised nf_conntrack_max/buckets in 11-nf-conntrack.conf never
+# take effect in router/NAT mode. Ordered at START=21 (just after firewall START=19/20),
+# this re-applies them once the module is present. Fully non-fatal and a no-op on a pure
+# bridge AP where nf_conntrack is never loaded.
+START=21
+start() {
+	[ -d /proc/sys/net/netfilter ] || return 0
+	sysctl -e -p /etc/sysctl.d/11-nf-conntrack.conf >/dev/null 2>&1 || true
+	return 0
+}

@@ -3,10 +3,15 @@
 # Overlay-provided init scripts are not package-owned, so OpenWrt will not
 # create their rc.d links automatically on a clean flash. Enable every service
 # whose state must survive reboot; each command is idempotent on upgrades.
-for service in smartap-qos cr6608-rescue-guard cr6608-quicksettings; do
+for service in smartap-qos cr6608-rescue-guard cr6608-quicksettings smartap-conntrack; do
 	[ -x "/etc/init.d/$service" ] || exit 1
 	"/etc/init.d/$service" enable || exit 1
-	"/etc/init.d/$service" start || exit 1
+	# start() is non-fatal: smartap-qos runs first and returns smartap-qos-apply's exit
+	# code, which is non-zero when `nft -f` fails during early first-boot (before the
+	# netfilter path is fully up). A hard `exit 1` there would strand the cron enable +
+	# smartap-perf blocks below — leaving the session reaper and perf tuning off. The
+	# rc.d link is already installed by enable, so the service still starts on next boot.
+	"/etc/init.d/$service" start || logger -t smartap-init "$service start failed at first-boot (non-fatal; enabled for next boot)"
 done
 
 # cron drives the scheduled maintenance in /etc/crontabs/root: the session reaper

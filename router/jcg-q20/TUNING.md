@@ -110,7 +110,13 @@ SFE/Shortcut-FE, MT7621 DTS overclock, and full-cone NAT. The discipline of know
   sometimes silently stays symmetric; only worth it for gaming/P2P NAT-type-A. immortalwrt#1177.
 - **Experimental HWNAT driver ports / MT7621 "overclock" DTS** — panic-prone / heat &
   instability for little gain. coolsnowwolf/lede#9450.
-- **irqbalance** — near-cosmetic once packet steering is on. forum 250246.
+- **irqbalance** — **must NOT be installed.** Its whole job is to periodically rewrite
+  `/proc/irq/*/smp_affinity`, which would overwrite `smartap-perf`'s static pins (wired MAC
+  on CPU0, Wi-Fi on a *different physical core*) every rebalance interval and collapse the
+  topology-aware IRQ split — reintroducing the exact hard-IRQ contention smartap-perf removes,
+  plus a resident daemon on a 256 MB SoC. If it is ever pulled into the seed, ban the two
+  pinned IRQs (`IRQBALANCE_BANNED_CPUS` / `--banirq`) or re-assert the pins after boot.
+  forum 250246.
 
 ## 4. Device-specific defects (sourced) and how this build handles each
 

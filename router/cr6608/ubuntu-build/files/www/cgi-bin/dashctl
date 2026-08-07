@@ -1943,13 +1943,33 @@ EOF
     valid_management_host "$ipaddr" "$netmask" || { emit false "LAN / DHCP" "Invalid LAN IP or netmask" "[]" "Use a usable host address with a contiguous IPv4 netmask; network and broadcast addresses are rejected." "[]" "[]"; exit 0; }
     [ -n "$start" ] && [ "$start" -ge 1 ] 2>/dev/null && [ "$start" -le 254 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP start" "[]" "DHCP start must be 1-254." "[]" "[]"; exit 0; }
     [ -n "$limit" ] && [ "$limit" -ge 1 ] 2>/dev/null && [ "$limit" -le 250 ] 2>/dev/null || { emit false "LAN / DHCP" "Invalid DHCP limit" "[]" "DHCP limit must be 1-250." "[]" "[]"; exit 0; }
+    # dnsmasq accepts 12h / 720m / 30s / infinite. Reject anything else rather than
+    # committing a value dnsmasq will refuse at restart.
+    case "$leasetime" in
+      ''|infinite) : ;;
+      *[!0-9smhd]*) emit false "LAN / DHCP" "Invalid lease time" "[]" "Use a number followed by s, m, h or d - for example 12h or 720m - or 'infinite'." "[]" "[]"; exit 0 ;;
+      *[0-9]*[smhd]) : ;;
+      *) emit false "LAN / DHCP" "Invalid lease time" "[]" "Use a number followed by s, m, h or d - for example 12h or 720m - or 'infinite'." "[]" "[]"; exit 0 ;;
+    esac
     action_backup lan-dhcp || exit 0
     uci set network.lan.ipaddr="$ipaddr"; uci set network.lan.netmask="$netmask"
     uci -q set smartap.quick.lan_ipaddr="$ipaddr"; uci -q set smartap.quick.lan_netmask="$netmask"
     uci -q set cr6608quick.default.lan_ipaddr="$ipaddr"; uci -q set cr6608quick.default.lan_netmask="$netmask"
-    # DHCP is hard-off on this AP by owner policy: the LAN IP/netmask can be changed, but the
-    # DHCP pool is deleted so no server ever exists or appears (toggle intentionally ignored).
-    uci -q delete dhcp.lan 2>/dev/null || true
+    # Honour the DHCP toggle instead of always deleting the pool. This form is reachable
+    # in router mode too (apply_royal and cr6608-quicksettings-apply both create dhcp.lan),
+    # and unconditionally deleting it meant that editing only the LAN address silently
+    # tore down a working DHCP server and left its clients without a lease. The start,
+    # limit and lease-time fields the form collects are now actually applied.
+    if [ "$enabled" = "0" ]; then
+      uci -q delete dhcp.lan 2>/dev/null || true
+    else
+      uci -q get dhcp.lan >/dev/null 2>&1 || uci set dhcp.lan=dhcp
+      uci set dhcp.lan.interface='lan'
+      uci set dhcp.lan.start="$start"
+      uci set dhcp.lan.limit="$limit"
+      [ -n "$leasetime" ] && uci set dhcp.lan.leasetime="$leasetime"
+      uci -q delete dhcp.lan.ignore 2>/dev/null || true
+    fi
     arm_rollback "$backup" || { for _pkg in network dhcp smartap cr6608quick; do uci -q revert "$_pkg" >/dev/null 2>&1 || true; done; emit false "LAN / DHCP" "Rollback guard failed" "[]" "Nothing was committed because the persistent rollback guard could not be armed." "[]" "[]"; exit 0; }
     action_commit network "LAN / DHCP" || exit 0
     action_commit dhcp "LAN / DHCP" || exit 0

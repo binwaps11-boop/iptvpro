@@ -1320,6 +1320,16 @@ apply_config() {
 		log "root password update failed after successful service apply"
 		post_rc=3
 	fi
+	# On a successful password change, also sync the dashboard/LuCI web login (rpcd) to the
+	# new root hash so the credential used to log into the panel actually changes (passwd
+	# only updates /etc/shadow for SSH/console). Guarded to a well-formed crypt hash.
+	if [ "$change_password" = "1" ] && [ "$post_rc" = "0" ]; then
+		newhash="$(awk -F: '/^root:/{print $2; exit}' /etc/shadow 2>/dev/null)"
+		case "$newhash" in '$'*'$'*)
+			uci -q set rpcd.@login[0].password="$newhash" && uci -q commit rpcd && \
+				{ /etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true; } ;;
+		esac
+	fi
 	admin_password=''
 	set_reset_button "$reset_lock" "$reset_custom" "$reset_seconds" "$reset_mode" || { log "reset-button update failed"; post_rc=3; }
 	if [ "$post_rc" != "0" ]; then

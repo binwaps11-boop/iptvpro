@@ -27,6 +27,10 @@ build_fields() {
   customer="$(clean_text "$(uci -q get smartap.identity.customer_name 2>/dev/null)")"
   device="$(clean_text "$(uci -q get smartap.identity.device_name 2>/dev/null)")"
   phone="$(clean_phone "$(uci -q get smartap.identity.phone 2>/dev/null)")"
+  # The shipped generic default is treated as unset so the per-unit unique hostname
+  # wins on neighbor discovery — otherwise identical units all advertise the same name
+  # and 96-cr6608-unique-hostname becomes dead code.
+  [ "$device" = "SmartAP-Q20" ] && device=""
   [ -n "$device" ] || device="$(clean_text "$(cat /proc/sys/kernel/hostname 2>/dev/null)")"
   [ -n "$device" ] || device=CR6608
 

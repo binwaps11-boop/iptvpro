@@ -156,11 +156,20 @@ build_one(){
   make package/kernel/mt76/prepare V=s QUILT=1 2>&1 | tail -3 || make package/kernel/mt76/prepare V=s 2>&1 | tail -3 || true
   MT76DIR="$(find build_dir -maxdepth 5 -type d -name 'mt76-*' 2>/dev/null | head -1)"
   [ -n "$MT76DIR" ] || err "[$dev] no mt76 build dir"
+  # Snapshot the pristine source, apply the 38 dBm early-return, then persist the delta
+  # with diff(1) on REAL files. (git diff on the build_dir emits 0 bytes — build_dir is
+  # gitignored and the nearest .git is OpenWrt's own, which sees none of these files.)
+  cp "$MT76DIR/mt7915/eeprom.c" "$MT76DIR/mt7915/eeprom.c.orig"
   python3 "$APPLY" "$MT76DIR"
   mkdir -p package/kernel/mt76/patches
-  ( cd "$MT76DIR" && git diff 2>/dev/null || true ) > package/kernel/mt76/patches/999-smartap-38dbm.patch || true
-  # If the source tree isn't a git repo, fall back: the early-return edit is already in
-  # eeprom.c and the clean below re-prepares from it via the persisted patch if present.
+  # diff returns 1 when files differ; `|| true` is MANDATORY under `set -eu`.
+  diff -u -L a/mt7915/eeprom.c -L b/mt7915/eeprom.c \
+    "$MT76DIR/mt7915/eeprom.c.orig" "$MT76DIR/mt7915/eeprom.c" \
+    > package/kernel/mt76/patches/999-smartap-38dbm.patch || true
+  rm -f "$MT76DIR/mt7915/eeprom.c.orig"
+  test -s package/kernel/mt76/patches/999-smartap-38dbm.patch \
+    || err "[$dev] empty 38 dBm patch — refusing to build a driver that would fail the marker gate"
+  # Clean so the full build re-extracts pristine mt76 and re-applies ALL patches (incl. ours).
   make package/kernel/mt76/clean V=s 2>&1 | tail -2 || true
 
   say "[$dev] Download sources"
