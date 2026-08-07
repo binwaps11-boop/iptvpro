@@ -1,47 +1,84 @@
 #!/bin/sh
 
-# SmartAP Max-Range mode — operator-controlled reach/speed trade for 2.4 GHz.
+# SmartAP Range mode — operator-controlled reach/speed trade across BOTH bands.
 #
-#   smartap-range-mode on      # maximum JOIN range: allow 802.11b CCK rates
-#   smartap-range-mode off     # maximum throughput (shipped default)
+#   smartap-range-mode off      # maximum throughput  (shipped default)
+#   smartap-range-mode on       # balanced extra range (+~3 dB): 5 GHz HE40 + 2.4 CCK
+#   smartap-range-mode max      # maximum range       (+~6 dB): 5 GHz HE20 + 2.4 CCK
 #   smartap-range-mode status
 #
-# Physics of the knob: with legacy_rates=0 (default) the 2.4 GHz radio is
-# OFDM-only, so beacons/management go at 6 Mb/s — fast, airtime-cheap, but a
-# client must decode 6 Mb/s OFDM to even SEE the network. legacy_rates=1
-# re-admits the 1/2/5.5/11 Mb/s CCK rates; 1 Mb/s CCK decodes ~6-8 dB deeper
-# into the noise, so far/weak clients can find, join and hold the network from
-# considerably farther away. The cost is real: management/multicast frames get
-# slower and total cell throughput drops when b-rates are in play — which is
-# why this ships OFF and is a one-command operator choice, not a default.
-# 5 GHz never had CCK, so only radio0 is touched. Survives reboot (uci commit).
+# The physics (verified against MT7915 / OpenWrt 25.12.5):
+#  * NARROWER 5 GHz CHANNEL = MORE RANGE, both directions. Receiver noise power is
+#    N = kTB, so halving the width drops the noise floor ~3 dB; HE80->HE40 ≈ +3 dB,
+#    HE80->HE20 ≈ +6 dB better sensitivity/SNR. The PA's fixed conducted power is also
+#    concentrated into a narrower band, raising power-spectral-density per subcarrier by
+#    the same amount — a distant client at its sensitivity floor sees a stronger signal,
+#    AND the AP hears a weak far client better. Cost: peak PHY rate drops ~2x (HE40) or
+#    ~4x (HE20). HE20/HE40 are the most-tested MT7915 widths (instability is a 160 MHz-only
+#    issue), so this is a real, stable, non-placebo lever — the biggest one left after the
+#    always-on reliability settings (LDPC, STBC, beamforming, distance=1000, mcast 6 Mbps,
+#    no weak-client kicking) that ship enabled by default.
+#  * 2.4 GHz: re-admit 802.11b CCK (legacy_rates) and drop beacons to 1 Mbps CCK, which
+#    decodes ~6-8 dB deeper into the noise so far/weak clients can discover and join.
+#
+# Everything survives reboot (uci commit) and stays consistent with Quick Settings (the
+# 5 GHz width is mirrored into the quick-settings keys so a later Save & Apply keeps it).
 
-RADIO=radio0
+R24=radio0
+R5=radio1
 
-usage() { echo "usage: smartap-range-mode on|off|status" >&2; exit 1; }
+usage() { echo "usage: smartap-range-mode off|on|max|status" >&2; exit 1; }
 
-uci -q get wireless.$RADIO >/dev/null || { echo "error: wireless.$RADIO not configured" >&2; exit 1; }
+uci -q get wireless.$R5 >/dev/null || { echo "error: wireless.$R5 not configured" >&2; exit 1; }
 
-cur="$(uci -q get wireless.$RADIO.legacy_rates)"
+# Persist the chosen 5 GHz width into the quick-settings keys too, so a later
+# Quick Settings "Save & Apply" (which reasserts htmode5) does not undo the choice.
+_mirror_htmode5() {
+	w="$1"
+	uci -q get smartap.quick >/dev/null 2>&1 && uci set smartap.quick.htmode5="$w"
+	uci -q get cr6608quick.default >/dev/null 2>&1 && uci set cr6608quick.default.htmode5="$w"
+	uci -q commit smartap 2>/dev/null || true
+	uci -q commit cr6608quick 2>/dev/null || true
+}
+
+_apply_reload() {
+	uci commit wireless
+	_mirror_htmode5 "$1"
+	wifi reload >/dev/null 2>&1 || wifi >/dev/null 2>&1
+}
+
+cur_w="$(uci -q get wireless.$R5.htmode)"
+cur_l="$(uci -q get wireless.$R24.legacy_rates)"
+
 case "$1" in
-on)
-	uci set wireless.$RADIO.legacy_rates='1'
-	uci commit wireless
-	wifi reload >/dev/null 2>&1 || wifi >/dev/null 2>&1
-	echo "Max-Range mode ON: 2.4 GHz now admits CCK (1-11 Mb/s) — far clients can join from farther; peak throughput reduced."
-	;;
 off)
-	uci set wireless.$RADIO.legacy_rates='0'
-	uci commit wireless
-	wifi reload >/dev/null 2>&1 || wifi >/dev/null 2>&1
-	echo "Max-Range mode OFF: 2.4 GHz is OFDM-only — maximum throughput (default)."
+	uci set wireless.$R5.htmode='HE80'
+	uci set wireless.$R24.legacy_rates='0'
+	uci -q delete wireless.$R24.beacon_rate
+	_apply_reload 'HE80'
+	echo "Range mode OFF: 5 GHz HE80, 2.4 GHz OFDM-only — maximum throughput (default)."
+	;;
+on)
+	uci set wireless.$R5.htmode='HE40'
+	uci set wireless.$R24.legacy_rates='1'
+	uci set wireless.$R24.beacon_rate='1000'
+	_apply_reload 'HE40'
+	echo "Range mode ON (balanced, ~+3 dB): 5 GHz HE40 + 2.4 GHz CCK/1 Mbps beacons. Far clients reach farther; 5 GHz peak ~halved."
+	;;
+max)
+	uci set wireless.$R5.htmode='HE20'
+	uci set wireless.$R24.legacy_rates='1'
+	uci set wireless.$R24.beacon_rate='1000'
+	_apply_reload 'HE20'
+	echo "Range mode MAX (~+6 dB): 5 GHz HE20 + 2.4 GHz CCK/1 Mbps beacons. Longest reach for far/weak clients; 5 GHz peak ~quartered."
 	;;
 status)
-	if [ "$cur" = 1 ]; then
-		echo "Max-Range mode: ON (legacy_rates=1 on $RADIO)"
-	else
-		echo "Max-Range mode: OFF (legacy_rates=${cur:-0} on $RADIO)"
-	fi
+	case "$cur_w" in
+		HE20) lvl="MAX (5 GHz HE20)" ;;
+		HE40) lvl="ON (5 GHz HE40)" ;;
+		*)    lvl="OFF (5 GHz ${cur_w:-HE80})" ;;
+	esac
+	echo "Range mode: $lvl ; 2.4 GHz legacy_rates=${cur_l:-0}"
 	;;
 *)
 	usage
