@@ -451,7 +451,9 @@ load_royal_params() {
 
   htmode24="$(param htmode24)"; [ -n "$htmode24" ] || htmode24="HE20"
   htmode5="$(param htmode5)"; [ -n "$htmode5" ] || htmode5="HE80"
-  case "$htmode5" in HE160|VHT160) htmode5="HE80" ;; esac
+  # 160 MHz (HE160/VHT160) is an operator choice, not forced down to 80 anymore. It needs a
+  # DFS-capable anchor channel (e.g. 36 spans 36-64) and is throughput-first (WORSE range);
+  # if the radio cannot bring it up, Safe Apply rolls back to the prior width automatically.
   country24="$(param country24)"
   [ -n "$country24" ] || country24="$(uci -q get wireless.radio0.country 2>/dev/null)"
   country24="$(printf '%s' "$country24" | tr a-z A-Z)"
@@ -580,7 +582,7 @@ royal_params_valid() {
   if [ -z "$royal_error" ]; then case "$ch24" in auto|1|2|3|4|5|6|7|8|9|10|11|12|13) : ;; *) royal_error="2.4 GHz channel must be Automatic or 1-13." ;; esac; fi
   [ -n "$royal_error" ] || valid_ch5 "$ch5" || royal_error="Unsupported 5 GHz channel."
   if [ -z "$royal_error" ]; then case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) : ;; *) royal_error="Unsupported 2.4 GHz channel width." ;; esac; fi
-  if [ -z "$royal_error" ]; then case "$htmode5" in HT20|HT40|HE20|HE40|HE80|VHT20|VHT40|VHT80) : ;; *) royal_error="Unsupported 5 GHz channel width." ;; esac; fi
+  if [ -z "$royal_error" ]; then case "$htmode5" in HT20|HT40|HE20|HE40|HE80|HE160|VHT20|VHT40|VHT80|VHT160) : ;; *) royal_error="Unsupported 5 GHz channel width." ;; esac; fi
   [ -n "$royal_error" ] || { valid_country_code "$country24" && wireless_country_supported radio0 "$country24"; } || royal_error="radio0 country is not reported by the driver."
   [ -n "$royal_error" ] || { valid_country_code "$country5" && wireless_country_supported radio1 "$country5"; } || royal_error="radio1 country is not reported by the driver."
 	[ -n "$royal_error" ] || [ "$country24" = "$country5" ] || royal_error="Both radios share one cfg80211 regulatory country; choose the same country for 2.4 GHz and 5 GHz."
