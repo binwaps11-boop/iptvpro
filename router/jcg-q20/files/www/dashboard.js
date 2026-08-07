@@ -51,6 +51,9 @@
       system: "صحة النظام", actions: "إجراءات", isolation: "العزل والحماية",
       vendor: "الشركة", type: "النوع", link: "المنفذ", action: "إجراء", unknownVendor: "غير معروف", near: "قريب / قوي", mid: "متوسط", far: "بعيد / ضعيف",
       scanNeighbors: "فحص القنوات والشبكات المجاورة", scanning: "جاري الفحص…", bestChannel: "أفضل قناة",
+      wizStepDevice: "1. إعدادات الجهاز", wizStepSecurity: "2. إعدادات الحماية", wizStepAdvanced: "3. إعدادات متقدمة",
+      wizModeHint: "بعد التطبيق اختبر الاتصال ثم اضغط «احتفظ بالتغييرات» خلال المهلة المعروضة؛ وإلا يرجع الجهاز تلقائياً. طاقة البث قابلة للاختيار من 1 إلى 38 dBm، والقيمة المقبولة تُعرض منفصلة.",
+      wizPreview: "المعاينة", pvMode: "الوضع", pvIp: "IP (واي فاي + كابل)", pvVlan: "VLAN", pvSsid: "SSID", pvSecurity: "الحماية", pvNat: "NAT / DHCP / FW", pvTxPower: "طاقة 2.4G / 5G",
       neighbors: "الشبكات المجاورة", noNeighbors: "لم يُعثر على شبكات مجاورة", applyBest: "طبّق أفضل قناة",
       scanLan: "اكتشاف الأجهزة على الشبكة", lanNeighbors: "أجهزة الشبكة (الجيران)",
       lanScanHint: "يفحص كل المنافذ ويكشف الأجهزة خلف أي سويتش — يعرض الاسم والـ IP والـ MAC والمنفذ.",
@@ -110,6 +113,9 @@
       system: "System Health", actions: "Actions", isolation: "Isolation",
       vendor: "Vendor", type: "Type", link: "Link", action: "Action", unknownVendor: "Unknown", near: "Near / Strong", mid: "Medium", far: "Far / Weak",
       scanNeighbors: "Scan channels & neighbors", scanning: "Scanning…", bestChannel: "Best channel",
+      wizStepDevice: "1. Device settings", wizStepSecurity: "2. Security settings", wizStepAdvanced: "3. Advanced settings",
+      wizModeHint: "After applying, test the connection then press Keep changes within the shown window; otherwise the device auto-reverts. TX power is selectable 1-38 dBm; the accepted value is shown separately.",
+      wizPreview: "Preview", pvMode: "Mode", pvIp: "IP (WiFi + Cable)", pvVlan: "VLAN", pvSsid: "SSID", pvSecurity: "Security", pvNat: "NAT / DHCP / FW", pvTxPower: "TX Power 2.4G / 5G",
       neighbors: "Neighboring networks", noNeighbors: "No neighboring networks found", applyBest: "Apply best channel",
       scanLan: "Discover devices on the network", lanNeighbors: "Network devices (Neighbors)",
       lanScanHint: "Scans every port and reveals devices behind any switch — shows name, IP, MAC and port.",
@@ -1481,28 +1487,28 @@
     }).join("") + '</div>';
     return cards +
       '<div class="wizard-tabs">' +
-      '<button class="wizard-tab active" data-wizard-tab="device">1. إعدادات الجهاز</button>' +
-      '<button class="wizard-tab" data-wizard-tab="security">2. إعدادات الحماية</button>' +
-      '<button class="wizard-tab" data-wizard-tab="advanced">3. إعدادات متقدمة</button>' +
+      '<button class="wizard-tab active" data-wizard-tab="device">' + esc(tr("wizStepDevice")) + '</button>' +
+      '<button class="wizard-tab" data-wizard-tab="security">' + esc(tr("wizStepSecurity")) + '</button>' +
+      '<button class="wizard-tab" data-wizard-tab="advanced">' + esc(tr("wizStepAdvanced")) + '</button>' +
       '</div>' +
-      '<p class="mode-hint">بعد التطبيق اختبر الاتصال ثم اضغط احتفظ بالتغييرات خلال 120 ثانية؛ وإلا يرجع الجهاز تلقائياً. طاقة البث قابلة للاختيار من 1 إلى 38 dBm، والقيمة المقبولة تظهر منفصلة.</p>' +
+      '<p class="mode-hint">' + esc(tr("wizModeHint")) + '</p>' +
       '<section class="royal-pane" data-wizard-pane="device"><div class="royal-grid wizard-fields">' + group("device") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="security" hidden><div class="royal-grid wizard-fields">' + group("security") + '</div></section>' +
       '<section class="royal-pane" data-wizard-pane="advanced" hidden><div class="royal-grid wizard-fields">' + group("advanced") + '</div></section>' +
-      '<div class="wizard-preview"><b>Preview</b><div id="wizardPreview"></div></div>' + actions + (data.text ? '<pre class="ctl-pre">' + esc(data.text) + '</pre>' : "");
+      '<div class="wizard-preview"><b>' + esc(tr("wizPreview")) + '</b><div id="wizardPreview"></div></div>' + actions + (data.text ? '<pre class="ctl-pre">' + esc(data.text) + '</pre>' : "");
   }
   function updateWizardPreview() {
     var box = $("wizardPreview"); if (!box) return;
     function fv(n) { var el = document.querySelector('[data-control-section="wizard"] [data-ctl-field="' + n + '"]'); return el ? el.value : ""; }
     var modeEl = document.querySelector('[data-control-section="wizard"] [data-ctl-field="program_mode"]');
     var modeLabel = modeEl && modeEl.options ? modeEl.options[modeEl.selectedIndex].text : fv("program_mode");
-    box.innerHTML = '<div class="kv"><span>Mode</span><b class="latin">' + esc(modeLabel || "-") + '</b></div>' +
-      '<div class="kv"><span>IP (WiFi + Cable)</span><b class="latin">' + esc(fv("device_ip") || "-") + '</b></div>' +
-      '<div class="kv"><span>VLAN</span><b class="latin">' + esc(fv("vlan_id") || "-") + '</b></div>' +
-      '<div class="kv"><span>SSID</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
-      '<div class="kv"><span>Security</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
-      '<div class="kv"><span>NAT / DHCP / FW</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
-      '<div class="kv"><span>TX Power 2.4G / 5G</span><b class="latin">' + esc((fv("txpower_radio0") || "38") + " / " + (fv("txpower_radio1") || "38")) + ' dBm</b></div>';
+    box.innerHTML = '<div class="kv"><span>' + esc(tr("pvMode")) + '</span><b class="latin">' + esc(modeLabel || "-") + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvIp")) + '</span><b class="latin">' + esc(fv("device_ip") || "-") + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvVlan")) + '</span><b class="latin">' + esc(fv("vlan_id") || "-") + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvSsid")) + '</span><b class="latin">' + esc(fv("ssid") || "-") + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvSecurity")) + '</span><b class="latin">' + esc(fv("security") || "-") + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvNat")) + '</span><b class="latin">' + esc((fv("nat_enabled") || "0") + " / " + (fv("dhcp_server") || "0") + " / " + (fv("firewall_enabled") || "1")) + '</b></div>' +
+      '<div class="kv"><span>' + esc(tr("pvTxPower")) + '</span><b class="latin">' + esc((fv("txpower_radio0") || "38") + " / " + (fv("txpower_radio1") || "38")) + ' dBm</b></div>';
   }
   function syncWizardMode() {
     var panel = document.querySelector('[data-control-section="wizard"]');

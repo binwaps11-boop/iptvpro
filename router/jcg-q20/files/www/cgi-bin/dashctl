@@ -1406,6 +1406,28 @@ case "$action" in
     uci commit network >/dev/null 2>&1 || { uci -q revert network >/dev/null 2>&1 || true; action_rollback_pending; emit false "Interfaces" "Commit failed" "[]" "Could not commit deletion of $ifname. $_action_rollback_text Backup: $backup" "[]" "[]"; exit 0; }
     action_reload "Interfaces" "Reload failed" /etc/init.d/network reload || exit 0
     emit true "Interfaces" "Interface deleted with rollback" "[]" "Backup: $backup\nDeleted interface $ifname. Keep changes after testing access." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+  set_range_mode)
+    # One-click dual-band range preset (same lever as the smartap-range-mode CLI) applied
+    # INSIDE this guarded wifi transaction (backup + capture + arm + commit + verified reload)
+    # instead of exec'ing the self-committing/self-reloading CLI script.
+    range_mode="$(safe_word "$(param range_mode)")"
+    case "$range_mode" in off|on|max) ;; *) emit false "Range mode" "Invalid range mode" "[]" "Choose off (throughput), on (balanced) or max (range)." "[]" "[]"; exit 0 ;; esac
+    action_backup range-mode || exit 0
+    action_capture_wireless "Range mode" || exit 0
+    case "$range_mode" in
+      off) uci set wireless.radio1.htmode='HE80'; uci set wireless.radio0.legacy_rates='0'; uci -q delete wireless.radio0.beacon_rate 2>/dev/null; w5='HE80' ;;
+      on)  uci set wireless.radio1.htmode='HE40'; uci set wireless.radio0.legacy_rates='1'; uci set wireless.radio0.beacon_rate='1000'; w5='HE40' ;;
+      max) uci set wireless.radio1.htmode='HE20'; uci set wireless.radio0.legacy_rates='1'; uci set wireless.radio0.beacon_rate='1000'; w5='HE20' ;;
+    esac
+    # Mirror the 5 GHz width into Quick Settings so a later Save & Apply keeps it.
+    uci -q get smartap.quick >/dev/null 2>&1 && uci -q set smartap.quick.htmode5="$w5"
+    uci -q get cr6608quick.default >/dev/null 2>&1 && uci -q set cr6608quick.default.htmode5="$w5"
+    action_arm_rollback "Range mode" || exit 0
+    action_commit smartap "Range mode" || exit 0
+    action_commit cr6608quick "Range mode" || exit 0
+    action_commit wireless "Range mode" || exit 0
+    action_wifi_reload "Range mode" "Wi-Fi runtime verification failed" radio1 || exit 0
+    emit true "Range mode" "Range mode: $range_mode" "[]" "Backup: $backup\n5 GHz width now $w5; 2.4 GHz legacy/CCK $([ "$range_mode" = off ] && echo off || echo on). Narrower = more range, lower peak speed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_wifi)
     # one-click save (owner request): everyday saves apply immediately; a backup is
     # still recorded for the manual "Rollback now" button. Confirm stays only on
