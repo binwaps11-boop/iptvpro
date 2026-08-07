@@ -116,3 +116,7 @@ client/public/__manus__/version.json
 jcg-q20-SmartAP-source.tar.gz
 cr6608-source-package-*.tar.gz
 *-sysupgrade-38dbm*.bin
+
+# Python bytecode from local tooling checks
+__pycache__/
+*.pyc
