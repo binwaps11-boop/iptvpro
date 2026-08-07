@@ -1423,10 +1423,16 @@ case "$action" in
     uci -q get smartap.quick >/dev/null 2>&1 && uci -q set smartap.quick.htmode5="$w5"
     uci -q get cr6608quick.default >/dev/null 2>&1 && uci -q set cr6608quick.default.htmode5="$w5"
     action_arm_rollback "Range mode" || exit 0
-    action_commit smartap "Range mode" || exit 0
-    action_commit cr6608quick "Range mode" || exit 0
-    action_commit wireless "Range mode" || exit 0
-    action_wifi_reload "Range mode" "Wi-Fi runtime verification failed" radio1 || exit 0
+    # Commit wireless FIRST with a FULL staged-revert on failure, so no dangling radio delta
+    # can survive in /tmp/.uci to be flushed by a later commit (multi-package commits are not
+    # atomic; action_commit only reverts its own package). The htmode5 mirror into
+    # smartap/cr6608quick is a best-effort, idempotent convenience, so its commit is non-fatal.
+    action_commit wireless "Range mode" || { for _p in wireless smartap cr6608quick; do uci -q revert "$_p" >/dev/null 2>&1 || true; done; exit 0; }
+    uci -q commit smartap 2>/dev/null || true
+    uci -q commit cr6608quick 2>/dev/null || true
+    # BOTH radios are touched (radio1 width + radio0 2.4 GHz legacy/beacon), so reload BOTH,
+    # otherwise the 2.4 GHz half of the preset is committed but never pushed to the live radio.
+    action_wifi_reload "Range mode" "Wi-Fi runtime verification failed" all || exit 0
     emit true "Range mode" "Range mode: $range_mode" "[]" "Backup: $backup\n5 GHz width now $w5; 2.4 GHz legacy/CCK $([ "$range_mode" = off ] && echo off || echo on). Narrower = more range, lower peak speed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_wifi)
     # one-click save (owner request): everyday saves apply immediately; a backup is
