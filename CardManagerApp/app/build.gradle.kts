@@ -4,6 +4,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// رقم البناء من CI (GITHUB_RUN_NUMBER) — يجعل كل نسخة **تحديثاً** فوق سابقتها
+// عند التثبيت بدل رقمٍ ثابت. محلياً يسقط إلى 1.
+val ciBuildNumber = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
+
 android {
     namespace = "com.binwaps.cardmanager"
     compileSdk = 34
@@ -12,15 +16,32 @@ android {
         applicationId = "com.binwaps.cardmanager"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = ciBuildNumber
+        versionName = "3.$ciBuildNumber"
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // مفتاح توقيع **ثابت** داخل المستودع: بدونه كان كل بناء CI يوقّع بمفتاح
+    // عشوائي جديد فيرفض أندرويد تثبيت التحديث فوق النسخة المثبّتة (توقيع
+    // مختلف) — فيبقى المستخدم على نسخة قديمة ويظن أن الأعطال لم تُصلح.
+    // المفتاح للتوزيع الجانبي (خارج المتاجر) فوجوده في المستودع مقبول.
+    signingConfigs {
+        create("shared") {
+            storeFile = file("signing/shared.keystore")
+            storePassword = "cardmanager2026"
+            keyAlias = "cardmanager"
+            keyPassword = "cardmanager2026"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
 
@@ -44,7 +65,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }

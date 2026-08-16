@@ -363,7 +363,7 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
         Spacer(Modifier.height(14.dp))
 
         Text(
-            "مدير الكروت — الإصدار 3.1  •  المهندس علي واقص",
+            "مدير الكروت — الإصدار ${com.binwaps.cardmanager.BuildConfig.VERSION_NAME}  •  المهندس علي واقص",
             fontSize = 11.sp, color = TextLow,
         )
         Spacer(Modifier.height(24.dp))

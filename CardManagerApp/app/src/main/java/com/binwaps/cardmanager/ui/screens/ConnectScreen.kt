@@ -392,6 +392,16 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             color = Violet,
             enabled = !busy,
         ) { Store.setConnected(false); onSkip() }
-        Spacer(Modifier.height(30.dp))
+        Spacer(Modifier.height(10.dp))
+        // رقم الإصدار ظاهر دائماً — ليعرف المستخدم فوراً أي نسخة مثبّتة فعلاً
+        Text(
+            "الإصدار ${com.binwaps.cardmanager.BuildConfig.VERSION_NAME}",
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            color = com.binwaps.cardmanager.ui.theme.TextLow,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        Spacer(Modifier.height(20.dp))
     }
 }
