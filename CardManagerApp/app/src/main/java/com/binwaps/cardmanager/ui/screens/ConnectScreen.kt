@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -101,6 +102,37 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
     var connectJob by remember { mutableStateOf<Job?>(null) }
     // ما الذي يجري الآن بالضبط — ليعرف المستخدم أين يتوقف بدل «جاري الاتصال» مبهمة
     var stage by remember { mutableStateOf("") }
+    // الاكتشاف التلقائي: يفحص بوابة شبكة الجوال ومنافذ API ويملأ الصحيح
+    var discovering by remember { mutableStateOf(false) }
+    var discoverMsg by remember { mutableStateOf<String?>(null) }
+    // تشخيص شبكة يُعرض مع فشل الاتصال (عنوان الجوال/البوابة/تنبيه اختلاف الشبكة)
+    var netInfo by remember { mutableStateOf<String?>(null) }
+
+    fun doDiscover() {
+        discovering = true
+        discoverMsg = null
+        error = null
+        netInfo = null
+        scope.launch {
+            val d = com.binwaps.cardmanager.util.RouterDiscovery.discover(context, host, port.toIntOrNull())
+            discovering = false
+            val hit = d.found.firstOrNull()
+            if (hit != null) {
+                host = hit.host
+                port = hit.port.toString()
+                if (hit.port == 8729) useSsl = true
+                discoverMsg = "وُجد منفذ API مفتوح على ${hit.host}:${hit.port} — اضغط «اتصال»" +
+                    if (d.found.size > 1) "\n(وأيضاً: ${d.found.drop(1).joinToString("، ") { "${it.host}:${it.port}" }})" else ""
+            } else {
+                error = buildString {
+                    append("لم يُعثر على منفذ API مفتوح تلقائياً.")
+                    d.phoneIp?.let { append("\nجوالك على الشبكة: $it") }
+                    d.gateway?.let { append(" — بوابة الشبكة: $it") }
+                    append("\nتأكد أن جوالك متصل بواي فاي الراوتر نفسه، وأن خدمة api مفعّلة.")
+                }
+            }
+        }
+    }
 
     // ملء الحقول عند اختيار راوتر محفوظ
     LaunchedEffect(editingId) {
@@ -110,8 +142,23 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         }
     }
 
+    // يُحسب عند فشل الاتصال: يكشف فوراً حالة «العنوان ليس على شبكة جوالك»
+    fun buildNetInfo(): String {
+        val pIp = com.binwaps.cardmanager.util.RouterDiscovery.phoneIp(context)
+        val gw = com.binwaps.cardmanager.util.RouterDiscovery.gatewayIp(context)
+        return buildString {
+            append("شبكة جوالك: ${pIp ?: "غير معروفة"}")
+            if (gw != null) append(" · بوابة الشبكة: $gw")
+            if (com.binwaps.cardmanager.util.RouterDiscovery.looksDifferentNetwork(pIp, host)) {
+                append("\n⚠ العنوان المكتوب ليس على شبكة جوالك — اضغط «اكتشاف الراوتر تلقائياً»")
+            }
+        }
+    }
+
     fun doConnect() {
         error = null
+        discoverMsg = null
+        netInfo = null
         busy = true
         // إيقاف المزامنة قبل المحاولة: دورة مزامنة جارية تحتجز قفل الجلسة
         // فيقف اتصال المستخدم في الطابور حتى تنتهي مهلته بلا سبب ظاهر
@@ -141,6 +188,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             if (result == null) {
                 error = "انتهت مهلة الاتصال — تأكد من العنوان والمنفذ، أو زد المهلة، " +
                     "أو تأكد أن خدمة API مفتوحة من الخارج للاتصال البعيد"
+                netInfo = buildNetInfo()
                 return@launch
             }
             result.onSuccess { smart ->
@@ -163,6 +211,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 onConnected()
             }.onFailure {
                 error = it.message ?: "تعذّر الاتصال بالراوتر"
+                netInfo = buildNetInfo()
             }
         }
     }
@@ -338,6 +387,35 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 }
             }
 
+            Spacer(Modifier.height(9.dp))
+            // الحل الجذري لخطأ «المنفذ مغلق أو العنوان خاطئ»: يقرأ بوابة شبكة
+            // الجوال (هي الراوتر فعلاً) ويفحص منافذ API ويملأ الصحيح بضغطة
+            GhostButton(
+                if (discovering) "جاري فحص الشبكة…" else "اكتشاف الراوتر تلقائياً",
+                Modifier.fillMaxWidth(),
+                Icons.Filled.Search,
+                enabled = !busy && !discovering,
+            ) { doDiscover() }
+
+            if (discoverMsg != null) {
+                Spacer(Modifier.height(9.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(com.binwaps.cardmanager.ui.theme.Lime.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
+                        .border(1.dp, com.binwaps.cardmanager.ui.theme.Lime.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                        .padding(11.dp)
+                ) {
+                    Text(
+                        discoverMsg!!,
+                        fontSize = 11.5.sp,
+                        lineHeight = 17.sp,
+                        color = com.binwaps.cardmanager.ui.theme.Lime,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+
             if (error != null) {
                 Spacer(Modifier.height(10.dp))
                 Row(
@@ -349,15 +427,20 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                 ) {
                     Column {
                         Text("فشل الاتصال", fontSize = 12.5.sp, color = Danger, fontWeight = FontWeight.Bold)
-                        Text(error!!, fontSize = 11.sp, color = TextMid)
+                        Text(error!!, fontSize = 11.sp, lineHeight = 16.sp, color = TextMid)
+                        if (netInfo != null) {
+                            Spacer(Modifier.height(5.dp))
+                            Text(netInfo!!, fontSize = 11.sp, lineHeight = 16.sp, color = TextHi)
+                        }
                         Spacer(Modifier.height(4.dp))
                         Text(
                             if (useSsl)
                                 "للاتصال عن بعد: فعّل api-ssl على الراوتر (IP → Services → api-ssl منفذ 8729) مع شهادة، " +
                                     "وتأكد أن المنفذ مفتوح من الخارج أو استخدم IP Cloud DDNS."
                             else
-                                "تأكد أن خدمة API مفعّلة: IP → Services → api (منفذ 8728)، وأن جوالك على نفس الشبكة.",
-                            fontSize = 10.5.sp, color = TextLow,
+                                "تأكد أن خدمة API مفعّلة: IP → Services → api، وأن المنفذ في التطبيق " +
+                                    "يطابق منفذ الخدمة على الراوتر، وأن جوالك على نفس الشبكة.",
+                            fontSize = 10.5.sp, lineHeight = 15.sp, color = TextLow,
                         )
                     }
                 }
