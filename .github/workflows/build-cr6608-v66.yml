@@ -136,17 +136,17 @@ jobs:
           apply_git "$P/996-cr6608-dts-rf-38dbm-lab-mode.patch"
 
           # 2) mac80211 tx-power trace (subsys quilt patch)
-          install -m 0644 "$P/995-mac80211-cr6608-txpower-trace.patch" \
+          install -D -m 0644 "$P/995-mac80211-cr6608-txpower-trace.patch" \
             package/kernel/mac80211/patches/subsys/995-cr6608-txpower-trace.patch
 
           # 3) ramips kernel patches: DSA EEE fix + PCIe warm-reboot reset delays
-          install -m 0644 "$P/140-net-dsa-mt7530-do-not-advertise-EEE-on-MT7621-switch.patch" \
+          install -D -m 0644 "$P/140-net-dsa-mt7530-do-not-advertise-EEE-on-MT7621-switch.patch" \
             target/linux/ramips/patches-6.12/140-net-dsa-mt7530-do-not-advertise-EEE-on-MT7621-switch.patch
-          install -m 0644 "$P/399-pcie-mt7621-longer-reset-delays.patch" \
+          install -D -m 0644 "$P/399-pcie-mt7621-longer-reset-delays.patch" \
             target/linux/ramips/patches-6.12/399-pcie-mt7621-longer-reset-delays.patch
 
           # 4) uhttpd dispatch/close-unread-body patch
-          install -m 0644 "$P/992-uhttpd-normalize-dispatch-and-close-unread-body.patch" \
+          install -D -m 0644 "$P/992-uhttpd-normalize-dispatch-and-close-unread-body.patch" \
             package/network/services/uhttpd/patches/992-uhttpd-normalize-dispatch-and-close-unread-body.patch
 
           # 5) mt76 driver stack: 38 dBm request path + factory38 + eeprom shadow
@@ -158,7 +158,7 @@ jobs:
                    zzz-mt7915-cr6608-firmware-eeprom-shadow.patch \
                    zzzz-mt7915-cr6608-ul-muru-experimental.patch \
                    zzzzz-mt7915-cr6608-ul-muru-vendor-proof.patch; do
-            install -m 0644 "$P/$f" "package/kernel/mt76/patches/$f"
+            install -D -m 0644 "$P/$f" "package/kernel/mt76/patches/$f"
           done
 
           # 6) LuCI: preserve configured txpower (applied inside the luci feed)
