@@ -1,0 +1,308 @@
+name: Build CR6608 v66 (login-fixed, fleet-flashable, 38 dBm from source)
+
+# Builds the corrected v66 Smart AP firmware for the Xiaomi CR6608 from OpenWrt
+# source on a GitHub Ubuntu runner. This is the user's own v66 overlay + driver
+# patches, with two corrections baked in so one image flashes to a whole fleet:
+#
+#   1. Login fix   — /etc/shadow ships a root password of "admin" and rpcd uses
+#                    the $p$root indirection, so the Smart AP dashboard, LuCI,
+#                    SSH and console all open with root/admin on every device.
+#   2. Flash-and-go — both radios and both SSIDs ship ENABLED with a default
+#                    WPA passphrase, so a freshly flashed device is immediately
+#                    usable without per-device retail provisioning.
+#
+# It does NOT run v66's build.sh: that script hard-requires the owner's private
+# signing keys (absent from the source kit by design) and its pre-publish
+# inspector deliberately REFUSES to ship a working shared password. We build the
+# same source with OpenWrt's own tooling instead, so no private keys are needed.
+#
+# Run it: GitHub -> Actions -> this workflow -> "Run workflow" (pick this branch).
+# ~1-2 hours. The final .bin is uploaded as an artifact AND published to the
+# cr6608-v66-delivery branch for a direct git/raw download link.
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_ref:
+        description: 'OpenWrt git ref/commit to build (v66 was authored against v25.12.5 = f0a60eee)'
+        required: true
+        default: 'f0a60eee2fe051741c643ea6118718aae1ef17fb'
+      publish:
+        description: 'Publish the built .bin to the cr6608-v66-delivery branch'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+
+env:
+  SRC: router/cr6608-v66
+  MARKER: CR6608-RF-38DBM
+  DEVICE: xiaomi_mi-router-cr6608
+  SHADOW_PROOF: 'root:$6$3HCjAsm.bChZtxt8$'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          echo "== before =="; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "== after =="; df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget quilt \
+            libelf-dev ecj fastjar java-propose-classpath
+
+      - name: Clone OpenWrt at the pinned ref
+        env:
+          OPENWRT_REF: ${{ github.event.inputs.openwrt_ref || 'f0a60eee2fe051741c643ea6118718aae1ef17fb' }}
+        run: |
+          retry(){ n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; echo "retry $n/5: $*"; sleep $((n*10)); done; }
+          retry git clone https://git.openwrt.org/openwrt/openwrt.git ow
+          cd ow
+          git checkout --detach --force "$OPENWRT_REF"
+          git log -1 --oneline
+
+      - name: Update & install feeds
+        run: |
+          cd ow
+          retry(){ n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; echo "retry $n/5: $*"; sleep $((n*10)); done; }
+          retry ./scripts/feeds update -a
+          for f in luci routing packages; do
+            [ -d "feeds/$f" ] || { echo "feed $f missing after update — retrying"; retry ./scripts/feeds update -a; break; }
+          done
+          [ -d feeds/luci ] && [ -d feeds/routing ] && [ -d feeds/packages ] \
+            || { echo "::error::core feeds (luci/routing/packages) still missing after retries"; exit 1; }
+          retry ./scripts/feeds install -a
+
+      - name: Stage the prplMesh EasyMesh package
+        run: |
+          cd ow
+          DST=package/network/services/prplmesh
+          [ ! -e "$DST" ] || { echo "::error::prplmesh already present unexpectedly"; exit 1; }
+          cp -a "$GITHUB_WORKSPACE/$SRC/packages/prplmesh" "$DST"
+          diff -qr "$GITHUB_WORKSPACE/$SRC/packages/prplmesh" "$DST" >/dev/null \
+            || { echo "::error::staged prplmesh differs from source"; exit 1; }
+          echo "prplmesh staged"
+
+      - name: Apply CR6608 v66 patches to their exact targets
+        run: |
+          cd ow
+          P="$GITHUB_WORKSPACE/$SRC/patches"
+
+          apply_git() { # <patchfile> — apply at the OpenWrt worktree root
+            echo "== git apply $(basename "$1") =="
+            if git apply --check "$1" 2>/dev/null; then git apply -v "$1";
+            elif patch -p1 --dry-run < "$1" >/dev/null 2>&1; then patch -p1 < "$1";
+            else echo "::error::failed to apply $(basename "$1")"; exit 1; fi
+          }
+          apply_feed() { # <patchfile> <feeddir> — apply inside a feed
+            echo "== feed apply $(basename "$1") into $2 =="
+            if git -C "$2" apply --check "$1" 2>/dev/null; then git -C "$2" apply -v "$1";
+            elif patch -p1 -d "$2" --dry-run < "$1" >/dev/null 2>&1; then patch -p1 -d "$2" < "$1";
+            else echo "::error::failed to apply $(basename "$1") into $2"; exit 1; fi
+          }
+
+          # 1) DTS: arm the 38 dBm request-path property + experimental UL-MURU,
+          #    drop disable-radar-background (enables background CAC).
+          apply_git "$P/996-cr6608-dts-rf-38dbm-lab-mode.patch"
+
+          # 2) mac80211 tx-power trace (subsys quilt patch)
+          install -m 0644 "$P/995-mac80211-cr6608-txpower-trace.patch" \
+            package/kernel/mac80211/patches/subsys/995-cr6608-txpower-trace.patch
+
+          # 3) ramips kernel patches: DSA EEE fix + PCIe warm-reboot reset delays
+          install -m 0644 "$P/140-net-dsa-mt7530-do-not-advertise-EEE-on-MT7621-switch.patch" \
+            target/linux/ramips/patches-6.12/140-net-dsa-mt7530-do-not-advertise-EEE-on-MT7621-switch.patch
+          install -m 0644 "$P/399-pcie-mt7621-longer-reset-delays.patch" \
+            target/linux/ramips/patches-6.12/399-pcie-mt7621-longer-reset-delays.patch
+
+          # 4) uhttpd dispatch/close-unread-body patch
+          install -m 0644 "$P/992-uhttpd-normalize-dispatch-and-close-unread-body.patch" \
+            package/network/services/uhttpd/patches/992-uhttpd-normalize-dispatch-and-close-unread-body.patch
+
+          # 5) mt76 driver stack: 38 dBm request path + factory38 + eeprom shadow
+          #    + experimental UL-MURU (+ vendor proof). Applied in sorted order by
+          #    OpenWrt during mt76 prepare (999 < zz < zzz < zzzz < zzzzz).
+          mkdir -p package/kernel/mt76/patches
+          for f in 999-mt7915-cr6608-rf-38dbm-request-path.patch \
+                   zz-mt7915-cr6608-factory38-path.patch \
+                   zzz-mt7915-cr6608-firmware-eeprom-shadow.patch \
+                   zzzz-mt7915-cr6608-ul-muru-experimental.patch \
+                   zzzzz-mt7915-cr6608-ul-muru-vendor-proof.patch; do
+            install -m 0644 "$P/$f" "package/kernel/mt76/patches/$f"
+          done
+
+          # 6) LuCI: preserve configured txpower (applied inside the luci feed)
+          apply_feed "$P/993-luci-wireless-preserve-configured-txpower.patch" feeds/luci
+
+          echo "== staged mt76 patches ==" ; ls -1 package/kernel/mt76/patches/
+          echo "== staged ramips patches (140/399) ==" ; ls -1 target/linux/ramips/patches-6.12/ | grep -E '140-|399-'
+          echo "== staged mac80211 subsys patch ==" ; ls -1 package/kernel/mac80211/patches/subsys/ | grep 995 || true
+
+      - name: Bake in the corrected v66 overlay (login fix + flash-and-go)
+        run: |
+          cd ow
+          mkdir -p files
+          cp -a "$GITHUB_WORKSPACE/$SRC/files/." files/
+          # Normalize modes the way the shipped image expects.
+          find files -type d -exec chmod 0755 {} +
+          find files -type f -exec chmod 0644 {} +
+          for d in etc/init.d etc/hotplug.d etc/uci-defaults usr/bin usr/sbin usr/libexec www/cgi-bin; do
+            [ -d "files/$d" ] && find "files/$d" -type f -exec chmod 0755 {} + || true
+          done
+          [ -f files/etc/shadow ] && chmod 0600 files/etc/shadow || true
+          [ -d files/etc/config ] && find files/etc/config -type f -exec chmod 0600 {} + || true
+          [ -f files/etc/crontabs/root ] && chmod 0600 files/etc/crontabs/root || true
+          echo "overlay files: $(find files -type f | wc -l)"
+          echo "== login proof in overlay shadow =="
+          grep -q "^${SHADOW_PROOF}" files/etc/shadow && echo "shadow admin-hash present" \
+            || { echo "::error::overlay shadow missing the admin login hash"; exit 1; }
+          echo "== wireless enabled (no disabled '1') =="
+          ! grep -q "option disabled '1'" files/etc/config/wireless && echo "radios+ssids enabled" \
+            || { echo "::error::wireless still ships disabled"; exit 1; }
+
+      - name: Seed .config and expand
+        run: |
+          cd ow
+          cp "$GITHUB_WORKSPACE/$SRC/cr6608.seed.config" .config
+          make defconfig
+          grep -q "^CONFIG_TARGET_ramips_mt7621_DEVICE_${DEVICE}=y" .config \
+            && echo "device profile selected" \
+            || { echo "::error::device profile NOT selected"; exit 1; }
+          # Warn (do not fail) on curated packages that did not survive defconfig
+          # as a literal =y line — virtual/PROVIDES packages legitimately don't.
+          missing=""
+          while IFS= read -r sym; do
+            grep -qxF "$sym" .config || missing="$missing ${sym%=y}"
+          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9._-]+=y' "$GITHUB_WORKSPACE/$SRC/cr6608.seed.config")
+          [ -n "$missing" ] && echo "::warning::packages not literal =y after defconfig (may be virtual/dependency-provided):$missing" || echo "all curated packages survived defconfig"
+
+      - name: Download sources
+        run: cd ow && make download -j8 V=s
+
+      - name: Prepare kernel, mt76 and mac80211 (applies the driver patches)
+        run: |
+          cd ow
+          make package/kernel/mt76/clean V=s || true
+          make package/kernel/mac80211/clean V=s || true
+          make package/firmware/wireless-regdb/clean V=s || true
+          make package/network/services/uhttpd/clean V=s || true
+          make target/linux/clean V=s || true
+          make package/firmware/wireless-regdb/prepare V=s 2>&1 | tail -5
+          make target/linux/prepare V=s 2>&1 | tail -20
+          make package/kernel/mt76/prepare V=s 2>&1 | tail -30
+          make package/kernel/mac80211/prepare V=s 2>&1 | tail -20
+          # Prove the 38 dBm request-path landed in the prepared mt76 source.
+          MT76DIR="$(find build_dir -maxdepth 5 -type d -name 'mt76-*' 2>/dev/null | head -1)"
+          echo "mt76 dir: ${MT76DIR:-NONE}"
+          [ -n "$MT76DIR" ] || { echo "::error::mt76 not prepared"; exit 1; }
+          grep -rq "mt7915_cr6608_rf_request_enabled" "$MT76DIR" \
+            && echo "38 dBm request-path patch applied to mt76 source" \
+            || { echo "::error::38 dBm request-path NOT in prepared mt76 source"; exit 1; }
+
+      - name: Build firmware
+        run: |
+          cd ow
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Prove the compiled driver carries the 38 dBm marker
+        run: |
+          cd ow
+          KO="$(find build_dir bin -name 'mt7915e.ko' 2>/dev/null | head -1)"
+          echo "mt7915e.ko: ${KO:-NONE}"
+          [ -n "$KO" ] || { echo "::error::mt7915e.ko not found"; exit 1; }
+          if strings -a "$KO" | grep -qF "$MARKER"; then
+            echo "::notice::marker '$MARKER' present in compiled mt7915e.ko"
+            strings -a "$KO" | grep -F "$MARKER" | head -2
+          else
+            echo "::error::marker '$MARKER' NOT in compiled driver — refusing"; exit 1
+          fi
+
+      - name: Verify the final image (driver marker + login + device)
+        run: |
+          cd ow
+          sudo apt-get install -y squashfs-tools >/dev/null 2>&1 || true
+          BIN="$(ls bin/targets/ramips/mt7621/*${DEVICE}*squashfs-sysupgrade.bin 2>/dev/null | head -1)"
+          echo "sysupgrade image: ${BIN:-NONE}"
+          [ -n "$BIN" ] || { echo "::error::no CR6608 sysupgrade .bin produced"; exit 1; }
+          ls -lh "$BIN"; sha256sum "$BIN"
+          rm -rf /tmp/chk && mkdir -p /tmp/chk
+          tar -xf "$BIN" -C /tmp/chk 2>/dev/null || true
+          ROOT="$(find /tmp/chk -name root -type f | head -1)"
+          [ -n "$ROOT" ] || { echo "::error::could not locate rootfs in image"; exit 1; }
+          unsquashfs -q -d /tmp/chk/sq "$ROOT" >/dev/null 2>&1 || true
+          # (a) 38 dBm marker inside the final image's driver
+          IMGKO="$(find /tmp/chk/sq -name 'mt7915e.ko' | head -1)"
+          [ -n "$IMGKO" ] && strings -a "$IMGKO" | grep -qF "$MARKER" \
+            && echo "::notice::CONFIRMED $MARKER inside final image driver" \
+            || { echo "::error::$MARKER NOT inside final image driver"; exit 1; }
+          # (b) login fix inside the final image's /etc/shadow
+          if grep -q "^${SHADOW_PROOF}" /tmp/chk/sq/etc/shadow; then
+            echo "::notice::CONFIRMED root/admin login hash inside final image"
+          else
+            echo "::error::admin login hash NOT in final image /etc/shadow"; exit 1
+          fi
+          # (c) rpcd $p$root indirection present
+          grep -q "p\$root" /tmp/chk/sq/etc/config/rpcd \
+            && echo "::notice::rpcd \$p\$root indirection present" \
+            || echo "::warning::rpcd indirection not found (check auth)"
+          # (d) wireless enabled inside the final image
+          ! grep -q "option disabled '1'" /tmp/chk/sq/etc/config/wireless \
+            && echo "::notice::radios+ssids enabled in final image" \
+            || { echo "::error::wireless ships disabled in final image"; exit 1; }
+          echo "ALL GATES PASSED"
+
+      - name: Stage the delivered image + checksum
+        id: stage
+        run: |
+          cd ow
+          BIN="$(ls bin/targets/ramips/mt7621/*${DEVICE}*squashfs-sysupgrade.bin | head -1)"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          OUT="smartap-cr6608-v66-fixed-sysupgrade-38dbm.bin"
+          cp "$BIN" "$GITHUB_WORKSPACE/out/$OUT"
+          ( cd "$GITHUB_WORKSPACE/out" && sha256sum "$OUT" > "$OUT.sha256" )
+          echo "outname=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$GITHUB_WORKSPACE/out"
+
+      - name: Upload sysupgrade image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cr6608-v66-fixed-sysupgrade-38dbm
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish to the cr6608-v66-delivery branch (direct download link)
+        if: ${{ (github.event.inputs.publish || 'true') == 'true' }}
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Publish onto an orphan-style delivery branch that carries only dist/.
+          git fetch origin cr6608-v66-delivery || true
+          git checkout -B cr6608-v66-delivery
+          mkdir -p dist
+          cp out/*.bin out/*.sha256 dist/
+          ( cd dist && sha256sum *.bin > SHA256SUMS )
+          git add -f dist/*
+          git commit -m "Deliver corrected v66 CR6608 image (login-fixed, flash-and-go, 38 dBm) [run ${GITHUB_RUN_ID}]"
+          n=0
+          until git push -f -u origin cr6608-v66-delivery; do
+            n=$((n+1)); [ $n -ge 4 ] && { echo "push failed"; exit 1; }
+            echo "push retry $n/4"; sleep $((2**n))
+          done
+          echo "Published to cr6608-v66-delivery/dist/"

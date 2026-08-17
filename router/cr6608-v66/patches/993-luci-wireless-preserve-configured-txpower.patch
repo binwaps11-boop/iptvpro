@@ -1,0 +1,103 @@
+diff --git a/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js b/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
+--- a/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
++++ b/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
+@@ -612,8 +612,10 @@ var CBIWifiTxPowerValue = form.ListValue.extend({
+ 
+ 			this.value('', _('driver default'));
+ 
+-			for (let p of pwrlist)
+-				this.value(p.dbm, `${p.dbm} dBm (${p.mw} mW)`);
++			for (let dbm = 1; dbm <= 38; dbm++) {
++				const key = String(dbm);
++				this.value(key, `${key} dBm`);
++			}
+ 
+ 			return form.ListValue.prototype.load.apply(this, [section_id]);
+ 		}, this));
+@@ -659,9 +661,31 @@ var CBIWifiCountryValue = form.Value.extend({
+ 		if (formvalue != null && formvalue != '' && !/^[A-Z0-9][A-Z0-9]$/.test(formvalue))
+ 			return _('Use ISO/IEC 3166 alpha2 country codes.');
+ 
++		const current = uci.get('wireless', section_id, 'country');
++		const currentValue = (current != null) ? String(current) : '';
++		const nextValue = (formvalue != null) ? String(formvalue) : '';
++
++		if (nextValue !== currentValue) {
++			const fixedRadios = uci.sections('wireless', 'wifi-device')
++				.filter(radio => String(radio.channel || '') !== 'auto');
++
++			if (fixedRadios.length)
++				return _('The regulatory country is shared by all radios. Set every radio channel to Automatic before changing it.');
++		}
++
+ 		return true;
+ 	},
+ 
++	write: function(section_id, value) {
++		for (const radio of uci.sections('wireless', 'wifi-device'))
++			uci.set('wireless', radio['.name'], 'country', value);
++	},
++
++	remove: function(section_id) {
++		for (const radio of uci.sections('wireless', 'wifi-device'))
++			uci.unset('wireless', radio['.name'], 'country');
++	},
++
+ 	renderWidget: function(section_id, option_index, cfgvalue) {
+ 		const typeClass = (this.keylist && this.keylist.length) ? form.ListValue : form.Value;
+ 		return typeClass.prototype.renderWidget.apply(this, [section_id, option_index, cfgvalue]);
+
+diff --git a/applications/luci-app-usteer/htdocs/luci-static/resources/view/usteer/usteer.js b/applications/luci-app-usteer/htdocs/luci-static/resources/view/usteer/usteer.js
+--- a/applications/luci-app-usteer/htdocs/luci-static/resources/view/usteer/usteer.js
++++ b/applications/luci-app-usteer/htdocs/luci-static/resources/view/usteer/usteer.js
+@@ -235,9 +235,11 @@ const callNetworkRrdnsLookup = rpc.declare({
+ });
+ 
+ 
+ function collectRemoteHosts (remotehosttableentries,Remotehosts) {
++	Remotehosts = Remotehosts || {};
+ 	const getUndefinedDnsCacheIPs = (Remotehosts, dns_cache) =>
+-		Object.keys(Remotehosts).filter(IPaddr => !dns_cache.hasOwnProperty(IPaddr));
++		Object.keys(Remotehosts || {}).filter(IPaddr =>
++			!Object.prototype.hasOwnProperty.call(dns_cache, IPaddr));
+ 
+ 	const ipAddrs = getUndefinedDnsCacheIPs(Remotehosts, dns_cache);
+ 
+@@ -419,11 +419,11 @@ return view.extend({
+ 
+ 	poll_status(nodes, data) {
+ 		
+-		Hosts = data[1];
+-		Remotehosts = data[2];
+-		Remoteinfo = data[3];
+-		Localinfo = data[4];
+-		Clients = data[5];
++		Hosts = data[1] || {};
++		Remotehosts = data[2] || {};
++		Remoteinfo = data[3] || {};
++		Localinfo = data[4] || {};
++		Clients = data[5] || {};
+ 
+ 		getCipherAKM();	 
+ 
+@@ -465,13 +465,13 @@ return view.extend({
+ 			m = new form.Map('usteer', _('Usteer'));
+ 		}
+ 
+-		Hosts = data[1];
+-		Remotehosts = data[2];
+-		Remoteinfo = data[3];
+-		Localinfo = data[4];
+-		Clients = data[5];
+-		WifiNetworks = data[6];
+-		Initscript = data[7];
++		Hosts = data[1] || {};
++		Remotehosts = data[2] || {};
++		Remoteinfo = data[3] || {};
++		Localinfo = data[4] || {};
++		Clients = data[5] || {};
++		WifiNetworks = data[6] || [];
++		Initscript = data[7] || '';
+ 
+ 		getCipherAKM();
+ 		

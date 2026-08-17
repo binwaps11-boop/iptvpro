@@ -1,0 +1,93 @@
+From: Smart AP firmware project
+Subject: [PATCH] openwrt: bound logs and tolerate optional survey noise
+
+OpenWrt's nl80211 survey dump legitimately omits the optional noise attribute
+for inactive channels.  Logging every omission once per monitor cycle creates
+large TRACE files without identifying a fault.  Keep a diagnostic only for the
+in-use channel.
+
+The automatic rollover helper is called with the single, trusted `roll_logs`
+verb.  Handle that verb before the enhanced-getopt parser so rollover remains
+available during recovery from an incomplete dependency set.  Always remove
+the inter-process rollover lock on exit.
+
+Production files retain fatal, error, warning and informational events while
+excluding TRACE/DEBUG traffic.  This changes diagnostics only; it does not
+claim or emulate any unimplemented EasyMesh operation.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -116,7 +116,8 @@ endif()
+ 
+ # Default values
+ set(BEEROCKS_REPEATER_MODE 0)
+-set(BEEROCKS_MONITOR_POLLING_RATE_MSEC 250)
++set(BEEROCKS_MONITOR_POLLING_RATE_MSEC 250 CACHE STRING
++    "Monitor polling interval in milliseconds")
+ 
+ # Platform specific flags
+ if (TARGET_PLATFORM STREQUAL "openwrt")
+--- a/agent/config/beerocks_agent.conf.in
++++ b/agent/config/beerocks_agent.conf.in
+@@ -68,7 +68,7 @@ enable_repeater_mode=0
+ 
+ [log]
+-log_global_levels=error,info,warning,fatal,trace,debug
+-log_global_syslog_levels=error,info,warning,fatal,trace,debug
++log_global_levels=error,info,warning,fatal
++log_global_syslog_levels=error,warning,fatal
+ log_global_size=@BEEROCKS_AGENT_LOG_SIZE@
+ log_files_enabled=@BEEROCKS_LOG_FILES_ENABLED@
+ log_files_path=@BEEROCKS_LOG_FILES_PATH@
+--- a/controller/config/beerocks_controller.conf.in
++++ b/controller/config/beerocks_controller.conf.in
+@@ -59,7 +59,7 @@ use_dataelements_vap_configs=0
+ 
+ [log]
+-log_global_levels=error,info,warning,fatal,trace,debug
+-log_global_syslog_levels=error,info,warning,fatal,trace,debug
++log_global_levels=error,info,warning,fatal
++log_global_syslog_levels=error,warning,fatal
+ log_global_size=@BEEROCKS_CONTROLLER_LOG_SIZE@
+ log_files_enabled=@BEEROCKS_LOG_FILES_ENABLED@
+ log_files_path=@BEEROCKS_LOG_FILES_PATH@
+--- a/common/beerocks/bwl/shared/nl80211_client_impl.cpp
++++ b/common/beerocks/bwl/shared/nl80211_client_impl.cpp
+@@ -940,8 +940,9 @@ bool nl80211_client_impl::get_survey_info(const std::string &interface_name,
+             if (sinfo[NL80211_SURVEY_INFO_NOISE]) {
+                 channel_survey_info.noise_dbm =
+                     (int8_t)nla_get_u8(sinfo[NL80211_SURVEY_INFO_NOISE]);
+-            } else {
+-                LOG(TRACE) << "NL80211_SURVEY_INFO_NOISE attribute is missing";
++            } else if (channel_survey_info.in_use) {
++                LOG(DEBUG) << "NL80211_SURVEY_INFO_NOISE attribute is missing for the in-use "
++                           << "channel";
+             }
+ 
+             if (sinfo[NL80211_SURVEY_INFO_CHANNEL_TIME]) {
+--- a/common/beerocks/scripts/prplmesh_utils.sh.in
++++ b/common/beerocks/scripts/prplmesh_utils.sh.in
+@@ -195,0 +196,7 @@ roll_logs_function()
++    cleanup_roll_lock()
++    {
++        rmdir "$ROLL_PROGRESS_DIR" 2>/dev/null || true
++    }
++    trap cleanup_roll_lock EXIT
++    trap 'exit 1' INT TERM
++
+@@ -210 +217,2 @@ roll_logs_function()
+-    rm -r $ROLL_PROGRESS_DIR
++    cleanup_roll_lock
++    trap - EXIT INT TERM
+@@ -489,4 +497,11 @@ VERBOSE=false
+ DATA_IFACE=
+ PRPLMESH_MODE="CA" # CA = Controller & Agent, A = Agent only, C = Controller only
+ 
++# RollMonitor invokes this exact non-interactive path.  Do not make emergency
++# log rotation depend on the optional command-line parser being functional.
++if [ "$#" -eq 1 ] && [ "$1" = "roll_logs" ]; then
++    roll_logs_function
++    exit $?
++fi
++
+ main "$@"

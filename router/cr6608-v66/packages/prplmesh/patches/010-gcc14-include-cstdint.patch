@@ -1,0 +1,16 @@
+From: Smart AP firmware project
+Subject: [PATCH] bcl: include cstdint for uint32_t
+
+GCC 14 no longer exposes uint32_t here through unrelated transitive
+includes. Include the C++ standard header that declares it.
+
+--- a/common/beerocks/bcl/include/bcl/network/netlink_event_listener.h
++++ b/common/beerocks/bcl/include/bcl/network/netlink_event_listener.h
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/netlink.h>
+ 
++#include <cstdint>
+ #include <functional>
+ #include <unordered_map>
+ 

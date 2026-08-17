@@ -1,0 +1,12 @@
+#!/bin/sh
+
+# netifd may recreate bridge slave state during a network reload. Replay only
+# the runtime bridge guard and per-port state once LAN is usable again.
+case "${ACTION:-}:${INTERFACE:-}" in
+	ifup:lan|ifupdate:lan)
+		(
+			sleep 1
+			/usr/sbin/cr6608-security-apply hotplug >/dev/null 2>&1
+		) &
+		;;
+esac

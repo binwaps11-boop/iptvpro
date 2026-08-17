@@ -1,0 +1,53 @@
+#!/bin/sh
+
+# Migrate the legacy dedicated Smart AP web credential which may be retained
+# by sysupgrade. OpenWrt's $p$root indirection makes rpcd authenticate against
+# the live root account without copying or changing its hash. This migration is
+# deliberately board-scoped and does not touch LAN, DHCP, wireless, calibration
+# data, the root account, or flash partitions.
+
+UCI_BIN="${CR6608_MIGRATION_UCI_BIN:-uci}"
+LOGGER_BIN="${CR6608_MIGRATION_LOGGER_BIN:-logger}"
+BOARD_NAME_FILE="${CR6608_MIGRATION_BOARD_NAME_FILE:-/tmp/sysinfo/board_name}"
+RPCD_ROOT_PASSWORD='$p$root'
+MARKER='smartap.migration.preserved_config_version'
+VERSION='4'
+
+[ "$(cat "$BOARD_NAME_FILE" 2>/dev/null)" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+find_section_by_option() {
+	package="$1"
+	type="$2"
+	option="$3"
+	expected="$4"
+	index=0
+
+	while [ "$index" -lt 64 ]; do
+		section="@${type}[${index}]"
+		value="$("$UCI_BIN" -q get "${package}.${section}.${option}" 2>/dev/null)" || break
+		if [ "$value" = "$expected" ]; then
+			printf '%s\n' "$section"
+			return 0
+		fi
+		index=$((index + 1))
+	done
+
+	return 1
+}
+
+root_login="$(find_section_by_option rpcd login username root)" || exit 1
+[ "$("$UCI_BIN" -q get "$MARKER" 2>/dev/null)" = "$VERSION" ] &&
+	[ "$("$UCI_BIN" -q get "rpcd.${root_login}.password" 2>/dev/null)" = "$RPCD_ROOT_PASSWORD" ] &&
+	exit 0
+"$UCI_BIN" -q set "rpcd.${root_login}.password=${RPCD_ROOT_PASSWORD}" || exit 1
+
+"$UCI_BIN" -q commit rpcd || exit 1
+
+# Write the marker only after every required package was committed.  If an
+# earlier commit fails, uci-defaults will retry this idempotent migration.
+"$UCI_BIN" -q set smartap.migration=migration || exit 1
+"$UCI_BIN" -q set "$MARKER=$VERSION" || exit 1
+"$UCI_BIN" -q commit smartap || exit 1
+
+"$LOGGER_BIN" -t cr6608-migration "applied preserved-config migration v${VERSION}"
+exit 0

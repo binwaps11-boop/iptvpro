@@ -1,0 +1,316 @@
+#!/bin/sh
+# Auto best-channel: scan neighbours, pick from channels currently enabled by
+# cfg80211 for each radio, then apply with rollback on reload failure.
+for cr6608_close_fd in 4 5 6 7 8; do
+  eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+[ "$(uci -q get smartap.autochannel.enabled)" = "1" ] || exit 0
+log() { logger -t smartap-autochannel "$1"; }
+
+APPLY_LOCK="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+[ -r "$CACHE_STATE_LIB" ] && . "$CACHE_STATE_LIB"
+SAFE_WIFI_RELOAD="${CR6608_SAFE_WIFI_RELOAD:-/usr/sbin/cr6608-safe-wifi-reload}"
+WIRELESS_CONFIG="${CR6608_WIRELESS_CONFIG:-/etc/config/wireless}"
+APPLY_LOCK_OWNER=0
+APPLY_LOCK_START=""
+wireless_backup=""
+KEEP_WIRELESS_BACKUP=0
+
+apply_process_start() {
+  awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+
+apply_lock_owned_by_ancestor() {
+  [ -r "$APPLY_LOCK/owner" ] || return 1
+  read owner_pid owner_start < "$APPLY_LOCK/owner" || return 1
+  case "$owner_pid:$owner_start" in *[!0-9:]*|:|*:) return 1 ;; esac
+  current="$$"
+  while [ "$current" -gt 1 ] 2>/dev/null; do
+    current_start="$(apply_process_start "$current")"
+    [ "$current" = "$owner_pid" ] && [ "$current_start" = "$owner_start" ] && return 0
+    parent="$(awk '{print $4}' "/proc/$current/stat" 2>/dev/null)"
+    case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$parent" != "$current" ] || return 1
+    current="$parent"
+  done
+  return 1
+}
+
+release_apply_lock() {
+  [ "$APPLY_LOCK_OWNER" = "1" ] || return 0
+  [ -r "$APPLY_LOCK/owner" ] || return 0
+  read owner_pid owner_start < "$APPLY_LOCK/owner" || return 0
+  [ "$owner_pid" = "$$" ] && [ "$owner_start" = "$APPLY_LOCK_START" ] || return 0
+  rm -f "$APPLY_LOCK/owner" 2>/dev/null
+  rmdir "$APPLY_LOCK" 2>/dev/null || true
+  APPLY_LOCK_OWNER=0
+}
+
+acquire_apply_lock() {
+  ownerless=0
+  attempts=0
+  apply_lock_owned_by_ancestor && return 0
+  while ! mkdir "$APPLY_LOCK" 2>/dev/null; do
+    owner_pid=""
+    owner_start=""
+    if [ -r "$APPLY_LOCK/owner" ]; then
+      read owner_pid owner_start < "$APPLY_LOCK/owner" || true
+    fi
+    case "$owner_pid:$owner_start" in
+      *[!0-9:]*|:|*:) live_start="" ;;
+      *) live_start="$(apply_process_start "$owner_pid")" ;;
+    esac
+    if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && [ "$live_start" = "$owner_start" ]; then
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    if [ -z "$owner_pid" ] || [ -z "$owner_start" ]; then
+      ownerless=$((ownerless + 1))
+      if [ "$ownerless" -lt 3 ]; then
+        sleep 1
+        continue
+      fi
+    fi
+    rm -f "$APPLY_LOCK/owner" 2>/dev/null
+    rmdir "$APPLY_LOCK" 2>/dev/null || true
+    [ "$attempts" -le 3 ] || return 1
+  done
+  APPLY_LOCK_START="$(apply_process_start "$$")"
+  [ -n "$APPLY_LOCK_START" ] || { rmdir "$APPLY_LOCK" 2>/dev/null; return 1; }
+  printf '%s %s\n' "$$" "$APPLY_LOCK_START" > "$APPLY_LOCK/owner" || {
+    rm -f "$APPLY_LOCK/owner" 2>/dev/null
+    rmdir "$APPLY_LOCK" 2>/dev/null
+    return 1
+  }
+  APPLY_LOCK_OWNER=1
+}
+
+cleanup_exit() {
+  command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+    cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+  release_apply_lock
+  if [ "$KEEP_WIRELESS_BACKUP" != "1" ] && [ -n "$wireless_backup" ]; then
+    rm -f "$wireless_backup"
+  fi
+}
+signal_exit() {
+  signal_rc="$1"
+  trap - EXIT HUP INT TERM
+  cleanup_exit
+  exit "$signal_rc"
+}
+trap cleanup_exit EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+acquire_apply_lock || { log "another configuration transaction is active"; exit 5; }
+if [ "$APPLY_LOCK_OWNER" = "1" ]; then
+  command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || {
+    log "dashboard cache state helper is unavailable; auto-channel deferred"
+    exit 5
+  }
+  cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || {
+    log "dashboard cache mutation lock is unavailable; auto-channel deferred"
+    exit 5
+  }
+fi
+if [ -e /etc/smartap-pending-rollback ] || [ -L /etc/smartap-pending-rollback ] ||
+   [ -e /tmp/smartap-rollback-armed ] || [ -L /tmp/smartap-rollback-armed ]; then
+  log "Safe Apply is pending; automatic channel selection deferred"
+  exit 5
+fi
+
+enabled_channels() {
+  iw phy "$1" channels 2>/dev/null |
+    awk '
+      /MHz \[[0-9]+\]/ && $0 !~ /\(disabled\)|radar detection|no IR/ {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^\[[0-9]+\]$/) {
+            gsub(/[][]/, "", $i)
+            print $i
+            break
+          }
+        }
+      }
+    '
+}
+
+allowed24="$(enabled_channels phy0 | awk '$1 == 1 || $1 == 6 || $1 == 11' | tr '\n' ' ')"
+allowed5="$(enabled_channels phy1 | awk '$1 == 149 || $1 == 153 || $1 == 157 || $1 == 161 || $1 == 165' | tr '\n' ' ')"
+[ -n "$allowed24" ] || { log "no enabled 2.4 GHz candidate channels"; exit 1; }
+[ -n "$allowed5" ] || { log "no enabled non-DFS 5 GHz candidate channels"; exit 1; }
+
+scan="$(for IF in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do /usr/sbin/iw dev "$IF" scan 2>/dev/null; done)"
+parsed="$(printf '%s\n' "$scan" | awk '
+  function ch(f){ if(f==2484)return 14; if(f>=2412&&f<=2472)return int((f-2407)/5); if(f>=5000&&f<=5900)return int((f-5000)/5); return 0 }
+  /^BSS /{ if(fr)print ch(fr); fr=0 }
+  /^[ \t]*freq:/{ fr=$2 }
+  END{ if(fr)print ch(fr) }')"
+best24="$(printf '%s\n' "$parsed" | awk -v allowed="$allowed24" '
+  $1>0&&$1<=14{c[$1]++}
+  END{
+    n=split(allowed,k," "); bw=1e9
+    for(i=1;i<=n;i++) if(k[i]!=""){
+      ch=k[i]; w=0
+      for(x in c) if((x-ch)<=2&&(ch-x)<=2) w+=c[x]
+      if(w<bw){bw=w;b=ch}
+    }
+    if(b!="") print b
+  }')"
+best5="$(printf '%s\n' "$parsed" | awk -v allowed="$allowed5" '
+  $1>=30{c[$1]++}
+  END{
+    n=split(allowed,k," "); bw=1e9
+    for(i=1;i<=n;i++) if(k[i]!=""){
+      ch=k[i]; w=c[ch]+0
+      if(w<bw){bw=w;b=ch}
+    }
+    if(b!="") print b
+  }')"
+[ -n "$best24" ] && [ -n "$best5" ] || { log "could not select enabled channels"; exit 1; }
+
+cur24_present=0
+cur5_present=0
+if cur24="$(uci -q get wireless.radio0.channel 2>/dev/null)"; then cur24_present=1; else cur24=""; fi
+if cur5="$(uci -q get wireless.radio1.channel 2>/dev/null)"; then cur5_present=1; else cur5=""; fi
+quick24="$(uci -q get cr6608quick.default.channel24 2>/dev/null)"
+quick5="$(uci -q get cr6608quick.default.channel5 2>/dev/null)"
+smart24="$(uci -q get smartap.quick.ch24 2>/dev/null)"
+smart5="$(uci -q get smartap.quick.ch5 2>/dev/null)"
+
+restore_channels() {
+  restore_failed=0
+  if [ "$cur24_present" = 1 ]; then
+    uci set wireless.radio0.channel="$cur24" || restore_failed=1
+  else
+    uci -q delete wireless.radio0.channel || true
+  fi
+  if [ "$cur5_present" = 1 ]; then
+    uci set wireless.radio1.channel="$cur5" || restore_failed=1
+  else
+    uci -q delete wireless.radio1.channel || true
+  fi
+  uci -q get cr6608quick.default >/dev/null 2>&1 ||
+    uci set cr6608quick.default=quick || restore_failed=1
+  if [ "$cur24_present" = 1 ]; then
+    uci set cr6608quick.default.channel24="$cur24" || restore_failed=1
+  else
+    uci -q delete cr6608quick.default.channel24 || true
+  fi
+  if [ "$cur5_present" = 1 ]; then
+    uci set cr6608quick.default.channel5="$cur5" || restore_failed=1
+  else
+    uci -q delete cr6608quick.default.channel5 || true
+  fi
+  uci -q get smartap.quick >/dev/null 2>&1 ||
+    uci set smartap.quick=quicksettings || restore_failed=1
+  if [ "$cur24_present" = 1 ]; then
+    uci set smartap.quick.ch24="$cur24" || restore_failed=1
+  else
+    uci -q delete smartap.quick.ch24 || true
+  fi
+  if [ "$cur5_present" = 1 ]; then
+    uci set smartap.quick.ch5="$cur5" || restore_failed=1
+  else
+    uci -q delete smartap.quick.ch5 || true
+  fi
+  uci commit wireless || restore_failed=1
+  uci commit cr6608quick || restore_failed=1
+  uci commit smartap || restore_failed=1
+  [ "$restore_failed" = 0 ]
+}
+
+wireless_changed=0
+quick_changed=0
+smart_changed=0
+[ "$best24" = "$cur24" ] && [ "$best5" = "$cur5" ] || wireless_changed=1
+[ "$best24" = "$quick24" ] && [ "$best5" = "$quick5" ] || quick_changed=1
+[ "$best24" = "$smart24" ] && [ "$best5" = "$smart5" ] || smart_changed=1
+
+if [ "$wireless_changed" = 0 ] && [ "$quick_changed" = 0 ] && [ "$smart_changed" = 0 ]; then
+  log "already optimal 2.4G=$cur24 5G=$cur5"
+  exit 0
+fi
+
+if [ "$wireless_changed" = 1 ]; then
+  wireless_backup="$(mktemp /tmp/cr6608-autochannel-wireless.XXXXXX 2>/dev/null)" ||
+    { log "could not create the wireless safety backup"; exit 1; }
+  chmod 0600 "$wireless_backup" 2>/dev/null || {
+    rm -f "$wireless_backup"
+    log "could not protect the wireless safety backup"
+    exit 1
+  }
+  cp -f "$WIRELESS_CONFIG" "$wireless_backup" 2>/dev/null || {
+    rm -f "$wireless_backup"
+    log "could not capture the wireless safety backup"
+    exit 1
+  }
+  uci set wireless.radio0.channel="$best24" ||
+    { uci -q revert wireless; log "could not stage 2.4 GHz channel"; exit 1; }
+  uci set wireless.radio1.channel="$best5" ||
+    { uci -q revert wireless; log "could not stage 5 GHz channel"; exit 1; }
+fi
+if [ "$quick_changed" = 1 ]; then
+  uci -q get cr6608quick.default >/dev/null 2>&1 ||
+    uci set cr6608quick.default=quick ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not create quick metadata"; exit 1; }
+  uci set cr6608quick.default.channel24="$best24" ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not stage 2.4 GHz metadata"; exit 1; }
+  uci set cr6608quick.default.channel5="$best5" ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not stage 5 GHz metadata"; exit 1; }
+fi
+if [ "$smart_changed" = 1 ]; then
+  uci -q get smartap.quick >/dev/null 2>&1 ||
+    uci set smartap.quick=quicksettings ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not create smartap quick metadata"; exit 1; }
+  uci set smartap.quick.ch24="$best24" ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not stage smartap 2.4 GHz metadata"; exit 1; }
+  uci set smartap.quick.ch5="$best5" ||
+    { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not stage smartap 5 GHz metadata"; exit 1; }
+fi
+
+apply_failed=0
+[ "$wireless_changed" = 0 ] || uci commit wireless || apply_failed=1
+[ "$quick_changed" = 0 ] || uci commit cr6608quick || apply_failed=1
+[ "$smart_changed" = 0 ] || uci commit smartap || apply_failed=1
+
+if [ "$apply_failed" = 0 ] && {
+  [ "$wireless_changed" = 0 ] ||
+    CR6608_INHERIT_CACHE_LOCK=1 "$SAFE_WIFI_RELOAD" 30 "$wireless_backup" all >/dev/null 2>&1
+}; then
+  if [ "$wireless_changed" = 1 ]; then
+    log "applied enabled channels 2.4G=$best24 (was $cur24) 5G=$best5 (was $cur5)"
+    printf '{"ts":"%s","ch24":%s,"ch5":%s}\n' "$(date +%s 2>/dev/null)" "$best24" "$best5" > /tmp/smartap-autochannel.json
+  else
+    log "synchronized quick channel metadata stores 2.4G=$cur24 5G=$cur5"
+  fi
+  [ -z "$wireless_backup" ] || rm -f "$wireless_backup"
+else
+  restore_ok=0
+  runtime_ok=1
+  if restore_channels; then
+    restore_ok=1
+  else
+    [ -z "$wireless_backup" ] || KEEP_WIRELESS_BACKUP=1
+    log "channel and metadata rollback did not complete; safety backup retained"
+  fi
+  if [ "$wireless_changed" = 1 ]; then
+    runtime_ok=0
+    if [ "$restore_ok" = 1 ] &&
+       CR6608_INHERIT_CACHE_LOCK=1 "$SAFE_WIFI_RELOAD" 30 "$wireless_backup" all >/dev/null 2>&1; then
+      runtime_ok=1
+      rm -f "$wireless_backup"
+    else
+      KEEP_WIRELESS_BACKUP=1
+      log "restored Wi-Fi runtime could not be verified; safety backup retained at $wireless_backup"
+    fi
+  fi
+  if [ "$restore_ok" = 1 ] && [ "$runtime_ok" = 1 ]; then
+    log "apply failed; restored wireless and both quick metadata stores to 2.4G=$cur24 5G=$cur5"
+  else
+    log "apply failed; rollback remains incomplete and requires the retained safety evidence"
+  fi
+  exit 1
+fi
+exit 0

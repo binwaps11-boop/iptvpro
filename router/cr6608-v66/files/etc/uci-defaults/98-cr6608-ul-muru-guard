@@ -1,0 +1,17 @@
+#!/bin/sh
+
+if ! uci -q get smartap.experimental >/dev/null; then
+	uci -q set smartap.experimental='experimental'
+fi
+
+uci -q get smartap.experimental.ul_muru >/dev/null || \
+	uci -q set smartap.experimental.ul_muru='1'
+uci -q get smartap.experimental.ul_muru_guard >/dev/null || \
+	uci -q set smartap.experimental.ul_muru_guard='1'
+uci -q get smartap.experimental.ul_muru_state >/dev/null || \
+	uci -q set smartap.experimental.ul_muru_state='armed'
+uci -q commit smartap
+
+/etc/init.d/cr6608-ul-muru-guard enable
+
+exit 0

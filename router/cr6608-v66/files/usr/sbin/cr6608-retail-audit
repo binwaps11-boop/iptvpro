@@ -1,0 +1,126 @@
+#!/bin/sh
+# Fail-closed sale gate. This command contains no secret and is safe to retain
+# on the unit so factory QA can rerun it immediately before shipment.
+
+set -u
+
+MARKER="${CR6608_RETAIL_MARKER:-/etc/cr6608-retail-provisioned}"
+SHADOW="${CR6608_RETAIL_SHADOW:-/etc/shadow}"
+UCI_BIN="${CR6608_RETAIL_UCI:-/sbin/uci}"
+SKIP_OWNER_MODE="${CR6608_RETAIL_TEST_SKIP_OWNER_MODE:-0}"
+PROC_NET_TCP="${CR6608_RETAIL_PROC_NET_TCP:-/proc/net/tcp}"
+PROC_NET_TCP6="${CR6608_RETAIL_PROC_NET_TCP6:-/proc/net/tcp6}"
+
+fail() {
+	printf 'retail_security=FAIL reason=%s\n' "$1" >&2
+	exit 1
+}
+
+[ "$(id -u)" = 0 ] || fail must_run_as_root
+[ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail provisioning_marker_missing
+if [ "$SKIP_OWNER_MODE" != 1 ]; then
+	[ "$(stat -c '%u' "$MARKER" 2>/dev/null)" = 0 ] || fail provisioning_marker_owner
+	marker_mode="$(stat -c '%a' "$MARKER" 2>/dev/null)"
+	case "$marker_mode" in 600|400) ;; *) fail provisioning_marker_mode ;; esac
+fi
+
+root_hash="$(awk -F: '$1 == "root" { print $2; exit }' "$SHADOW" 2>/dev/null)"
+case "$root_hash" in
+	''|'!'|'*'|'x'|'!'*) fail root_account_locked ;;
+esac
+case "$root_hash" in
+	\$1\$*) fail root_hash_md5 ;;
+	\$5\$*|\$6\$*|\$y\$*) ;;
+	*) fail root_hash_format ;;
+esac
+root_fingerprint="$(printf %s "$root_hash" | sha256sum | awk '{print $1}')"
+case "$root_fingerprint" in
+	086f9f99e700f9d639639e9a3ea28a0bdf4838d0ddec68c9752641ab9be2779b|\
+	b627c9b421c1f1c4fa119b1c5c532928024843ced55fe09dd25d6e1c548ad573)
+		fail retired_shared_root_credential
+		;;
+esac
+
+command -v "$UCI_BIN" >/dev/null 2>&1 || fail uci_missing
+[ "$($UCI_BIN -q get 'system.@system[0].ttylogin' 2>/dev/null)" = 1 ] || \
+	fail console_password_login_disabled
+redirect="$($UCI_BIN -q get uhttpd.main.redirect_https 2>/dev/null)"
+[ "$redirect" = 1 ] || fail https_redirect_disabled
+https_endpoints="$($UCI_BIN -q get uhttpd.main.listen_https 2>/dev/null)"
+endpoint_v4=0
+endpoint_v6=0
+endpoint_count=0
+for endpoint in $https_endpoints; do
+	endpoint_count=$((endpoint_count + 1))
+	case "$endpoint" in
+		0.0.0.0:443) [ "$endpoint_v4" = 0 ] || fail https_listener_duplicate; endpoint_v4=1 ;;
+		'[::]:443') [ "$endpoint_v6" = 0 ] || fail https_listener_duplicate; endpoint_v6=1 ;;
+		*) fail https_listener_unexpected ;;
+	esac
+done
+[ "$endpoint_count" -eq 2 ] && [ "$endpoint_v4" = 1 ] && [ "$endpoint_v6" = 1 ] || \
+	fail https_listener_set_incomplete
+
+cert_file="$($UCI_BIN -q get uhttpd.main.cert 2>/dev/null)"
+key_file="$($UCI_BIN -q get uhttpd.main.key 2>/dev/null)"
+case "$cert_file" in /*) ;; *) fail https_cert_config_invalid ;; esac
+case "$key_file" in /*) ;; *) fail https_key_config_invalid ;; esac
+[ -s "$cert_file" ] && [ -f "$cert_file" ] && [ ! -L "$cert_file" ] || \
+	fail https_cert_file_invalid
+[ -s "$key_file" ] && [ -f "$key_file" ] && [ ! -L "$key_file" ] || \
+	fail https_key_file_invalid
+if [ "$SKIP_OWNER_MODE" != 1 ]; then
+	[ "$(stat -c '%u' "$cert_file" 2>/dev/null)" = 0 ] || fail https_cert_owner
+	[ "$(stat -c '%u' "$key_file" 2>/dev/null)" = 0 ] || fail https_key_owner
+	cert_mode="$(stat -c '%a' "$cert_file" 2>/dev/null)"
+	key_mode="$(stat -c '%a' "$key_file" 2>/dev/null)"
+	case "$cert_mode" in 400|440|444|600|640|644) ;; *) fail https_cert_mode ;; esac
+	case "$key_mode" in 400|600) ;; *) fail https_key_mode ;; esac
+fi
+
+has_listen_443() {
+	awk 'NR > 1 {
+		n = split($2, local, ":")
+		if (toupper(local[n]) == "01BB" && toupper($4) == "0A") found=1
+	} END { exit(found ? 0 : 1) }' "$1" 2>/dev/null
+}
+[ -r "$PROC_NET_TCP" ] && has_listen_443 "$PROC_NET_TCP" || fail https_ipv4_runtime_missing
+[ -r "$PROC_NET_TCP6" ] && has_listen_443 "$PROC_NET_TCP6" || fail https_ipv6_runtime_missing
+
+for radio in radio0 radio1; do
+	[ "$($UCI_BIN -q get "wireless.${radio}.disabled" 2>/dev/null)" != 1 ] || \
+		fail "${radio}_disabled"
+	protected_ap_count=0
+	for section in $($UCI_BIN -q show wireless 2>/dev/null |
+		sed -n "s/^wireless\.\([^=]*\)=wifi-iface$/\1/p"); do
+		[ "$($UCI_BIN -q get "wireless.${section}.device" 2>/dev/null)" = "$radio" ] || continue
+		[ "$($UCI_BIN -q get "wireless.${section}.mode" 2>/dev/null)" = ap ] || continue
+		[ "$($UCI_BIN -q get "wireless.${section}.disabled" 2>/dev/null)" != 1 ] || continue
+		encryption="$($UCI_BIN -q get "wireless.${section}.encryption" 2>/dev/null)"
+		case "$encryption" in
+			psk2|psk2+ccmp|sae|sae-mixed) ;;
+			*) fail "${section}_open_or_unsupported_encryption" ;;
+		esac
+		pmf="$($UCI_BIN -q get "wireless.${section}.ieee80211w" 2>/dev/null)"
+		case "$pmf" in 1|2) ;; *) fail "${section}_pmf_disabled" ;; esac
+		key="$($UCI_BIN -q get "wireless.${section}.key" 2>/dev/null)"
+		[ "${#key}" -ge 12 ] 2>/dev/null || fail "${section}_key_too_short"
+		key_fingerprint="$(printf %s "$key" | sha256sum | awk '{print $1}')"
+		case "$key_fingerprint" in
+			1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+			e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+			8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+			5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+			ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+			15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+			c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+			b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff)
+				fail "${section}_forbidden_shared_key"
+				;;
+		esac
+		protected_ap_count=$((protected_ap_count + 1))
+	done
+	[ "$protected_ap_count" -ge 1 ] || fail "${radio}_protected_ap_missing"
+done
+
+printf 'retail_security=PASS\n'

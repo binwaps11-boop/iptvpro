@@ -1,0 +1,969 @@
+#!/bin/sh
+
+# A dashboard/apply parent may own advisory locks on these descriptors.  Close
+# the public descriptor numbers before doing any work.  When FD7 is an explicit,
+# verified cache handoff, move its flock to an independent FD9; bounded command
+# and guard children close that private lock before exec.
+INHERITED_CACHE_LOCK_FD=0
+INHERITED_FD7_TARGET=""
+REQUESTED_CACHE_DIR="${CR6608_DASHBOARD_CACHE_DIR:-/var/run/cr6608-dashboard-cache}"
+CACHE_EXPECT_UID="${CR6608_DASHBOARD_CACHE_EXPECT_UID:-0}"
+EXPECTED_CACHE_LOCK="$REQUESTED_CACHE_DIR/mutation.lock"
+# FD8 is scratch space for the short metadata-lock transfer below.  Drop every
+# other dashboard descriptor now; FD7 is closed immediately after handoff.
+exec 4>&- 5>&- 6>&- 8>&- || true
+if [ "${CR6608_INHERIT_CACHE_LOCK:-0}" = 1 ] &&
+   [ "${1:-}" != --verify-only ] && [ -e "/proc/$$/fd/7" ]; then
+	INHERITED_FD7_TARGET="$(readlink -f "/proc/$$/fd/7" 2>/dev/null)"
+	EXPECTED_CACHE_LOCK="$(readlink -f "$EXPECTED_CACHE_LOCK" 2>/dev/null)"
+	EXPECTED_CACHE_DIR="${EXPECTED_CACHE_LOCK%/mutation.lock}"
+	if [ -n "$INHERITED_FD7_TARGET" ] && [ -n "$EXPECTED_CACHE_LOCK" ] &&
+	   [ "$INHERITED_FD7_TARGET" = "$EXPECTED_CACHE_LOCK" ] &&
+	   [ -d "$REQUESTED_CACHE_DIR" ] && [ ! -L "$REQUESTED_CACHE_DIR" ] &&
+	   [ "$(stat -c %u "$REQUESTED_CACHE_DIR" 2>/dev/null)" = "$CACHE_EXPECT_UID" ] &&
+	   [ -f "$EXPECTED_CACHE_DIR/mutation.dirty" ] &&
+	   [ ! -L "$EXPECTED_CACHE_DIR/mutation.dirty" ]; then
+		# A dup shares the parent's flock and would be unlocked by its `flock -u`.
+		# Transfer to an independently opened FD9 while holding meta.lock: every
+		# begin/finish/recovery/publish path takes that metadata lock, so no reader
+		# can observe the sub-millisecond unlock/relock interval.
+		HANDOFF_META_LOCKED=0
+		HANDOFF_SOURCE_VALID=0
+		if exec 9>>"$EXPECTED_CACHE_LOCK" &&
+		   exec 8>>"$EXPECTED_CACHE_DIR/meta.lock" &&
+		   chmod 0600 "$EXPECTED_CACHE_LOCK" "$EXPECTED_CACHE_DIR/meta.lock" 2>/dev/null; then
+			HANDOFF_TRIES=0
+			while [ "$HANDOFF_TRIES" -lt 5 ]; do
+				if flock -xn 8 2>/dev/null; then
+					HANDOFF_META_LOCKED=1
+					break
+				fi
+				HANDOFF_TRIES=$((HANDOFF_TRIES + 1))
+				sleep 1
+			done
+			if [ "$HANDOFF_META_LOCKED" = 1 ]; then
+				if flock -xn 7 2>/dev/null; then
+					HANDOFF_SOURCE_VALID=1
+					flock -u 7 2>/dev/null || true
+				fi
+				if [ "$HANDOFF_SOURCE_VALID" = 1 ] && flock -xn 9 2>/dev/null; then
+					INHERITED_CACHE_LOCK_FD=1
+				else
+					# meta.lock still excludes every cooperating contender, so restore
+					# the caller's original lock before abandoning the handoff.
+					flock -xn 7 2>/dev/null || true
+					exec 9>&- || true
+				fi
+			fi
+		fi
+		[ "$HANDOFF_META_LOCKED" = 1 ] && flock -u 8 2>/dev/null || true
+		exec 8>&- || true
+		[ "$INHERITED_CACHE_LOCK_FD" = 1 ] || exec 9>&- || true
+	fi
+fi
+close_dashboard_fds() {
+	local cr6608_close_fd
+	for cr6608_close_fd in 4 5 6 7 8; do
+		eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+	done
+}
+close_private_cache_fd() {
+	[ "$INHERITED_CACHE_LOCK_FD" = 1 ] || return 0
+	exec 9>&- || true
+}
+close_dashboard_fds
+
+MODE=apply
+OWN_BACKUP=0
+if [ "${1:-}" = "--rollback-only" ]; then
+	MODE=rollback
+	timeout="${2:-20}"
+	BACKUP="${3:-}"
+	SCOPE="${4:-all}"
+	[ -r "$BACKUP" ] || exit 2
+elif [ "${1:-}" = "--verify-only" ]; then
+	MODE=verify
+	timeout="${2:-20}"
+	SCOPE="${3:-all}"
+	BACKUP=""
+else
+	timeout="${1:-20}"
+	BACKUP="${2:-}"
+	SCOPE="${3:-all}"
+	[ -r "$BACKUP" ] || {
+		BACKUP="/tmp/cr6608-wireless-last-good.conf"
+		cp -f /etc/config/wireless "$BACKUP" 2>/dev/null || exit 1
+		OWN_BACKUP=1
+	}
+fi
+
+WIFI_BIN="${CR6608_WIFI_BIN:-wifi}"
+WIFI_COMMAND_TIMEOUT="${CR6608_WIFI_COMMAND_TIMEOUT:-45}"
+case "$WIFI_COMMAND_TIMEOUT" in ''|*[!0-9]*) WIFI_COMMAND_TIMEOUT=45 ;; esac
+[ "$WIFI_COMMAND_TIMEOUT" -ge 3 ] 2>/dev/null &&
+	[ "$WIFI_COMMAND_TIMEOUT" -le 120 ] 2>/dev/null || WIFI_COMMAND_TIMEOUT=45
+RUNTIME_PROBE_TIMEOUT="${CR6608_WIFI_PROBE_TIMEOUT:-4}"
+case "$RUNTIME_PROBE_TIMEOUT" in ''|*[!0-9]*) RUNTIME_PROBE_TIMEOUT=4 ;; esac
+[ "$RUNTIME_PROBE_TIMEOUT" -ge 2 ] 2>/dev/null &&
+	[ "$RUNTIME_PROBE_TIMEOUT" -le 15 ] 2>/dev/null || RUNTIME_PROBE_TIMEOUT=4
+UBUS_BIN="${CR6608_UBUS_BIN:-/bin/ubus}"
+IW_BIN="${CR6608_IW_BIN:-/usr/sbin/iw}"
+SETSID_BIN="${CR6608_SETSID_BIN:-/usr/bin/setsid}"
+
+APPLY_LOCK="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+WATCHDOG_STATE_DIR="${CR6608_WIFI_WATCHDOG_DIR:-/var/run}"
+[ -d "$WATCHDOG_STATE_DIR" ] && [ ! -L "$WATCHDOG_STATE_DIR" ] || WATCHDOG_STATE_DIR=/var/run
+SAFE_WIFI_CACHE_OWNER=0
+BOUNDED_COMMAND_PID=""
+BOUNDED_COMMAND_START=""
+BOUNDED_COMMAND_GROUP=0
+BOUNDED_GUARD_PID=""
+BOUNDED_GUARD_START=""
+BOUNDED_TIMEOUT_FILE=""
+BOUNDED_STDOUT_FILE=""
+BOUNDED_STDERR_FILE=""
+RUNTIME_DEADLINE=0
+MUTATION_ACTIVE=0
+ROLLBACK_ACTIVE=0
+RECOVERY_PID=""
+find "$WATCHDOG_STATE_DIR" -maxdepth 1 -type f \( \
+	-name '.cr6608-wifi-timeout.*' -o -name '.cr6608-wifi-out.*' -o \
+	-name '.cr6608-wifi-err.*' \) -mmin +10 \
+	-exec rm -f {} \; 2>/dev/null || true
+
+process_identity() {
+	case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+	# Parse after the final ") " so a kernel comm containing spaces does not
+	# shift the state, process-group or start-time fields.
+	awk '
+		{
+			line=$0; close_at=0
+			for (i=length(line)-1; i>0; i--)
+				if (substr(line,i,2)==") ") { close_at=i; break }
+			if (!close_at) exit 1
+			tail=substr(line,close_at+2)
+			n=split(tail,field," ")
+			if (n < 20) exit 1
+			print field[1] " " field[2] " " field[3] " " field[4] " " field[20]
+		}' "/proc/$1/stat" 2>/dev/null
+}
+
+process_start() {
+	local identity
+	identity="$(process_identity "$1")" || return 1
+	printf '%s\n' "${identity##* }"
+}
+
+process_group() {
+	local identity
+	identity="$(process_identity "$1")" || return 1
+	set -- $identity
+	printf '%s\n' "$3"
+}
+
+process_parent() {
+	local identity
+	identity="$(process_identity "$1")" || return 1
+	set -- $identity
+	printf '%s\n' "$2"
+}
+
+process_session() {
+	local identity
+	identity="$(process_identity "$1")" || return 1
+	set -- $identity
+	printf '%s\n' "$4"
+}
+
+pause_100ms() {
+	# GNU/coreutils sleep accepts fractions in the host tests, while the CR6608
+	# BusyBox build does not. ucode is part of the image and sleeps in
+	# milliseconds, preserving the intended bounded one-second retry window.
+	sleep 0.1 2>/dev/null && return 0
+	if [ -x /usr/bin/ucode ]; then
+		/usr/bin/ucode -e 'sleep(100)' >/dev/null 2>&1 && return 0
+	fi
+	sleep 1
+}
+
+capture_process_start() {
+	local pid="$1" attempts=0 captured
+	while [ "$attempts" -lt 10 ]; do
+		captured="$(process_start "$pid")"
+		if [ -n "$captured" ]; then
+			printf '%s\n' "$captured"
+			return 0
+		fi
+		kill -0 "$pid" 2>/dev/null || return 1
+		attempts=$((attempts + 1))
+		pause_100ms
+	done
+	return 1
+}
+
+process_is_same() {
+	local pid="$1" expected="$2" identity state actual
+	[ -n "$expected" ] || return 1
+	identity="$(process_identity "$pid")" || return 1
+	state="${identity%% *}"
+	actual="${identity##* }"
+	[ "$state" != Z ] && [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
+capture_private_process_group() {
+	local pid="$1" attempts=0 group
+	[ -x "$SETSID_BIN" ] || return 1
+	while [ "$attempts" -lt 10 ]; do
+		group="$(process_group "$pid")"
+		[ "$group" = "$pid" ] && return 0
+		process_is_same "$pid" "$BOUNDED_COMMAND_START" || return 1
+		attempts=$((attempts + 1))
+		pause_100ms
+	done
+	return 1
+}
+
+process_children() {
+	local parent_pid="$1" stat_file child_pid child_parent
+	if command -v pgrep >/dev/null 2>&1; then
+		pgrep -P "$parent_pid" 2>/dev/null || true
+		return 0
+	fi
+	for stat_file in /proc/[0-9]*/stat; do
+		[ -r "$stat_file" ] || continue
+		child_pid="${stat_file#/proc/}"
+		child_pid="${child_pid%/stat}"
+		case "$child_pid" in ''|*[!0-9]*) continue ;; esac
+		child_parent="$(process_parent "$child_pid")"
+		[ "$child_parent" = "$parent_pid" ] || continue
+		printf '%s\n' "$child_pid"
+	done
+}
+
+# Signal descendants before their parent, validating every PID with its procfs
+# start time immediately before kill.  pgrep -P is provided by the same runtime
+# already used by the dashboard watchdogs and works on BusyBox/OpenWrt.
+signal_process_tree() {
+	local signal="$1" pid="$2" expected="$3" child child_start
+	process_is_same "$pid" "$expected" || return 0
+	for child in $(process_children "$pid"); do
+		child_start="$(process_start "$child")"
+		[ -n "$child_start" ] || continue
+		signal_process_tree "$signal" "$child" "$child_start"
+	done
+	process_is_same "$pid" "$expected" || return 0
+	case "$signal" in
+		TERM) kill -TERM "$pid" 2>/dev/null || true ;;
+		KILL) kill -KILL "$pid" 2>/dev/null || true ;;
+	esac
+}
+
+# Preserve each descendant's identity before TERM.  A shell parent can exit and
+# reparent a stubborn child before the KILL pass; the saved PID:start tuples let
+# us finish that pass without ever signalling a reused PID.
+snapshot_process_tree() {
+	local pid="$1" expected="$2" child child_start
+	process_is_same "$pid" "$expected" || return 0
+	for child in $(process_children "$pid"); do
+		child_start="$(process_start "$child")"
+		[ -n "$child_start" ] || continue
+		snapshot_process_tree "$child" "$child_start"
+	done
+	printf '%s:%s\n' "$pid" "$expected"
+}
+
+signal_process_snapshot() {
+	local signal="$1" snapshot="$2" identity pid expected
+	for identity in $snapshot; do
+		pid="${identity%%:*}"
+		expected="${identity#*:}"
+		process_is_same "$pid" "$expected" || continue
+		case "$signal" in
+			TERM) kill -TERM "$pid" 2>/dev/null || true ;;
+			KILL) kill -KILL "$pid" 2>/dev/null || true ;;
+		esac
+	done
+}
+
+snapshot_has_group_member() {
+	local group="$1" stat_file pid identity state pgrp session
+	for stat_file in /proc/[0-9]*/stat; do
+		[ -r "$stat_file" ] || continue
+		pid="${stat_file#/proc/}"
+		pid="${pid%/stat}"
+		case "$pid" in ''|*[!0-9]*) continue ;; esac
+		identity="$(process_identity "$pid")" || continue
+		set -- $identity
+		state="$1"; pgrp="$3"; session="$4"
+		[ "$state" != Z ] && [ "$session" = "$group" ] &&
+			[ "$pgrp" = "$group" ] && return 0
+	done
+	return 1
+}
+
+snapshot_process_session() {
+	local session_id="$1" stat_file pid identity state session start
+	for stat_file in /proc/[0-9]*/stat; do
+		[ -r "$stat_file" ] || continue
+		pid="${stat_file#/proc/}"
+		pid="${pid%/stat}"
+		case "$pid" in ''|*[!0-9]*) continue ;; esac
+		identity="$(process_identity "$pid")" || continue
+		set -- $identity
+		state="$1"; session="$4"; start="$5"
+		[ "$state" != Z ] && [ "$session" = "$session_id" ] || continue
+		printf '%s:%s\n' "$pid" "$start"
+	done
+}
+
+terminate_process_tree() {
+	local pid="$1" expected="$2" snapshot session_snapshot
+	snapshot="$(snapshot_process_tree "$pid" "$expected")"
+	[ -n "$snapshot" ] || return 0
+	if [ "$BOUNDED_COMMAND_GROUP" = 1 ] && process_is_same "$pid" "$expected"; then
+		/bin/kill -TERM "-$pid" 2>/dev/null || signal_process_snapshot TERM "$snapshot"
+	else
+		signal_process_snapshot TERM "$snapshot"
+	fi
+	sleep 1
+	if [ "$BOUNDED_COMMAND_GROUP" = 1 ]; then
+		# The unreaped session leader reserves this session id, so a fresh scan can
+		# safely include descendants born after the pre-TERM tree snapshot.
+		session_snapshot="$(snapshot_process_session "$pid")"
+		if snapshot_has_group_member "$pid"; then
+			/bin/kill -KILL "-$pid" 2>/dev/null || true
+		fi
+		signal_process_snapshot KILL "$session_snapshot"
+	fi
+	# Keep the PID:start fallback for platforms without setsid and for a child
+	# that left the command's process group before TERM.
+	signal_process_snapshot KILL "$snapshot"
+}
+
+stop_bounded_guard() {
+	local attempts=0
+	[ -n "$BOUNDED_GUARD_PID" ] || return 0
+	if process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"; then
+		signal_process_tree TERM "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"
+	fi
+	while process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START" &&
+	      [ "$attempts" -lt 3 ]; do
+		sleep 1
+		attempts=$((attempts + 1))
+	done
+	if process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"; then
+		signal_process_tree KILL "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"
+		sleep 1
+	fi
+	process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START" ||
+		wait "$BOUNDED_GUARD_PID" 2>/dev/null || true
+	BOUNDED_GUARD_PID=""
+	BOUNDED_GUARD_START=""
+}
+
+await_bounded_guard() {
+	local attempts=0
+	[ -n "$BOUNDED_GUARD_PID" ] || return 0
+	while process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START" &&
+	      [ "$attempts" -lt 4 ]; do
+		sleep 1
+		attempts=$((attempts + 1))
+	done
+	if process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"; then
+		signal_process_tree KILL "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START"
+		sleep 1
+	fi
+	process_is_same "$BOUNDED_GUARD_PID" "$BOUNDED_GUARD_START" ||
+		wait "$BOUNDED_GUARD_PID" 2>/dev/null || true
+	BOUNDED_GUARD_PID=""
+	BOUNDED_GUARD_START=""
+}
+
+discard_bounded_files() {
+	[ -z "$BOUNDED_TIMEOUT_FILE" ] || rm -f "$BOUNDED_TIMEOUT_FILE" 2>/dev/null
+	[ -z "$BOUNDED_STDOUT_FILE" ] || rm -f "$BOUNDED_STDOUT_FILE" 2>/dev/null
+	[ -z "$BOUNDED_STDERR_FILE" ] || rm -f "$BOUNDED_STDERR_FILE" 2>/dev/null
+	BOUNDED_TIMEOUT_FILE=""
+	BOUNDED_STDOUT_FILE=""
+	BOUNDED_STDERR_FILE=""
+}
+
+emit_bounded_files() {
+	[ -z "$BOUNDED_STDOUT_FILE" ] || cat "$BOUNDED_STDOUT_FILE" 2>/dev/null
+	[ -z "$BOUNDED_STDERR_FILE" ] || cat "$BOUNDED_STDERR_FILE" >&2 2>/dev/null
+	discard_bounded_files
+}
+
+abort_bounded_command() {
+	if [ -n "$BOUNDED_COMMAND_PID" ] &&
+	   process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"; then
+		terminate_process_tree "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"
+	fi
+	stop_bounded_guard
+	discard_bounded_files
+	BOUNDED_COMMAND_PID=""
+	BOUNDED_COMMAND_START=""
+	BOUNDED_COMMAND_GROUP=0
+}
+
+run_bounded() {
+	local limit="$1" command_rc=125 timed_out=0 poll_elapsed=0 capture_identity capture_state
+	shift
+	case "$limit" in ''|*[!0-9]*) return 125 ;; esac
+	[ "$limit" -ge 1 ] 2>/dev/null && [ "$limit" -le 120 ] 2>/dev/null || return 125
+	[ "$#" -gt 0 ] || return 125
+	BOUNDED_TIMEOUT_FILE="$(mktemp "$WATCHDOG_STATE_DIR/.cr6608-wifi-timeout.$$.XXXXXX" 2>/dev/null)" || return 125
+	BOUNDED_STDOUT_FILE="$(mktemp "$WATCHDOG_STATE_DIR/.cr6608-wifi-out.$$.XXXXXX" 2>/dev/null)" || {
+		discard_bounded_files
+		return 125
+	}
+	BOUNDED_STDERR_FILE="$(mktemp "$WATCHDOG_STATE_DIR/.cr6608-wifi-err.$$.XXXXXX" 2>/dev/null)" || {
+		discard_bounded_files
+		return 125
+	}
+	printf '0\n' >"$BOUNDED_TIMEOUT_FILE" || {
+		discard_bounded_files
+		return 125
+	}
+	chmod 0600 "$BOUNDED_TIMEOUT_FILE" "$BOUNDED_STDOUT_FILE" \
+		"$BOUNDED_STDERR_FILE" 2>/dev/null || {
+		discard_bounded_files
+		return 125
+	}
+
+	if [ -x "$SETSID_BIN" ]; then
+		( close_dashboard_fds; close_private_cache_fd; exec "$SETSID_BIN" "$@" ) \
+			</dev/null >"$BOUNDED_STDOUT_FILE" 2>"$BOUNDED_STDERR_FILE" &
+	else
+		( close_dashboard_fds; close_private_cache_fd; exec "$@" ) \
+			</dev/null >"$BOUNDED_STDOUT_FILE" 2>"$BOUNDED_STDERR_FILE" &
+	fi
+	BOUNDED_COMMAND_PID=$!
+	BOUNDED_COMMAND_START="$(capture_process_start "$BOUNDED_COMMAND_PID")"
+	if [ -z "$BOUNDED_COMMAND_START" ]; then
+		# A very short command can exit before procfs identity capture.  Reap it
+		# normally when it is already gone (or is a zombie); only the still-live,
+		# unidentifiable case takes the fail-safe kill path below.
+		capture_identity="$(process_identity "$BOUNDED_COMMAND_PID")"
+		capture_state="${capture_identity%% *}"
+		if ! kill -0 "$BOUNDED_COMMAND_PID" 2>/dev/null || [ "$capture_state" = Z ]; then
+			wait "$BOUNDED_COMMAND_PID" 2>/dev/null
+			command_rc=$?
+			emit_bounded_files
+			BOUNDED_COMMAND_PID=""
+			return "$command_rc"
+		fi
+		kill -TERM "$BOUNDED_COMMAND_PID" 2>/dev/null || true
+		sleep 1
+		kill -KILL "$BOUNDED_COMMAND_PID" 2>/dev/null || true
+		kill -0 "$BOUNDED_COMMAND_PID" 2>/dev/null || wait "$BOUNDED_COMMAND_PID" 2>/dev/null || true
+		emit_bounded_files
+		BOUNDED_COMMAND_PID=""
+		return 125
+	fi
+	if capture_private_process_group "$BOUNDED_COMMAND_PID"; then
+		BOUNDED_COMMAND_GROUP=1
+	else
+		BOUNDED_COMMAND_GROUP=0
+	fi
+	(
+		close_dashboard_fds
+		close_private_cache_fd
+		sleep "$limit"
+		process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START" || exit 0
+		printf '1\n' >"$BOUNDED_TIMEOUT_FILE" 2>/dev/null || true
+		terminate_process_tree "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"
+	) >/dev/null 2>&1 &
+	BOUNDED_GUARD_PID=$!
+	BOUNDED_GUARD_START="$(capture_process_start "$BOUNDED_GUARD_PID")"
+	if [ -z "$BOUNDED_GUARD_START" ]; then
+		kill -TERM "$BOUNDED_GUARD_PID" 2>/dev/null || true
+		sleep 1
+		kill -KILL "$BOUNDED_GUARD_PID" 2>/dev/null || true
+		terminate_process_tree "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"
+		process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START" ||
+			wait "$BOUNDED_COMMAND_PID" 2>/dev/null || true
+		emit_bounded_files
+		BOUNDED_COMMAND_PID=""
+		BOUNDED_COMMAND_START=""
+		BOUNDED_COMMAND_GROUP=0
+		BOUNDED_GUARD_PID=""
+		return 125
+	fi
+
+	# Poll procfs instead of waiting.  A killed task can remain in uninterruptible
+	# D state indefinitely; it must never pin this helper or a command-substitution
+	# pipe.  The command owns only private output files, which are unlinked below.
+	if process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"; then
+		pause_100ms
+	fi
+	while process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"; do
+		if [ "$(sed -n '1p' "$BOUNDED_TIMEOUT_FILE" 2>/dev/null)" = 1 ]; then
+			timed_out=1
+			break
+		fi
+		sleep 1
+		poll_elapsed=$((poll_elapsed + 1))
+		# The independent guard is authoritative.  This secondary ceiling handles
+		# an unexpectedly dead guard without turning the safety wrapper into a hang.
+		if [ "$poll_elapsed" -gt $((limit + 3)) ]; then
+			printf '1\n' >"$BOUNDED_TIMEOUT_FILE" 2>/dev/null || true
+			terminate_process_tree "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"
+			timed_out=1
+			break
+		fi
+	done
+	[ "$(sed -n '1p' "$BOUNDED_TIMEOUT_FILE" 2>/dev/null)" = 1 ] && timed_out=1
+	if [ "$timed_out" = 1 ]; then
+		await_bounded_guard
+	else
+		stop_bounded_guard
+	fi
+	if ! process_is_same "$BOUNDED_COMMAND_PID" "$BOUNDED_COMMAND_START"; then
+		wait "$BOUNDED_COMMAND_PID" 2>/dev/null
+		command_rc=$?
+	fi
+	emit_bounded_files
+	BOUNDED_COMMAND_PID=""
+	BOUNDED_COMMAND_START=""
+	BOUNDED_COMMAND_GROUP=0
+	[ "$timed_out" = 0 ] || return 124
+	case "$command_rc" in 137|143) return 124 ;; esac
+	return "$command_rc"
+}
+
+monotonic_seconds() {
+	local now
+	now="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$now" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$now"
+}
+
+runtime_probe_limit() {
+	local now remaining limit="$RUNTIME_PROBE_TIMEOUT"
+	now="$(monotonic_seconds)" || return 1
+	remaining=$((RUNTIME_DEADLINE - now))
+	[ "$remaining" -gt 0 ] 2>/dev/null || return 1
+	[ "$limit" -le "$remaining" ] 2>/dev/null || limit="$remaining"
+	printf '%s\n' "$limit"
+}
+
+ubus() {
+	local limit
+	limit="$(runtime_probe_limit)" || return 124
+	run_bounded "$limit" "$UBUS_BIN" "$@"
+}
+
+iw() {
+	local limit
+	limit="$(runtime_probe_limit)" || return 124
+	run_bounded "$limit" "$IW_BIN" "$@"
+}
+
+apply_lock_owned_by_ancestor() {
+	local owner_pid owner_start current current_start parent
+	[ -r "$APPLY_LOCK/owner" ] || return 1
+	read owner_pid owner_start <"$APPLY_LOCK/owner" 2>/dev/null || return 1
+	case "$owner_pid:$owner_start" in *[!0-9:]*|:|*:) return 1 ;; esac
+	current="$$"
+	while [ "$current" -gt 1 ] 2>/dev/null; do
+		current_start="$(process_start "$current")"
+		[ "$current" = "$owner_pid" ] && [ "$current_start" = "$owner_start" ] && return 0
+		parent="$(process_parent "$current")"
+		case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+		[ "$parent" != "$current" ] || return 1
+		current="$parent"
+	done
+	return 1
+}
+
+cache_mutation_begin() {
+	# Cache-lock handoff is explicit, never inferred merely from ancestry.  If a
+	# mutating caller exported CR6608_INHERIT_CACHE_LOCK=1 and passed the verified
+	# FD7, the meta-serialized independent FD9 owns the bracket through rollback.
+	if [ "$INHERITED_CACHE_LOCK_FD" = 1 ]; then
+		[ -r "$CACHE_STATE_LIB" ] || return 1
+		. "$CACHE_STATE_LIB" || return 1
+		command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || return 1
+		# FD9 owns an independent exclusive flock after the meta-serialized
+		# transfer.  Move it back to FD7 so the shared finish routine advances
+		# generation, clears dirty, and releases exactly this helper's lock.
+		exec 7>&9 || return 1
+		exec 9>&- || true
+		INHERITED_CACHE_LOCK_FD=0
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=1
+		SAFE_WIFI_CACHE_OWNER=1
+		return 0
+	fi
+	if apply_lock_owned_by_ancestor; then
+		logger -t cr6608-safe-apply "apply ancestor did not hand off its dashboard cache lock"
+	fi
+	close_private_cache_fd
+	INHERITED_CACHE_LOCK_FD=0
+	[ -r "$CACHE_STATE_LIB" ] || {
+		logger -t cr6608-safe-apply "dashboard cache helper unavailable; refusing standalone Wi-Fi mutation"
+		return 1
+	}
+	. "$CACHE_STATE_LIB" || return 1
+	command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || return 1
+	cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || return 1
+	SAFE_WIFI_CACHE_OWNER=1
+	return 0
+}
+
+cache_mutation_finish() {
+	[ "$SAFE_WIFI_CACHE_OWNER" = 1 ] || return 0
+	SAFE_WIFI_CACHE_OWNER=0
+	cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || {
+		logger -t cr6608-safe-apply "dashboard cache generation finish used its fail-safe path"
+		return 1
+	}
+}
+
+safe_wifi_cleanup() {
+	abort_bounded_command
+	cache_mutation_finish || true
+	close_private_cache_fd
+}
+
+safe_wifi_signal_exit() {
+	local signal_rc="$1" recovery_rc=1
+	trap - EXIT
+	# Emergency rollback is idempotent.  Ignore repeated soft signals while it
+	# runs; SIGKILL is handled by the detached recovery session below.
+	trap '' HUP INT TERM
+	if [ "$MODE" = apply ] && [ "$MUTATION_ACTIVE" = 1 ] && [ -r "$BACKUP" ] &&
+	   [ -x "$SETSID_BIN" ] && [ -x "$0" ]; then
+		CR6608_INHERIT_CACHE_LOCK=1 "$SETSID_BIN" "$0" --rollback-only \
+			"$min_timeout" "$BACKUP" "$SCOPE" </dev/null >/dev/null 2>&1 &
+		RECOVERY_PID=$!
+	fi
+	abort_bounded_command
+	if [ -n "$RECOVERY_PID" ]; then
+		wait "$RECOVERY_PID" 2>/dev/null
+		recovery_rc=$?
+		RECOVERY_PID=""
+	fi
+	if [ "$MODE" != verify ] && [ "$MUTATION_ACTIVE" = 1 ] && [ -r "$BACKUP" ] &&
+	   [ "$recovery_rc" != 0 ]; then
+		ROLLBACK_ACTIVE=1
+		if restore_previous_wireless; then
+			logger -t cr6608-safe-apply "signal received; previous wireless config and runtime restored"
+		else
+			logger -t cr6608-safe-apply "signal received; previous wireless config restored incompletely; backup retained at $BACKUP"
+		fi
+		ROLLBACK_ACTIVE=0
+	fi
+	MUTATION_ACTIVE=0
+	cache_mutation_finish || true
+	close_private_cache_fd
+	exit "$signal_rc"
+}
+
+trap safe_wifi_cleanup EXIT
+trap 'safe_wifi_signal_exit 129' HUP
+trap 'safe_wifi_signal_exit 130' INT
+trap 'safe_wifi_signal_exit 143' TERM
+
+radio_enabled() {
+	[ "$(uci -q get wireless."$1".disabled 2>/dev/null)" != "1" ]
+}
+
+runtime_type_for_mode() {
+	case "$1" in
+		ap) printf 'AP' ;;
+		mesh) printf 'mesh point' ;;
+		sta) printf 'managed' ;;
+		adhoc) printf 'IBSS' ;;
+		monitor) printf 'monitor' ;;
+		*) return 1 ;;
+	esac
+}
+
+runtime_value() {
+	local expression="$1"
+	printf '%s\n' "$RUNTIME_STATUS" |
+		jsonfilter -e "$expression" 2>/dev/null
+}
+
+runtime_interface_index() {
+	local radio="$1" section="$2" index=0 status_section
+	while [ "$index" -lt 32 ]; do
+		status_section="$(runtime_value "@.$radio.interfaces[$index].section")"
+		[ -n "$status_section" ] || return 1
+		if [ "$status_section" = "$section" ]; then
+			printf '%s\n' "$index"
+			return 0
+		fi
+		index=$((index + 1))
+	done
+	return 1
+}
+
+runtime_ifname_for_section() {
+	local radio="$1" section="$2" index ifname
+	index="$(runtime_interface_index "$radio" "$section")" || return 1
+	ifname="$(runtime_value "@.$radio.interfaces[$index].ifname")"
+	[ -n "$ifname" ] || return 1
+	printf '%s\n' "$ifname"
+}
+
+runtime_ifname_has_type() {
+	local ifname="$1" expected="$2"
+	iw dev "$ifname" info 2>/dev/null | awk -v expected="$expected" '
+		$1 == "type" {
+			$1 = ""
+			sub(/^[ \t]+/, "")
+			if ($0 == expected)
+				found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	'
+}
+
+runtime_any_for_radio() {
+	local radio="$1" radio_interfaces
+	radio_interfaces="$(runtime_value "@.${radio}.interfaces[*].ifname")"
+	[ -z "$radio_interfaces" ]
+}
+
+normalize_words() {
+	tr '	 ' '\n' |
+		sed '/^$/d' |
+		sort -u |
+		tr '\n' ' ' |
+		sed 's/[[:space:]]*$//'
+}
+
+runtime_radio_config_matches() {
+	local radio="$1" option desired actual
+	for option in channel country htmode txpower band; do
+		desired="$(uci -q get wireless."$radio"."$option" 2>/dev/null)"
+		[ -n "$desired" ] || continue
+		actual="$(runtime_value "@.$radio.config.$option")"
+		if [ "$option" = "country" ]; then
+			desired="$(printf '%s' "$desired" | tr 'a-z' 'A-Z')"
+			actual="$(printf '%s' "$actual" | tr 'a-z' 'A-Z')"
+		fi
+		[ "$actual" = "$desired" ] || return 1
+	done
+	[ "$(runtime_value "@.$radio.up")" = "true" ] || return 1
+	[ "$(runtime_value "@.$radio.disabled")" != "true" ] || return 1
+	[ "$(runtime_value "@.$radio.pending")" != "true" ] || return 1
+	return 0
+}
+
+runtime_width_matches() {
+	local ifname="$1" htmode="$2" expected=""
+	case "$htmode" in
+		*160) expected=160 ;;
+		*80) expected=80 ;;
+		*40*) expected=40 ;;
+		*20) expected=20 ;;
+		*) return 0 ;;
+	esac
+	iw dev "$ifname" info 2>/dev/null |
+		awk -v expected="$expected" '
+			/width:/ {
+				for (i = 1; i <= NF; i++)
+					if ($i == "width:" && $(i + 1) == expected)
+						found = 1
+			}
+			END { exit(found ? 0 : 1) }
+		'
+}
+
+runtime_channel_matches() {
+	local ifname="$1" channel="$2"
+	case "$channel" in ''|auto) return 0 ;; esac
+	iw dev "$ifname" info 2>/dev/null |
+		awk -v expected="$channel" '
+			$1 == "channel" && $2 == expected { found = 1 }
+			END { exit(found ? 0 : 1) }
+		'
+}
+
+runtime_interface_config_matches() {
+	local radio="$1" section="$2" mode="$3" ifname="$4"
+	local index option desired actual desired_network actual_network raw state hostapd_ssid
+	index="$(runtime_interface_index "$radio" "$section")" || return 1
+	for option in mode ssid encryption; do
+		desired="$(uci -q get wireless."$section"."$option" 2>/dev/null)"
+		[ -n "$desired" ] || continue
+		actual="$(runtime_value "@.$radio.interfaces[$index].config.$option")"
+		[ "$actual" = "$desired" ] || return 1
+	done
+	desired_network="$(uci -q get wireless."$section".network 2>/dev/null |
+		normalize_words)"
+	actual_network="$(runtime_value "@.$radio.interfaces[$index].config.network[*]" |
+		normalize_words)"
+	[ "$actual_network" = "$desired_network" ] || return 1
+	runtime_ifname_has_type "$ifname" "$(runtime_type_for_mode "$mode")" || return 1
+	runtime_channel_matches "$ifname" "$(uci -q get wireless."$radio".channel 2>/dev/null)" ||
+		return 1
+	runtime_width_matches "$ifname" "$(uci -q get wireless."$radio".htmode 2>/dev/null)" ||
+		return 1
+	if [ "$mode" = "ap" ]; then
+		ubus -S list "hostapd.$ifname" 2>/dev/null |
+			grep -Fqx "hostapd.$ifname" || return 1
+		raw="$(ubus -S call "hostapd.$ifname" get_status 2>/dev/null)" || return 1
+		state="$(printf '%s\n' "$raw" | jsonfilter -e '@.status' 2>/dev/null)"
+		[ "$state" = "ENABLED" ] || return 1
+		hostapd_ssid="$(printf '%s\n' "$raw" | jsonfilter -e '@.ssid' 2>/dev/null)"
+		desired="$(uci -q get wireless."$section".ssid 2>/dev/null)"
+		[ -z "$desired" ] || [ "$hostapd_ssid" = "$desired" ] || return 1
+	fi
+	return 0
+}
+
+radio_ready() {
+	local radio="$1" section mode ifname found=0 index
+	RUNTIME_STATUS="$(ubus -S call network.wireless status 2>/dev/null)" || return 1
+	if ! radio_enabled "$radio"; then
+		[ "$(runtime_value "@.$radio.disabled")" = "true" ] || return 1
+		[ "$(runtime_value "@.$radio.up")" != "true" ] || return 1
+		runtime_any_for_radio "$radio"
+		return $?
+	fi
+
+	runtime_radio_config_matches "$radio" || return 1
+	for section in $(uci -q show wireless 2>/dev/null |
+		sed -n "s/^wireless\.\([^.=]*\)=wifi-iface$/\1/p"); do
+		[ "$(uci -q get wireless."$section".device 2>/dev/null)" = "$radio" ] || continue
+		if [ "$(uci -q get wireless."$section".disabled 2>/dev/null)" = "1" ]; then
+			! runtime_interface_index "$radio" "$section" >/dev/null 2>&1 || return 1
+			continue
+		fi
+		mode="$(uci -q get wireless."$section".mode 2>/dev/null)"
+		runtime_type_for_mode "$mode" >/dev/null || return 1
+		found=1
+		ifname="$(runtime_ifname_for_section "$radio" "$section")" || return 1
+		runtime_interface_config_matches "$radio" "$section" "$mode" "$ifname" || return 1
+	done
+
+	[ "$found" = "1" ]
+}
+
+case "$timeout" in ''|*[!0-9]*) timeout=20 ;; esac
+case "$SCOPE" in all|radio0|radio1) ;; *) SCOPE=all ;; esac
+min_timeout="${CR6608_WIFI_MIN_TIMEOUT:-20}"
+case "$min_timeout" in ''|*[!0-9]*) min_timeout=20 ;; esac
+[ "$min_timeout" -ge 1 ] 2>/dev/null && [ "$min_timeout" -le 20 ] 2>/dev/null || min_timeout=20
+[ "$timeout" -ge "$min_timeout" ] 2>/dev/null || timeout="$min_timeout"
+
+adjust_timeout_for_channels() {
+	local radio channel
+	for radio in radio0 radio1; do
+		channel="$(uci -q get wireless."$radio".channel 2>/dev/null)"
+		case "$channel" in
+			auto|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144)
+				# Weather-radar channels can require a ten-minute CAC.
+				[ "$timeout" -ge 660 ] 2>/dev/null || timeout=660
+				;;
+		esac
+	done
+}
+
+apply_wifi_scope() {
+	local wifi_rc
+	case "$SCOPE" in
+		radio0|radio1)
+			if radio_enabled "$SCOPE"; then
+				run_bounded "$WIFI_COMMAND_TIMEOUT" "$WIFI_BIN" up "$SCOPE" >/dev/null 2>&1
+			else
+				run_bounded "$WIFI_COMMAND_TIMEOUT" "$WIFI_BIN" down "$SCOPE" >/dev/null 2>&1
+			fi
+			;;
+		*) run_bounded "$WIFI_COMMAND_TIMEOUT" "$WIFI_BIN" reload >/dev/null 2>&1 ;;
+	esac
+	wifi_rc=$?
+	if [ "$wifi_rc" = 124 ]; then
+		logger -t cr6608-safe-apply "Wi-Fi command exceeded ${WIFI_COMMAND_TIMEOUT}s; process tree terminated"
+	fi
+	return "$wifi_rc"
+}
+
+wait_runtime_ready() {
+	local now ready
+	now="$(monotonic_seconds)" || return 1
+	RUNTIME_DEADLINE=$((now + timeout))
+	while :; do
+		now="$(monotonic_seconds)" || return 1
+		[ "$now" -lt "$RUNTIME_DEADLINE" ] 2>/dev/null || return 1
+		ready=0
+		case "$SCOPE" in
+			radio0) radio_ready radio0 && ready=1 ;;
+			radio1) radio_ready radio1 && ready=1 ;;
+			*) radio_ready radio0 && radio_ready radio1 && ready=1 ;;
+		esac
+		[ "$ready" = "1" ] && return 0
+		now="$(monotonic_seconds)" || return 1
+		[ "$now" -lt "$RUNTIME_DEADLINE" ] 2>/dev/null || return 1
+		sleep 1
+	done
+}
+
+restore_previous_wireless() {
+	local restore_rc=0
+	ROLLBACK_ACTIVE=1
+	cp -f "$BACKUP" /etc/config/wireless 2>/dev/null || restore_rc=1
+	uci revert wireless >/dev/null 2>&1 || true
+	uci commit wireless >/dev/null 2>&1 || restore_rc=1
+	timeout="$min_timeout"
+	adjust_timeout_for_channels
+	apply_wifi_scope || restore_rc=1
+	if [ "$restore_rc" = 0 ] && wait_runtime_ready; then
+		ROLLBACK_ACTIVE=0
+		return 0
+	fi
+	ROLLBACK_ACTIVE=0
+	return 1
+}
+
+adjust_timeout_for_channels
+if [ "$MODE" = "verify" ]; then
+	wait_runtime_ready
+	exit $?
+fi
+
+cache_mutation_begin || {
+	logger -t cr6608-safe-apply "could not start dashboard cache mutation bracket; Wi-Fi left unchanged"
+	exit 3
+}
+MUTATION_ACTIVE=1
+
+if [ "$MODE" = rollback ]; then
+	# The spawning process/group may still be receiving its final KILL.  This
+	# helper owns a new session and the transferred cache lock, so wait briefly
+	# before restoring to avoid racing the command that triggered cancellation.
+	sleep 2
+	if restore_previous_wireless; then
+		logger -t cr6608-safe-apply "detached emergency rollback restored previous wireless config and runtime"
+		MUTATION_ACTIVE=0
+		exit 0
+	fi
+	logger -t cr6608-safe-apply "detached emergency rollback incomplete; backup retained at $BACKUP"
+	MUTATION_ACTIVE=0
+	exit 2
+fi
+
+apply_failed=0
+apply_wifi_scope || apply_failed=1
+if [ "$apply_failed" = "0" ] && wait_runtime_ready; then
+	logger -t cr6608-safe-apply "Wi-Fi reload OK; configured runtime roles and hostapd are active"
+	[ "$OWN_BACKUP" = "1" ] && rm -f "$BACKUP"
+	MUTATION_ACTIVE=0
+	exit 0
+fi
+
+if restore_previous_wireless; then
+	logger -t cr6608-safe-apply "Wi-Fi reload failed; previous wireless config restored and runtime verified"
+	[ "$OWN_BACKUP" = "1" ] && rm -f "$BACKUP"
+	MUTATION_ACTIVE=0
+	exit 1
+fi
+
+logger -t cr6608-safe-apply "Wi-Fi reload failed and restored runtime did not become ready; backup retained at $BACKUP"
+MUTATION_ACTIVE=0
+exit 2

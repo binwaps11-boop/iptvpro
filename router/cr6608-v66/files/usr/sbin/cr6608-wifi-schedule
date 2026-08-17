@@ -1,0 +1,165 @@
+#!/bin/sh
+# Bounded nightly Wi-Fi off/on runner.  Cron must never execute /sbin/wifi
+# directly: a wedged netifd/driver command would otherwise live forever.
+
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+ACTION="${1:-}"
+case "$ACTION" in down|up) ;; *) exit 2 ;; esac
+
+TAG=cr6608-wifi-schedule
+LOCK="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+LOCK_OWNER=0
+BOUNDED_PID=""
+BOUNDED_START=""
+
+log() { logger -t "$TAG" "$*" 2>/dev/null || true; }
+process_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+
+release_lock() {
+	command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+		cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+	[ "$LOCK_OWNER" = 1 ] || return 0
+	read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || return 0
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "$LOCK_START" ] || return 0
+	rm -f "$LOCK/owner" 2>/dev/null
+	rmdir "$LOCK" 2>/dev/null || true
+	LOCK_OWNER=0
+}
+
+acquire_lock() {
+	_wait=0
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		owner_pid=""; owner_start=""
+		read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || true
+		case "$owner_pid:$owner_start" in
+			*[!0-9:]*|:|*:)
+				_wait=$((_wait + 1))
+				[ "$_wait" -lt 3 ] || {
+					rm -f "$LOCK/owner" 2>/dev/null
+					rmdir "$LOCK" 2>/dev/null || true
+				}
+				;;
+			*)
+				_live_start="$(process_start "$owner_pid")"
+				if [ -z "$_live_start" ] || [ "$_live_start" != "$owner_start" ]; then
+					rm -f "$LOCK/owner" 2>/dev/null
+					rmdir "$LOCK" 2>/dev/null || true
+				else
+					_wait=$((_wait + 1))
+				fi
+				;;
+		esac
+		[ "$_wait" -lt "${CR6608_WIFI_SCHEDULE_LOCK_WAIT:-120}" ] || return 1
+		sleep 1
+	done
+	LOCK_START="$(process_start "$$")"
+	[ -n "$LOCK_START" ] || { rmdir "$LOCK" 2>/dev/null; return 1; }
+	printf '%s %s\n' "$$" "$LOCK_START" >"$LOCK/owner" || {
+		rmdir "$LOCK" 2>/dev/null
+		return 1
+	}
+	LOCK_OWNER=1
+}
+
+bounded_process_running() {
+	_bp_seen="$(awk '{print $3 " " $22}' "/proc/$1/stat" 2>/dev/null)"
+	[ -n "$_bp_seen" ] || return 1
+	_bp_state="${_bp_seen%% *}"
+	_bp_start_seen="${_bp_seen#* }"
+	[ "$_bp_state" != Z ] && [ "$_bp_start_seen" = "$2" ]
+}
+
+cancel_bounded_process() {
+	[ -n "$BOUNDED_PID" ] && [ -n "$BOUNDED_START" ] || return 0
+	if bounded_process_running "$BOUNDED_PID" "$BOUNDED_START"; then
+		/bin/kill -TERM "-$BOUNDED_PID" 2>/dev/null || /bin/kill -TERM "$BOUNDED_PID" 2>/dev/null || true
+		sleep 1
+		/bin/kill -KILL "-$BOUNDED_PID" 2>/dev/null || /bin/kill -KILL "$BOUNDED_PID" 2>/dev/null || true
+	fi
+	BOUNDED_PID=""
+	BOUNDED_START=""
+}
+
+signal_exit() {
+	_signal_rc="$1"
+	trap - EXIT HUP INT TERM
+	cancel_bounded_process
+	release_lock
+	exit "$_signal_rc"
+}
+
+run_bounded() {
+	_rb_timeout="$1"; shift
+	case "$_rb_timeout" in ''|*[!0-9]*|0) return 2 ;; esac
+	_rb_log="$(mktemp /var/run/cr6608-wifi-schedule.$$.XXXXXX 2>/dev/null)" || return 1
+	chmod 0600 "$_rb_log" 2>/dev/null || { rm -f "$_rb_log"; return 1; }
+	( for _rb_fd in 4 5 6 7 8; do eval "exec ${_rb_fd}>&-" 2>/dev/null || true; done
+	  exec /usr/bin/setsid "$@" ) >"$_rb_log" 2>&1 &
+	_rb_pid=$!
+	_rb_start="$(process_start "$_rb_pid")"
+	BOUNDED_PID="$_rb_pid"
+	BOUNDED_START="$_rb_start"
+	_rb_elapsed=0
+	while [ -n "$_rb_start" ] && bounded_process_running "$_rb_pid" "$_rb_start" &&
+	      [ "$_rb_elapsed" -lt "$_rb_timeout" ]; do
+		sleep 1
+		_rb_elapsed=$((_rb_elapsed + 1))
+	done
+	if [ -z "$_rb_start" ]; then
+		/bin/kill -KILL "-$_rb_pid" 2>/dev/null || /bin/kill -KILL "$_rb_pid" 2>/dev/null || true
+		_rb_rc=125
+	elif bounded_process_running "$_rb_pid" "$_rb_start"; then
+		/bin/kill -TERM "-$_rb_pid" 2>/dev/null || /bin/kill -TERM "$_rb_pid" 2>/dev/null || true
+		sleep 1
+		/bin/kill -KILL "-$_rb_pid" 2>/dev/null || /bin/kill -KILL "$_rb_pid" 2>/dev/null || true
+		sleep 1
+		_rb_rc=124
+		bounded_process_running "$_rb_pid" "$_rb_start" || wait "$_rb_pid" 2>/dev/null || true
+	else
+		wait "$_rb_pid" 2>/dev/null
+		_rb_rc=$?
+	fi
+	BOUNDED_PID=""
+	BOUNDED_START=""
+	if [ "$_rb_rc" != 0 ]; then
+		log "bounded command rc=$_rb_rc: $(tail -c 400 "$_rb_log" 2>/dev/null)"
+	fi
+	rm -f "$_rb_log" 2>/dev/null
+	return "$_rb_rc"
+}
+
+[ ! -e /etc/smartap-pending-rollback ] || { log "skipped $ACTION: Safe Apply pending"; exit 1; }
+[ ! -e /tmp/smartap-rollback-armed ] || { log "skipped $ACTION: rollback armed"; exit 1; }
+acquire_lock || { log "skipped $ACTION: apply lock busy"; exit 1; }
+trap release_lock EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+
+[ -r "$CACHE_STATE_LIB" ] && . "$CACHE_STATE_LIB"
+command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || {
+	log "skipped $ACTION: cache state unavailable"
+	exit 1
+}
+cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || {
+	log "skipped $ACTION: cache mutation lock busy"
+	exit 1
+}
+
+if [ "$ACTION" = down ]; then
+	run_bounded "${CR6608_WIFI_COMMAND_TIMEOUT:-90}" /sbin/wifi down || exit $?
+	log "scheduled Wi-Fi down completed"
+	exit 0
+fi
+
+run_bounded "${CR6608_WIFI_COMMAND_TIMEOUT:-90}" /sbin/wifi up || exit $?
+if [ -x /usr/sbin/cr6608-safe-wifi-reload ]; then
+	run_bounded "${CR6608_WIFI_VERIFY_TIMEOUT:-700}" \
+		/usr/sbin/cr6608-safe-wifi-reload --verify-only 660 all || exit $?
+fi
+log "scheduled Wi-Fi up completed and runtime verified"
+exit 0

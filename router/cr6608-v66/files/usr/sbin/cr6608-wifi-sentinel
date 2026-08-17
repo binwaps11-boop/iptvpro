@@ -1,0 +1,161 @@
+#!/bin/sh
+# cr6608-wifi-sentinel — self-healing for the RADIOS ONLY. NEVER reboots anything.
+# Cron runs it every 5 minutes: if a radio is enabled in uci but its AP interface
+# has been missing for TWO consecutive checks, bring that radio back with a
+# targeted `wifi up radioX` (the other radio and its clients are untouched).
+# Guards: skips the first 3 minutes after boot, skips while an apply/reload is
+# in flight, and heals each radio at most once per 10 minutes (no flapping).
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+UP="$(cut -d. -f1 /proc/uptime)"
+[ "${UP:-0}" -lt 180 ] && exit 0
+pgrep -f cr6608-quicksettings-apply >/dev/null 2>&1 && exit 0
+pgrep -f cr6608-safe-wifi-reload   >/dev/null 2>&1 && exit 0
+pgrep -f cr6608-security-apply     >/dev/null 2>&1 && exit 0
+pgrep -f smartap-autochannel       >/dev/null 2>&1 && exit 0
+
+wifi_schedule_off_now() {
+	[ -r /etc/crontabs/root ] || return 1
+	off_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="down" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+	on_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="up" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+	now_min="$(date '+%H %M' 2>/dev/null | awk '{ print ($1 * 60) + $2 }')"
+	case "$off_min:$on_min:$now_min" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
+	[ "$off_min" -ne "$on_min" ] || return 1
+	if [ "$off_min" -lt "$on_min" ]; then
+		[ "$now_min" -ge "$off_min" ] && [ "$now_min" -lt "$on_min" ]
+	else
+		[ "$now_min" -ge "$off_min" ] || [ "$now_min" -lt "$on_min" ]
+	fi
+}
+
+ST=/tmp/cr6608-wifi-sentinel
+if wifi_schedule_off_now; then
+	rm -f "$ST/radio0.miss" "$ST/radio1.miss" 2>/dev/null
+	exit 0
+fi
+
+LOCK="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+[ -r "$CACHE_STATE_LIB" ] && . "$CACHE_STATE_LIB"
+LOCK_OWNER=0
+process_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+release_lock() {
+	command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+		cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+	[ "$LOCK_OWNER" = 1 ] || return 0
+	read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || return 0
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "$LOCK_START" ] || return 0
+	rm -f "$LOCK/owner" 2>/dev/null
+	rmdir "$LOCK" 2>/dev/null || true
+}
+acquire_lock() {
+	attempts=0
+	ownerless=0
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		owner_pid=""; owner_start=""
+		read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || true
+		case "$owner_pid:$owner_start" in
+			*[!0-9:]*|:|*:)
+				ownerless=$((ownerless + 1))
+				attempts=$((attempts + 1))
+				if [ "$ownerless" -ge 3 ]; then
+					rm -f "$LOCK/owner" 2>/dev/null
+					rmdir "$LOCK" 2>/dev/null || true
+				else
+					sleep 1
+				fi
+				[ "$attempts" -le 3 ] || return 1
+				continue
+				;;
+		esac
+		live_start="$(process_start "$owner_pid")"
+		[ -z "$live_start" ] || [ "$live_start" != "$owner_start" ] || return 1
+		rm -f "$LOCK/owner" 2>/dev/null
+		rmdir "$LOCK" 2>/dev/null || true
+		attempts=$((attempts + 1))
+		[ "$attempts" -le 3 ] || return 1
+	done
+	LOCK_START="$(process_start "$$")"
+	[ -n "$LOCK_START" ] || { rmdir "$LOCK" 2>/dev/null; return 1; }
+	printf '%s %s\n' "$$" "$LOCK_START" >"$LOCK/owner" || {
+		rmdir "$LOCK" 2>/dev/null
+		return 1
+	}
+	LOCK_OWNER=1
+}
+
+mkdir -p "$ST"
+
+ensure_mutation_lock() {
+	[ "$LOCK_OWNER" = 1 ] && return 0
+	acquire_lock || return 1
+	trap release_lock EXIT
+	trap 'trap - EXIT HUP INT TERM; release_lock; exit 130' HUP INT TERM
+	# Re-check after taking the mutex; an apply may have started between the
+	# cheap preflight checks and the second failed-radio sample.
+	pgrep -f cr6608-safe-wifi-reload >/dev/null 2>&1 && { release_lock; return 1; }
+	pgrep -f cr6608-security-apply >/dev/null 2>&1 && { release_lock; return 1; }
+	[ ! -e /etc/smartap-pending-rollback ] || { release_lock; return 1; }
+	[ ! -e /tmp/smartap-rollback-armed ] || { release_lock; return 1; }
+	command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || { release_lock; return 1; }
+	cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || { release_lock; return 1; }
+}
+
+radio_runtime_up() { # $1=radioX $2=phyX
+	_radio="$1"; _phy="$2"
+	status="$(ubus call network.wireless status 2>/dev/null)"
+	ifnames="$(printf '%s\n' "$status" | jsonfilter -e "@.$_radio.interfaces[*].ifname" 2>/dev/null)"
+	radio_up=0
+	for ifname in $ifnames; do
+		if [ -d "/sys/class/net/$ifname" ] && iw dev "$ifname" info >/dev/null 2>&1; then
+			radio_up=1
+			break
+		fi
+	done
+	if [ "$radio_up" = "0" ] && [ -z "$ifnames" ]; then
+		iw phy "$_phy" info >/dev/null 2>&1 &&
+			iw dev 2>/dev/null | awk -v target="${_phy#phy}" '
+				/^phy#[0-9]+/ { current=$1; sub(/^phy#/, "", current) }
+				$1=="Interface" && current==target { found=1 }
+				END { exit !found }
+			' && radio_up=1
+	fi
+	[ "$radio_up" = 1 ]
+}
+
+check_radio() { # $1=radioX  $2=phyX
+	radio="$1"; phy="$2"
+	# owner intentionally disabled it -> nothing to heal
+	[ "$(uci -q get wireless.$radio.disabled)" = "1" ] && { rm -f "$ST/$radio.miss"; return 0; }
+	if radio_runtime_up "$radio" "$phy"; then
+		rm -f "$ST/$radio.miss"
+		return 0
+	fi
+	miss=$(( $(cat "$ST/$radio.miss" 2>/dev/null || echo 0) + 1 ))
+	echo "$miss" > "$ST/$radio.miss"
+	[ "$miss" -lt 2 ] && return 0
+	last="$(cat "$ST/$radio.heal" 2>/dev/null || echo 0)"
+	[ $(( UP - last )) -lt 600 ] && return 0
+	ensure_mutation_lock || return 0
+	# A queued netifd recovery may have completed while the sentinel waited for
+	# the global apply lock.  Do not flap an already recovered radio.
+	if radio_runtime_up "$radio" "$phy"; then
+		rm -f "$ST/$radio.miss"
+		return 0
+	fi
+	echo "$UP" > "$ST/$radio.heal"
+	rm -f "$ST/$radio.miss"
+	logger -t cr6608-sentinel "$radio ($phy) down for 2 checks -> targeted 'wifi up $radio' (no reboot, other radio untouched)"
+	if [ -x /usr/sbin/cr6608-safe-wifi-reload ]; then
+		CR6608_INHERIT_CACHE_LOCK=1 /usr/sbin/cr6608-safe-wifi-reload 45 "" "$radio" >/dev/null 2>&1 ||
+			logger -t cr6608-sentinel "$radio targeted recovery did not verify; retained last-good wireless config"
+	else
+		logger -t cr6608-sentinel "$radio recovery helper missing; no unverified wifi command was run"
+	fi
+}
+
+check_radio radio0 phy0
+check_radio radio1 phy1
+exit 0

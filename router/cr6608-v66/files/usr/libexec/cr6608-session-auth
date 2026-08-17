@@ -1,0 +1,288 @@
+#!/bin/sh
+
+# Smart AP sessions are reboot-volatile and have a fixed 12-hour lifetime.
+
+cr6608_proc_start() {
+	awk '{ print $22 }' "/proc/$1/stat" 2>/dev/null
+}
+
+# A libubus deadline handles a responsive client talking to an unresponsive
+# daemon. The outer watchdog also handles a wedged client process. Keeping both
+# prevents one broken rpcd/ubus exchange from occupying a uhttpd worker and the
+# global session lock until the CGI timeout.
+cr6608_run_bounded() {
+	local limit="$1"
+	local command_pid command_start guard_pid guard_children command_rc
+	shift
+	case "$limit" in ''|*[!0-9]*) return 125 ;; esac
+	[ "$limit" -ge 1 ] 2>/dev/null && [ "$limit" -le 30 ] 2>/dev/null || return 125
+	[ "$#" -gt 0 ] || return 125
+
+	"$@" &
+	command_pid=$!
+	command_start="$(cr6608_proc_start "$command_pid")"
+	(
+		sleep "$limit"
+		[ -n "$command_start" ] || exit 0
+		[ "$(cr6608_proc_start "$command_pid")" = "$command_start" ] || exit 0
+		kill -TERM "$command_pid" 2>/dev/null || exit 0
+		sleep 1
+		[ "$(cr6608_proc_start "$command_pid")" = "$command_start" ] || exit 0
+		kill -KILL "$command_pid" 2>/dev/null || true
+	) >/dev/null 2>&1 &
+	guard_pid=$!
+
+	wait "$command_pid" 2>/dev/null
+	command_rc=$?
+	guard_children="$(pgrep -P "$guard_pid" 2>/dev/null || true)"
+	kill "$guard_pid" 2>/dev/null || true
+	[ -z "$guard_children" ] || kill $guard_children 2>/dev/null || true
+	wait "$guard_pid" 2>/dev/null || true
+	case "$command_rc" in 137|143) return 124 ;; esac
+	return "$command_rc"
+}
+
+cr6608_ubus() {
+	cr6608_run_bounded 2 "${CR6608_UBUS_BIN:-/bin/ubus}" -t 2 "$@"
+}
+
+cr6608_path_owner() {
+	env stat -L -c '%u' "$1" 2>/dev/null ||
+		LC_ALL=C ls -Ldln "$1" 2>/dev/null | awk 'NR == 1 { print $3; exit }'
+}
+
+cr6608_path_owned_by_root() {
+	[ "$(cr6608_path_owner "$1")" = 0 ]
+}
+
+cr6608_path_permissions() {
+	[ -e "$1" ] && [ ! -L "$1" ] || return 1
+	env stat -c '%A' "$1" 2>/dev/null ||
+		LC_ALL=C ls -Ldn "$1" 2>/dev/null | awk 'NR == 1 { print $1; exit }'
+}
+
+cr6608_valid_hex32() {
+	case "$1" in
+		????????????????????????????????)
+			case "$1" in *[!A-Fa-f0-9]*) return 1 ;; *) return 0 ;; esac
+			;;
+	esac
+	return 1
+}
+
+cr6608_prepare_root_dir() {
+	dir="$1"
+	mode="$2"
+	if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+		rm -f "$dir" || return 1
+	fi
+	if [ -d "$dir" ] && ! cr6608_path_owned_by_root "$dir"; then
+		rm -rf "$dir" || return 1
+	fi
+	umask 077
+	mkdir -p "$dir" 2>/dev/null || return 1
+	chmod "$mode" "$dir" 2>/dev/null || return 1
+	[ -d "$dir" ] && [ ! -L "$dir" ] && cr6608_path_owned_by_root "$dir"
+}
+
+cr6608_session_storage_prepare() {
+	cr6608_prepare_root_dir /tmp/dashsess 0700
+}
+
+cr6608_map_storage_prepare() {
+	cr6608_prepare_root_dir /tmp/dashluci 0700
+}
+
+# Atomically bind one Smart AP session to its already-authenticated rpcd/LuCI
+# session.  The browser receives neither value in JSON and the caller holds the
+# global session lock while replacing the map.
+cr6608_write_luci_map_unlocked() {
+	local smart_sid="$1"
+	local luci_sid="$2"
+	local map_file map_tmp
+	cr6608_valid_hex32 "$smart_sid" || return 1
+	cr6608_valid_hex32 "$luci_sid" || return 1
+	cr6608_map_storage_prepare || return 1
+	map_file="/tmp/dashluci/$smart_sid"
+	[ ! -L "$map_file" ] || return 1
+	map_tmp="$(mktemp "/tmp/dashluci/.map.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! printf '%s\n' "$luci_sid" >"$map_tmp" ||
+	   ! chmod 0600 "$map_tmp" ||
+	   ! mv -f "$map_tmp" "$map_file"; then
+		rm -f "$map_tmp" 2>/dev/null
+		return 1
+	fi
+	return 0
+}
+
+cr6608_uptime_seconds() {
+	cut -d. -f1 /proc/uptime 2>/dev/null
+}
+
+cr6608_random_hex32() {
+	cr6608_session_storage_prepare || return 1
+	random_file="/tmp/dashsess/.random.$$"
+	umask 077
+	[ ! -e "$random_file" ] && [ ! -L "$random_file" ] || return 1
+	dd if=/dev/urandom of="$random_file" bs=16 count=1 2>/dev/null || {
+		rm -f "$random_file"
+		return 1
+	}
+	[ "$(wc -c <"$random_file" 2>/dev/null)" = 16 ] || {
+		rm -f "$random_file"
+		return 1
+	}
+	token="$(hexdump -v -n 16 -e '1/1 "%02x"' "$random_file" 2>/dev/null)"
+	rm -f "$random_file"
+	cr6608_valid_hex32 "$token" || return 1
+	printf '%s' "$token"
+}
+
+# HTTP and HTTPS deliberately use different cookie names. A browser may retain
+# both schemes while the operator migrates the management URL; sharing one name
+# lets two same-name cookies reach CGI in an implementation-defined order.
+cr6608_session_cookie_name() {
+	if [ "${HTTPS:-off}" = on ]; then
+		printf '%s' cr6608_sid_https
+	else
+		printf '%s' cr6608_sid_http
+	fi
+}
+
+cr6608_luci_session_cookie_name() {
+	if [ "${HTTPS:-off}" = on ]; then
+		printf '%s' sysauth_https
+	else
+		printf '%s' sysauth_http
+	fi
+}
+
+# Return 0 for one well-formed match, 2 when absent, and 1 for an invalid or
+# ambiguous value. The sentinel preserves an explicitly empty cookie so it is
+# rejected rather than mistaken for an absent cookie eligible for migration.
+cr6608_cookie_value_unique() {
+	local cookie_name="$1"
+	local matches count value
+	matches="$(printf '%s' "${HTTP_COOKIE:-}" | awk -v wanted="$cookie_name" '
+		BEGIN { RS = ";" }
+		{
+			part = $0
+			sub(/^[[:space:]]+/, "", part)
+			sub(/[[:space:]]+$/, "", part)
+			eq = index(part, "=")
+			if (eq > 0 && substr(part, 1, eq - 1) == wanted)
+				print "x" substr(part, eq + 1)
+		}')"
+	[ -n "$matches" ] || return 2
+	count="$(printf '%s\n' "$matches" | wc -l | tr -d '[:space:]')"
+	[ "$count" = 1 ] || return 1
+	value="${matches#x}"
+	cr6608_valid_hex32 "$value" || return 1
+	printf '%s' "$value"
+}
+
+# The browser never exposes the Smart AP bearer to JavaScript. Every CGI
+# resolves it only from the protocol-specific HttpOnly SameSite cookie. The old
+# cr6608_sid name is accepted only when the preferred cookie is absent, allowing
+# one release of migration without enabling cross-protocol cookie fallback.
+cr6608_session_from_request() {
+	local cookie_name sid cookie_rc
+	cookie_name="$(cr6608_session_cookie_name)"
+	if sid="$(cr6608_cookie_value_unique "$cookie_name")"; then
+		cookie_rc=0
+	else
+		cookie_rc=$?
+	fi
+	case "$cookie_rc" in
+		0) printf '%s' "$sid"; return 0 ;;
+		1) printf '%s' ''; return 0 ;;
+	esac
+	if ! sid="$(cr6608_cookie_value_unique cr6608_sid)"; then
+		sid=''
+	fi
+	printf '%s' "$sid"
+}
+
+cr6608_destroy_luci_session() {
+	local luci_sid="$1"
+	local destroy_rc=0
+	cr6608_valid_hex32 "$luci_sid" || return 0
+	cr6608_ubus call session destroy "{\"ubus_rpc_session\":\"$luci_sid\"}" >/dev/null 2>&1
+	destroy_rc=$?
+	# libubus may expose NOT_FOUND as 4 or as the wrapped -4 status (252).
+	# A child already removed by native LuCI logout is a successful revocation.
+	case "$destroy_rc" in 0|4|252) return 0 ;; esac
+	return "$destroy_rc"
+}
+
+# Caller serializes mutations with cr6608_luci_session_lock when possible.
+cr6608_revoke_session_unlocked() {
+	sid="$1"
+	cr6608_valid_hex32 "$sid" || return 0
+	rc=0
+	[ ! -e "/tmp/dashsess/$sid" ] || rm -f "/tmp/dashsess/$sid" || rc=1
+	map_file="/tmp/dashluci/$sid"
+	if [ -f "$map_file" ] && [ ! -L "$map_file" ] && cr6608_path_owned_by_root "$map_file"; then
+		read -r luci_sid extra <"$map_file" 2>/dev/null || luci_sid=''
+		cr6608_destroy_luci_session "$luci_sid" || rc=1
+		rm -f "$map_file" || rc=1
+	elif [ -e "$map_file" ] || [ -L "$map_file" ]; then
+		rm -f "$map_file" || rc=1
+	fi
+	return "$rc"
+}
+
+# Serialize Smart AP/LuCI session creation and destruction. The lock lives in
+# the root-owned 0700 session directory.
+cr6608_luci_session_lock() {
+	cr6608_session_storage_prepare || return 1
+	lock_file=/tmp/dashsess/.luci-session.lock
+	[ ! -L "$lock_file" ] || return 1
+	if [ -e "$lock_file" ]; then
+		[ -f "$lock_file" ] && cr6608_path_owned_by_root "$lock_file" || return 1
+	fi
+	umask 077
+	exec 9>>"$lock_file" || return 1
+	chmod 0600 "$lock_file" 2>/dev/null || return 1
+	[ ! -L "$lock_file" ] && cr6608_path_owned_by_root "$lock_file" || return 1
+	# BusyBox flock has no -w option. Never queue a web request behind another
+	# session operation: fail fast and let the browser retry.
+	flock -xn 9 || return 1
+}
+
+cr6608_session_valid() {
+	sid="$1"
+	cr6608_valid_hex32 "$sid" || return 1
+	cr6608_session_storage_prepare || return 1
+	file="/tmp/dashsess/$sid"
+	if ! { [ -f "$file" ] && [ ! -L "$file" ] && cr6608_path_owned_by_root "$file"; }; then
+		cr6608_revoke_session_unlocked "$sid" >/dev/null 2>&1 || true
+		return 1
+	fi
+	read -r created_epoch created_uptime extra <"$file" 2>/dev/null
+	case "$created_epoch" in
+		''|*[!0-9]*) cr6608_revoke_session_unlocked "$sid" >/dev/null 2>&1 || true; return 1 ;;
+	esac
+
+	age=''
+	now_uptime="$(cr6608_uptime_seconds)"
+	case "$created_uptime" in
+		''|*[!0-9]*) ;;
+		*)
+			case "$now_uptime" in
+				''|*[!0-9]*) ;;
+				*) [ "$now_uptime" -lt "$created_uptime" ] 2>/dev/null || age=$((now_uptime - created_uptime)) ;;
+			esac
+			;;
+	esac
+	if [ -z "$age" ]; then
+		now_epoch="$(date +%s 2>/dev/null)"
+		case "$now_epoch" in ''|*[!0-9]*) return 1 ;; esac
+		age=$((now_epoch - created_epoch))
+	fi
+	if [ "$age" -lt 0 ] 2>/dev/null || [ "$age" -gt 43200 ] 2>/dev/null; then
+		cr6608_revoke_session_unlocked "$sid" >/dev/null 2>&1 || true
+		return 1
+	fi
+	return 0
+}

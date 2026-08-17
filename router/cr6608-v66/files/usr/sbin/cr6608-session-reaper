@@ -1,0 +1,33 @@
+#!/bin/sh
+
+# Revoke LuCI child sessions whose fixed-lifetime Smart AP parent expired.
+
+# cron command logging is intentionally quiet; retain an explicit fault record
+# without logging the successful one-minute runs.
+trap 'rc=$?; [ "$rc" -eq 0 ] || logger -t cr6608-session-reaper "session cleanup failed rc=$rc"; exit "$rc"' EXIT
+
+. /usr/libexec/cr6608-session-auth || exit 1
+cr6608_session_storage_prepare || exit 1
+cr6608_map_storage_prepare || exit 1
+cr6608_luci_session_lock || exit 1
+
+for session_file in /tmp/dashsess/*; do
+	[ -f "$session_file" ] && [ ! -L "$session_file" ] || continue
+	sid="${session_file##*/}"
+	cr6608_valid_hex32 "$sid" || continue
+	cr6608_session_valid "$sid" >/dev/null 2>&1 || true
+done
+
+for map_file in /tmp/dashluci/*; do
+	[ -e "$map_file" ] || [ -L "$map_file" ] || continue
+	sid="${map_file##*/}"
+	if ! cr6608_valid_hex32 "$sid"; then
+		rm -f "$map_file" || exit 1
+		continue
+	fi
+	if ! { [ -f "/tmp/dashsess/$sid" ] && [ ! -L "/tmp/dashsess/$sid" ]; }; then
+		cr6608_revoke_session_unlocked "$sid" || exit 1
+	fi
+done
+
+exit 0

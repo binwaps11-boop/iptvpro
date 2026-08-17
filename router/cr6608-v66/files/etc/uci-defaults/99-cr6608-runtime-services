@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# Enable each overlay-provided product runtime whose state must survive reboot.
+# Every command is idempotent.
+for service in smartap-qos cr6608-rescue-guard cr6608-quicksettings cr6608-dashboard-cache; do
+	[ -x "/etc/init.d/$service" ] || exit 1
+	"/etc/init.d/$service" enable || exit 1
+	"/etc/init.d/$service" start || exit 1
+done
+
+# The package-owned usteer start action deliberately returns non-zero when its
+# config is disabled. Install the rc.d link unconditionally, but only start the
+# daemon after the owner has explicitly enabled Smart Connect.
+[ -x /etc/init.d/usteer ] || exit 1
+/etc/init.d/usteer enable || exit 1
+if [ "$(uci -q get usteer.main.enabled 2>/dev/null)" = "1" ]; then
+	/etc/init.d/usteer start || exit 1
+else
+	/etc/init.d/usteer stop >/dev/null 2>&1 || true
+fi
+
+exit 0

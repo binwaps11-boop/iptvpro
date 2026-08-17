@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# A preserved /etc/rc.d overlay can hide a new lower-root symlink after
+# sysupgrade. Recreate it once on both clean installs and kept-settings upgrades.
+[ -x /etc/init.d/cr6608-neighbor ] || exit 1
+/etc/init.d/cr6608-neighbor enable || exit 1
+/etc/init.d/cr6608-neighbor start >/dev/null 2>&1 || exit 1
+logger -t cr6608-neighbor 'MNDP service enabled by image migration' 2>/dev/null || true
+exit 0

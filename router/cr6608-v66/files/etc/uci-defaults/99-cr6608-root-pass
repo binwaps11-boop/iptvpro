@@ -1,0 +1,34 @@
+#!/bin/sh
+
+# A generic image must never install a fleet-wide root credential. Keep a
+# valid nine-field root record and preserve every existing operator password
+# on a keep-settings sysupgrade. Historical shared credentials are rejected by
+# cr6608-retail-audit, but are not auto-locked here: that would lock an operator
+# out before the device has been uniquely provisioned.
+shadow_file="${CR6608_SHADOW_FILE:-/etc/shadow}"
+[ -f "$shadow_file" ] && [ ! -L "$shadow_file" ] || exit 1
+cur="$(awk -F: '/^root:/{print $2; exit}' "$shadow_file" 2>/dev/null)"
+next="$cur"
+
+case "$cur" in
+	""|"!"|"x"|"*"|"!*") next='!' ;;
+esac
+[ "$next" = "$cur" ] || logger -t cr6608 \
+	"kept the unprovisioned root account locked"
+
+# Normalize password aging so a malformed record cannot expire the account.
+days="$(( $(date +%s 2>/dev/null) / 86400 ))"
+[ "$days" -ge 10000 ] 2>/dev/null || days=20647
+tmp="${shadow_file}.cr6608.$$"
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+awk -F: -v OFS=: -v days="$days" -v hash="$next" '
+	$1 == "root" { print $1, hash, days, 0, 99999, 7, "", "", ""; found=1; next }
+	{ print }
+	END { if (!found) exit 1 }
+' "$shadow_file" > "$tmp" || exit 1
+chmod 0600 "$tmp" || exit 1
+mv -f "$tmp" "$shadow_file" || exit 1
+trap - EXIT HUP INT TERM
+exit 0

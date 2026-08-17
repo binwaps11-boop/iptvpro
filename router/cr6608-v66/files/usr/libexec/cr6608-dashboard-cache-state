@@ -1,0 +1,491 @@
+#!/bin/sh
+# Shared, root-only state for the Smart AP hardware snapshot cache.
+#
+# The public CGIs run as root while /tmp is world writable.  Keep every cache,
+# counter and lock below /var/run (which resolves to the root-owned /tmp/run on
+# OpenWrt) so predictable names cannot be replaced with hostile symlinks.
+
+CR6608_DASHBOARD_CACHE_DIR="${CR6608_DASHBOARD_CACHE_DIR:-/var/run/cr6608-dashboard-cache}"
+CR6608_DASHBOARD_CACHE_EXPECT_UID="${CR6608_DASHBOARD_CACHE_EXPECT_UID:-0}"
+CR6608_DASHBOARD_JSONFILTER_BIN="${CR6608_DASHBOARD_JSONFILTER_BIN:-jsonfilter}"
+CR6608_DASHBOARD_FINGERPRINT_PATHS="${CR6608_DASHBOARD_FINGERPRINT_PATHS:-/etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/dropbear /etc/config/uhttpd /etc/config/smartap /etc/config/cr6608quick /etc/config/sqm /etc/config/usteer /etc/crontabs/root}"
+CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+CR6608_DASHBOARD_CACHE_META_OWNER=0
+CR6608_DASHBOARD_CACHE_READER_OWNER=0
+CR6608_DASHBOARD_CACHE_PRUNED=0
+
+umask 077
+
+cr6608_dashboard_cache_prepare() {
+	_cache_dir="$CR6608_DASHBOARD_CACHE_DIR"
+	[ ! -L "$_cache_dir" ] || return 1
+	if [ -e "$_cache_dir" ]; then
+		[ -d "$_cache_dir" ] || return 1
+	else
+		# Two first requests may race between -e and mkdir.  If another root
+		# request won, validate the directory it created instead of failing.
+		mkdir -m 0700 "$_cache_dir" 2>/dev/null ||
+			{ [ -d "$_cache_dir" ] && [ ! -L "$_cache_dir" ]; } || return 1
+	fi
+	[ ! -L "$_cache_dir" ] || return 1
+	_cache_uid="$(stat -c %u "$_cache_dir" 2>/dev/null)"
+	[ "$_cache_uid" = "$CR6608_DASHBOARD_CACHE_EXPECT_UID" ] || return 1
+	chmod 0700 "$_cache_dir" 2>/dev/null || return 1
+	if [ "$CR6608_DASHBOARD_CACHE_PRUNED" = 0 ]; then
+		# TERM paths remove process-owned temps immediately.  This bounded prune
+		# also recovers files left by SIGKILL or power loss without touching the
+		# atomically published response or any lock/generation state.
+		find "$_cache_dir" -maxdepth 1 -type f \( \
+			-name '.generation.*.*' -o -name '.view.*.*' -o \
+			-name '.emit.*.*' -o \
+			-name '.publish.*.*' -o -name '.publish-final.*.*' -o \
+			-name '.perf.*.*' -o -name '.collect.*.*' -o -name '.dirty.*.*' -o \
+			-name '.external.*.*' -o \
+			-name '.devices.*' -o -name '.arp.*' -o -name '.fdb.*' -o \
+			-name '.lease.*' -o -name '.degraded.*' \) \
+			-mmin +10 -exec rm -f {} \; 2>/dev/null || true
+		CR6608_DASHBOARD_CACHE_PRUNED=1
+	fi
+	return 0
+}
+
+cr6608_dashboard_cache_cleanup_process() {
+	cr6608_dashboard_cache_prepare || return 0
+	find "$CR6608_DASHBOARD_CACHE_DIR" -maxdepth 1 -type f \( \
+		-name ".generation.$$.*" -o -name ".view.$$.*" -o \
+		-name ".emit.$$.*" -o \
+		-name ".publish.$$.*" -o -name ".publish-final.$$.*" -o \
+		-name ".perf.$$.*" -o -name ".collect.$$.*" -o -name ".dirty.$$.*" -o \
+		-name ".external.$$.*" -o \
+		-name ".devices.$$" -o -name ".arp.$$" -o -name ".fdb.$$" -o \
+		-name ".lease.$$" -o -name ".degraded.$$" \) \
+		-exec rm -f {} \; 2>/dev/null || true
+}
+
+# BusyBox flock has no -w timeout.  Poll its non-blocking form so a dead or
+# back-pressured CGI can delay an apply for only a bounded number of seconds.
+cr6608_dashboard_cache_flock_bounded() {
+	_cache_lock_mode="$1"; _cache_lock_fd="$2"; _cache_lock_attempts="$3"
+	case "$_cache_lock_attempts" in ''|*[!0-9]*|0) return 1 ;; esac
+	_cache_lock_try=0
+	while :; do
+		case "$_cache_lock_mode" in
+			x) flock -xn "$_cache_lock_fd" 2>/dev/null && return 0 ;;
+			s) flock -sn "$_cache_lock_fd" 2>/dev/null && return 0 ;;
+			*) return 1 ;;
+		esac
+		_cache_lock_try=$((_cache_lock_try + 1))
+		[ "$_cache_lock_try" -lt "$_cache_lock_attempts" ] || return 1
+		sleep 1
+	done
+}
+
+cr6608_dashboard_cache_external_fingerprint() {
+	_cache_fp_result="$({
+		# The path set is fixed by root-owned firmware data.  Build one argument
+		# vector so BusyBox runs one stat and one sha256sum process instead of
+		# two processes per UCI file on every full dashboard refresh.
+		set --
+		for _cache_fp_path in $CR6608_DASHBOARD_FINGERPRINT_PATHS; do
+			if [ -f "$_cache_fp_path" ] && [ ! -L "$_cache_fp_path" ]; then
+				set -- "$@" "$_cache_fp_path"
+			else
+				printf '%s:missing\n' "$_cache_fp_path"
+			fi
+		done
+		if [ "$#" -gt 0 ]; then
+			stat -c '%n:%Y:%s:%i' "$@" 2>/dev/null || printf '%s\n' 'batch:stat-error'
+			# Content closes the one-second mtime/same-size hole left by
+			# in-place SSH edits on BusyBox filesystems.
+			sha256sum "$@" 2>/dev/null || printf '%s\n' 'batch:checksum-error'
+		fi
+	} | sha256sum 2>/dev/null | awk '{print $1}')"
+	case "$_cache_fp_result" in ''|*[!0-9a-f]*) return 1 ;; esac
+	printf '%s\n' "$_cache_fp_result"
+}
+
+cr6608_dashboard_cache_write_external_fingerprint() {
+	_cache_fp_value="$1"
+	case "$_cache_fp_value" in ''|*[!0-9a-f]*) return 1 ;; esac
+	_cache_fp_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.external.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! printf '%s\n' "$_cache_fp_value" >"$_cache_fp_tmp" ||
+	   ! chmod 0600 "$_cache_fp_tmp" ||
+	   ! mv -f "$_cache_fp_tmp" "$CR6608_DASHBOARD_CACHE_DIR/external.fingerprint"; then
+		rm -f "$_cache_fp_tmp" 2>/dev/null
+		return 1
+	fi
+}
+
+# Detect UCI commits made through LuCI or SSH, not just Smart AP CGIs.  The
+# unchanged path is lock-free; a change is rechecked and invalidated under the
+# metadata lock so concurrent requests converge on one fingerprint/generation.
+cr6608_dashboard_cache_external_sync() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_fp_file="$CR6608_DASHBOARD_CACHE_DIR/external.fingerprint"
+	[ ! -L "$_cache_fp_file" ] || return 1
+	_cache_fp_now="$(cr6608_dashboard_cache_external_fingerprint)" || return 1
+	_cache_fp_old=""
+	if [ -f "$_cache_fp_file" ]; then
+		IFS= read -r _cache_fp_old <"$_cache_fp_file" 2>/dev/null || _cache_fp_old=""
+	fi
+	[ "$_cache_fp_now" != "$_cache_fp_old" ] || return 0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	_cache_fp_now="$(cr6608_dashboard_cache_external_fingerprint)" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	_cache_fp_old=""
+	if [ -f "$_cache_fp_file" ] && [ ! -L "$_cache_fp_file" ]; then
+		IFS= read -r _cache_fp_old <"$_cache_fp_file" 2>/dev/null || _cache_fp_old=""
+	fi
+	_cache_fp_rc=0
+	if [ -z "$_cache_fp_old" ]; then
+		cr6608_dashboard_cache_write_external_fingerprint "$_cache_fp_now" || _cache_fp_rc=1
+	elif [ "$_cache_fp_now" != "$_cache_fp_old" ]; then
+		cr6608_dashboard_cache_new_generation >/dev/null || _cache_fp_rc=1
+		rm -f "$CR6608_DASHBOARD_CACHE_DIR/perf" "$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" 2>/dev/null || _cache_fp_rc=1
+		cr6608_dashboard_cache_write_external_fingerprint "$_cache_fp_now" || _cache_fp_rc=1
+	fi
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_fp_rc"
+}
+
+cr6608_dashboard_cache_meta_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_META_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	exec 5>>"$CR6608_DASHBOARD_CACHE_DIR/meta.lock" || return 1
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/meta.lock" 2>/dev/null || { exec 5>&-; return 1; }
+	cr6608_dashboard_cache_flock_bounded x 5 5 || { exec 5>&-; return 1; }
+	CR6608_DASHBOARD_CACHE_META_OWNER=1
+}
+
+cr6608_dashboard_cache_meta_release() {
+	[ "$CR6608_DASHBOARD_CACHE_META_OWNER" = 1 ] || return 0
+	flock -u 5 2>/dev/null || true
+	exec 5>&-
+	CR6608_DASHBOARD_CACHE_META_OWNER=0
+}
+
+cr6608_dashboard_cache_reader_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_READER_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	exec 4>>"$CR6608_DASHBOARD_CACHE_DIR/meta.lock" || return 1
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/meta.lock" 2>/dev/null || { exec 4>&-; return 1; }
+	cr6608_dashboard_cache_flock_bounded s 4 3 || { exec 4>&-; return 1; }
+	CR6608_DASHBOARD_CACHE_READER_OWNER=1
+}
+
+cr6608_dashboard_cache_reader_release() {
+	[ "$CR6608_DASHBOARD_CACHE_READER_OWNER" = 1 ] || return 0
+	flock -u 4 2>/dev/null || true
+	exec 4>&-
+	CR6608_DASHBOARD_CACHE_READER_OWNER=0
+}
+
+cr6608_dashboard_cache_new_generation() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.generation.$$.XXXXXX" 2>/dev/null)" || return 1
+	_cache_suffix="${_cache_tmp##*.}"
+	_cache_uptime="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$_cache_uptime" in ''|*[!0-9]*) _cache_uptime=0 ;; esac
+	_cache_token="${_cache_suffix}.$$.$_cache_uptime"
+	if ! printf '%s\n' "$_cache_token" >"$_cache_tmp" ||
+	   ! chmod 0600 "$_cache_tmp" ||
+	   ! mv -f "$_cache_tmp" "$CR6608_DASHBOARD_CACHE_DIR/generation"; then
+		rm -f "$_cache_tmp" 2>/dev/null
+		return 1
+	fi
+	printf '%s\n' "$_cache_token"
+}
+
+cr6608_dashboard_cache_generation() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_generation_file="$CR6608_DASHBOARD_CACHE_DIR/generation"
+	_cache_token=""
+	if [ -f "$_cache_generation_file" ] && [ ! -L "$_cache_generation_file" ]; then
+		IFS= read -r _cache_token <"$_cache_generation_file" 2>/dev/null || _cache_token=""
+	fi
+	case "$_cache_token" in
+		''|*[!A-Za-z0-9._-]*) cr6608_dashboard_cache_new_generation ;;
+		*) printf '%s\n' "$_cache_token" ;;
+	esac
+}
+
+cr6608_dashboard_cache_invalidate() {
+	_cache_invalidate_rc=0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	cr6608_dashboard_cache_new_generation >/dev/null || _cache_invalidate_rc=1
+	rm -f "$CR6608_DASHBOARD_CACHE_DIR/perf" "$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" 2>/dev/null || _cache_invalidate_rc=1
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_invalidate_rc"
+}
+
+cr6608_dashboard_cache_clear() {
+	cr6608_dashboard_cache_invalidate || return 1
+	rm -f \
+		"$CR6608_DASHBOARD_CACHE_DIR/response.json" \
+		"$CR6608_DASHBOARD_CACHE_DIR/perf" \
+		"$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" 2>/dev/null
+}
+
+# Configuration CGIs bracket every potentially mutating action.  A generation
+# is written both before and after the action, while the flock tells readers
+# that even a matching intermediate generation must be treated as stale.
+cr6608_dashboard_cache_mutation_begin() {
+	[ "$CR6608_DASHBOARD_CACHE_MUTATION_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	cr6608_dashboard_cache_meta_acquire || return 1
+	exec 7>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || {
+		exec 7>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! flock -xn 7; then
+		exec 7>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	fi
+	CR6608_DASHBOARD_CACHE_MUTATION_OWNER=1
+	_cache_dirty_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.dirty.$$.XXXXXX" 2>/dev/null)" || {
+		flock -u 7 2>/dev/null || true
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! printf '%s\n' "$$" >"$_cache_dirty_tmp" ||
+	   ! chmod 0600 "$_cache_dirty_tmp" ||
+	   ! mv -f "$_cache_dirty_tmp" "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ||
+	   ! cr6608_dashboard_cache_new_generation >/dev/null ||
+	   ! rm -f "$CR6608_DASHBOARD_CACHE_DIR/perf" "$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" 2>/dev/null; then
+		rm -f "$_cache_dirty_tmp" "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" 2>/dev/null || true
+		flock -u 7 2>/dev/null || true
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		cr6608_dashboard_cache_meta_release
+		return 1
+	fi
+	cr6608_dashboard_cache_meta_release
+	return 0
+}
+
+cr6608_dashboard_cache_mutation_finish() {
+	[ "$CR6608_DASHBOARD_CACHE_MUTATION_OWNER" = 1 ] || return 0
+	_cache_finish_rc=0
+	_cache_finish_advanced=0
+	if cr6608_dashboard_cache_meta_acquire; then
+		# A bounded child may have transferred the inherited FD7 flock to an
+		# independently opened descriptor while preserving mutation.dirty.  The
+		# caller's old FD7 then no longer owns the lock: never let its cleanup
+		# clear the child's dirty marker or publish a final generation early.
+		if ! flock -xn 7 2>/dev/null; then
+			cr6608_dashboard_cache_meta_release
+			exec 7>&-
+			CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+			return 0
+		fi
+		if cr6608_dashboard_cache_new_generation >/dev/null; then
+			_cache_finish_advanced=1
+		else
+			_cache_finish_rc=1
+		fi
+		rm -f "$CR6608_DASHBOARD_CACHE_DIR/perf" "$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" 2>/dev/null || _cache_finish_rc=1
+		if [ "$_cache_finish_advanced" = 1 ]; then
+			rm -f "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" 2>/dev/null || _cache_finish_rc=1
+		fi
+		cr6608_dashboard_cache_meta_release
+	else
+		# Do not race a lock handoff by publishing without meta.lock.  Closing
+		# this descriptor without an explicit unlock preserves a still-inherited
+		# open-file-description lock; otherwise the surviving dirty marker makes
+		# the next reader advance generation through recover_dirty().
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		return 1
+	fi
+	flock -u 7 2>/dev/null || _cache_finish_rc=1
+	exec 7>&-
+	CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+	return "$_cache_finish_rc"
+}
+
+cr6608_dashboard_cache_mutation_active() {
+	cr6608_dashboard_cache_prepare || return 0
+	# The dirty marker survives SIGKILL/power-loss between begin and finish.  It
+	# is deliberately fail-closed until a reader-side recovery advances the
+	# generation while proving that no mutation flock is still held.
+	[ ! -e "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ] &&
+		[ ! -L "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ] || return 0
+	exec 6>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || return 0
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || { exec 6>&-; return 0; }
+	if flock -sn 6; then
+		flock -u 6 2>/dev/null || true
+		exec 6>&-
+		return 1
+	fi
+	exec 6>&-
+	return 0
+}
+
+# Recover a dirty marker left by a killed mutator.  Status 2 means a live
+# mutator still owns mutation.lock; status 1 is an actual recovery failure.
+cr6608_dashboard_cache_recover_dirty() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_dirty="$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty"
+	[ ! -L "$_cache_dirty" ] || return 1
+	[ -f "$_cache_dirty" ] || return 0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	if [ ! -f "$_cache_dirty" ] || [ -L "$_cache_dirty" ]; then
+		cr6608_dashboard_cache_meta_release
+		[ ! -L "$_cache_dirty" ]
+		return $?
+	fi
+	exec 6>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || {
+		exec 6>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! flock -xn 6; then
+		exec 6>&-
+		cr6608_dashboard_cache_meta_release
+		return 2
+	fi
+	_cache_recover_rc=0
+	if cr6608_dashboard_cache_new_generation >/dev/null; then
+		rm -f "$CR6608_DASHBOARD_CACHE_DIR/perf" \
+			"$CR6608_DASHBOARD_CACHE_DIR/lite.cpu" "$_cache_dirty" 2>/dev/null || _cache_recover_rc=1
+	else
+		rm -f "$CR6608_DASHBOARD_CACHE_DIR/generation" \
+			"$CR6608_DASHBOARD_CACHE_DIR/response.json" 2>/dev/null || true
+		_cache_recover_rc=1
+	fi
+	flock -u 6 2>/dev/null || _cache_recover_rc=1
+	exec 6>&-
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_recover_rc"
+}
+
+# The kernel owns collector exclusion and releases it automatically on crash;
+# there is no mkdir/owner-file window and no stale PID recovery heuristic.
+cr6608_dashboard_cache_collector_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	exec 8>>"$CR6608_DASHBOARD_CACHE_DIR/collector.lock" || return 1
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/collector.lock" 2>/dev/null || { exec 8>&-; return 1; }
+	if ! flock -xn 8; then
+		exec 8>&-
+		return 1
+	fi
+	CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=1
+	return 0
+}
+
+cr6608_dashboard_cache_collector_release() {
+	[ "$CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER" = 1 ] || return 0
+	flock -u 8 2>/dev/null || true
+	exec 8>&-
+	CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+}
+
+# Copy the atomically published inode into a request-private regular file.  The
+# caller validates and serves this copy, so a concurrent rename cannot mix
+# metadata from one snapshot with JSON from another.
+cr6608_dashboard_cache_snapshot() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_response="$CR6608_DASHBOARD_CACHE_DIR/response.json"
+	[ -f "$_cache_response" ] && [ ! -L "$_cache_response" ] || return 1
+	_cache_view="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.view.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! cp -f "$_cache_response" "$_cache_view" 2>/dev/null || ! chmod 0600 "$_cache_view"; then
+		rm -f "$_cache_view" 2>/dev/null
+		return 1
+	fi
+	printf '%s\n' "$_cache_view"
+}
+
+# Set CR6608_DASHBOARD_SNAPSHOT_{VALID,COMPLETED,GENERATION}.  jsonfilter must
+# parse the whole document successfully; a prefix such as {"ok":true is not
+# sufficient and a truncated candidate is never served.
+cr6608_dashboard_cache_inspect() {
+	_cache_json="$1"
+	CR6608_DASHBOARD_SNAPSHOT_VALID=0
+	CR6608_DASHBOARD_SNAPSHOT_COMPLETED=0
+	CR6608_DASHBOARD_SNAPSHOT_GENERATION=""
+	[ -f "$_cache_json" ] && [ ! -L "$_cache_json" ] || return 1
+	_cache_ok="$("$CR6608_DASHBOARD_JSONFILTER_BIN" -i "$_cache_json" -e '@.ok' 2>/dev/null)" || return 1
+	_cache_completed="$("$CR6608_DASHBOARD_JSONFILTER_BIN" -i "$_cache_json" -e '@.snapshot_completed_s' 2>/dev/null)" || return 1
+	_cache_generation="$("$CR6608_DASHBOARD_JSONFILTER_BIN" -i "$_cache_json" -e '@.snapshot_generation' 2>/dev/null)" || return 1
+	[ "$_cache_ok" = true ] || return 1
+	case "$_cache_completed" in ''|*[!0-9]*) return 1 ;; esac
+	case "$_cache_generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+	CR6608_DASHBOARD_SNAPSHOT_VALID=1
+	CR6608_DASHBOARD_SNAPSHOT_COMPLETED="$_cache_completed"
+	CR6608_DASHBOARD_SNAPSHOT_GENERATION="$_cache_generation"
+	return 0
+}
+
+# Publish only a complete JSON candidate collected outside a mutation.  The
+# generation and mutation state are checked again immediately before rename.
+# A concurrent invalidation is never cleared; it simply makes this candidate
+# ineligible or makes the published generation stale for the next reader.
+cr6608_dashboard_cache_publish() {
+	_cache_raw="$1"; _cache_captured="$2"
+	case "$_cache_captured" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+	cr6608_dashboard_cache_prepare || return 1
+	[ -f "$_cache_raw" ] && [ ! -L "$_cache_raw" ] || return 1
+	_cache_current="$(cr6608_dashboard_cache_generation)" || return 1
+	[ "$_cache_current" = "$_cache_captured" ] || return 2
+	cr6608_dashboard_cache_mutation_active && return 2
+	_cache_publish="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.publish.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! sed '1s/^{/{"snapshot_completed_s":0,"snapshot_generation":"'"$_cache_captured"'",/' \
+		"$_cache_raw" >"$_cache_publish" || ! chmod 0600 "$_cache_publish"; then
+		rm -f "$_cache_publish" 2>/dev/null
+		return 1
+	fi
+	cr6608_dashboard_cache_inspect "$_cache_publish" || {
+		rm -f "$_cache_publish" 2>/dev/null
+		return 1
+	}
+	# Serialize the final generation check and rename against mutation begin/
+	# finish.  Validation above may be slow; it deliberately happens before the
+	# metadata lock and before the publish timestamp is sampled.
+	cr6608_dashboard_cache_meta_acquire || {
+		rm -f "$_cache_publish" 2>/dev/null
+		return 1
+	}
+	_cache_current="$(cr6608_dashboard_cache_generation)" || {
+		cr6608_dashboard_cache_meta_release
+		rm -f "$_cache_publish" 2>/dev/null
+		return 1
+	}
+	if [ "$_cache_current" != "$_cache_captured" ] || cr6608_dashboard_cache_mutation_active; then
+		cr6608_dashboard_cache_meta_release
+		rm -f "$_cache_publish" 2>/dev/null
+		return 2
+	fi
+	_cache_completed="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$_cache_completed" in ''|*[!0-9]*) _cache_completed=0 ;; esac
+	_cache_final="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.publish-final.$$.XXXXXX" 2>/dev/null)" || {
+		cr6608_dashboard_cache_meta_release
+		rm -f "$_cache_publish" 2>/dev/null
+		return 1
+	}
+	if ! sed '1s/"snapshot_completed_s":0/"snapshot_completed_s":'"$_cache_completed"'/' \
+		"$_cache_publish" >"$_cache_final" || ! chmod 0600 "$_cache_final" ||
+	   ! mv -f "$_cache_final" "$CR6608_DASHBOARD_CACHE_DIR/response.json"; then
+		rm -f "$_cache_publish" "$_cache_final" 2>/dev/null
+		cr6608_dashboard_cache_meta_release
+		return 1
+	fi
+	rm -f "$_cache_publish" 2>/dev/null
+	cr6608_dashboard_cache_meta_release
+	return 0
+}

@@ -1,0 +1,15 @@
+From: Smart AP firmware project
+Subject: [PATCH] nl80211: treat hostapd multi_ap zero as fronthaul-only
+
+hostapd reports multi_ap=0 for an untagged access point. This is a valid
+existing AP and is equivalent to fronthaul-only for discovery purposes.
+
+--- a/common/beerocks/bwl/nl80211/base_wlan_hal_nl80211.cpp
++++ b/common/beerocks/bwl/nl80211/base_wlan_hal_nl80211.cpp
+@@ -843,6 +843,7 @@ bool base_wlan_hal_nl80211::refresh_vaps_info(int id)
+             vap_element.backhaul  = true;
+             break;
++        case 0:
+         case beerocks::eBssType::BSS_TYPE_FRONTHAUL:
+             vap_element.fronthaul = true;
+             vap_element.backhaul  = false;

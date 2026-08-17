@@ -1,0 +1,74 @@
+{
+  "assets": {
+    "files/www/luci-static/argon/favicon.ico": {
+      "sha256": "a5448d8a7de57e5e9bb5b2a1800498c9e5ea9dc94be999b389e3f481746f16ed",
+      "size": 30105
+    },
+    "files/www/luci-static/argon/icon/android-icon-192x192.png": {
+      "sha256": "55f8bcbdc0f08d5e2ae2a405f9b9dcf7d0a51da432cc189cd7f6f5105416cbc0",
+      "size": 9961
+    },
+    "files/www/luci-static/argon/icon/android-icon-512x512.png": {
+      "sha256": "49f48b573dd8ee54617080366417c1af9b4b47c4345dedf43808fcb6f763297b",
+      "size": 23186
+    },
+    "files/www/luci-static/argon/icon/apple-icon-144x144.png": {
+      "sha256": "821fa987c6d2609e0c89b3da6b8fc17fbb6cf6866fefb321b80f3f4fd467511c",
+      "size": 7732
+    },
+    "files/www/luci-static/argon/icon/apple-icon-180x180.png": {
+      "sha256": "365c822baacc022ee86ba847836e1789121720ed86d8ce24e28ee591da33308b",
+      "size": 9717
+    },
+    "files/www/luci-static/argon/icon/apple-icon-60x60.png": {
+      "sha256": "cc559ef800dc12dcc658fce3df4f35d0388810be4406dac6cb2c7d642db29b80",
+      "size": 3703
+    },
+    "files/www/luci-static/argon/icon/apple-icon-72x72.png": {
+      "sha256": "8c1c6ddfd678b37116808c7930f663edb577ce33d8ddb6c26a882a6b29eea98b",
+      "size": 4290
+    },
+    "files/www/luci-static/argon/icon/browserconfig.xml": {
+      "sha256": "767bb08842ba2d19e8f6b93e516acb7fe157e3fe228d0bb1dcd38cef15f231c4",
+      "size": 438
+    },
+    "files/www/luci-static/argon/icon/favicon-16x16.png": {
+      "sha256": "204a3346178db64ef5658f1a42eb7ddb447512d04068d81ed10799c55e9b7d23",
+      "size": 841
+    },
+    "files/www/luci-static/argon/icon/favicon-32x32.png": {
+      "sha256": "95de2058df9cfcaa8e7c503ba2d660801b8770f1c319a7527e2349a92cfb2a36",
+      "size": 1881
+    },
+    "files/www/luci-static/argon/icon/favicon-96x96.png": {
+      "sha256": "a55ca2e5c8f4fa5fb757cd501d6a6c8eee2ee61032119691c17b44f2f22e9cfe",
+      "size": 5538
+    },
+    "files/www/luci-static/argon/icon/manifest.json": {
+      "sha256": "5da54d935acc5e35e4e558dab351881e048ed408e1e842b7422e7a21279ab878",
+      "size": 583
+    },
+    "files/www/luci-static/argon/icon/ms-icon-144x144.png": {
+      "sha256": "821fa987c6d2609e0c89b3da6b8fc17fbb6cf6866fefb321b80f3f4fd467511c",
+      "size": 7732
+    },
+    "files/www/luci-static/argon/icon/ms-icon-150x150.png": {
+      "sha256": "6f386afd0221418e8c64e8ea45ab70235168f3aa1835dab3eea0b6ee6567066d",
+      "size": 8327
+    },
+    "files/www/luci-static/argon/icon/ms-icon-310x310.png": {
+      "sha256": "493b5f02b4baed81ae9d66c77f1f1e376b06285b05988d1e322f4c6a07b17403",
+      "size": 15438
+    },
+    "files/www/luci-static/argon/icon/ms-icon-70x70.png": {
+      "sha256": "1636441cda3929a0012f186f083f879db9a32dace8c160fdf1dadfc286cc563d",
+      "size": 4304
+    },
+    "files/www/luci-static/argon/icon/smart-ap.svg": {
+      "sha256": "50cd2392607c692805657c54ad65ae0a32484c77da5f1b0b2221ee3fb0ccd7a1",
+      "size": 900
+    }
+  },
+  "generator_sha256": "dbd07728281310b11885e9491600ec1cee0e1b20c18db9aafdad311c4e7896bc",
+  "schema": "smart-ap-brand-assets-v1"
+}

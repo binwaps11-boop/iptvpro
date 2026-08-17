@@ -1,0 +1,17 @@
+From: Smart AP firmware project
+Subject: [PATCH] bwl: include cstdint for int64_t
+
+GCC 14 no longer exposes int64_t here through unrelated transitive
+includes. Include the C++ standard header that declares it.
+
+--- a/common/beerocks/bwl/include/bwl/key_value_parser.h
++++ b/common/beerocks/bwl/include/bwl/key_value_parser.h
+@@ -8,6 +8,7 @@
+ #ifndef _BWL_KEY_VALUE_PARSER_H_
+ #define _BWL_KEY_VALUE_PARSER_H_
+ 
++#include <cstdint>
+ #include <list>
+ #include <string>
+ #include <unordered_map>
+

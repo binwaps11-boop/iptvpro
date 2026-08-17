@@ -1,0 +1,150 @@
+diff --git a/net/mac80211/main.c b/net/mac80211/main.c
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/fips.h>
+ #include <linux/init.h>
++#include <linux/of.h>
+ #include <linux/netdevice.h>
+ #include <linux/types.h>
+ #include <linux/slab.h>
+@@ -101,7 +102,7 @@
+ 	struct cfg80211_chan_def *oper = NULL;
+ 	enum ieee80211_smps_mode smps_mode = IEEE80211_SMPS_STATIC;
+ 	u32 changed = 0;
+-	int power;
++	int power, chandef_power, vif_power = INT_MAX;
+ 	u32 offchannel_flag;
+ 
+ 	if (!local->emulate_chanctx)
+@@ -166,7 +167,8 @@
+ 		changed |= IEEE80211_CONF_CHANGE_SMPS;
+ 	}
+ 
+-	power = ieee80211_chandef_max_power(&chandef);
++	chandef_power = ieee80211_chandef_max_power(&chandef);
++	power = chandef_power;
+ 	if (local->user_power_level != IEEE80211_UNSET_POWER_LEVEL)
+ 		power = min(local->user_power_level, power);
+ 
+@@ -178,14 +180,27 @@
+ 			continue;
+ 		if (sdata->vif.bss_conf.txpower == INT_MIN)
+ 			continue;
++		vif_power = min(vif_power, sdata->vif.bss_conf.txpower);
+ 		power = min(power, sdata->vif.bss_conf.txpower);
+ 	}
+ 	rcu_read_unlock();
+ 
++	if (chandef.chan && local->user_power_level >= 38 &&
++	    of_machine_is_compatible("xiaomi,mi-router-cr6608"))
++		pr_info_ratelimited("CR6608-TXTRACE stage=mac80211 wiphy=%s band=%u channel=%u freq=%u width=%u user_dbm=%d chandef_dbm=%d vif_dbm=%d result_dbm=%d\n",
++				    wiphy_name(local->hw.wiphy),
++				    chandef.chan->band, chandef.chan->hw_value,
++				    chandef.chan->center_freq, chandef.width,
++				    local->user_power_level, chandef_power,
++				    vif_power == INT_MAX ? -127 : vif_power,
++				    power);
++
+ 	if (local->hw.conf.power_level != power) {
+ 		changed |= IEEE80211_CONF_CHANGE_POWER;
+ 		local->hw.conf.power_level = power;
+ 	}
++	if (!++local->txpower_state_generation)
++		local->txpower_state_generation++;
+ 
+ 	return changed;
+ }
+diff --git a/net/mac80211/debugfs.c b/net/mac80211/debugfs.c
+--- a/net/mac80211/debugfs.c
++++ b/net/mac80211/debugfs.c
+@@ -8,6 +8,8 @@
+  */
+ 
+ #include <linux/debugfs.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/vmalloc.h>
+ #include "ieee80211_i.h"
+@@ -72,6 +74,60 @@
+ DEBUGFS_READONLY_FILE(rate_ctrl_alg, "%s",
+ 	local->rate_ctrl ? local->rate_ctrl->ops->name : "hw/driver");
+ 
++static ssize_t txpower_state_read(struct file *file, char __user *userbuf,
++				  size_t count, loff_t *ppos)
++{
++	struct ieee80211_local *local = file->private_data;
++	struct ieee80211_sub_if_data *sdata;
++	struct cfg80211_chan_def chandef;
++	u64 snapshot_uptime_ms;
++	char buf[320];
++	int band = -1, channel = -1, freq = -1, width = -1;
++	int chandef_power = -127, vif_power = INT_MAX;
++	int len;
++
++	wiphy_lock(local->hw.wiphy);
++	chandef = local->hw.conf.chandef;
++	snapshot_uptime_ms = div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC);
++	if (chandef.chan && cfg80211_chandef_valid(&chandef)) {
++		band = chandef.chan->band;
++		channel = chandef.chan->hw_value;
++		freq = chandef.chan->center_freq;
++		width = chandef.width;
++		chandef_power = ieee80211_chandef_max_power(&chandef);
++	}
++
++	rcu_read_lock();
++	list_for_each_entry_rcu(sdata, &local->interfaces, list) {
++		if (!rcu_access_pointer(sdata->vif.bss_conf.chanctx_conf))
++			continue;
++		if (sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
++			continue;
++		if (sdata->vif.bss_conf.txpower == INT_MIN)
++			continue;
++		vif_power = min(vif_power, sdata->vif.bss_conf.txpower);
++	}
++	rcu_read_unlock();
++
++	len = scnprintf(buf, sizeof(buf),
++			"snapshot_seq=%u snapshot_uptime_ms=%llu valid=%u wiphy=%s band=%d channel=%d freq=%d width=%d user_dbm=%d chandef_dbm=%d vif_dbm=%d result_dbm=%d\n",
++			local->txpower_state_generation, snapshot_uptime_ms,
++			chandef.chan && cfg80211_chandef_valid(&chandef),
++			wiphy_name(local->hw.wiphy), band, channel, freq, width,
++			local->user_power_level, chandef_power,
++			vif_power == INT_MAX ? -127 : vif_power,
++			local->hw.conf.power_level);
++	wiphy_unlock(local->hw.wiphy);
++
++	return simple_read_from_buffer(userbuf, count, ppos, buf, len);
++}
++
++static const struct file_operations txpower_state_ops = {
++	.read = txpower_state_read,
++	.open = simple_open,
++	.llseek = generic_file_llseek,
++};
++
+ static ssize_t aqm_read(struct file *file,
+ 			char __user *user_buf,
+ 			size_t count,
+@@ -705,6 +761,7 @@
+ 	DEBUGFS_ADD_MODE(hwflags, 0600);
+ 	DEBUGFS_ADD(user_power);
+ 	DEBUGFS_ADD(power);
++	DEBUGFS_ADD(txpower_state);
+ 	DEBUGFS_ADD(hw_conf);
+ 	DEBUGFS_ADD_MODE(force_tx_status, 0600);
+ 	DEBUGFS_ADD_MODE(aql_enable, 0600);
+diff --git a/net/mac80211/ieee80211_i.h b/net/mac80211/ieee80211_i.h
+--- a/net/mac80211/ieee80211_i.h
++++ b/net/mac80211/ieee80211_i.h
+@@ -1654,6 +1654,7 @@
+ 	int dynamic_ps_forced_timeout;
+ 
+ 	int user_power_level; /* in dBm, for all interfaces */
++	u32 txpower_state_generation;
+ 
+ 	struct work_struct restart_work;
+ 

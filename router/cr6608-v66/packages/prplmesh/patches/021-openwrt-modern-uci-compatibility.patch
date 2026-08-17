@@ -1,0 +1,73 @@
+From: Smart AP firmware project
+Subject: [PATCH] bpl: support modern OpenWrt band and wired backhaul config
+
+OpenWrt's mac80211 configuration uses the band option instead of the legacy
+hwmode value.  Also accept an empty key for an open fronthaul and keep an
+absent STA interface non-fatal when Ethernet is the wired backhaul.
+
+--- a/framework/platform/bpl/cfg/uci/bpl_cfg.cpp
++++ b/framework/platform/bpl/cfg/uci/bpl_cfg.cpp
+@@ -522,6 +522,10 @@ int cfg_get_beerocks_credentials(const int radio_dir, char ssid[BPL_SSID_LEN],
+ 
+     retVal |= cfg_get_prplmesh_param("ssid", ssid, BPL_SSID_LEN);
+     retVal |= cfg_get_prplmesh_param("mode_enabled", sec, BPL_SEC_LEN);
++    if (!strcmp(sec, "None")) {
++        pass[0] = '\0';
++        return retVal;
++    }
+     if (!strcmp(sec, "WEP-64") || !strcmp(sec, "WEP-128")) {
+         retVal |= cfg_get_prplmesh_param("wep_key", pass, BPL_PASS_LEN);
+     } else {
+--- a/framework/platform/bpl/cfg/uci/bpl_cfg_wifi.cpp
++++ b/framework/platform/bpl/cfg/uci/bpl_cfg_wifi.cpp
+@@ -246,10 +246,19 @@ bool bpl_cfg_get_wireless_settings(std::list<son::wireless_utils::sBssInfoConf>
+         // Operating classes are not specified in UCI configuration, but we can guess based on
+         // the mode used by hostapd that was set for the radio.
+         // To get the mode, first get the device and then the mode inside the section for that
+-        // device.
++        // device. Modern OpenWrt uses the explicit band option, while older targets used
++        // hwmode. The modern option is checked first so HE radios are not rejected.
+         std::string device;
+         if (!uci_get_option(package_name, section_type, section_name, "device", device)) {
+             LOG(DEBUG) << "Failed to get 'device' from section " << section_name;
+             continue;
+         }
++        std::string band;
++        std::string hwmode;
++        uci_get_option(package_name, "wifi-device", device, "band", band);
++        if (band == "2g") {
++            configuration.operating_class.splice(configuration.operating_class.end(), son::wireless_utils::string_to_wsc_oper_class("24g"));
++        } else if (band == "5g") {
++            configuration.operating_class.splice(configuration.operating_class.end(), son::wireless_utils::string_to_wsc_oper_class("5g"));
++        } else {
+ 
+@@ -258,3 +267,2 @@ bool bpl_cfg_get_wireless_settings(std::list<son::wireless_utils::sBssInfoConf>
+         // Option "hwmode" in device section selects the wireless protocol to use, possible values
+         // are 11b, 11g, and 11a.
+-        std::string hwmode;
+@@ -285,6 +293,7 @@ bool bpl_cfg_get_wireless_settings(std::list<son::wireless_utils::sBssInfoConf>
+                        << " from hwmode " << hwmode;
+             continue;
+         }
++        }
+ 
+         // Multi - AP
+         std::string management_mode;
+@@ -332,6 +341,6 @@ bool bpl_cfg_get_wireless_settings(std::list<son::wireless_utils::sBssInfoConf>
+         wireless_settings.push_back(configuration);
+ 
+         LOG(DEBUG) << "Configuration added for SSID " << configuration.ssid
+-                   << " (hwmode = " << hwmode << ")";
++                   << " (band = " << (band.empty() ? hwmode : band) << ")";
+     }
+ 
+@@ -466,8 +474,8 @@ int cfg_get_sta_iface(const char iface[BPL_IFNAME_LEN], char sta_iface[BPL_IFNAM
+     std::string option_value;
+     if (!uci_get_option(package_name, section_type, section_name, "sta_iface", option_value)) {
+-        LOG(ERROR) << "Failed to get STA interface for Host AP interface " << iface;
+-        return RETURN_ERR;
++        sta_iface[0] = '\0';
++        return RETURN_OK;
+     }
+ 
+     mapf::utils::copy_string(sta_iface, option_value.c_str(), BPL_IFNAME_LEN);

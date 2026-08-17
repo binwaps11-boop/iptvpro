@@ -1,0 +1,43 @@
+#!/bin/sh
+# Heal a corrupt /etc/config/smartap on first boot. Some earlier builds shipped a JSON
+# config-export snapshot at this path; libuci cannot parse it, so every `uci smartap.*`
+# read/write fails and Quick Settings / Security / port-isolation / auto-channel / per-client
+# QoS silently stop persisting. Runs (numeric 93) BEFORE the security service (98) so the
+# apply tool sees a valid file. If the live file is unreadable, restore the pristine rootfs
+# copy (/rom); otherwise start clean.
+if ! uci -q show smartap >/dev/null 2>&1; then
+	if [ -f /rom/etc/config/smartap ] && head -c1 /rom/etc/config/smartap 2>/dev/null | grep -q '[a-z]'; then
+		cp /rom/etc/config/smartap /etc/config/smartap
+	else
+		: > /etc/config/smartap
+	fi
+	logger -t cr6608 "healed unreadable /etc/config/smartap at boot" 2>/dev/null || true
+fi
+
+wireless_changed=0
+
+seed_wireless_option() {
+	local section="$1" option="$2" value="$3"
+
+	uci -q get "wireless.${section}" >/dev/null 2>&1 || return 0
+	uci -q get "wireless.${section}.${option}" >/dev/null 2>&1 && return 0
+	uci set "wireless.${section}.${option}=${value}" || return 1
+	wireless_changed=1
+}
+
+for radio in radio0 radio1; do
+	if [ "$(uci -q get "wireless.${radio}.distance" 2>/dev/null)" = "auto" ]; then
+		uci -q delete "wireless.${radio}.distance" || exit 1
+		wireless_changed=1
+	fi
+	seed_wireless_option "$radio" ldpc 1 || exit 1
+	seed_wireless_option "$radio" legacy_rates 0 || exit 1
+done
+
+for iface in wifinet0 wifinet1; do
+	seed_wireless_option "$iface" wmm 1 || exit 1
+	seed_wireless_option "$iface" isolate 0 || exit 1
+done
+
+[ "$wireless_changed" -eq 0 ] || uci commit wireless || exit 1
+exit 0

@@ -1,0 +1,18 @@
+#!/bin/sh
+
+[ -x /etc/init.d/cr6608-safe-apply ] || exit 1
+
+# Existing installations preserve /etc/config/uhttpd across sysupgrade. Raise
+# only shorter/invalid values; never reduce an operator-selected larger limit.
+script_timeout="$(uci -q get uhttpd.main.script_timeout 2>/dev/null)"
+case "$script_timeout" in
+	''|*[!0-9]*) script_timeout=0 ;;
+esac
+if [ "$script_timeout" -lt 750 ] 2>/dev/null; then
+	uci set uhttpd.main.script_timeout='750' || exit 1
+	uci commit uhttpd || exit 1
+fi
+
+/etc/init.d/cr6608-safe-apply enable || exit 1
+/etc/init.d/cr6608-safe-apply start || exit 1
+exit 0

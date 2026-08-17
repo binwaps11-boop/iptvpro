@@ -1,0 +1,428 @@
+#!/bin/sh
+# cr6608-security-apply — applies Smart AP security, port and VLAN policy from /etc/config/smartap.
+# Design goals:
+#   * Everything is optional (master switch security.enabled) and fully removable.
+#   * Protections: web flood guard, rogue-DHCP / IP-leak guard (never hand IPs to the
+#     upstream Mikrotik or leak them to other ports), loop guard (STP).
+#   * Per-port enable/disable, isolation and plain/access/trunk VLAN policy.
+#   * Plain and trunk ports keep the management network untagged; access ports carry only
+#     their selected client VLAN. The Wi-Fi recovery interface remains available separately.
+# Usage: cr6608-security-apply {apply|firewall|ports|vlan|get}
+
+# This helper is often launched by a dashboard process that owns cache/apply
+# descriptors.  Never let a long network or nft operation inherit those locks.
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+STATE="smartap"
+PORTS="lan1 lan2 lan3"
+MGMT_DEFAULT_VLAN="1"
+NETWORK_POLICY_CHANGED=0
+CACHE_AFFECTS_STATE=1
+[ "${1:-}" = get ] && CACHE_AFFECTS_STATE=0
+
+log() { logger -t cr6608-security "$*"; }
+g()   { uci -q get "$1" 2>/dev/null; }
+invalidate_dashboard() {
+	[ "$CACHE_AFFECTS_STATE" = 1 ] || return 0
+	[ -x /usr/sbin/cr6608-dashboard-invalidate ] || return 0
+	(CR6608_DASHBOARD_INVALIDATE_ATTEMPTS=2 \
+		/usr/sbin/cr6608-dashboard-invalidate </dev/null >/dev/null 2>&1) &
+}
+bridge_config_ref() {
+	uci -q show network 2>/dev/null | sed -n "s/^\(network\.[^.=]*\)\.name='br-lan'$/\1/p" | head -n 1
+}
+runtime_ap_ifaces() {
+	local iface type found=""
+	for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+		type="$(iw dev "$iface" info 2>/dev/null | awk '$1 == "type" { print $2; exit }')"
+		[ "$type" = "AP" ] && found="$found $iface"
+	done
+	[ -n "$found" ] && printf '%s\n' "$found" || printf '%s\n' 'phy0-ap0 phy1-ap0'
+}
+
+configured_ap_sections() {
+	local radio="$1" section network
+
+	for section in $(uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+		[ "$(g "wireless.${section}.device")" = "$radio" ] || continue
+		[ "$(g "wireless.${section}.mode")" = "ap" ] || continue
+		case "$section" in *rescue*|*recovery*) continue ;; esac
+		network="$(g "wireless.${section}.network")"
+		case " $network " in *" recovery "*) continue ;; esac
+		printf '%s\n' "$section"
+	done
+}
+
+wifi_isolation_snapshot() {
+	local radio section
+
+	for radio in radio0 radio1; do
+		for section in $(configured_ap_sections "$radio"); do
+			printf '%s=%s\n' "$section" "$(g "wireless.${section}.isolate")"
+		done
+	done
+}
+
+# Prevent hotplug, boot and dashboard applies from racing over UCI/nft/bridge state.
+LOCK="/var/run/cr6608-security.lock"
+lock_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+lock_owner=0
+release_lock() {
+	[ "$lock_owner" = "1" ] || return 0
+	read owner_pid owner_start < "$LOCK/owner" 2>/dev/null
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "$(lock_start "$$")" ] || return 0
+	rm -f "$LOCK/owner" 2>/dev/null
+	rmdir "$LOCK" 2>/dev/null
+}
+security_cleanup() {
+	invalidate_dashboard
+	release_lock
+}
+security_signal_exit() {
+	security_signal_rc="$1"
+	trap - EXIT HUP INT TERM
+	security_cleanup
+	exit "$security_signal_rc"
+}
+acquire_lock() {
+	local wait_left=300 orphan_ticks=0 owner_pid owner_start live_start self_start
+	self_start="$(lock_start "$$")"
+	[ -n "$self_start" ] || return 1
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		read owner_pid owner_start < "$LOCK/owner" 2>/dev/null
+		live_start="$(lock_start "$owner_pid")"
+		if [ -n "$owner_pid" ] && [ -n "$live_start" ] && [ "$live_start" = "$owner_start" ]; then
+			orphan_ticks=0
+		else
+			orphan_ticks=$((orphan_ticks + 1))
+			if [ "$orphan_ticks" -ge 10 ]; then
+				rm -f "$LOCK/owner" 2>/dev/null
+				rmdir "$LOCK" 2>/dev/null
+				orphan_ticks=0
+				continue
+			fi
+		fi
+		[ "$wait_left" -gt 0 ] || { log "timed out waiting for apply lock"; return 1; }
+		wait_left=$((wait_left - 1))
+		if ! sleep 0.1 2>/dev/null; then
+			if [ -x /usr/bin/ucode ]; then
+				/usr/bin/ucode -e 'sleep(100)' >/dev/null 2>&1 || sleep 1
+			else
+				sleep 1
+			fi
+		fi
+	done
+	if ! printf '%s %s\n' "$$" "$self_start" > "$LOCK/owner"; then
+		rm -f "$LOCK/owner" 2>/dev/null
+		rmdir "$LOCK" 2>/dev/null
+		return 1
+	fi
+	lock_owner=1
+	trap security_cleanup EXIT
+	trap 'security_signal_exit 129' HUP
+	trap 'security_signal_exit 130' INT
+	trap 'security_signal_exit 143' TERM
+	return 0
+}
+
+acquire_lock || { log "could not acquire apply lock"; exit 1; }
+invalidate_dashboard
+
+# ------------------------------------------------------------------ firewall
+# All Smart AP firewall rules carry a name prefixed with "SmartAP-" so we can
+# add/remove them idempotently without touching the user's own rules.
+clear_smartap_fw() {
+	# uci indexes shift on delete, so resolve by name repeatedly
+	uci -q show firewall >/dev/null 2>&1 || return 1
+	while uci show firewall 2>/dev/null | grep -q "\.name='SmartAP-"; do
+		local idx
+		idx="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@rule\[[0-9]*\]\)\.name='SmartAP-.*/\1/p" | head -n1)"
+		[ -n "$idx" ] || return 1
+		uci -q delete "firewall.$idx" || return 1
+	done
+	return 0
+}
+
+add_fw_rule() {
+	# add_fw_rule <name> <opts...>  — opts are uci key=val pairs
+	local s
+	s="$(uci add firewall rule)" || return 1
+	[ -n "$s" ] || return 1
+	uci set "firewall.$s.name=$1" || return 1
+	shift
+	for kv in "$@"; do uci set "firewall.$s.${kv%%=*}=${kv#*=}" || return 1; done
+	return 0
+}
+
+apply_firewall() {
+	local enabled flood rogue
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	flood="$(g $STATE.security.flood_guard)"; flood="${flood:-1}"
+	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+
+	clear_smartap_fw || return 1
+
+	if [ "$enabled" = "1" ]; then
+		if [ "$flood" = "1" ]; then
+			# Rate-limit dashboard/web hits from the LAN, then drop the flood overflow.
+			add_fw_rule "SmartAP-Web-RateLimit" src=lan proto=tcp dest_port="80 443" \
+				limit="1200/minute" limit_burst=240 target=ACCEPT || return 1
+			add_fw_rule "SmartAP-Web-FloodDrop" src=lan proto=tcp dest_port="80 443" target=DROP || return 1
+		fi
+		if [ "$rogue" = "1" ]; then
+			# Defensive L3 drop: nothing on the LAN may act as a DHCP server toward the
+			# router / upstream. Core guarantee is DHCP-server-off + isolation + STP.
+			add_fw_rule "SmartAP-RogueDHCP-In" src=lan proto=udp src_port=67 dest_port=68 target=DROP || return 1
+			add_fw_rule "SmartAP-RogueDHCP-Boot" src=lan proto=udp src_port=68 dest_port=67 family=ipv4 target=ACCEPT || return 1
+		fi
+	fi
+	uci commit firewall || return 1
+	if [ "$enabled" = "1" ]; then
+		/etc/init.d/firewall enable >/dev/null 2>&1 || return 1
+		/etc/init.d/firewall start >/dev/null 2>&1 || return 1
+		/etc/init.d/firewall reload >/dev/null 2>&1 || return 1
+	elif /etc/init.d/firewall enabled >/dev/null 2>&1; then
+		/etc/init.d/firewall reload >/dev/null 2>&1 || return 1
+	fi
+	return 0
+}
+
+apply_bridge_guard() {
+	local enabled rogue tmp check p iso pm pv protect rules=0 rc=0
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+	if [ "$enabled" != "1" ] || [ "$rogue" != "1" ] || [ ! -x /usr/sbin/nft ]; then
+		nft delete table bridge smartap_guard >/dev/null 2>&1 || true
+		return 0
+	fi
+	tmp="/tmp/cr6608-smartap-guard.$$.nft"
+	check="/tmp/cr6608-smartap-guard-check.$$.nft"
+	{
+		echo 'table bridge smartap_guard {'
+		echo ' chain forward {'
+		echo '  type filter hook forward priority -5; policy accept;'
+		for p in $(runtime_ap_ifaces); do
+			echo "  iifname \"$p\" ether type ip ip protocol udp udp sport 67 udp dport 68 counter drop comment \"SmartAP block client DHCP $p\""
+			rules=$((rules + 1))
+		done
+		for p in $PORTS; do
+			iso="$(g $STATE.$p.isolate)"
+			pm="$(g $STATE.$p.vlan_mode)"; pv="$(g $STATE.$p.vlan)"; protect=0
+			[ "$iso" = "1" ] && protect=1
+			[ "$pm" = "access" ] && [ "${pv:-1}" -ge 2 ] 2>/dev/null && protect=1
+			[ "$protect" = "1" ] || continue
+			echo "  iifname \"$p\" ether type ip ip protocol udp udp sport 67 udp dport 68 counter drop comment \"SmartAP block isolated DHCP $p\""
+			rules=$((rules + 1))
+		done
+		echo ' }'
+		echo '}'
+	} > "$tmp" || { rm -f "$tmp" "$check"; return 1; }
+	# Validate under a unique table name. Validating the live name fails once the
+	# table already exists and would leave stale isolation rules in place.
+	sed "s/table bridge smartap_guard/table bridge smartap_guard_check_$$/" "$tmp" > "$check" || { rm -f "$tmp" "$check"; return 1; }
+	if nft -c -f "$check" >/dev/null 2>&1; then
+		nft delete table bridge smartap_guard >/dev/null 2>&1 || true
+		if nft -f "$tmp" >/dev/null 2>&1; then
+			log "bridge DHCP guard installed rules=$rules"
+		else
+			log "bridge DHCP guard install failed"
+			rc=1
+		fi
+	else
+		log "bridge DHCP guard validation failed; previous table kept"
+		rc=1
+	fi
+	rm -f "$tmp" "$check" || rc=1
+	return "$rc"
+}
+
+clear_runtime() {
+	local p rc=0
+	if [ -x /usr/sbin/nft ] && nft list table bridge smartap_guard >/dev/null 2>&1; then
+		nft delete table bridge smartap_guard >/dev/null 2>&1 || {
+			nft list table bridge smartap_guard >/dev/null 2>&1 && rc=1
+		}
+		nft list table bridge smartap_guard >/dev/null 2>&1 && rc=1
+	fi
+	for p in $PORTS; do
+		[ -d "/sys/class/net/$p" ] || continue
+		ip link set dev "$p" up >/dev/null 2>&1 || rc=1
+		bridge link set dev "$p" isolated off >/dev/null 2>&1 || rc=1
+	done
+	log "security runtime cleared"
+	return "$rc"
+}
+
+apply_dhcp_guard() {
+	local enabled rogue
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	rogue="$(g $STATE.security.rogue_dhcp_guard)"; rogue="${rogue:-1}"
+	# DHCP is controlled ONLY by the Quick Settings save (Access-Point modes ship/leave it off;
+	# choosing + saving PPPoE client turns it on). This boot-time guard intentionally does NOT
+	# touch DHCP, so it can neither delete the PPPoE pool nor add one on its own.
+	:
+}
+
+apply_loop_guard() {
+	local enabled loop bridge before after
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	loop="$(g $STATE.security.loop_guard)"; loop="${loop:-0}"
+	local want=0
+	[ "$enabled" = "1" ] && [ "$loop" = "1" ] && want=1
+	bridge="$(bridge_config_ref)"; [ -n "$bridge" ] || return 1
+	before="$(uci -q get "$bridge.stp" 2>/dev/null)/$(uci -q get "$bridge.forward_delay" 2>/dev/null)"
+	uci set "$bridge.stp=$want" 2>/dev/null || return 1
+	if [ "$want" = "1" ]; then
+		uci set "$bridge.forward_delay=2" 2>/dev/null || return 1
+	else
+		uci -q delete "$bridge.forward_delay"
+	fi
+	uci commit network || return 1
+	after="$(uci -q get "$bridge.stp" 2>/dev/null)/$(uci -q get "$bridge.forward_delay" 2>/dev/null)"
+	[ "$before" = "$after" ] || NETWORK_POLICY_CHANGED=1
+	return 0
+}
+
+apply_wifi_isolation() {
+	local enabled iso24 iso5 before after section
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	iso24="$(g $STATE.security.wifi_isolate24)"
+	iso5="$(g $STATE.security.wifi_isolate5)"
+	# Backward compatibility with older builds that saved only one Wi-Fi isolate key.
+	[ -n "$iso24" ] || iso24="$(g $STATE.security.wifi_isolate)"
+	[ -n "$iso5" ] || iso5="$(g $STATE.security.wifi_isolate)"
+	[ "$enabled" = "1" ] || { iso24=0; iso5=0; }
+	case "$iso24" in 1) iso24=1 ;; *) iso24=0 ;; esac
+	case "$iso5" in 1) iso5=1 ;; *) iso5=0 ;; esac
+	before="$(wifi_isolation_snapshot)"
+	for section in $(configured_ap_sections radio0); do
+		uci set "wireless.${section}.isolate=$iso24" || return 1
+	done
+	for section in $(configured_ap_sections radio1); do
+		uci set "wireless.${section}.isolate=$iso5" || return 1
+	done
+	uci commit wireless || return 1
+	after="$(wifi_isolation_snapshot)"
+	if [ "$before" != "$after" ]; then wifi reload >/dev/null 2>&1 || return 1; fi
+	log "wifi isolation applied radio0=$iso24 radio1=$iso5"
+	return 0
+}
+
+# ------------------------------------------------------------------ ports
+apply_ports() {
+	local enabled
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	for p in $PORTS; do
+		[ -d "/sys/class/net/$p" ] || continue
+		local en iso
+		if [ "$enabled" = "1" ]; then
+			en="$(g $STATE.$p.enabled)"; en="${en:-1}"
+			iso="$(g $STATE.$p.isolate)"; iso="${iso:-0}"
+		else
+			en=1
+			iso=0
+		fi
+		if [ "$en" = "0" ]; then
+			ip link set dev "$p" down 2>/dev/null || { log "port $p down failed"; return 1; }
+			log "port $p down"
+		else
+			ip link set dev "$p" up 2>/dev/null || { log "port $p up failed"; return 1; }
+			if [ "$iso" = "1" ]; then
+				bridge link set dev "$p" isolated on 2>/dev/null || { log "port $p isolation enable failed"; return 1; }
+			else
+				bridge link set dev "$p" isolated off 2>/dev/null || { log "port $p isolation disable failed"; return 1; }
+			fi
+			log "port $p up isolate=$iso"
+		fi
+	done
+	return 0
+}
+
+# ------------------------------------------------------------------ vlan
+apply_vlan() {
+	# Single owner: /usr/libexec/cr6608-vlan-lib builds the wired-port membership from
+	# smartap.<port>.vlan (+vlan_mode) — ACCESS by default (a plain device plugged into
+	# the port lands inside the VLAN), 'trunk' for VLAN-aware gear, or 'plain' for an
+	# untagged management switch port. The active quick-
+	# settings VLAN (Wi-Fi side) is respected: unset LAN policy follows it as a trunk.
+	[ -r /usr/libexec/cr6608-vlan-lib ] || { log "vlan lib missing; ports unchanged"; return 1; }
+	. /usr/libexec/cr6608-vlan-lib || { log "vlan lib load failed"; return 1; }
+	local qvid="" enabled ignore_policy=0 dev_before dev_after network_before network_after
+	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	[ "$enabled" = "1" ] || ignore_policy=1
+	qvid="$(uci -q get network.cr6608_vlan.device 2>/dev/null | sed -n 's/^br-lan\.\([0-9]\+\)$/\1/p')"
+	dev_before="$(uci -q get network.lan.device 2>/dev/null)"
+	network_before="$(uci -q show network 2>/dev/null)"
+	cr6608_apply_port_vlans "$qvid" "$ignore_policy" || { log "port vlan staging failed"; return 1; }
+	uci commit network || { log "network commit failed"; return 1; }
+	network_after="$(uci -q show network 2>/dev/null)"
+	if [ "$NETWORK_POLICY_CHANGED" = "1" ] || [ "$network_before" != "$network_after" ]; then
+		/etc/init.d/network reload >/dev/null 2>&1 || { log "network reload failed"; return 1; }
+		NETWORK_POLICY_CHANGED=0
+	else
+		log "network configuration unchanged; reload skipped"
+	fi
+	dev_after="$(uci -q get network.lan.device 2>/dev/null)"
+	if [ "$dev_before" != "$dev_after" ]; then
+		wifi reload >/dev/null 2>&1 || { log "wifi reload after vlan change failed"; return 1; }
+		log "lan.device $dev_before -> $dev_after; wifi reloaded to re-bridge APs"
+	fi
+	# The vlan subcommand is also callable directly. Re-resolve the lan zone even
+	# when /etc/config/firewall itself did not change.
+	if /etc/init.d/firewall enabled >/dev/null 2>&1; then
+		/etc/init.d/firewall reload >/dev/null 2>&1 || { log "firewall reload after vlan change failed"; return 1; }
+	fi
+	log "port vlans applied (quick vid='${qvid:-none}'; security_policy=$enabled)"
+	return 0
+}
+
+# management always reachable: keep recovery interface + lan input open
+ensure_management() {
+	# Keep the static recovery IP, DHCP management alias and firewall zone in sync.
+	[ -x /usr/sbin/smartap-bootstrap ] || { log "management bootstrap missing"; return 1; }
+	/usr/sbin/smartap-bootstrap quiet >/dev/null 2>&1 || { log "management bootstrap failed"; return 1; }
+}
+
+rc=0
+case "$1" in
+	firewall)
+		apply_firewall && apply_bridge_guard && apply_dhcp_guard && apply_loop_guard || rc=$?
+		if [ "$rc" = "0" ] && [ "$NETWORK_POLICY_CHANGED" = "1" ]; then
+			/etc/init.d/network reload >/dev/null 2>&1 || rc=$?
+		fi
+		;;
+	ports)    apply_ports || rc=$? ;;
+	boot)     apply_bridge_guard && apply_ports || rc=$? ;;
+	hotplug)
+		# Re-check after owning the lock. A rollback may disable the service while
+		# this event is queued behind another network/security operation.
+		if /etc/init.d/cr6608-security enabled >/dev/null 2>&1; then
+			apply_bridge_guard && apply_ports || rc=$?
+		fi
+		;;
+	clear-runtime) clear_runtime || rc=$? ;;
+	vlan)     apply_vlan || rc=$? ;;
+	get)
+		echo "enabled=$(g $STATE.security.enabled)"
+		echo "flood_guard=$(g $STATE.security.flood_guard)"
+		echo "rogue_dhcp_guard=$(g $STATE.security.rogue_dhcp_guard)"
+		echo "loop_guard=$(g $STATE.security.loop_guard)"
+		for p in $PORTS; do echo "$p enabled=$(g $STATE.$p.enabled) isolate=$(g $STATE.$p.isolate) vlan=$(g $STATE.$p.vlan)"; done
+		;;
+	apply|"")
+		# VLAN/network must settle before fw4 resolves the lan zone device.
+		ensure_management &&
+		apply_loop_guard &&
+		apply_vlan &&
+		apply_firewall &&
+		apply_bridge_guard &&
+		apply_dhcp_guard &&
+		apply_wifi_isolation &&
+		apply_ports || rc=$?
+	;;
+	*) echo "usage: $0 {apply|boot|hotplug|clear-runtime|firewall|ports|vlan|get}"; exit 1 ;;
+esac
+exit "$rc"

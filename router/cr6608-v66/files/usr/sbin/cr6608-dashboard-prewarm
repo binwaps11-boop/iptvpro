@@ -1,0 +1,36 @@
+#!/bin/sh
+# Populate the expensive wireless dashboard snapshot after boot, before the
+# first phone/browser request. The collector owns its own lock and watchdogs.
+
+UBUS_BIN="${CR6608_PREWARM_UBUS_BIN:-/bin/ubus}"
+DASHAPI="${CR6608_PREWARM_DASHAPI:-/www/cgi-bin/dashapi2}"
+MAX_WAIT="${CR6608_PREWARM_MAX_WAIT:-45}"
+
+case "$MAX_WAIT" in ''|*[!0-9]*) MAX_WAIT=45 ;; esac
+[ "$MAX_WAIT" -le 120 ] 2>/dev/null || MAX_WAIT=120
+[ "$MAX_WAIT" -ge 0 ] 2>/dev/null || MAX_WAIT=0
+[ -x "$DASHAPI" ] || exit 0
+
+run_bounded() {
+	limit="$1"; shift
+	"$@" & command_pid=$!
+	( sleep "$limit"; kill "$command_pid" 2>/dev/null; sleep 1; kill -KILL "$command_pid" 2>/dev/null ) >/dev/null 2>&1 &
+	guard_pid=$!
+	wait "$command_pid" 2>/dev/null; command_rc=$?
+	kill "$guard_pid" 2>/dev/null || true
+	wait "$guard_pid" 2>/dev/null || true
+	return "$command_rc"
+}
+
+attempt=0
+while [ "$attempt" -lt "$MAX_WAIT" ]; do
+	status="$("$UBUS_BIN" -S -t 2 call network.wireless status 2>/dev/null)"
+	if printf '%s\n' "$status" | grep -q '"ifname"'; then
+		break
+	fi
+	attempt=$((attempt + 1))
+	sleep 1
+done
+
+run_bounded 15 env CR6608_DASHAPI_INTERNAL=1 "$DASHAPI" >/dev/null 2>&1 || exit 0
+exit 0

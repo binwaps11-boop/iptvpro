@@ -1,0 +1,193 @@
+#!/bin/sh
+
+# Runtime safety guard for the CR6608 experimental MT7915 UL MURU path.
+# The kernel debugfs control is intentionally one-way: it can disable the
+# scheduler until reboot, but cannot re-advertise/re-enable capabilities.
+
+TAG="cr6608-ul-muru-guard"
+STATE_FILE="/tmp/cr6608-ul-muru-state"
+MODULE_FILE="/etc/modules.d/mt7915e"
+INTERVAL="${CR6608_UL_MURU_INTERVAL:-15}"
+HANG_PATTERN='mt7915.*(Message[[:space:]]+[[:xdigit:]]+[[:space:]]+timeout|wifi subsystem reset failure|Could not release semaphore|Timeout for initializing firmware|Firmware did not enter download state|chip full reset failed|tx hang|mcu.*tim(e|ed) out|firmware.*(crash|assert)|watchdog|ser.*(fail|error))'
+
+hang_signature_present() {
+	grep -Eqi "$HANG_PATTERN"
+}
+
+signature_self_test() {
+	local signature
+	for signature in \
+		'Message 00005aed timeout' \
+		'wifi subsystem reset failure' \
+		'Could not release semaphore' \
+		'Timeout for initializing firmware' \
+		'Firmware did not enter download state' \
+		'chip full reset failed'; do
+		printf 'kernel: mt7915e 0000:02:00.0: %s\n' "$signature" | \
+			hang_signature_present || return 1
+	done
+	if printf 'kernel: mt7915e 0000:02:00.0: normal startup complete\n' | \
+	   hang_signature_present; then
+		return 1
+	fi
+	printf 'ul_muru_guard_signature_self_test=pass\n'
+}
+
+if [ "${1:-}" = --signature-self-test ]; then
+	signature_self_test
+	exit $?
+fi
+
+write_state() {
+	local state="$1" reason="$2"
+	printf '{"state":"%s","reason":"%s","time":%s}\n' \
+		"$state" "$reason" "$(date +%s)" >"${STATE_FILE}.new"
+	mv -f "${STATE_FILE}.new" "${STATE_FILE}"
+}
+
+debug_nodes() {
+	find /sys/kernel/debug/ieee80211 -path '*/mt76/cr6608_ul_muru' \
+		-type f 2>/dev/null
+}
+
+recovery_nodes() {
+	find /sys/kernel/debug/ieee80211 -path '*/mt76/sys_recovery' \
+		-type f 2>/dev/null
+}
+
+reset_total() {
+	local total=0 line wm wa node
+	for node in $(recovery_nodes); do
+		line="$(grep 'SYS_RESET_COUNT:' "$node" 2>/dev/null | tail -n 1)"
+		wm="$(printf '%s\n' "$line" | sed -n 's/.*WM \([0-9][0-9]*\),.*/\1/p')"
+		wa="$(printf '%s\n' "$line" | sed -n 's/.*WA \([0-9][0-9]*\).*/\1/p')"
+		total=$((total + ${wm:-0} + ${wa:-0}))
+	done
+	printf '%s\n' "$total"
+}
+
+arm_stats() {
+	local node
+	for node in /sys/kernel/debug/ieee80211/phy*/mt76/muru_debug; do
+		[ -f "$node" ] && printf '1\n' >"$node" 2>/dev/null
+	done
+}
+
+runtime_disable() {
+	local reason="$1" node gate_count=0 disabled_count=0 persisted=1 recovery_ok=1
+	local all_gates_disabled=0 failure_reason
+	logger -p daemon.crit -t "$TAG" \
+		"disabling experimental UL MU-MIMO/OFDMA: $reason"
+
+	for node in $(debug_nodes); do
+		gate_count=$((gate_count + 1))
+		if printf '0\n' >"$node" 2>/dev/null && \
+		   [ "$(cat "$node" 2>/dev/null)" = 0 ]; then
+			disabled_count=$((disabled_count + 1))
+		fi
+	done
+
+	uci -q set smartap.experimental.ul_muru='0' &&
+		uci -q set smartap.experimental.ul_muru_state='disabled-by-guard' &&
+		uci -q set smartap.experimental.ul_muru_reason="$reason" &&
+		uci -q commit smartap || persisted=0
+
+	if [ -f "$MODULE_FILE" ]; then
+		sed -i 's/cr6608_ul_muru=1/cr6608_ul_muru=0/g' "$MODULE_FILE" &&
+			grep -Fq 'cr6608_ul_muru=0' "$MODULE_FILE" || persisted=0
+	else
+		persisted=0
+	fi
+
+	if [ "$gate_count" -gt 0 ] && [ "$disabled_count" -eq "$gate_count" ]; then
+		all_gates_disabled=1
+		write_state "disabled" "$reason"
+	else
+		write_state "reboot-required" \
+			"${reason}-driver-gates-${disabled_count}-of-${gate_count}"
+		logger -p daemon.crit -t "$TAG" \
+			"UL MURU driver gate could not be fully disabled; reboot is required"
+	fi
+	sync
+	# Recreate all station records after engaging the one-way driver gate.
+	# SSIDs, channels and user configuration are not changed.
+	if [ -x /usr/sbin/cr6608-safe-wifi-reload ]; then
+		/usr/sbin/cr6608-safe-wifi-reload 60 "" all >/dev/null 2>&1 ||
+			recovery_ok=0
+	else
+		wifi reload >/dev/null 2>&1 || recovery_ok=0
+	fi
+
+	if [ "$all_gates_disabled" = 1 ] && [ "$recovery_ok" = 1 ]; then
+		return 0
+	fi
+	if [ "$all_gates_disabled" != 1 ]; then
+		failure_reason="${reason}-driver-gate-disable-incomplete"
+		logger -p daemon.crit -t "$TAG" \
+			"verified Wi-Fi reload cannot make an incomplete UL MURU driver disable safe"
+	else
+		failure_reason="${reason}-wifi-recovery-failed"
+		logger -p daemon.crit -t "$TAG" \
+			"verified Wi-Fi recovery failed after disabling UL MURU"
+	fi
+	if [ "$persisted" = 1 ] && [ -x /sbin/reboot ]; then
+		# The next boot loads cr6608_ul_muru=0, so this is a one-shot recovery
+		# rather than a reboot loop.  Never reboot when the persistent disable
+		# could not be verified.
+		write_state "rebooting" "$failure_reason"
+		sync
+		sleep 3
+		/sbin/reboot
+		write_state "reboot-failed" "${failure_reason}-reboot-command-returned"
+	else
+		write_state "reboot-required" \
+			"${failure_reason}-persistence-${persisted}"
+		logger -p daemon.crit -t "$TAG" \
+			"automatic reboot refused because the persistent UL disable was not verified"
+	fi
+}
+
+wait_for_driver() {
+	local n=0
+	while [ "$n" -lt 60 ]; do
+		[ -n "$(debug_nodes)" ] && return 0
+		n=$((n + 1))
+		sleep 1
+	done
+	return 1
+}
+
+wait_for_driver || {
+	write_state "unavailable" "driver-debugfs-missing"
+	logger -p daemon.err -t "$TAG" "driver debugfs gate did not appear"
+	exit 1
+}
+
+if [ "$(uci -q get smartap.experimental.ul_muru)" != 1 ]; then
+	for node in $(debug_nodes); do
+		printf '0\n' >"$node" 2>/dev/null || true
+	done
+	write_state "disabled" "uci-disabled"
+	while sleep 3600; do :; done
+fi
+
+arm_stats
+baseline="$(reset_total)"
+write_state "armed" "baseline-reset-count-${baseline}"
+logger -p daemon.notice -t "$TAG" \
+	"experimental UL MURU armed; firmware reset baseline=$baseline"
+
+while sleep "$INTERVAL"; do
+	current="$(reset_total)"
+	if [ "$current" -gt "$baseline" ]; then
+		runtime_disable "firmware-reset-count-${baseline}-to-${current}"
+		while sleep 3600; do :; done
+	fi
+
+	if logread 2>/dev/null | hang_signature_present; then
+		runtime_disable "mt7915-hang-signature"
+		while sleep 3600; do :; done
+	fi
+
+	write_state "armed" "reset-count-${current}"
+done

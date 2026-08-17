@@ -1,0 +1,22 @@
+#!/bin/sh
+# Best-effort cache invalidation for external LuCI/SSH/hotplug writers.
+
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+[ -r "$CACHE_STATE_LIB" ] || exit 1
+. "$CACHE_STATE_LIB" || exit 1
+
+attempts="${CR6608_DASHBOARD_INVALIDATE_ATTEMPTS:-5}"
+case "$attempts" in ''|*[!0-9]*|0) attempts=5 ;; esac
+[ "$attempts" -le 10 ] 2>/dev/null || attempts=10
+
+while [ "$attempts" -gt 0 ]; do
+	cr6608_dashboard_cache_invalidate && exit 0
+	attempts=$((attempts - 1))
+	[ "$attempts" -gt 0 ] || break
+	sleep 1
+done
+exit 1

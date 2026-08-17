@@ -1,0 +1,8 @@
+#!/bin/sh
+# Invalidate live interface snapshots after netifd transitions, including LuCI
+# and SSH-triggered applies that bypass the Smart AP CGIs.
+
+case "${ACTION:-}" in ifup|ifdown|ifupdate) ;; *) exit 0 ;; esac
+[ -x /usr/sbin/cr6608-dashboard-invalidate ] || exit 0
+/usr/sbin/cr6608-dashboard-invalidate >/dev/null 2>&1 &
+exit 0

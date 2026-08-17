@@ -1,0 +1,641 @@
+#!/bin/sh
+
+# Read-only inventory by default. --run performs disruptive channel tests over
+# the current regulatory domain, saves the exact wireless configuration, and
+# restores it on every exit path.
+
+set -u
+
+mode=inventory
+cac_timeout=660
+ready_timeout=45
+stamp="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)"
+report="/tmp/cr6608-wifi-full-verify-${stamp}.csv"
+restore_needed=0
+backup=""
+map_file=""
+rows_file=""
+log_file=""
+feature_file=""
+run_failures=0
+runnable_channels_2g=0
+runnable_channels_5g=0
+run_attempts_2g=0
+run_attempts_5g=0
+run_passes_2g=0
+run_passes_5g=0
+rf_param_root="${CR6608_RF_PARAM_ROOT:-/sys/module/mt7915e/parameters}"
+
+usage() {
+	echo "usage: cr6608-wifi-full-verify [--inventory|--run] [--report /tmp/file.csv] [--cac-timeout seconds]" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--inventory) mode=inventory ;;
+		--run) mode=run ;;
+		--report)
+			[ "$#" -ge 2 ] || usage
+			report="$2"
+			shift
+			;;
+		--cac-timeout)
+			[ "$#" -ge 2 ] || usage
+			cac_timeout="$2"
+			shift
+			;;
+		-h|--help) usage ;;
+		*) usage ;;
+	esac
+	shift
+done
+
+case "$report" in
+	/tmp/*.csv|/root/*.csv) ;;
+	*) echo "report must be a .csv file under /tmp or /root" >&2; exit 2 ;;
+esac
+case "$report" in *..*|*[!A-Za-z0-9_./:-]*) echo "unsafe report path" >&2; exit 2 ;; esac
+case "$cac_timeout" in ''|*[!0-9]*) usage ;; esac
+[ "$cac_timeout" -ge 60 ] 2>/dev/null && [ "$cac_timeout" -le 1800 ] 2>/dev/null || usage
+
+base="${report%.csv}"
+log_file="${base}.log"
+feature_file="${base}.features.txt"
+map_file="$(mktemp /tmp/cr6608-radio-map.XXXXXX)" || exit 1
+rows_file="$(mktemp /tmp/cr6608-channel-rows.XXXXXX)" || exit 1
+
+radio_sections() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+radio_interfaces() {
+	local radio="$1"
+
+	ubus -S call network.wireless status 2>/dev/null |
+		jsonfilter -e "@.${radio}.interfaces[*].ifname" 2>/dev/null
+}
+
+radio_ap_interfaces() {
+	local radio="$1" iface type
+
+	for iface in $(radio_interfaces "$radio"); do
+		type="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "type" { print $2; exit }')"
+		[ "$type" = AP ] && printf '%s\n' "$iface"
+	done
+}
+
+interface_phy() {
+	local iface="$1" index
+
+	index="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "wiphy" { print $2; exit }')"
+	[ -n "$index" ] && printf 'phy%s\n' "$index"
+}
+
+phy_has_band() {
+	local phy="$1" band="$2"
+
+	iw phy "$phy" info 2>/dev/null | awk -v wanted="$band" '
+		/ MHz \[[0-9]+\]/ {
+			freq = $2 + 0
+			band = (freq < 3000 ? "2g" : (freq < 5925 ? "5g" : "6g"))
+			if (band == wanted)
+				found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	'
+}
+
+radio_phy() {
+	local radio="$1" band="$2" iface phy candidate
+
+	for iface in $(radio_interfaces "$radio"); do
+		phy="$(interface_phy "$iface")"
+		[ -z "$phy" ] || { printf '%s\n' "$phy"; return 0; }
+	done
+
+	for candidate_path in /sys/class/ieee80211/*; do
+		[ -e "$candidate_path" ] || continue
+		candidate="${candidate_path##*/}"
+		grep -Fq "|${candidate}|" "$map_file" 2>/dev/null && continue
+		if phy_has_band "$candidate" "$band"; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+build_radio_map() {
+	local radio band phy
+
+	: >"$map_file"
+	for radio in $(radio_sections); do
+		band="$(uci -q get "wireless.${radio}.band" 2>/dev/null)"
+		case "$band" in 2g|5g) ;; *) continue ;; esac
+		phy="$(radio_phy "$radio" "$band" 2>/dev/null || true)"
+		[ -z "$phy" ] || printf '%s|%s|%s|\n' "$radio" "$phy" "$band" >>"$map_file"
+	done
+}
+
+extract_channel_rows() {
+	local phy="$1"
+
+	iw phy "$phy" info 2>/dev/null | awk '
+		/ MHz \[[0-9]+\]/ {
+			line = $0
+			freq = $2 + 0
+			channel = substr($4, 2, length($4) - 2)
+			band = (freq < 3000 ? "2.4GHz" : (freq < 5925 ? "5GHz" : "6GHz"))
+			max = "unknown"
+			for (i = 1; i <= NF; i++) {
+				if ($i == "dBm)") {
+					max = $(i - 1)
+					sub(/^\(/, "", max)
+				}
+			}
+			dfs = (line ~ /radar detection/ ? 1 : 0)
+			disabled = (line ~ /\(disabled\)/ ? 1 : 0)
+			no_ir = (line ~ /\(no IR\)/ ? 1 : 0)
+			no40p = (line ~ /no HT40\+/ ? 1 : 0)
+			no40m = (line ~ /no HT40-/ ? 1 : 0)
+			no80 = (line ~ /no 80MHz/ ? 1 : 0)
+			printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
+			       band, channel, freq, max, dfs, disabled, no_ir,
+			       no40p, no40m, no80
+		}
+	'
+}
+
+sanitize() {
+	printf '%s' "$1" |
+		tr '\r\n' '  ' |
+		sed 's/"/""/g; s/[[:space:]][[:space:]]*/ /g'
+}
+
+write_row() {
+	local first=1 value
+
+	for value in "$@"; do
+		[ "$first" -eq 1 ] || printf ',' >>"$report"
+		printf '"%s"' "$(sanitize "$value")" >>"$report"
+		first=0
+	done
+	printf '\n' >>"$report"
+}
+
+restore_wireless() {
+	local rc=0
+
+	[ "$restore_needed" -eq 1 ] || return 0
+	if ! cp -f "$backup" /etc/config/wireless 2>/dev/null; then
+		rc=1
+	else
+		uci -q revert wireless >/dev/null 2>&1 || true
+		if ! wifi reload >/dev/null 2>&1; then
+			rc=1
+		elif ! wait_restored_radios; then
+			rc=1
+		fi
+	fi
+	restore_needed=0
+	return "$rc"
+}
+
+cleanup() {
+	local ec=$?
+
+	trap - EXIT HUP INT TERM
+	if ! restore_wireless; then
+		echo "RESTORE_STATUS=failed" >>"$log_file"
+		[ "$ec" -ne 0 ] || ec=1
+	else
+		echo "RESTORE_STATUS=ok" >>"$log_file"
+	fi
+	[ -z "$backup" ] || rm -f "$backup"
+	[ -z "$map_file" ] || rm -f "$map_file"
+	[ -z "$rows_file" ] || rm -f "$rows_file"
+	exit "$ec"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+find_hostapd_config() {
+	local iface="$1" candidate
+
+	for candidate in \
+		"/var/run/hostapd-${iface}.conf" \
+		/var/run/hostapd/*.conf \
+		/var/run/hostapd-*.conf; do
+		[ -f "$candidate" ] || continue
+		if grep -qx "interface=${iface}" "$candidate" 2>/dev/null; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+driver_max_for_interface() {
+	local iface="$1"
+
+	iwinfo "$iface" txpowerlist 2>/dev/null | awk '
+		/dBm/ {
+			value = ($1 == "*" ? $2 : $1) + 0
+			if (!seen || value > max)
+				max = value
+			seen = 1
+		}
+		END { if (seen) print max }
+	'
+}
+
+module_bool_is_true() {
+	case "$1" in
+		1|Y|y|true|on) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+rf_witness_for_channel() {
+	local band="$1" channel="$2" frequency="$3" band_idx prefix
+	local generation_start generation_end requested kernel telemetry_frequency
+	local telemetry_channel path_delta sar_bound rate_limit eeprom_target
+	local sku_applied override_active channel_ready mcu_generation mcu_result
+	local gate_active persisted_match
+
+	case "$band" in
+		2.4GHz) band_idx=0 ;;
+		5GHz) band_idx=1 ;;
+		*) return 1 ;;
+	esac
+	prefix="${rf_param_root}/cr6608_rf_band${band_idx}_"
+
+	generation_start="$(cat "${prefix}generation" 2>/dev/null)" || return 1
+	requested="$(cat "${prefix}requested_dbm" 2>/dev/null)" || return 1
+	kernel="$(cat "${prefix}kernel_dbm" 2>/dev/null)" || return 1
+	telemetry_frequency="$(cat "${prefix}frequency_mhz" 2>/dev/null)" || return 1
+	telemetry_channel="$(cat "${prefix}channel" 2>/dev/null)" || return 1
+	path_delta="$(cat "${prefix}path_delta_half_dbm" 2>/dev/null)" || return 1
+	sar_bound="$(cat "${prefix}sar_bounded_per_path_half_dbm" 2>/dev/null)" || return 1
+	rate_limit="$(cat "${prefix}rate_limited_per_path_half_dbm" 2>/dev/null)" || return 1
+	eeprom_target="$(cat "${prefix}eeprom_target_per_path_half_dbm" 2>/dev/null)" || return 1
+	sku_applied="$(cat "${prefix}sku_applied_per_path_half_dbm" 2>/dev/null)" || return 1
+	override_active="$(cat "${prefix}override_active" 2>/dev/null)" || return 1
+	channel_ready="$(cat "${prefix}channel_ready" 2>/dev/null)" || return 1
+	mcu_generation="$(cat "${prefix}mcu_generation" 2>/dev/null)" || return 1
+	mcu_result="$(cat "${prefix}mcu_result" 2>/dev/null)" || return 1
+	gate_active="$(cat "${rf_param_root}/cr6608_rf_38dbm_active" 2>/dev/null)" || return 1
+	persisted_match="$(cat "${rf_param_root}/cr6608_factory38_persisted_match" 2>/dev/null)" || return 1
+	generation_end="$(cat "${prefix}generation" 2>/dev/null)" || return 1
+
+	case "${generation_start}:${generation_end}:${sar_bound}" in
+		*[!0-9:]*) return 1 ;;
+	esac
+	[ "$generation_start" = "$generation_end" ] &&
+		[ "$generation_end" -gt 0 ] &&
+		[ $((generation_end % 2)) -eq 0 ] &&
+		module_bool_is_true "$gate_active" &&
+		[ "$requested" = 38 ] && [ "$kernel" = 38 ] &&
+		[ "$telemetry_frequency" = "$frequency" ] &&
+		[ "$telemetry_channel" = "$channel" ] &&
+		[ "$path_delta" = 6 ] && [ "$sar_bound" = 70 ] &&
+		[ "$rate_limit" = 70 ] && [ "$eeprom_target" = 70 ] &&
+		[ "$sku_applied" = 70 ] && [ "$override_active" = 1 ] &&
+		[ "$channel_ready" = 1 ] &&
+		[ "$mcu_generation" = "$generation_end" ] && [ "$mcu_result" = 0 ]
+}
+
+feature_summary() {
+	local phy="$1" iface="$2" info conf su mu he
+
+	info="$(iw phy "$phy" info 2>/dev/null || true)"
+	conf="$(find_hostapd_config "$iface" 2>/dev/null || true)"
+	su=not-advertised
+	mu=not-advertised
+	he=not-advertised
+	printf '%s\n' "$info" | grep -q 'SU Beamformer' && su=supported
+	printf '%s\n' "$info" | grep -q 'MU Beamformer' && mu=supported
+	printf '%s\n' "$info" | grep -q 'HE Iftypes:' && he=supported
+	[ -z "$conf" ] || {
+		grep -qx 'he_su_beamformer=1' "$conf" 2>/dev/null && su="${su}+configured"
+		grep -qx 'he_mu_beamformer=1' "$conf" 2>/dev/null && mu="${mu}+configured"
+		grep -qx 'ieee80211ax=1' "$conf" 2>/dev/null && he="${he}+configured"
+	}
+	printf '%s|%s|%s\n' "$su" "$mu" "$he"
+}
+
+wait_radio() {
+	local radio="$1" channel="$2" is_dfs="$3" timeout elapsed=0
+	local iface object raw state active runtime_channel
+
+	timeout="$ready_timeout"
+	[ "$is_dfs" -eq 0 ] || timeout="$cac_timeout"
+	CURRENT_IFACE=""
+	CURRENT_STATE=not-started
+	CURRENT_CAC=not-required
+
+	while [ "$elapsed" -lt "$timeout" ]; do
+		iface="$(radio_ap_interfaces "$radio" | head -n 1)"
+		if [ -n "$iface" ]; then
+			CURRENT_IFACE="$iface"
+			object="hostapd.${iface}"
+			raw="$(ubus -S call "$object" get_status 2>/dev/null || true)"
+			state="$(printf '%s\n' "$raw" |
+				jsonfilter -e '@.status' 2>/dev/null)"
+			CURRENT_STATE="${state:-hostapd-unavailable}"
+			active="$(printf '%s\n' "$raw" |
+				jsonfilter -e '@.dfs.cac_active' 2>/dev/null)"
+			runtime_channel="$(iw dev "$iface" info 2>/dev/null |
+				awk '$1 == "channel" { print $2; exit }')"
+			if [ "$state" = ENABLED ] && [ "$runtime_channel" = "$channel" ]; then
+				CURRENT_STATE=started
+				if [ "$is_dfs" -eq 1 ]; then
+					CURRENT_CAC=completed
+				fi
+				return 0
+			fi
+			if [ "$is_dfs" -eq 1 ] && [ "$active" = true ]; then
+				CURRENT_CAC=running
+			fi
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+
+	[ "$is_dfs" -eq 0 ] || [ "$CURRENT_CAC" = completed ] || CURRENT_CAC=timeout
+	return 1
+}
+
+wait_restored_radios() {
+	local elapsed=0 radio disabled iface raw state all_ok
+
+	while [ "$elapsed" -lt "$cac_timeout" ]; do
+		all_ok=1
+		for radio in $(radio_sections); do
+			disabled="$(uci -q get "wireless.${radio}.disabled" 2>/dev/null || echo 0)"
+			[ "$disabled" = 1 ] && continue
+			iface="$(radio_ap_interfaces "$radio" | head -n 1)"
+			if [ -z "$iface" ]; then
+				all_ok=0
+				continue
+			fi
+			raw="$(ubus -S call "hostapd.${iface}" get_status 2>/dev/null || true)"
+			state="$(printf '%s\n' "$raw" |
+				jsonfilter -e '@.status' 2>/dev/null)"
+			[ "$state" = ENABLED ] || all_ok=0
+		done
+		[ "$all_ok" -eq 1 ] && return 0
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+
+	return 1
+}
+
+widths_for_row() {
+	local band="$1" no40p="$2" no40m="$3" no80="$4" channel="$5"
+
+	printf 'HE20\n'
+	# US channel 165 has no valid 40/80 MHz extension: channel 169 is NO-IR.
+	# Do not turn an impossible hostapd geometry into a power-test failure.
+	[ "${band}:${channel}" != "5GHz:165" ] || return 0
+	if [ "$no40p" -eq 0 ] || [ "$no40m" -eq 0 ]; then
+		printf 'HE40\n'
+	fi
+	if [ "$band" = 5GHz ] && [ "$no80" -eq 0 ]; then
+		printf 'HE80\n'
+	fi
+}
+
+collect_errors() {
+	local label="$1"
+
+	{
+		printf '\n===== %s =====\n' "$label"
+		dmesg 2>/dev/null |
+			grep -Ei 'mt7915|mt76|cfg80211|hostapd|radar|CAC|thermal|power|error|fail' |
+			tail -n 80 || true
+		logread 2>/dev/null |
+			grep -Ei 'mt7915|mt76|cfg80211|hostapd|radar|CAC|thermal|power|error|fail' |
+			tail -n 80 || true
+	} >>"$log_file"
+}
+
+run_coverage_complete() {
+	[ "$runnable_channels_2g" -gt 0 ] && [ "$run_attempts_2g" -gt 0 ] &&
+		[ "$run_passes_2g" -eq "$run_attempts_2g" ] &&
+		[ "$runnable_channels_5g" -gt 0 ] && [ "$run_attempts_5g" -gt 0 ] &&
+		[ "$run_passes_5g" -eq "$run_attempts_5g" ]
+}
+
+if [ "${CR6608_WIFI_FULL_VERIFY_LIBRARY_ONLY:-0}" = 1 ]; then
+	trap - EXIT HUP INT TERM
+	rm -f "$map_file" "$rows_file"
+	map_file=""
+	rows_file=""
+	return 0 2>/dev/null || exit 0
+fi
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = xiaomi,mi-router-cr6608 ] || {
+	echo "This verifier is restricted to Xiaomi CR6608." >&2
+	exit 1
+}
+
+for command in uci ubus jsonfilter iw iwinfo wifi awk sed grep; do
+	command -v "$command" >/dev/null 2>&1 || {
+		echo "missing command: $command" >&2
+		exit 1
+	}
+done
+
+: >"$report" || {
+	echo "cannot create report: $report" >&2
+	exit 1
+}
+: >"$log_file" || {
+	echo "cannot create log: $log_file" >&2
+	exit 1
+}
+write_row \
+	"Band" "Channel" "Frequency" "Country" "DFS" "Bandwidth" \
+	"Requested dBm" "Regulatory Maximum" "Driver Maximum" \
+	"Accepted dBm" "Interface Started" "CAC Result" \
+	"Beamforming Capability" "HE Capability" "Error" "Pass/Fail"
+
+if [ "$mode" = run ]; then
+	backup="$(mktemp /tmp/cr6608-wireless-backup.XXXXXX)" || exit 1
+	cp -p /etc/config/wireless "$backup" || exit 1
+	restore_needed=1
+fi
+
+build_radio_map
+
+if [ ! -s "$map_file" ]; then
+	echo "No radio-to-phy mapping could be established." >&2
+	exit 1
+fi
+
+if command -v cr6608-ax-verify >/dev/null 2>&1; then
+	cr6608-ax-verify >"$feature_file" 2>&1 || true
+else
+	echo "cr6608-ax-verify is missing" >"$feature_file"
+fi
+
+while IFS='|' read -r radio phy configured_band unused; do
+	case "$configured_band" in
+		2g) expected_band=2.4GHz ;;
+		5g) expected_band=5GHz ;;
+		*) continue ;;
+	esac
+	[ -n "$radio" ] || continue
+	country="$(uci -q get "wireless.${radio}.country" 2>/dev/null)"
+	[ -n "$country" ] || country=unknown
+	extract_channel_rows "$phy" >"$rows_file"
+	while IFS='|' read -r band channel frequency reg_max dfs disabled no_ir no40p no40m no80; do
+		[ "$band" != 6GHz ] || continue
+		[ "$band" = "$expected_band" ] || continue
+		if [ "$disabled" -eq 1 ] || [ "$no_ir" -eq 1 ]; then
+			reason=disabled
+			[ "$no_ir" -eq 0 ] || reason=no-IR
+			write_row "$band" "$channel" "$frequency" "$country" \
+				"$([ "$dfs" -eq 1 ] && echo DFS || echo non-DFS)" \
+				"not-tested" "38" "$reg_max" "unknown" "unknown" \
+				"no" "not-run" "not-read" "not-read" "$reason" "SKIP"
+			continue
+		fi
+		if [ "$mode" = run ]; then
+			case "$band" in
+				2.4GHz) runnable_channels_2g=$((runnable_channels_2g + 1)) ;;
+				5GHz) runnable_channels_5g=$((runnable_channels_5g + 1)) ;;
+			esac
+		fi
+
+		for width in $(widths_for_row "$band" "$no40p" "$no40m" "$no80" "$channel"); do
+			if [ "$mode" != run ]; then
+				write_row "$band" "$channel" "$frequency" "$country" \
+					"$([ "$dfs" -eq 1 ] && echo DFS || echo non-DFS)" \
+					"$width" "38" "$reg_max" "unknown" "unknown" \
+					"not-run" "not-run" "not-run" "not-run" \
+					"inventory-only" "NOT_RUN"
+				continue
+			fi
+			case "$band" in
+				2.4GHz) run_attempts_2g=$((run_attempts_2g + 1)) ;;
+				5GHz) run_attempts_5g=$((run_attempts_5g + 1)) ;;
+			esac
+
+			uci -q set "wireless.${radio}.disabled=0"
+			uci -q set "wireless.${radio}.channel=${channel}"
+			uci -q set "wireless.${radio}.htmode=${width}"
+			uci -q set "wireless.${radio}.txpower=38"
+
+			error=""
+			if ! wifi down "$radio" >/dev/null 2>&1; then
+				error="netifd-down-failed"
+			fi
+			if ! wifi up "$radio" >/dev/null 2>&1; then
+				[ -z "$error" ] || error="${error};"
+				error="${error}netifd-up-failed"
+			fi
+
+			if wait_radio "$radio" "$channel" "$dfs"; then
+				started=yes
+			else
+				started=no
+				[ -n "$error" ] || error="AP-or-CAC-timeout"
+			fi
+
+			iface="$CURRENT_IFACE"
+			accepted=unknown
+			driver_max=unknown
+			probe_result=not-run
+			mcu_witness=not-run
+			beamforming=not-read
+			he=not-read
+
+			probe_error="$(mktemp /tmp/cr6608-probe-error.XXXXXX)" || exit 1
+			if iw phy "$phy" set txpower fixed 3800 2>"$probe_error"; then
+				probe_result=accepted
+			else
+				probe_result=rejected
+				probe_text="$(cat "$probe_error")"
+				[ -n "$error" ] || error="fixed-3800-rejected:${probe_text}"
+			fi
+			rm -f "$probe_error"
+
+			sleep 1
+			if [ -n "$iface" ]; then
+				accepted="$(iw dev "$iface" info 2>/dev/null |
+					awk '$1 == "txpower" { print $2; exit }')"
+				[ -n "$accepted" ] || accepted=unknown
+				driver_max="$(driver_max_for_interface "$iface")"
+				[ -n "$driver_max" ] || driver_max=unknown
+				features="$(feature_summary "$phy" "$iface")"
+				beamforming="$(printf '%s' "$features" |
+					awk -F'|' '{ print "SU=" $1 ";MU=" $2 }')"
+				he="$(printf '%s' "$features" |
+					awk -F'|' '{ print $3 }')"
+				if rf_witness_for_channel "$band" "$channel" "$frequency"; then
+					mcu_witness=verified
+				else
+					mcu_witness=rejected
+				fi
+			fi
+
+			result=FAIL
+			if [ "$started" = yes ] && [ "$probe_result" = accepted ] &&
+			   [ "$mcu_witness" = verified ] &&
+			   printf '%s\n' "$accepted" | awk '
+				$1 ~ /^[0-9]+([.][0-9]+)?$/ && ($1 + 0) == 38 { ok = 1 }
+				END { exit(ok ? 0 : 1) }
+			   '; then
+				result=PASS
+			elif [ -z "$error" ]; then
+				error="requested-38-accepted-${accepted}; regulatory-or-driver-limit"
+			fi
+			if [ "$result" = PASS ]; then
+				case "$band" in
+					2.4GHz) run_passes_2g=$((run_passes_2g + 1)) ;;
+					5GHz) run_passes_5g=$((run_passes_5g + 1)) ;;
+				esac
+			fi
+			[ "$result" = PASS ] || run_failures=$((run_failures + 1))
+
+			write_row "$band" "$channel" "$frequency" "$country" \
+				"$([ "$dfs" -eq 1 ] && echo DFS || echo non-DFS)" \
+				"$width" "38" "$reg_max" "$driver_max" "$accepted" \
+				"$started" "$CURRENT_CAC" "$beamforming" "$he" \
+				"$error;probe=$probe_result;mcu=$mcu_witness" "$result"
+			collect_errors "${radio}/${phy} channel=${channel} width=${width}"
+		done
+	done <"$rows_file"
+done <"$map_file"
+
+echo "REPORT=$report"
+echo "FEATURE_REPORT=$feature_file"
+echo "LOG=$log_file"
+echo "MODE=$mode"
+if [ "$mode" != run ]; then
+	echo "RESULT=NOT_RUN"
+	echo "RF_MEASURED_POWER=NOT_MEASURED"
+	exit 0
+fi
+coverage_failures=0
+run_coverage_complete || coverage_failures=1
+echo "RUN_COVERAGE=2.4GHz:${run_passes_2g}/${run_attempts_2g}:channels=${runnable_channels_2g},5GHz:${run_passes_5g}/${run_attempts_5g}:channels=${runnable_channels_5g}"
+run_failures=$((run_failures + coverage_failures))
+if [ "$mode" = run ] && [ "$run_failures" -ne 0 ]; then
+	echo "RESULT=BUILD_REJECTED failures=$run_failures"
+	echo "RF_MEASURED_POWER=NOT_MEASURED"
+	exit 1
+fi
+echo "RESULT=DRIVER_GATE_PASS_PHYSICAL_RF_UNVERIFIED"
+echo "RF_MEASURED_POWER=NOT_MEASURED"

@@ -1,0 +1,196 @@
+/* CR6608 Argon mobile layout compatibility. Keep this file loaded last. */
+body[data-page="admin-system-system"] #localtime,
+body[data-page="admin-status-overview"] #view > .cbi-section:first-child .table .tr:nth-child(7) > .td:last-child {
+	direction: ltr;
+	unicode-bidi: isolate;
+	max-width: 100%;
+	text-align: left;
+	font-variant-numeric: tabular-nums;
+	white-space: normal;
+	overflow-wrap: anywhere;
+	word-break: normal;
+	text-overflow: clip;
+}
+
+body[data-page="admin-system-system"] #localtime {
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+}
+
+@media screen and (max-width: 768px) {
+	body.logged-in .showSide {
+		display: inline-flex !important;
+		align-items: center;
+		justify-content: center;
+		box-sizing: border-box;
+		width: 2.75rem;
+		min-width: 2.75rem;
+		height: 2.75rem;
+		padding: .625rem;
+		color: #fff;
+	}
+
+	body.logged-in .showSide::before {
+		display: none !important;
+		content: none !important;
+	}
+
+	body.logged-in .showSide > .cr6608-menu-lines {
+		display: flex;
+		flex-direction: column;
+		justify-content: space-between;
+		width: 1.35rem;
+		height: 1rem;
+		pointer-events: none;
+	}
+
+	body.logged-in .showSide > .cr6608-menu-lines > i {
+		display: block;
+		flex: 0 0 .125rem;
+		box-sizing: border-box;
+		width: 100%;
+		height: .125rem;
+		border-radius: 999px;
+		background: currentColor;
+	}
+}
+
+@media screen and (max-width: 600px) {
+	body.logged-in #maincontent .tabs,
+	body.logged-in #maincontent .cbi-tabmenu {
+		display: flex;
+		flex-flow: row wrap;
+		align-items: stretch;
+		gap: .25rem;
+		box-sizing: border-box;
+		width: 100%;
+		max-width: 100%;
+		overflow: visible;
+		white-space: normal;
+	}
+
+	body.logged-in #maincontent .tabs > li,
+	body.logged-in #maincontent .cbi-tabmenu > li {
+		flex: 1 1 9rem;
+		box-sizing: border-box;
+		width: auto;
+		min-width: 0;
+		max-width: 100%;
+		height: auto;
+		margin: 0;
+	}
+
+	body.logged-in #maincontent .tabs > li > a,
+	body.logged-in #maincontent .cbi-tabmenu > li > a {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		min-height: 2.75rem;
+		height: 100%;
+		padding: .45rem .55rem;
+		line-height: 1.25;
+		text-align: center;
+		white-space: normal;
+		overflow: visible;
+		overflow-wrap: anywhere;
+		word-break: normal;
+		text-overflow: clip;
+	}
+
+	body[data-page="admin-system-system"] #localtime + br {
+		display: none;
+	}
+
+	body[data-page="admin-system-system"] #localtime + br + .control-group {
+		display: flex;
+		flex-flow: row wrap;
+		gap: .5rem;
+		box-sizing: border-box;
+		width: 100%;
+		max-width: 100%;
+		margin-top: .5rem;
+	}
+
+	body[data-page="admin-system-system"] #localtime + br + .control-group > .cbi-button {
+		flex: 1 1 9rem;
+		box-sizing: border-box;
+		min-width: 0;
+		max-width: 100%;
+		margin: 0;
+		white-space: normal;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] {
+		display: flex;
+		flex-flow: row wrap;
+		align-items: stretch;
+		box-sizing: border-box;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .td[data-name="_badge"],
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .td[data-name="_stat"] {
+		flex: 1 1 100%;
+		flex-basis: 100%;
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .td[data-name="_badge"] {
+		text-align: center;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .td[data-name="_stat"] {
+		text-align: start;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .td[data-name="_stat"] > div {
+		display: block;
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		max-width: 100%;
+		line-height: 1.45;
+		white-space: normal;
+		overflow: visible;
+		overflow-wrap: anywhere;
+		word-break: normal;
+		text-overflow: clip;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .td[data-name="_stat"] big {
+		display: block;
+		max-width: 100%;
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .cbi-section-actions {
+		flex: 1 1 100%;
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .cbi-section-actions > div {
+		display: flex;
+		flex-flow: row wrap;
+		justify-content: flex-end;
+		gap: .5rem;
+		max-width: 100%;
+	}
+
+	body[data-page="admin-network-wireless"] #cbi-wireless .cbi-section-table-row[data-sid] > .cbi-section-actions .cbi-button {
+		margin: 0;
+	}
+}

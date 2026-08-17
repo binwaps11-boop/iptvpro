@@ -1,0 +1,244 @@
+#!/bin/sh
+# One-device manufacturing provisioner. Secret arguments are deliberately not
+# accepted: pass root-only files so credentials do not appear in ps output or
+# shell history. A generic firmware image is not sale-ready until this succeeds.
+
+set -u
+umask 077
+
+ROOT_PASSWORD_FILE=''
+WIFI_KEY_FILE=''
+SSID24=''
+SSID5=''
+MARKER="${CR6608_RETAIL_MARKER:-/etc/cr6608-retail-provisioned}"
+SHADOW_PATH="${CR6608_RETAIL_SHADOW:-/etc/shadow}"
+WIRELESS_CONFIG="${CR6608_RETAIL_WIRELESS_CONFIG:-/etc/config/wireless}"
+QUICK_CONFIG="${CR6608_RETAIL_QUICK_CONFIG:-/etc/config/cr6608quick}"
+UHTTPD_CONFIG="${CR6608_RETAIL_UHTTPD_CONFIG:-/etc/config/uhttpd}"
+SYSTEM_CONFIG="${CR6608_RETAIL_SYSTEM_CONFIG:-/etc/config/system}"
+UCI_BIN="${CR6608_RETAIL_UCI:-/sbin/uci}"
+PASSWD_BIN="${CR6608_RETAIL_PASSWD:-/usr/bin/passwd}"
+UHTTPD_INIT="${CR6608_RETAIL_UHTTPD_INIT:-/etc/init.d/uhttpd}"
+WIFI_BIN="${CR6608_RETAIL_WIFI:-/sbin/wifi}"
+AUDIT_BIN="${CR6608_RETAIL_AUDIT:-/usr/sbin/cr6608-retail-audit}"
+SKIP_OWNER_MODE="${CR6608_RETAIL_TEST_SKIP_OWNER_MODE:-0}"
+
+usage() {
+	printf '%s\n' \
+		'usage: cr6608-retail-provision --root-password-file FILE --wifi-key-file FILE' \
+		'       [--ssid24 NAME] [--ssid5 NAME]'
+	exit "${1:-2}"
+}
+
+fail() {
+	printf 'retail_provision=FAIL reason=%s\n' "$1" >&2
+	exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--root-password-file) [ "$#" -ge 2 ] || usage; ROOT_PASSWORD_FILE="$2"; shift 2 ;;
+		--wifi-key-file) [ "$#" -ge 2 ] || usage; WIFI_KEY_FILE="$2"; shift 2 ;;
+		--ssid24) [ "$#" -ge 2 ] || usage; SSID24="$2"; shift 2 ;;
+		--ssid5) [ "$#" -ge 2 ] || usage; SSID5="$2"; shift 2 ;;
+		-h|--help) usage 0 ;;
+		*) usage ;;
+	esac
+done
+
+[ "$SKIP_OWNER_MODE" = 1 ] || [ "$(id -u)" = 0 ] || fail must_run_as_root
+
+secure_input() {
+	[ -n "$1" ] && [ -f "$1" ] && [ ! -L "$1" ] || return 1
+	if [ "$SKIP_OWNER_MODE" != 1 ]; then
+		[ "$(stat -c '%u' "$1" 2>/dev/null)" = 0 ] || return 1
+		mode="$(stat -c '%a' "$1" 2>/dev/null)"
+		case "$mode" in 600|400) ;; *) return 1 ;; esac
+	fi
+	return 0
+}
+
+read_secret() {
+	# Exactly one non-empty line; reject CR/LF/NUL ambiguity and oversized input.
+	if [ "$SKIP_OWNER_MODE" = 1 ]; then
+		value="$(sed -n '1p' "$1")" || return 1
+		[ -n "$value" ] || return 1
+		printf %s "$value"
+		return 0
+	fi
+	[ "$(wc -l < "$1" 2>/dev/null | tr -d ' ')" = 1 ] || return 1
+	[ "$(wc -c < "$1" 2>/dev/null | tr -d ' ')" -le "$2" ] 2>/dev/null || return 1
+	IFS= read -r value < "$1" || [ -n "${value:-}" ]
+	case "${value:-}" in *"$(printf '\r')"*|*"$(printf '\n')"*) return 1 ;; esac
+	printf %s "$value"
+}
+
+secure_input "$ROOT_PASSWORD_FILE" || fail insecure_root_password_file
+secure_input "$WIFI_KEY_FILE" || fail insecure_wifi_key_file
+root_password="$(read_secret "$ROOT_PASSWORD_FILE" 81)" || fail invalid_root_password_file
+wifi_key="$(read_secret "$WIFI_KEY_FILE" 64)" || fail invalid_wifi_key_file
+[ "${#root_password}" -ge 12 ] 2>/dev/null || fail root_password_too_short
+[ "${#wifi_key}" -ge 12 ] 2>/dev/null || fail wifi_key_too_short
+[ "$root_password" != "$wifi_key" ] || fail credentials_must_be_distinct
+
+# Block common or previously documented fleet credentials without embedding
+# plaintext values. SHA-256 is only a deny-list fingerprint, never a password
+# verifier or a source of a provisioned credential.
+is_forbidden_secret() {
+	fingerprint="$(printf %s "$1" | sha256sum | awk '{print $1}')"
+	case "$fingerprint" in
+		1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+		e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+		8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+		5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+		ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+		15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+		c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+		b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff) return 0 ;;
+	esac
+	return 1
+}
+is_forbidden_secret "$root_password" && fail forbidden_root_password
+is_forbidden_secret "$wifi_key" && fail forbidden_wifi_key
+
+for label in "$SSID24" "$SSID5"; do
+	[ "${#label}" -le 32 ] 2>/dev/null || fail ssid_too_long
+	if [ "$SKIP_OWNER_MODE" != 1 ]; then
+		case "$label" in *"$(printf '\r')"*|*"$(printf '\n')"*) fail invalid_ssid ;; esac
+	fi
+done
+
+find_primary_ap() {
+	radio="$1"
+	for candidate in $($UCI_BIN -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+		[ "$($UCI_BIN -q get "wireless.${candidate}.device" 2>/dev/null)" = "$radio" ] || continue
+		[ "$($UCI_BIN -q get "wireless.${candidate}.mode" 2>/dev/null)" = ap ] || continue
+		printf '%s\n' "$candidate"
+		return 0
+	done
+	return 1
+}
+
+ap24="$(find_primary_ap radio0)" || fail radio0_primary_ap_missing
+ap5="$(find_primary_ap radio1)" || fail radio1_primary_ap_missing
+[ -n "$ap24" ] && [ -n "$ap5" ] && [ "$ap24" != "$ap5" ] || fail primary_ap_resolution
+
+for required_config in "$SHADOW_PATH" "$WIRELESS_CONFIG" "$QUICK_CONFIG" \
+	"$UHTTPD_CONFIG" "$SYSTEM_CONFIG"; do
+	[ -f "$required_config" ] && [ ! -L "$required_config" ] || fail required_config_missing
+done
+[ -x "$UHTTPD_INIT" ] && [ -x "$WIFI_BIN" ] && [ -x "$AUDIT_BIN" ] || \
+	fail runtime_helper_missing
+
+backup="$(mktemp -d /tmp/cr6608-retail-provision.XXXXXX)" || fail backup_create
+chmod 0700 "$backup" || { rm -rf "$backup"; fail backup_mode; }
+transaction_started=0
+marker_existed=0
+uhttpd_was_running=0
+cleanup() {
+	root_password=''; wifi_key=''
+	rm -rf "$backup"
+}
+trap cleanup EXIT
+cp -p "$SHADOW_PATH" "$backup/shadow" || fail shadow_backup
+cp -p "$WIRELESS_CONFIG" "$backup/wireless" || fail wireless_backup
+cp -p "$QUICK_CONFIG" "$backup/cr6608quick" || fail quick_backup
+cp -p "$UHTTPD_CONFIG" "$backup/uhttpd" || fail uhttpd_backup
+cp -p "$SYSTEM_CONFIG" "$backup/system" || fail system_backup
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+	[ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail invalid_existing_marker
+	cp -p "$MARKER" "$backup/marker" || fail marker_backup
+	marker_existed=1
+fi
+"$UHTTPD_INIT" running >/dev/null 2>&1 && uhttpd_was_running=1
+
+restore_files() {
+	restore_rc=0
+	cp -pf "$backup/shadow" "$SHADOW_PATH" || restore_rc=1
+	cp -pf "$backup/wireless" "$WIRELESS_CONFIG" || restore_rc=1
+	cp -pf "$backup/cr6608quick" "$QUICK_CONFIG" || restore_rc=1
+	cp -pf "$backup/uhttpd" "$UHTTPD_CONFIG" || restore_rc=1
+	cp -pf "$backup/system" "$SYSTEM_CONFIG" || restore_rc=1
+	for package in wireless cr6608quick uhttpd system; do
+		"$UCI_BIN" -q revert "$package" >/dev/null 2>&1 || restore_rc=1
+	done
+	if [ "$marker_existed" = 1 ]; then
+		cp -pf "$backup/marker" "$MARKER" || restore_rc=1
+	else
+		rm -f "$MARKER" || restore_rc=1
+		[ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || restore_rc=1
+	fi
+	return "$restore_rc"
+}
+
+restore_runtime() {
+	runtime_rc=0
+	if [ "$uhttpd_was_running" = 1 ]; then
+		"$UHTTPD_INIT" restart >/dev/null 2>&1 || runtime_rc=1
+	else
+		"$UHTTPD_INIT" stop >/dev/null 2>&1 || runtime_rc=1
+	fi
+	"$WIFI_BIN" reload >/dev/null 2>&1 || runtime_rc=1
+	return "$runtime_rc"
+}
+
+rollback_fail() {
+	reason="$1"
+	restore_live="${2:-0}"
+	rollback_rc=0
+	restore_files || rollback_rc=1
+	[ "$restore_live" = 0 ] || restore_runtime || rollback_rc=1
+	transaction_started=0
+	[ "$rollback_rc" = 0 ] || fail "${reason}_rollback_failed"
+	fail "$reason"
+}
+
+signal_exit() {
+	signal_rc="$1"
+	trap - HUP INT TERM
+	if [ "$transaction_started" = 1 ]; then
+		restore_files >/dev/null 2>&1 || true
+		restore_runtime >/dev/null 2>&1 || true
+	fi
+	exit "$signal_rc"
+}
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+transaction_started=1
+
+printf '%s\n%s\n' "$root_password" "$root_password" | "$PASSWD_BIN" root >/dev/null 2>&1 || \
+	rollback_fail root_password_update 0
+
+for section in "$ap24" "$ap5"; do
+	"$UCI_BIN" set "wireless.${section}.encryption=sae-mixed" || rollback_fail wireless_stage 0
+	"$UCI_BIN" set "wireless.${section}.key=$wifi_key" || rollback_fail wireless_stage 0
+	"$UCI_BIN" set "wireless.${section}.ieee80211w=1" || rollback_fail wireless_stage 0
+	"$UCI_BIN" set "wireless.${section}.disabled=0" || rollback_fail wireless_stage 0
+done
+[ -z "$SSID24" ] || "$UCI_BIN" set "wireless.${ap24}.ssid=$SSID24" || rollback_fail ssid24_stage 0
+[ -z "$SSID5" ] || "$UCI_BIN" set "wireless.${ap5}.ssid=$SSID5" || rollback_fail ssid5_stage 0
+"$UCI_BIN" set wireless.radio0.disabled=0 || rollback_fail radio_stage 0
+"$UCI_BIN" set wireless.radio1.disabled=0 || rollback_fail radio_stage 0
+"$UCI_BIN" set cr6608quick.default.security=mixed || rollback_fail quick_stage 0
+"$UCI_BIN" set "cr6608quick.default.wifi_key=$wifi_key" || rollback_fail quick_stage 0
+"$UCI_BIN" set cr6608quick.default.radio0_enabled=1 || rollback_fail quick_stage 0
+"$UCI_BIN" set cr6608quick.default.radio1_enabled=1 || rollback_fail quick_stage 0
+"$UCI_BIN" set uhttpd.main.redirect_https=1 || rollback_fail https_stage 0
+"$UCI_BIN" set 'system.@system[0].ttylogin=1' || rollback_fail ttylogin_stage 0
+"$UCI_BIN" commit wireless && "$UCI_BIN" commit cr6608quick && \
+	"$UCI_BIN" commit uhttpd && "$UCI_BIN" commit system || rollback_fail uci_commit 0
+
+{
+	printf 'profile=retail-v1\n'
+	printf 'provisioned_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$MARKER" || rollback_fail marker_write 0
+chmod 0400 "$MARKER" || rollback_fail marker_mode 0
+
+root_password=''; wifi_key=''
+"$UHTTPD_INIT" restart >/dev/null 2>&1 || rollback_fail uhttpd_restart 1
+"$WIFI_BIN" reload >/dev/null 2>&1 || rollback_fail wifi_reload 1
+"$AUDIT_BIN" >/dev/null || rollback_fail post_provision_audit 1
+transaction_started=0
+printf 'retail_provision=PASS reboot_required=1\n'

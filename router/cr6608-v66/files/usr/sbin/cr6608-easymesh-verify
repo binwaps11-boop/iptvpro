@@ -1,0 +1,216 @@
+#!/bin/sh
+
+set -u
+
+status=0
+root=/opt/prplmesh
+
+result() {
+	printf '%-32s %s\n' "$1" "$2"
+}
+
+require_binary() {
+	local name="$1"
+
+	if [ -x "$root/bin/$name" ]; then
+		result "$name binary" present
+	else
+		result "$name binary" missing
+		status=1
+	fi
+}
+
+require_process() {
+	local name="$1" pids
+
+	pids="$(pidof "$name" 2>/dev/null || true)"
+	if [ -n "$pids" ]; then
+		result "$name runtime" "running pid=$pids"
+	else
+		result "$name runtime" stopped
+		status=1
+	fi
+}
+
+database_value() {
+	local key="$1"
+	awk -v wanted="$key" '
+		index($0, wanted "=") == 1 { print substr($0, length(wanted) + 2); exit }
+	' /tmp/beerocks/prplmesh_platform_db
+}
+
+printf 'CR6608 prplMesh EasyMesh verification\n'
+
+for binary in ieee1905_transport beerocks_controller beerocks_agent \
+	beerocks_fronthaul beerocks_cli; do
+	require_binary "$binary"
+done
+
+if [ ! -f /etc/config/prplmesh ]; then
+	result "UCI configuration" missing
+	exit 1
+fi
+
+enabled="$(uci -q get prplmesh.config.enable 2>/dev/null || true)"
+operational="$(uci -q get prplmesh.config.operational 2>/dev/null || true)"
+mode="$(uci -q get prplmesh.config.management_mode 2>/dev/null || true)"
+passive="$(uci -q get prplmesh.config.passive_mode 2>/dev/null || true)"
+active_control_confirmed="$(uci -q get prplmesh.config.active_control_confirmed 2>/dev/null || true)"
+result "runtime gate" "${enabled:-missing}"
+result "operational gate" "${operational:-missing}"
+result "management mode" "${mode:-missing}"
+result "passive mode" "${passive:-missing}"
+result "active control confirmed" "${active_control_confirmed:-missing}"
+
+# A deliberately disabled service is a policy state, not a 128-second
+# readiness failure.  Return before process/log polling so dashboard and
+# release audits remain bounded when the factory-safe gate is closed.
+if [ "$enabled" != 1 ] || [ "$operational" != 1 ]; then
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=DISABLED_BY_POLICY\n'
+	exit 2
+fi
+if [ "$passive" != 1 ] && [ "$active_control_confirmed" != 1 ]; then
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=ACTIVE_CONTROL_NOT_CONFIRMED\n'
+	exit 1
+fi
+
+for section in radio0 radio1; do
+	iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+	if [ -n "$iface" ] && iw dev "$iface" info >/dev/null 2>&1; then
+		result "$section NL80211 AP" "$iface"
+	else
+		result "$section NL80211 AP" "missing:${iface:-unset}"
+		status=1
+	fi
+done
+
+require_process ieee1905_transport
+case "$mode" in
+	Multi-AP-Agent|Non-Prpl-Controller-and-Agent) ;;
+	*) require_process beerocks_controller ;;
+esac
+require_process beerocks_agent
+require_process beerocks_fronthaul
+
+if [ -r /tmp/beerocks/prplmesh_platform_db ]; then
+	result "runtime platform database" present
+	if grep -Fq 'prplmesh_pass' /tmp/beerocks/prplmesh_platform_db; then
+		result "example credentials" detected
+		status=1
+	else
+		result "example credentials" absent
+	fi
+	for section in radio0 radio1; do
+		iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+		expected_ssid="$(uci -q get prplmesh."$section".ssid 2>/dev/null || true)"
+		actual_ssid="$(database_value "wireless.$iface.ssid")"
+		if [ -n "$expected_ssid" ] && [ "$actual_ssid" = "$expected_ssid" ]; then
+			result "$section runtime SSID" matched
+		else
+			result "$section runtime SSID" "mismatch:${actual_ssid:-missing}"
+			status=1
+		fi
+	done
+else
+	result "runtime platform database" missing
+	status=1
+fi
+
+settle_seconds=0
+# The first boot after sysupgrade can spend more than a minute bringing up
+# both MT7915 AP managers before the controller completes WSC M2.  Keep the
+# verifier bounded, but do not turn that normal cold-start latency into a
+# false control-plane failure.
+while [ "$settle_seconds" -lt 120 ]; do
+	control_plane_ready=1
+	grep -q 'FSM: CONNECTED --> OPERATIONAL' \
+		/tmp/beerocks/logs/beerocks_backhaul.log 2>/dev/null || control_plane_ready=0
+	for section in radio0 radio1; do
+		iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+		grep -q 'Move to OPERATIONAL state' \
+			"/tmp/beerocks/logs/beerocks_ap_manager_${iface}.log" \
+			2>/dev/null || control_plane_ready=0
+		grep -q "AP_AUTOCONFIGURATION $iface FSM: .* --> CONFIGURED" \
+			/tmp/beerocks/logs/beerocks_agent.log 2>/dev/null || control_plane_ready=0
+	done
+	[ "$control_plane_ready" -eq 1 ] && break
+	sleep 2
+	settle_seconds=$((settle_seconds + 2))
+done
+if [ "$control_plane_ready" -eq 1 ]; then
+	result "control-plane settle" "ready:${settle_seconds}s"
+else
+	result "control-plane settle" "timeout:${settle_seconds}s"
+	status=1
+fi
+
+initial_pids="$(pidof ieee1905_transport beerocks_controller beerocks_agent beerocks_fronthaul 2>/dev/null || true)"
+sleep 8
+stable_pids="$(pidof ieee1905_transport beerocks_controller beerocks_agent beerocks_fronthaul 2>/dev/null || true)"
+if [ -n "$initial_pids" ] && [ "$stable_pids" = "$initial_pids" ]; then
+	result "process stability (8s)" stable
+else
+	result "process stability (8s)" "changed:${initial_pids:-none}->${stable_pids:-none}"
+	status=1
+fi
+
+sockets="$(find /tmp/beerocks -type s 2>/dev/null | wc -l)"
+result "local control sockets" "$sockets"
+[ "$sockets" -gt 0 ] || status=1
+
+if logread 2>/dev/null | tail -500 | grep -Eqi \
+	'prplmesh.*(segfault|assert|fatal|crash)|beerocks.*(segfault|assert|fatal|crash)'; then
+	result "recent fatal log" detected
+	status=1
+else
+	result "recent fatal log" none
+fi
+if grep -Eiq 'segfault|assert|fatal|terminate called|core dumped' \
+	/tmp/beerocks/logs/*.log 2>/dev/null; then
+	result "prplMesh file logs" fatal-detected
+	status=1
+else
+	result "prplMesh file logs" no-fatal
+fi
+
+if grep -Eiq \
+	'Failed reading front Wi-Fi credentials|unsupported freq_type|TLVF: (key|ssid) length is smaller|Autoconfiguration: "UPDATE |cannot save hostapd config|Move to TERMINATED state' \
+	/tmp/beerocks/logs/*.log 2>/dev/null; then
+	result "control-plane error scan" detected
+	status=1
+else
+	result "control-plane error scan" clean
+fi
+
+if grep -q 'FSM: CONNECTED --> OPERATIONAL' /tmp/beerocks/logs/beerocks_backhaul.log 2>/dev/null; then
+	result "wired backhaul FSM" operational
+else
+	result "wired backhaul FSM" not-operational
+	status=1
+fi
+
+for section in radio0 radio1; do
+	iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+	if grep -q 'Move to OPERATIONAL state' \
+		"/tmp/beerocks/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null; then
+		result "$section AP manager" operational
+	else
+		result "$section AP manager" not-operational
+		status=1
+	fi
+	if grep -q "AP_AUTOCONFIGURATION $iface FSM: .* --> CONFIGURED" \
+		/tmp/beerocks/logs/beerocks_agent.log 2>/dev/null; then
+		result "$section autoconfiguration" configured
+	else
+		result "$section autoconfiguration" not-configured
+		status=1
+	fi
+done
+
+if [ "$status" -eq 0 ]; then
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=PASS\n'
+	exit 0
+fi
+
+printf 'RESULT_EASYMESH_CONTROL_PLANE=FAIL\n'
+exit 1

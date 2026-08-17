@@ -1,0 +1,18 @@
+From: Smart AP firmware project
+Subject: [PATCH] bwl: keep inherited netlink transaction overload visible
+
+GCC 14 diagnoses the inherited send_receive_msg() overload as hidden by
+the NL80211-specific overload. Import the base overload into the derived
+class scope instead of suppressing overloaded-virtual diagnostics.
+
+--- a/common/beerocks/bwl/shared/nl80211_socket.h
++++ b/common/beerocks/bwl/shared/nl80211_socket.h
+@@ -21,6 +21,8 @@
+ class nl80211_socket : public nl_genl_socket {
+ 
+ public:
++    using nl_genl_socket::send_receive_msg;
++
+     /**
+      * @brief Class destructor.
+      */

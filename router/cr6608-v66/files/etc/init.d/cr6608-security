@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=10
+
+start() {
+	# Firewall/VLAN/Wi-Fi policy is already persisted in UCI and is loaded by
+	# the normal OpenWrt services. Only per-port runtime state needs replaying.
+	/usr/sbin/cr6608-security-apply boot >/dev/null 2>&1
+}
+
+stop() {
+	/usr/sbin/cr6608-security-apply clear-runtime >/dev/null 2>&1
+}
+
+reload_service() {
+	/usr/sbin/cr6608-security-apply apply
+}
+
+restart() {
+	reload_service
+}

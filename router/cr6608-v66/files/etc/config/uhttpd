@@ -1,0 +1,39 @@
+
+config uhttpd 'main'
+	list ucode_prefix '/cgi-bin/luci=/usr/share/ucode/luci/uhttpd.uc'
+	list listen_http '0.0.0.0:80'
+	list listen_http '[::]:80'
+	list listen_https '0.0.0.0:443'
+	list listen_https '[::]:443'
+	option cert '/etc/uhttpd.crt'
+	option key '/etc/uhttpd.key'
+	# HTTP remains available only for the unprovisioned/local recovery image.
+	# cr6608-retail-provision enables redirect_https after unique credentials
+	# are installed; cr6608-retail-audit rejects a sale unit without it.
+	option redirect_https '0'
+	option home '/www'
+	# Must be 0: the Wi-Fi rescue address 221.221.221.221 is a PUBLIC-range IP, and the
+	# RFC1918 rebinding filter would abort every request to it (ERR_CONNECTION_ABORTED).
+	# Disabling it lets the dashboard answer on 221.221.221.221 (and 192.168.1.1 stays fine).
+	option rfc1918_filter '0'
+	option max_requests '16'
+	option max_connections '100'
+	option cgi_prefix '/cgi-bin'
+	# Auto-channel/DFS validation may legitimately spend up to 660 seconds in
+	# ACS/CAC. The authenticated Quick Apply CGI has its own lock and bounded
+	# workflow, so uhttpd must outlive that guard instead of killing it midway.
+	option script_timeout '750'
+	option network_timeout '30'
+	option http_keepalive '20'
+	option tcp_keepalive '1'
+	option ubus_prefix '/ubus'
+
+config cert 'defaults'
+	option days '397'
+	option key_type 'ec'
+	option bits '2048'
+	option ec_curve 'P-256'
+	option country 'ZZ'
+	option state 'Somewhere'
+	option location 'Unknown'
+	option commonname 'OpenWrt'

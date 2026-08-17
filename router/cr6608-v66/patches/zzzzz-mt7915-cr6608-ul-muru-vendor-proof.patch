@@ -1,0 +1,142 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -298,6 +298,26 @@ DEFINE_DEBUGFS_ATTRIBUTE(fops_cr6608_ul_muru,
+ 			 mt7915_cr6608_ul_muru_get,
+ 			 mt7915_cr6608_ul_muru_set, "%lld\n");
+ 
++static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
++					     void *data)
++{
++	struct mt7915_dev *dev = file->private;
++
++	seq_printf(file, "allowed=%u\n", dev->cr6608_ul_muru_allowed);
++	seq_printf(file, "enabled=%u\n", READ_ONCE(dev->cr6608_ul_muru));
++	seq_puts(file, "policy=mediatek-vendor-sta-rec-muru\n");
++	seq_printf(file, "sta_rec_updates=%d\n",
++		   atomic_read(&dev->cr6608_ul_muru_sta_rec_updates));
++	seq_printf(file, "he_sta_rec_updates=%d\n",
++		   atomic_read(&dev->cr6608_ul_muru_he_sta_rec_updates));
++	seq_printf(file, "mimo_capable_updates=%d\n",
++		   atomic_read(&dev->cr6608_ul_muru_mimo_capable_updates));
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_ul_muru_state);
++
+ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ {
+ 	struct mt7915_phy *phy = file->private;
+@@ -1337,5 +1357,7 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 	debugfs_create_file("cr6608_ul_muru", 0600, dir, dev,
+ 			    &fops_cr6608_ul_muru);
++	debugfs_create_file("cr6608_ul_muru_state", 0400, dir, dev,
++			    &mt7915_cr6608_ul_muru_state_fops);
+ 
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+ 			    &mt7915_muru_stats_fops);
+@@ -1516,11 +1538,44 @@ mt7915_queues_show(struct seq_file *s, void *data)
+ 
+ DEFINE_SHOW_ATTRIBUTE(mt7915_queues);
+ 
++static int mt7915_cr6608_sta_muru_show(struct seq_file *file, void *data)
++{
++	struct ieee80211_sta *sta = file->private;
++	struct ieee80211_he_cap_elem *elem =
++		&sta->deflink.he_cap.he_cap_elem;
++	bool he = sta->deflink.he_cap.has_he;
++	bool full = he &&
++		(elem->phy_cap_info[2] &
++		 IEEE80211_HE_PHY_CAP2_UL_MU_FULL_MU_MIMO);
++	bool partial = he &&
++		(elem->phy_cap_info[2] &
++		 IEEE80211_HE_PHY_CAP2_UL_MU_PARTIAL_MU_MIMO);
++
++	seq_printf(file, "he=%u\n", he);
++	seq_printf(file, "ul_ofdma_sta_rec_eligible=%u\n", he);
++	seq_printf(file, "ul_mumimo_full=%u\n", full);
++	seq_printf(file, "ul_mumimo_partial=%u\n", partial);
++	/* This guarded build accepts full-bandwidth UL MU-MIMO peers for its
++	 * reproducible airtime proof.  Keep the peer's partial bit visible for
++	 * diagnostics, but do not treat a partial-only peer as proof.
++	 */
++	seq_printf(file, "ul_mumimo_capable=%u\n", full);
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_sta_muru);
++
+ void mt7915_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 			    struct ieee80211_sta *sta, struct dentry *dir)
+ {
++	struct mt7915_dev *dev = mt7915_hw_dev(hw);
++
+ 	debugfs_create_file("fixed_rate", 0600, dir, sta, &fops_fixed_rate);
+ 	debugfs_create_file("hw-queues", 0400, dir, sta, &mt7915_queues_fops);
++	if (READ_ONCE(dev->cr6608_ul_muru))
++		debugfs_create_file("cr6608_muru_capabilities", 0400, dir, sta,
++				    &mt7915_cr6608_sta_muru_fops);
+ }
+ 
+ #endif
+diff --git a/mt7915/init.c b/mt7915/init.c
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -1243,6 +1243,9 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 	INIT_WORK(&dev->reset_work, mt7915_mac_reset_work);
+ 	INIT_WORK(&dev->dump_work, mt7915_mac_dump_work);
+ 	mutex_init(&dev->dump_mutex);
++	atomic_set(&dev->cr6608_ul_muru_sta_rec_updates, 0);
++	atomic_set(&dev->cr6608_ul_muru_he_sta_rec_updates, 0);
++	atomic_set(&dev->cr6608_ul_muru_mimo_capable_updates, 0);
+ 
+ 	dev->cr6608_ul_muru_allowed =
+ 		is_mt7915(&dev->mt76) && cr6608_ul_muru &&
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -930,6 +930,8 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	    READ_ONCE(dev->cr6608_ul_muru)) {
+ 		muru->cfg.ofdma_ul_en = true;
+ 		muru->cfg.mimo_ul_en = true;
++		if (is_mt7915(&dev->mt76))
++			atomic_inc(&dev->cr6608_ul_muru_sta_rec_updates);
+ 	}
+ 	muru->cfg.ofdma_dl_en = true;
+ 
+@@ -940,6 +942,9 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	if (!sta->deflink.he_cap.has_he)
+ 		return;
+ 
++	if (is_mt7915(&dev->mt76) && READ_ONCE(dev->cr6608_ul_muru))
++		atomic_inc(&dev->cr6608_ul_muru_he_sta_rec_updates);
++
+ 	muru->mimo_dl.partial_bw_dl_mimo =
+ 		HE_PHY(CAP6_PARTIAL_BANDWIDTH_DL_MUMIMO, elem->phy_cap_info[6]);
+ 
+@@ -947,6 +952,10 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		HE_PHY(CAP2_UL_MU_FULL_MU_MIMO, elem->phy_cap_info[2]);
+ 	muru->mimo_ul.partial_ul_mimo =
+ 		HE_PHY(CAP2_UL_MU_PARTIAL_MU_MIMO, elem->phy_cap_info[2]);
++	/* Count full-bandwidth peers accepted by this build's proof policy. */
++	if (is_mt7915(&dev->mt76) && READ_ONCE(dev->cr6608_ul_muru) &&
++	    muru->mimo_ul.full_ul_mimo)
++		atomic_inc(&dev->cr6608_ul_muru_mimo_capable_updates);
+ 
+ 	muru->ofdma_dl.punc_pream_rx =
+ 		HE_PHY(CAP1_PREAMBLE_PUNC_RX_MASK, elem->phy_cap_info[1]);
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -301,6 +301,9 @@ struct mt7915_dev {
+ 	bool muru_debug;
+ 	bool cr6608_ul_muru_allowed;
+ 	bool cr6608_ul_muru;
++	atomic_t cr6608_ul_muru_sta_rec_updates;
++	atomic_t cr6608_ul_muru_he_sta_rec_updates;
++	atomic_t cr6608_ul_muru_mimo_capable_updates;
+ 	bool ibf;
+ 
+ 	u8 monitor_mask;

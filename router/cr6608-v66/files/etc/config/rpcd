@@ -1,0 +1,11 @@
+config rpcd
+	option socket /var/run/ubus/ubus.sock
+	option timeout 30
+
+config login
+	option username 'root'
+	# OpenWrt's password indirection keeps Smart AP, LuCI, SSH, and the console
+	# synchronized without copying or exposing the root hash in UCI.
+	option password '$p$root'
+	list read '*'
+	list write '*'

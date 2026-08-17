@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="smart-ap-title smart-ap-description">
+  <title id="smart-ap-title">Smart AP</title>
+  <desc id="smart-ap-description">Smart AP wireless access point mark</desc>
+  <defs>
+    <linearGradient id="smart-ap-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="105" fill="url(#smart-ap-gradient)"/>
+  <rect x="35" y="35" width="442" height="442" rx="94" fill="none" stroke="#94e0ff" stroke-opacity=".22" stroke-width="10"/>
+  <g fill="none" stroke="#f4fbff" stroke-width="30" stroke-linecap="round">
+    <path d="M111 238c75-88 215-88 290 0"/>
+    <path d="M170 301c45-51 127-51 172 0"/>
+  </g>
+  <circle cx="256" cy="366" r="24" fill="#f4fbff"/>
+</svg>

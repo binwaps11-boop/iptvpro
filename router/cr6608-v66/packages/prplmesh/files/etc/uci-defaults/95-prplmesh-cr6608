@@ -1,0 +1,126 @@
+#!/bin/sh
+
+set -eu
+
+UCI_BIN="${PRPLMESH_UCI_BIN:-uci}"
+config="${PRPLMESH_CONFIG:-/etc/config/prplmesh}"
+
+# INSTALL_CONF normally provides this file.  Keep the migration self-healing
+# for preserved overlays and make UCI failures visible to the first-boot gate.
+if [ ! -e "$config" ]; then
+	umask 077
+	: > "$config"
+fi
+
+if ! "$UCI_BIN" -q get prplmesh.config >/dev/null; then
+	"$UCI_BIN" -q batch <<'EOF'
+set prplmesh.config='prplmesh'
+set prplmesh.config.management_mode='Multi-AP-Controller-and-Agent'
+set prplmesh.config.operating_mode='Gateway'
+set prplmesh.config.enable='0'
+set prplmesh.config.onboarding='0'
+set prplmesh.config.master='1'
+set prplmesh.config.gateway='1'
+set prplmesh.config.passive_mode='1'
+set prplmesh.config.wired_backhaul='1'
+set prplmesh.config.operational='0'
+set prplmesh.config.active_control_confirmed='0'
+set prplmesh.config.ssid='Smart ap 2.4G'
+set prplmesh.config.mode_enabled='None'
+set prplmesh.config.key_passphrase=''
+set prplmesh.config.mem_only_psk='0'
+set prplmesh.config.backhaul_band='auto'
+set prplmesh.config.zwdfs_flag='0'
+set prplmesh.config.best_channel_rank_th='0'
+set prplmesh.config.backhaul_wire_iface='lan1'
+set prplmesh.config.band_steering='0'
+set prplmesh.config.client_11k_roaming='1'
+set prplmesh.config.load_balancing='0'
+set prplmesh.config.client_roaming='0'
+set prplmesh.config.certification_mode='0'
+set prplmesh.config.stop_on_failure_attempts='1'
+set prplmesh.config.dfs_reentry='0'
+set prplmesh.config.roaming_hysteresis_percent_bonus='10'
+set prplmesh.config.steering_disassoc_timer_msec='200'
+set prplmesh.config.link_metrics_request_interval_sec='60'
+set prplmesh.config.clients_measurement_mode='1'
+set prplmesh.config.radio_stats_enable='1'
+set prplmesh.config.unsuccessful_assoc_report_policy='1'
+set prplmesh.config.unsuccessful_assoc_max_reporting_rate='30'
+set prplmesh.config.ire_roaming='1'
+set prplmesh.config.exclude_hostap_iface='0'
+set prplmesh.radio0='wifi-device'
+set prplmesh.radio0.hostap_iface='phy0-ap0'
+set prplmesh.radio0.ssid='Smart ap 2.4G'
+set prplmesh.radio0.security_mode='none'
+set prplmesh.radio0.psk=''
+set prplmesh.radio1='wifi-device'
+set prplmesh.radio1.hostap_iface='phy1-ap0'
+set prplmesh.radio1.ssid='Smart ap 5G'
+set prplmesh.radio1.security_mode='none'
+set prplmesh.radio1.psk=''
+commit prplmesh
+EOF
+fi
+
+# A sysupgrade can preserve an enabled prplMesh configuration from an older
+# image.  Close the primary enable gate first, then the two operational gates,
+# and commit them before inspecting wireless or synchronising credentials.
+# Repeating these assignments is intentional and idempotent.  Any UCI error
+# aborts the migration; after the first successful set, even a later failure
+# leaves the primary runtime gate closed in UCI's pending transaction.
+close_preserved_runtime_gates() {
+	"$UCI_BIN" -q set "prplmesh.config.enable=0" || return 1
+	"$UCI_BIN" -q set "prplmesh.config.operational=0" || return 1
+	"$UCI_BIN" -q set "prplmesh.config.active_control_confirmed=0" || return 1
+	"$UCI_BIN" -q commit prplmesh || return 1
+
+	[ "$("$UCI_BIN" -q get prplmesh.config.enable)" = 0 ] || return 1
+	[ "$("$UCI_BIN" -q get prplmesh.config.operational)" = 0 ] || return 1
+	[ "$("$UCI_BIN" -q get prplmesh.config.active_control_confirmed)" = 0 ] || return 1
+}
+
+close_preserved_runtime_gates || exit 1
+
+wireless_ap_section() {
+	local device="$1" section
+
+	for section in $("$UCI_BIN" -q show wireless | sed -n \
+		"s/^wireless\.\([^=]*\)=wifi-iface$/\1/p"); do
+		[ "$("$UCI_BIN" -q get wireless."$section".device)" = "$device" ] || continue
+		[ "$("$UCI_BIN" -q get wireless."$section".mode)" = ap ] || continue
+		printf '%s\n' "$section"
+		return 0
+	done
+	return 1
+}
+
+sync_radio() {
+	local mesh_section="$1" device="$2" ap_section encryption ssid key security
+
+	ap_section="$(wireless_ap_section "$device" || true)"
+	[ -n "$ap_section" ] || return 0
+	ssid="$("$UCI_BIN" -q get wireless."$ap_section".ssid || true)"
+	key="$("$UCI_BIN" -q get wireless."$ap_section".key || true)"
+	encryption="$("$UCI_BIN" -q get wireless."$ap_section".encryption || true)"
+	[ -n "$ssid" ] || return 0
+	case "$encryption" in
+		none|'') security=none; mode_enabled=None; key='' ;;
+		*psk2*|*sae-mixed*) security=wpa2-psk; mode_enabled=WPA2-Personal ;;
+		*) security=unsupported; mode_enabled=Unsupported ;;
+	esac
+	"$UCI_BIN" -q set "prplmesh.$mesh_section.ssid=$ssid"
+	"$UCI_BIN" -q set "prplmesh.$mesh_section.security_mode=$security"
+	"$UCI_BIN" -q set "prplmesh.$mesh_section.psk=$key"
+	if [ "$mesh_section" = radio0 ]; then
+		"$UCI_BIN" -q set "prplmesh.config.ssid=$ssid"
+		"$UCI_BIN" -q set "prplmesh.config.mode_enabled=$mode_enabled"
+		"$UCI_BIN" -q set "prplmesh.config.key_passphrase=$key"
+	fi
+}
+
+sync_radio radio0 radio0
+sync_radio radio1 radio1
+"$UCI_BIN" -q commit prplmesh
+
+exit 0

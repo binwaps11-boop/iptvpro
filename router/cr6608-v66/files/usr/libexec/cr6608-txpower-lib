@@ -1,0 +1,83 @@
+#!/bin/sh
+
+# User requests are stored in dBm. The driver still applies all normal
+# regulatory, SAR, EEPROM, rate-table, firmware and thermal limits.
+
+cr6608_txpower_options() {
+	local value=1 separator=''
+
+	while [ "$value" -le 38 ]; do
+		printf '%s%s:%s dBm' "$separator" "$value" "$value"
+		separator=','
+		value=$((value + 1))
+	done
+}
+
+cr6608_txpower_valid_target() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 38 ] 2>/dev/null
+}
+
+cr6608_txpower_normalize_target() {
+	if cr6608_txpower_valid_target "$1"; then
+		printf '%s\n' "$1"
+	else
+		return 1
+	fi
+}
+
+cr6608_txpower_target_to_uci() {
+	cr6608_txpower_normalize_target "$1"
+}
+
+cr6608_txpower_uci_to_target() {
+	cr6608_txpower_normalize_target "$1"
+}
+
+cr6608_txpower_target_for_radio() {
+	local radio="$1" target raw
+
+	raw="$(uci -q get wireless.${radio}.txpower 2>/dev/null)"
+	if cr6608_txpower_valid_target "$raw"; then
+		printf '%s\n' "$raw"
+		return 0
+	fi
+
+	target="$(uci -q get cr6608quick.default.txpower_${radio} 2>/dev/null)"
+	if cr6608_txpower_valid_target "$target"; then
+		printf '%s\n' "$target"
+		return 0
+	fi
+
+	target="$(uci -q get smartap.quick.txpower_${radio} 2>/dev/null)"
+	if cr6608_txpower_valid_target "$target"; then
+		printf '%s\n' "$target"
+		return 0
+	fi
+
+	printf '38\n'
+}
+
+cr6608_txpower_apply_radio() {
+	local radio="$1" target raw
+
+	case "$radio" in
+		radio0|radio1) ;;
+		*) return 1 ;;
+	esac
+
+	target="$(cr6608_txpower_normalize_target "$2")" || return 1
+	raw="$(cr6608_txpower_target_to_uci "$target")" || return 1
+
+	uci set wireless.${radio}.txpower="$raw"
+	uci -q set cr6608quick.default.txpower_${radio}="$target"
+	uci -q set smartap.quick.txpower_${radio}="$target"
+	logger -t cr6608-txpower "${radio}: target=${target}dBm iw-dev, uci_request=${raw}dBm"
+}
+
+cr6608_txpower_apply_pair() {
+	cr6608_txpower_apply_radio radio0 "$1" || return 1
+	cr6608_txpower_apply_radio radio1 "$2" || return 1
+}

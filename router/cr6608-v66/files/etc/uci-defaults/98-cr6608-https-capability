@@ -1,0 +1,60 @@
+#!/bin/sh
+# Restore dual-stack management listeners in preserved configurations without
+# breaking a deliberately selected HTTP port or address-specific listener.
+# A settings-preserving sysupgrade keeps /etc/config/uhttpd, so older IPv4-only
+# wildcard HTTP listeners need the matching IPv6 wildcard (and vice versa).
+# Address-specific listeners and an intentionally absent HTTP listener are not
+# widened because doing so could expose management on an unintended interface.
+# TLS remains pinned to the product's audited IPv4/IPv6 port 443 endpoints.
+# Redirect is deliberately enabled only by cr6608-retail-provision after unique
+# credentials exist; existing units retain HTTP access during the upgrade.
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+if [ -z "$board" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	board="$(ubus call system board 2>/dev/null | jsonfilter -e '@.board_name' 2>/dev/null)"
+fi
+[ -n "$board" ] || exit 1
+[ "$board" = xiaomi,mi-router-cr6608 ] || exit 0
+
+section="$(uci -q show uhttpd 2>/dev/null |
+	sed -n 's/^uhttpd\.\([^=]*\)=uhttpd$/\1/p' | head -n 1)"
+[ -n "$section" ] || exit 1
+
+changed=0
+abort_migration() {
+	uci -q revert uhttpd >/dev/null 2>&1 || true
+	exit 1
+}
+
+http_listeners="$(uci -q get "uhttpd.${section}.listen_http" 2>/dev/null)"
+for listener in $http_listeners; do
+	case "$listener" in
+		0.0.0.0:*) counterpart="[::]:${listener##*:}" ;;
+		\[::\]:*) counterpart="0.0.0.0:${listener##*:}" ;;
+		*) continue ;;
+	esac
+	case " $http_listeners " in *" $counterpart "*) continue ;; esac
+	uci add_list "uhttpd.${section}.listen_http=$counterpart" || abort_migration
+	http_listeners="$http_listeners $counterpart"
+	changed=1
+done
+
+https_listeners="$(uci -q get "uhttpd.${section}.listen_https" 2>/dev/null)"
+case " $https_listeners " in *" 0.0.0.0:443 "*) ;; *)
+	uci add_list "uhttpd.${section}.listen_https=0.0.0.0:443" || abort_migration
+	changed=1
+;; esac
+case " $https_listeners " in *" [::]:443 "*) ;; *)
+	uci add_list "uhttpd.${section}.listen_https=[::]:443" || abort_migration
+	changed=1
+;; esac
+if ! uci -q get "uhttpd.${section}.cert" >/dev/null 2>&1; then
+	uci set "uhttpd.${section}.cert=/etc/uhttpd.crt" || abort_migration
+	changed=1
+fi
+if ! uci -q get "uhttpd.${section}.key" >/dev/null 2>&1; then
+	uci set "uhttpd.${section}.key=/etc/uhttpd.key" || abort_migration
+	changed=1
+fi
+[ "$changed" -eq 0 ] || uci commit uhttpd || abort_migration
+exit 0

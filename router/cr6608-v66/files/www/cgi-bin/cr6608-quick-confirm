@@ -1,0 +1,100 @@
+#!/bin/sh
+
+MAX_BODY=2048
+TMP_DIR="${CR6608_TMP_DIR:-/tmp}"
+JSONFILTER_BIN="${CR6608_JSONFILTER_BIN:-/usr/bin/jsonfilter}"
+UBUS_BIN="${CR6608_UBUS_BIN:-/bin/ubus}"
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+SAFE_APPLY="${CR6608_SAFE_APPLY:-/usr/sbin/cr6608-safe-apply}"
+SAFE_READY="${CR6608_SAFE_READY:-/tmp/cr6608-safe-apply-ready}"
+DASHSESS_DIR="${CR6608_DASHSESS_DIR:-/tmp/dashsess}"
+BODY=""
+
+export LC_ALL=C
+set -f
+umask 077
+
+headers() {
+	[ -n "$1" ] && echo "Status: $1"
+	echo "Content-Type: application/json"
+	echo "Cache-Control: no-store"
+	echo "X-Content-Type-Options: nosniff"
+	echo "Referrer-Policy: no-referrer"
+	echo "X-Frame-Options: DENY"
+	echo "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'"
+	echo ""
+}
+
+reply() {
+	headers "$1"
+	printf '%s\n' "$2"
+	exit 0
+}
+
+cleanup() {
+	[ -n "$BODY" ] && rm -f "$BODY"
+}
+trap cleanup EXIT HUP INT TERM
+
+[ "${REQUEST_METHOD:-GET}" = "POST" ] || reply "405 Method Not Allowed" '{"ok":false,"error":"method"}'
+case "${CONTENT_TYPE:-}" in application/json|application/json\;*) ;; *) reply "415 Unsupported Media Type" '{"ok":false,"error":"content_type"}' ;; esac
+LEN="${CONTENT_LENGTH:-}"
+case "$LEN" in ''|*[!0-9]*) reply "400 Bad Request" '{"ok":false,"error":"length"}' ;; esac
+[ "$LEN" -gt 0 ] 2>/dev/null && [ "$LEN" -le "$MAX_BODY" ] 2>/dev/null || reply "413 Payload Too Large" '{"ok":false,"error":"length"}'
+BODY="$(mktemp "$TMP_DIR/cr6608-confirm.XXXXXX" 2>/dev/null)" || reply "500 Internal Server Error" '{"ok":false,"error":"temporary_file"}'
+chmod 0600 "$BODY" 2>/dev/null || reply "500 Internal Server Error" '{"ok":false,"error":"temporary_file"}'
+dd bs=1 count="$LEN" of="$BODY" 2>/dev/null
+[ "$(wc -c <"$BODY" 2>/dev/null | tr -d ' ')" = "$LEN" ] || reply "400 Bad Request" '{"ok":false,"error":"short_body"}'
+"$JSONFILTER_BIN" -i "$BODY" -e '@' >/dev/null 2>&1 || reply "400 Bad Request" '{"ok":false,"error":"json"}'
+
+jget() { "$JSONFILTER_BIN" -i "$BODY" -e "@.$1" 2>/dev/null | head -n 1; }
+valid_sid() { case "$1" in ''|*[!A-Fa-f0-9]*) return 1 ;; esac; [ "${#1}" -eq 32 ] 2>/dev/null; }
+
+[ -r "$SESSION_AUTH_LIB" ] || reply "500 Internal Server Error" '{"ok":false,"error":"auth_helper"}'
+. "$SESSION_AUTH_LIB"
+
+dashboard_auth() {
+	local candidate="$1" file
+	valid_sid "$candidate" || return 1
+	file="$DASHSESS_DIR/$candidate"
+	[ -d "$DASHSESS_DIR" ] && [ ! -L "$DASHSESS_DIR" ] && cr6608_path_owned_by_root "$DASHSESS_DIR" || return 1
+	[ -f "$file" ] && [ ! -L "$file" ] && cr6608_path_owned_by_root "$file" || return 1
+	cr6608_session_valid "$candidate"
+}
+
+luci_auth() {
+	local candidate="$1" session username access
+	valid_sid "$candidate" || return 1
+	session="$("$UBUS_BIN" call session get "{\"ubus_rpc_session\":\"$candidate\"}" 2>/dev/null)" || return 1
+	username="$("$JSONFILTER_BIN" -s "$session" -e '@.values.username' 2>/dev/null)"
+	[ -n "$username" ] || username="$("$JSONFILTER_BIN" -s "$session" -e '@.data.username' 2>/dev/null)"
+	[ "$username" = "root" ] || return 1
+	access="$("$UBUS_BIN" call session access "{\"ubus_rpc_session\":\"$candidate\",\"scope\":\"uci\",\"object\":\"cr6608quick\",\"function\":\"write\"}" 2>/dev/null)" || return 1
+	case "$("$JSONFILTER_BIN" -s "$access" -e '@.access' 2>/dev/null)" in true|1) return 0 ;; esac
+	return 1
+}
+
+ok=0
+sid="$(cr6608_session_from_request)"
+dashboard_auth "$sid" && ok=1
+luci_sid="$(jget luci_sid)"
+if [ "$ok" != "1" ] && luci_auth "$luci_sid"; then ok=1; fi
+if [ "$ok" != "1" ]; then
+	luci_cookie_name="$(cr6608_luci_session_cookie_name)"
+	candidate="$(cr6608_cookie_value_unique "$luci_cookie_name")" || candidate=""
+	luci_auth "$candidate" && ok=1
+fi
+[ "$ok" = "1" ] || reply "403 Forbidden" '{"ok":false,"error":"forbidden"}'
+
+token="$(jget token)"
+case "$token" in ''|*[!0-9a-f]*) reply "400 Bad Request" '{"ok":false,"error":"token"}' ;; esac
+[ "${#token}" -eq 32 ] 2>/dev/null || reply "400 Bad Request" '{"ok":false,"error":"token"}'
+
+[ -f "$SAFE_READY" ] && [ ! -L "$SAFE_READY" ] || reply "409 Conflict" '{"ok":false,"error":"not_ready"}'
+IFS= read -r ready_token <"$SAFE_READY" || reply "409 Conflict" '{"ok":false,"error":"not_ready"}'
+[ "$ready_token" = "$token" ] || reply "409 Conflict" '{"ok":false,"error":"not_ready"}'
+
+if "$SAFE_APPLY" confirm "$token" >/dev/null 2>&1; then
+	reply "" '{"ok":true,"confirmed":true}'
+fi
+reply "409 Conflict" '{"ok":false,"error":"confirm_failed"}'

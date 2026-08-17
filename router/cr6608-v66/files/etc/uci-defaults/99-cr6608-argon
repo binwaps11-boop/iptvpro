@@ -1,0 +1,8 @@
+#!/bin/sh
+# Force the Argon (Royal Obsidian) LuCI theme as default on first boot.
+uci -q batch <<UCI
+set luci.main.mediaurlbase=/luci-static/argon
+set luci.themes.Argon=/luci-static/argon
+commit luci
+UCI
+exit 0

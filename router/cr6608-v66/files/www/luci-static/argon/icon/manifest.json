@@ -1,0 +1,24 @@
+{
+  "name": "Smart AP",
+  "short_name": "Smart AP",
+  "description": "Local Smart AP router management",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#05060b",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/luci-static/argon/icon/android-icon-192x192.png?v=smartap-v54",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/luci-static/argon/icon/android-icon-512x512.png?v=smartap-v54",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
