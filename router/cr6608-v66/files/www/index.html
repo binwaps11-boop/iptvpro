@@ -299,6 +299,9 @@
     th, td { padding:12px 14px; border-bottom:1px solid rgba(132,168,255,.08); text-align:start; vertical-align:middle; font-size:13px; }
     html[data-theme="light"] th, html[data-theme="light"] td { border-bottom-color:rgba(18,32,71,.08); }
     th { color:var(--muted); font-size:11px; letter-spacing:.09em; text-transform:uppercase; font-weight:700; }
+    /* Keep column headers readable while long tables scroll inside .table-wrap. */
+    thead th { position:sticky; top:0; background:rgba(14,21,42,.92); backdrop-filter:blur(4px); z-index:1; }
+    html[data-theme="light"] thead th { background:#F3F7FD; }
     thead tr { background:rgba(14,21,42,.55); }
     html[data-theme="light"] thead tr { background:#F3F7FD; }
     tbody tr:hover td { background:rgba(59,130,246,.05); }

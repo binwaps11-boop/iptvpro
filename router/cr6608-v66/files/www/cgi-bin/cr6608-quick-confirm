@@ -65,11 +65,11 @@ dashboard_auth() {
 luci_auth() {
 	local candidate="$1" session username access
 	valid_sid "$candidate" || return 1
-	session="$("$UBUS_BIN" call session get "{\"ubus_rpc_session\":\"$candidate\"}" 2>/dev/null)" || return 1
+	session="$("$UBUS_BIN" -t 5 call session get "{\"ubus_rpc_session\":\"$candidate\"}" 2>/dev/null)" || return 1
 	username="$("$JSONFILTER_BIN" -s "$session" -e '@.values.username' 2>/dev/null)"
 	[ -n "$username" ] || username="$("$JSONFILTER_BIN" -s "$session" -e '@.data.username' 2>/dev/null)"
 	[ "$username" = "root" ] || return 1
-	access="$("$UBUS_BIN" call session access "{\"ubus_rpc_session\":\"$candidate\",\"scope\":\"uci\",\"object\":\"cr6608quick\",\"function\":\"write\"}" 2>/dev/null)" || return 1
+	access="$("$UBUS_BIN" -t 5 call session access "{\"ubus_rpc_session\":\"$candidate\",\"scope\":\"uci\",\"object\":\"cr6608quick\",\"function\":\"write\"}" 2>/dev/null)" || return 1
 	case "$("$JSONFILTER_BIN" -s "$access" -e '@.access' 2>/dev/null)" in true|1) return 0 ;; esac
 	return 1
 }
@@ -85,6 +85,34 @@ if [ "$ok" != "1" ]; then
 	luci_auth "$candidate" && ok=1
 fi
 [ "$ok" = "1" ] || reply "403 Forbidden" '{"ok":false,"error":"forbidden"}'
+
+# Authenticated probe: lets the admin UI recover a pending Safe Apply session
+# whose apply response was lost (Wi-Fi restarts mid-apply drop the HTTP reply,
+# and the rollback token only existed in that reply). Read-only: reports the
+# guard state and, while a transaction is armed and unexpired, its token so
+# the client can render the Keep/Rollback confirmation again.
+if [ "$(jget probe)" = "1" ] || [ "$(jget probe)" = "true" ]; then
+	probe_status="$("$SAFE_APPLY" status 2>/dev/null)" || probe_status=""
+	probe_state="$(printf '%s\n' "$probe_status" | sed -n 's/^state=//p' | head -n1)"
+	case "$probe_state" in armed|clean|invalid) ;; *) probe_state=unknown ;; esac
+	probe_token="$(printf '%s\n' "$probe_status" | sed -n 's/^token=//p' | head -n1)"
+	case "$probe_token" in *[!0-9a-f]*) probe_token="" ;; esac
+	[ "${#probe_token}" -eq 32 ] 2>/dev/null || probe_token=""
+	probe_timeout="$(printf '%s\n' "$probe_status" | sed -n 's/^timeout=//p' | head -n1)"
+	case "$probe_timeout" in ''|*[!0-9]*) probe_timeout=0 ;; esac
+	probe_remaining="$(printf '%s\n' "$probe_status" | sed -n 's/^remaining=//p' | head -n1)"
+	case "$probe_remaining" in ''|*[!0-9]*) probe_remaining=0 ;; esac
+	# Only hand the token out while the transaction can still be confirmed.
+	probe_ready=false
+	if [ "$probe_state" = "armed" ] && [ -n "$probe_token" ] && \
+	   [ "$probe_remaining" -gt 0 ] 2>/dev/null && \
+	   [ -f "$SAFE_READY" ] && [ ! -L "$SAFE_READY" ]; then
+		probe_ready=true
+	else
+		probe_token=""
+	fi
+	reply "" "{\"ok\":true,\"probe\":true,\"state\":\"$probe_state\",\"confirmation_ready\":$probe_ready,\"rollback_token\":\"$probe_token\",\"rollback_timeout_s\":$probe_timeout,\"rollback_remaining_s\":$probe_remaining}"
+fi
 
 token="$(jget token)"
 case "$token" in ''|*[!0-9a-f]*) reply "400 Bad Request" '{"ok":false,"error":"token"}' ;; esac

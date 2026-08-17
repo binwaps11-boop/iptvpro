@@ -479,7 +479,9 @@ restore_loaded() {
 	if [ -x /usr/sbin/cr6608-safe-wifi-reload ]; then
 		/usr/sbin/cr6608-safe-wifi-reload --verify-only 30 all >/dev/null 2>&1 || failed=1
 	else
-		failed=1
+		# Degrade instead of failing the whole rollback: a missing verify helper
+		# must not leave the device stuck behind a permanently pending rollback.
+		wifi reload >/dev/null 2>&1 || failed=1
 	fi
 	[ "$failed" = "0" ]
 }
@@ -616,16 +618,31 @@ do_rollback() {
 	# completed-success state. Never allow Keep after a partial/failed rollback.
 	rm -f "$READY" 2>/dev/null || true
 	log "restoring rollback backup $backup"
-	if restore_loaded; then
-		cleanup_retained_ip "${token:-}" >/dev/null 2>&1 ||
-			log "temporary management address cleanup remains pending after rollback"
-		clear_pending
-		rm -f "$POINTER" "$META"
-		log "rollback completed"
-		return 0
-	fi
-	[ "$from_state" = "1" ] || printf '%s\n' "$backup" >"$POINTER"
-	log "rollback did not complete cleanly"
+	for rollback_try in 1 2; do
+		if restore_loaded; then
+			cleanup_retained_ip "${token:-}" >/dev/null 2>&1 ||
+				log "temporary management address cleanup remains pending after rollback"
+			clear_pending
+			rm -f "$POINTER" "$META"
+			log "rollback completed"
+			return 0
+		fi
+		log "rollback attempt $rollback_try did not complete cleanly"
+	done
+	# An unrecoverable rollback must not leave /etc/smartap-pending-rollback in
+	# place forever: do_arm refuses to stack on it, which permanently bricked
+	# every future apply on unattended fleet devices. Quarantine the transaction
+	# state (the config backup itself is preserved for manual recovery) so the
+	# next apply can proceed from the current — possibly partial — state.
+	rollback_quarantine="${STATE}.failed"
+	{
+		printf 'backup=%s\n' "$backup"
+		cat "$STATE" 2>/dev/null
+	} >"$rollback_quarantine" 2>/dev/null || true
+	chmod 0600 "$rollback_quarantine" 2>/dev/null || true
+	clear_pending
+	rm -f "$POINTER" "$META"
+	log "rollback failed twice; state quarantined to $rollback_quarantine, backup preserved at $backup — configuration may be partial"
 	return 1
 }
 

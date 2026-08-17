@@ -101,6 +101,40 @@ return view.extend({
 			needsLongWindow(payload.channel5, payload.radio1_enabled) ? 710000 : 90000;
 	},
 
+	// Read-only Safe Apply guard probe (authenticated). Reports whether a
+	// transaction is pending and, if so, returns its rollback token so a lost
+	// apply/confirm response can be recovered instead of guaranteeing rollback.
+	probeSafeApply: function() {
+		var payload = { probe: '1' };
+		try { payload.luci_sid = rpc.getSessionID(); } catch (e) {}
+		return this.requestJson('/cgi-bin/cr6608-quick-confirm', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload),
+			credentials: 'same-origin',
+			cache: 'no-store'
+		}, 10000).then(function(result) {
+			return (result && result.data && result.data.ok) ? result.data : null;
+		});
+	},
+
+	// Poll the guard until it reports a recoverable pending transaction or a
+	// settled (clean) state. Transport failures are expected while Wi-Fi
+	// reassociates after an apply, so they just consume an attempt.
+	recoverPendingApply: function(attempts, delayMs) {
+		var self = this;
+		function once(left) {
+			return self.probeSafeApply().catch(function() { return null; }).then(function(p) {
+				if (p && (p.confirmation_ready || p.state === 'clean')) return p;
+				if (left <= 1) return p;
+				return new Promise(function(resolve) {
+					window.setTimeout(function() { resolve(once(left - 1)); }, delayMs);
+				});
+			});
+		}
+		return once(Math.max(1, attempts || 10));
+	},
+
 	handleSaveApply: function(ev, mode) {
 		var self = this;
 		if (self._applyInFlight) {
@@ -128,7 +162,20 @@ return view.extend({
 		return this.handleSave(ev).then(function() {
 			var payload = {};
 			self.FIELDS.forEach(function(k) {
-				var v = uci.get('cr6608quick', 'default', k);
+				// The rendered form is the source of truth. Several widgets display
+				// LIVE /etc/config/wireless values through a cfgvalue override; LuCI
+				// only stages a value into the uci session when it differs from that
+				// cfgvalue, so uci.get on an untouched field returns the stale
+				// cr6608quick mirror (which once shipped radios disabled) and the
+				// apply would silently revert live settings. formvalue() returns
+				// exactly what the user sees regardless of staging.
+				var v = null;
+				try {
+					var lookup = self._qmap ? self._qmap.lookupOption(k, 'default') : null;
+					if (lookup && lookup[0]) v = lookup[0].formvalue('default');
+				} catch (e) { v = null; }
+				if (v === null || v === undefined)
+					v = uci.get('cr6608quick', 'default', k);
 				if (v !== null && v !== undefined) payload[k] = String(v);
 			});
 			if (payload.change_password === '1' && adminPassword)
@@ -168,8 +215,25 @@ return view.extend({
 				ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((j && (j.detail || j.code)) || '?')), 'warning');
 			window.setTimeout(function() { window.location.reload(); }, 1800);
 		}).catch(function(e) {
-			releaseApplyButton();
-			ui.addNotification(null, E('p', _('تعذّر إرسال التطبيق: ') + e), 'error');
+			// The apply itself restarts Wi-Fi/network, which routinely kills this
+			// HTTP response while the router-side transaction continues — the old
+			// code gave up here, so the rollback token was lost and the guard
+			// reverted every apply made over Wi-Fi. Probe the guard instead and
+			// recover the pending confirmation.
+			ui.addNotification(null, E('p', _('انقطع الاتصال أثناء التطبيق؛ جارٍ التحقق من حالة الحارس الآمن...')), 'info');
+			return self.recoverPendingApply(14, 3000).then(function(probe) {
+				if (probe && probe.confirmation_ready && probe.rollback_token) {
+					self.showReachabilityConfirmation(probe);
+					return;
+				}
+				releaseApplyButton();
+				if (probe && probe.state === 'clean') {
+					ui.addNotification(null, E('p', _('اكتملت المعاملة (تثبيت أو رجوع آمن). يُعاد تحميل الصفحة للتحقق من الإعدادات.')), 'info');
+					window.setTimeout(function() { window.location.reload(); }, 1500);
+				} else {
+					ui.addNotification(null, E('p', _('تعذّر إرسال التطبيق: ') + e), 'error');
+				}
+			});
 		});
 	},
 
@@ -206,6 +270,21 @@ return view.extend({
 			}
 		}
 		timer = window.setInterval(updateCounter, 1000);
+		var keepSendCount = 0;
+		var finishKeepSuccess = function() {
+			if (finished) return;
+			finished = true;
+			window.clearInterval(timer);
+			releaseApplyState();
+			ui.hideModal();
+			if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetIp) && targetIp !== window.location.hostname) {
+				var port = window.location.port ? ':' + window.location.port : '';
+				window.location.href = window.location.protocol + '//' + targetIp + port +
+					window.location.pathname + window.location.search + window.location.hash;
+			}
+			else
+				window.location.reload();
+		};
 		var keep = function() {
 			if (confirmInFlight || finished) return Promise.resolve();
 			confirmInFlight = true;
@@ -214,6 +293,7 @@ return view.extend({
 			keepButton.setAttribute('aria-busy', 'true');
 			var payload = { token: token };
 			try { payload.luci_sid = rpc.getSessionID(); } catch (e) {}
+			keepSendCount++;
 			return self.requestJson('/cgi-bin/cr6608-quick-confirm', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -230,26 +310,32 @@ return view.extend({
 						throw new Error(r.statusText || 'Confirmation failed');
 					return c;
 			}).then(function(c) {
-				if (!c || !c.ok) throw new Error('The guarded transaction did not match.');
-				if (finished) return;
-				finished = true;
-				window.clearInterval(timer);
-				releaseApplyState();
-				ui.hideModal();
-				if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetIp) && targetIp !== window.location.hostname) {
-					var port = window.location.port ? ':' + window.location.port : '';
-					window.location.href = window.location.protocol + '//' + targetIp + port +
-						window.location.pathname + window.location.search + window.location.hash;
+				if (c && c.ok) { finishKeepSuccess(); return; }
+				// A not_ready after an earlier send means that earlier confirm was
+				// consumed server-side but its response never reached us (Wi-Fi was
+				// still settling). The rollback timer has not expired, and nothing
+				// else consumes the token — verify via the guard probe and finish.
+				if (c && c.error === 'not_ready' && keepSendCount > 1 && remaining > 0) {
+					return self.probeSafeApply().then(function(p) {
+						if (p && p.state === 'clean') { finishKeepSuccess(); return; }
+						throw new Error(_('The guarded transaction did not match.'));
+					});
 				}
-				else
-					window.location.reload();
+				throw new Error((c && (c.detail || c.error)) || _('The guarded transaction did not match.'));
 			}).catch(function(e) {
 				confirmInFlight = false;
-				if (!finished) {
-					leaveButton.disabled = false;
-					keepButton.disabled = false;
-					keepButton.removeAttribute('aria-busy');
+				if (finished) return;
+				var transient = (e && e.code === 'request_timeout') || (e instanceof TypeError);
+				if (transient && remaining > 6) {
+					// The admin's Wi-Fi is reassociating right after the apply — this
+					// is the exact window the guard exists for. Keep retrying up to
+					// the rollback deadline instead of surrendering the transaction.
+					window.setTimeout(function() { if (!finished) { keep(); } }, 2500);
+					return;
 				}
+				leaveButton.disabled = false;
+				keepButton.disabled = false;
+				keepButton.removeAttribute('aria-busy');
 				ui.addNotification(null, E('p', _('فشل تأكيد الوصول، وسيبقى الرجوع التلقائي مفعلاً: ') + e), 'error');
 			});
 		};
@@ -396,6 +482,9 @@ return view.extend({
 
 		m = new form.Map('cr6608quick', _('الإعدادات السريعة'),
 			_('إعداد موحد لجهاز Xiaomi CR6608. يتم الحفظ عبر UCI مع نسخة احتياطية وحارس رجوع تلقائي. يمكن اختيار TX Power هنا، وتبقى القيمة الفعلية خاضعة لحدود القناة والمعايرة والحرارة والتنظيم.'));
+		// handleSaveApply reads the rendered form through this reference so the
+		// posted payload always matches what the user sees on screen.
+		this._qmap = m;
 
 		s = m.section(form.NamedSection, 'default', 'quick', _('Xiaomi CR6608'));
 		s.addremove = false;

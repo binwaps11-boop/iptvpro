@@ -390,8 +390,20 @@ rcu="$(normalize_bool "$(resolved "$(pick reset_custom)" reset_custom 0)" 0)" ||
 bbe="$(normalize_bool "$(resolved "$(pick broadband_enabled)" broadband_enabled 0)" 0)" || fail_request "400 Bad Request" "broadband_enabled" "Invalid broadband setting"
 fkm="$(normalize_bool "$(resolved "$(pick fake_mesh)" fake_mesh 0)" 0)" || fail_request "400 Bad Request" "fake_mesh" "Invalid fake-mesh setting"
 watchcat="$(normalize_bool "$(resolved "$(pick watchcat_enabled)" watchcat_enabled 0)" 0)" || fail_request "400 Bad Request" "watchcat_enabled" "Invalid watchcat setting"
-r0e="$(normalize_bool "$(resolved "$(pick radio0_enabled)" radio0_enabled 1)" 1)" || fail_request "400 Bad Request" "radio0_enabled" "Invalid radio setting"
-r1e="$(normalize_bool "$(resolved "$(pick radio1_enabled)" radio1_enabled 1)" 1)" || fail_request "400 Bad Request" "radio1_enabled" "Invalid radio setting"
+# Radio enablement must follow the LIVE wireless state when the request does
+# not name it, exactly like channel/country/htmode above. Falling back to the
+# cr6608quick mirror here once disabled both radios on every apply (a stale
+# mirror shipped radio*_enabled=0), which dropped the admin's own Wi-Fi and
+# made the reachability guard roll back every transaction.
+radio_live_enabled() { # <radioN>
+	if [ "$(qget "wireless.$1.disabled")" = "1" ]; then printf '0'; else printf '1'; fi
+}
+r0e_raw="$(pick radio0_enabled)"
+[ -n "$r0e_raw" ] || r0e_raw="$(radio_live_enabled radio0)"
+r0e="$(normalize_bool "$r0e_raw" 1)" || fail_request "400 Bad Request" "radio0_enabled" "Invalid radio setting"
+r1e_raw="$(pick radio1_enabled)"
+[ -n "$r1e_raw" ] || r1e_raw="$(radio_live_enabled radio1)"
+r1e="$(normalize_bool "$r1e_raw" 1)" || fail_request "400 Bad Request" "radio1_enabled" "Invalid radio setting"
 
 rmode="$(resolved "$(pick reset_mode)" reset_mode '')"
 rseconds="$(resolved "$(pick reset_seconds)" reset_seconds 15)"
