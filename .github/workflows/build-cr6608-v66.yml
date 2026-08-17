@@ -290,6 +290,11 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           OUT="smartap-cr6608-v66-fixed-sysupgrade-38dbm.bin"
           cp "$BIN" "$GITHUB_WORKSPACE/out/$OUT"
+          # Ship the complete corrected source kit next to the binary so a single
+          # download carries everything: overlay, driver patches, seed config and
+          # the build workflow itself (the user's requirement: bin + source + patches).
+          tar -C "$GITHUB_WORKSPACE" -czf "$GITHUB_WORKSPACE/out/smartap-cr6608-v66-source-kit.tar.gz" \
+            router/cr6608-v66 .github/workflows/build-cr6608-v66.yml
           ( cd "$GITHUB_WORKSPACE/out" && sha256sum "$OUT" > "$OUT.sha256" )
           echo "outname=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$GITHUB_WORKSPACE/out"
@@ -312,8 +317,8 @@ jobs:
           git fetch origin cr6608-v66-delivery || true
           git checkout -B cr6608-v66-delivery
           mkdir -p dist
-          cp out/*.bin out/*.sha256 dist/
-          ( cd dist && sha256sum *.bin > SHA256SUMS )
+          cp out/*.bin out/*.sha256 out/*.tar.gz dist/
+          ( cd dist && sha256sum *.bin *.tar.gz > SHA256SUMS )
           git add -f dist/*
           git commit -m "Deliver corrected v66 CR6608 image (login-fixed, flash-and-go, 38 dBm) [run ${GITHUB_RUN_ID}]"
           n=0
