@@ -31,6 +31,21 @@ on:
         description: 'Publish the built .bin to the cr6608-v66-delivery branch'
         required: false
         default: 'true'
+  # Also fire on push to the development branch when the v66 source or this
+  # workflow changes. workflow_dispatch only works once a workflow lives on the
+  # default branch; a push trigger runs the branch's own copy, so the build can
+  # be driven entirely from the feature branch. concurrency cancels superseded
+  # runs so pushing a fix does not pile up hour-long builds.
+  push:
+    branches:
+      - claude/xiaomi-cr6608-firmware-fix-gnymma
+    paths:
+      - '.github/workflows/build-cr6608-v66.yml'
+      - 'router/cr6608-v66/**'
+
+concurrency:
+  group: build-cr6608-v66
+  cancel-in-progress: true
 
 permissions:
   contents: write
