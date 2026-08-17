@@ -184,7 +184,8 @@ jobs:
           [ -f files/etc/crontabs/root ] && chmod 0600 files/etc/crontabs/root || true
           echo "overlay files: $(find files -type f | wc -l)"
           echo "== login proof in overlay shadow =="
-          grep -q "^${SHADOW_PROOF}" files/etc/shadow && echo "shadow admin-hash present" \
+          # -F: the proof string contains $ which grep would treat as an anchor
+          grep -qF -- "${SHADOW_PROOF}" files/etc/shadow && echo "shadow admin-hash present" \
             || { echo "::error::overlay shadow missing the admin login hash"; exit 1; }
           echo "== wireless enabled (no disabled '1') =="
           ! grep -q "option disabled '1'" files/etc/config/wireless && echo "radios+ssids enabled" \
@@ -266,7 +267,7 @@ jobs:
             && echo "::notice::CONFIRMED $MARKER inside final image driver" \
             || { echo "::error::$MARKER NOT inside final image driver"; exit 1; }
           # (b) login fix inside the final image's /etc/shadow
-          if grep -q "^${SHADOW_PROOF}" /tmp/chk/sq/etc/shadow; then
+          if grep -qF -- "${SHADOW_PROOF}" /tmp/chk/sq/etc/shadow; then
             echo "::notice::CONFIRMED root/admin login hash inside final image"
           else
             echo "::error::admin login hash NOT in final image /etc/shadow"; exit 1
