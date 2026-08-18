@@ -13,5 +13,10 @@ uci -q get smartap.experimental.ul_muru_state >/dev/null || \
 uci -q commit smartap
 
 /etc/init.d/cr6608-ul-muru-guard enable
+# Also START it this boot: enabling alone left the firmware-hang guard dormant
+# until the NEXT reboot, so the very first session ran UL-MURU unmonitored. This
+# only launches the safety-monitor daemon — it does not touch the UL-MURU RF path
+# or its module parameters.
+/etc/init.d/cr6608-ul-muru-guard start >/dev/null 2>&1 || true
 
 exit 0

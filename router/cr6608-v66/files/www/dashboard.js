@@ -1810,6 +1810,10 @@
         if (s.mac && finite(ss)) pushHistory("sig_" + s.mac, ss, 40);
         var trendStr = (s.mac && (state.histories["sig_" + s.mac] || []).length > 2) ? spark(state.histories["sig_" + s.mac], qq.color) : "";
         var trafficStr = stationTrafficHtml(s);
+        // per-client throughput trend (download+upload byte-rate, per MAC)
+        var stRate = stationTraffic(s);
+        if (s.mac && stRate.hasRate) pushHistory("rate_" + s.mac, (stRate.down || 0) + (stRate.up || 0), 40);
+        var rateTrend = (s.mac && (state.histories["rate_" + s.mac] || []).length > 2) ? spark(state.histories["rate_" + s.mac], "var(--accent)") : "";
         var retries = num(s.tx_retries), packets = num(s.tx_packets), failed = num(s.tx_failed);
         var retryPct = finite(retries) && finite(packets) && retries + packets > 0 ? retries * 100 / (retries + packets) : null;
         var retryStr = finite(retryPct) ? '<span class="prox" style="color:' + (retryPct < 8 ? "var(--excellent)" : retryPct < 20 ? "var(--mid)" : "var(--weak)") + '">' + (state.lang === "ar" ? "إعادة إرسال " : "Retries ") + fmt(retryPct, 0) + '%</span>' : "";
@@ -1817,7 +1821,7 @@
         // 802.11v steer button — offered only for clients sitting on the 2.4G radio
         var steer = (x.band === "2.4G" && s.mac) ? ' <button class="btn dev-action" title="' + esc(tr("steerHint")) + '" data-steer-mac="' + esc(s.mac) + '" data-steer-iface="' + esc(x.iface || "") + '">' + esc(tr("steer5g")) + '</button>' : "";
         return '<div class="kv"><div><span class="latin">' + esc(s.ip || s.mac || tr("unavailable")) + steer + '</span><b class="latin">' + (finite(ss) ? ss + " dBm " : "") + proximity(ss) + '</b></div>' + bar(finite(ss) ? signalPct("rssi", ss) : 0, 100, qq.color) +
-          '<div class="cli-tags">' + retryStr + failStr + '</div>' + rfStr + phyStr + trafficStr + trendStr + '</div>';
+          '<div class="cli-tags">' + retryStr + failStr + '</div>' + rfStr + phyStr + trafficStr + trendStr + rateTrend + '</div>';
       }).join("") || '<div class="empty">' + tr("unavailable") + '</div>';
       var busyRow = finite(busy) ? '<div><span>' + tr("airtime") + '</span><b class="latin" style="color:' + (busy >= 60 ? "var(--weak)" : busy >= 35 ? "var(--mid)" : "var(--excellent)") + '">' + busy + '%</b></div>' : "";
       var txp = x.txpower || {},

@@ -198,8 +198,10 @@ apply_bridge_guard() {
 		nft delete table bridge smartap_guard >/dev/null 2>&1 || true
 		return 0
 	fi
-	tmp="/tmp/cr6608-smartap-guard.$$.nft"
-	check="/tmp/cr6608-smartap-guard-check.$$.nft"
+	# mktemp (0600, random suffix) instead of a predictable PID path so a
+	# pre-planted symlink at the old fixed name cannot redirect the root write.
+	tmp="$(mktemp /tmp/cr6608-smartap-guard.XXXXXX.nft 2>/dev/null)" || return 1
+	check="$(mktemp /tmp/cr6608-smartap-guard-check.XXXXXX.nft 2>/dev/null)" || { rm -f "$tmp"; return 1; }
 	{
 		echo 'table bridge smartap_guard {'
 		echo ' chain forward {'
