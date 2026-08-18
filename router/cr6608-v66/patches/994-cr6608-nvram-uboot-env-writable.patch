@@ -1,0 +1,15 @@
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
+@@ -76,7 +76,11 @@
+ 		partition@80000 {
+ 			label = "Nvram";
+ 			reg = <0x80000 0x40000>;
+-			read-only;
++			/*
++			 * Writable so userspace (cr6608-bootflags) can clear the
++			 * Xiaomi dual-boot failover flags in the u-boot env and
++			 * keep the device booting the OpenWrt slot at 0x200000.
++			 */
+ 		};
+
+ 		partition@c0000 {

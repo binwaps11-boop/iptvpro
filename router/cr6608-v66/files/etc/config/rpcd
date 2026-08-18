@@ -4,8 +4,10 @@ config rpcd
 
 config login
 	option username 'root'
-	# OpenWrt's password indirection keeps Smart AP, LuCI, SSH, and the console
-	# synchronized without copying or exposing the root hash in UCI.
-	option password '$p$root'
+	# DASHBOARD/LuCI password is INDEPENDENT from the SSH/console password by
+	# owner request: this fixed hash = "admin" (dashboard login root/admin),
+	# while /etc/shadow carries the separate SSH/console root password. Using a
+	# literal hash here (instead of $p$root) is what decouples the two.
+	option password '$6$CR6608dashAdm$BQqw1LRyISWT1W76KgXLbFMpuB0lDBY4CVz7vdm4PMg1YZ6y9fh.GZ0hKRp8X9NGb4FR5dGd7lsMiuCOK3hwl.'
 	list read '*'
 	list write '*'

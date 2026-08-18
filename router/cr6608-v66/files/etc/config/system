@@ -26,14 +26,11 @@ config timeserver 'ntp'
 	list server '3.openwrt.pool.ntp.org'
 
 # The CR6608 has exactly one LAN-capable LED (blue:net); the kernel netdev
-# trigger follows a single interface, and binding it to lan1 left lan2/lan3
-# invisible. br-lan covers every LAN port (and Wi-Fi bridge traffic).
-config led 'led_lan1'
-	option name 'LAN link and traffic'
-	option sysfs 'blue:net'
-	option trigger 'netdev'
-	option dev 'br-lan'
-	option mode 'link tx rx'
+# trigger follows a single interface, and every static binding was wrong:
+# lan1-only hid lan2/lan3, while br-lan stayed lit from Wi-Fi even with no
+# cable plugged in. blue:net is therefore owned by the cr6608-lanled daemon
+# (on while any of lan1..lan3 has real wired link, off otherwise) and must
+# NOT get a static led section here.
 
 config led 'led_lan2'
 	option name 'WAN link and traffic'

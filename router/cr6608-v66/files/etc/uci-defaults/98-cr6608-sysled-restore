@@ -8,17 +8,16 @@ for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
 	esac
 done
 
-# Bind the blue network LED to br-lan so it reflects EVERY LAN port. The old
-# lan1-only binding meant lan2/lan3 never lit any LED (the board has a single
-# LAN-capable LED and the kernel netdev trigger follows one interface). The
-# LED staying lit while Wi-Fi keeps the bridge up is the accepted trade-off:
-# activity still blinks for all ports and wireless traffic.
-uci -q set system.led_lan1='led'
-uci -q set system.led_lan1.name='LAN link and traffic'
-uci -q set system.led_lan1.sysfs='blue:net'
-uci -q set system.led_lan1.trigger='netdev'
-uci -q set system.led_lan1.dev='br-lan'
-uci -q set system.led_lan1.mode='link tx rx'
+# blue:net is owned by the cr6608-lanled daemon (on only while a wired LAN
+# port has real link; the old br-lan netdev binding kept it lit from Wi-Fi
+# alone, and lan1-only hid lan2/lan3). Remove any static UCI binding that
+# would fight the daemon on keep-settings upgrades.
+for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
+	case "$(uci -q get "system.$s.sysfs")" in
+		blue:net) uci -q delete "system.$s" ;;
+	esac
+done
+
 uci -q set system.led_lan2='led'
 uci -q set system.led_lan2.name='WAN link and traffic'
 uci -q set system.led_lan2.sysfs='yellow:net'

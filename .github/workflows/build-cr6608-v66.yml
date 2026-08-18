@@ -4,9 +4,10 @@ name: Build CR6608 v66 (login-fixed, fleet-flashable, 38 dBm from source)
 # source on a GitHub Ubuntu runner. This is the user's own v66 overlay + driver
 # patches, with two corrections baked in so one image flashes to a whole fleet:
 #
-#   1. Login fix   — /etc/shadow ships a root password of "admin" and rpcd uses
-#                    the $p$root indirection, so the Smart AP dashboard, LuCI,
-#                    SSH and console all open with root/admin on every device.
+#   1. Login fix   — split credentials by owner request: the Smart AP dashboard
+#                    and LuCI open with root/admin (fixed hash in rpcd), while
+#                    SSH/console use the separate root password shipped in
+#                    /etc/shadow. Same on every device, no per-unit provisioning.
 #   2. Flash-and-go — both radios and both SSIDs ship ENABLED with a default
 #                    WPA passphrase, so a freshly flashed device is immediately
 #                    usable without per-device retail provisioning.
@@ -54,7 +55,8 @@ env:
   SRC: router/cr6608-v66
   MARKER: CR6608-RF-38DBM
   DEVICE: xiaomi_mi-router-cr6608
-  SHADOW_PROOF: 'root:$6$3HCjAsm.bChZtxt8$'
+  SHADOW_PROOF: 'root:$6$CR6608sshOwn$'
+  RPCD_DASH_PROOF: '$6$CR6608dashAdm$'
 
 jobs:
   build:
@@ -135,6 +137,12 @@ jobs:
           #    drop disable-radar-background (enables background CAC).
           apply_git "$P/996-cr6608-dts-rf-38dbm-lab-mode.patch"
 
+          # 1b) DTS: make the Nvram (u-boot env) partition writable so the
+          #     cr6608-bootflags service can reset the dual-boot failover flags
+          #     every boot — the root-cause fix for the device dropping into
+          #     the Xiaomi bootloader after power cycles.
+          apply_git "$P/994-cr6608-nvram-uboot-env-writable.patch"
+
           # 2) mac80211 tx-power trace (subsys quilt patch)
           install -D -m 0644 "$P/995-mac80211-cr6608-txpower-trace.patch" \
             package/kernel/mac80211/patches/subsys/995-cr6608-txpower-trace.patch
@@ -183,10 +191,13 @@ jobs:
           [ -d files/etc/config ] && find files/etc/config -type f -exec chmod 0600 {} + || true
           [ -f files/etc/crontabs/root ] && chmod 0600 files/etc/crontabs/root || true
           echo "overlay files: $(find files -type f | wc -l)"
-          echo "== login proof in overlay shadow =="
+          echo "== SSH/console login proof in overlay shadow =="
           # -F: the proof string contains $ which grep would treat as an anchor
-          grep -qF -- "${SHADOW_PROOF}" files/etc/shadow && echo "shadow admin-hash present" \
-            || { echo "::error::overlay shadow missing the admin login hash"; exit 1; }
+          grep -qF -- "${SHADOW_PROOF}" files/etc/shadow && echo "shadow SSH-hash present" \
+            || { echo "::error::overlay shadow missing the SSH login hash"; exit 1; }
+          echo "== dashboard login proof in overlay rpcd (independent hash) =="
+          grep -qF -- "${RPCD_DASH_PROOF}" files/etc/config/rpcd && echo "rpcd dashboard-hash present" \
+            || { echo "::error::overlay rpcd missing the dashboard admin hash"; exit 1; }
           echo "== wireless enabled (no disabled '1') =="
           ! grep -q "option disabled '1'" files/etc/config/wireless && echo "radios+ssids enabled" \
             || { echo "::error::wireless still ships disabled"; exit 1; }
@@ -266,20 +277,38 @@ jobs:
           [ -n "$IMGKO" ] && strings -a "$IMGKO" | grep -qF "$MARKER" \
             && echo "::notice::CONFIRMED $MARKER inside final image driver" \
             || { echo "::error::$MARKER NOT inside final image driver"; exit 1; }
-          # (b) login fix inside the final image's /etc/shadow
+          # (b) SSH/console login hash inside the final image's /etc/shadow
           if grep -qF -- "${SHADOW_PROOF}" /tmp/chk/sq/etc/shadow; then
-            echo "::notice::CONFIRMED root/admin login hash inside final image"
+            echo "::notice::CONFIRMED separate SSH/console root hash inside final image"
           else
-            echo "::error::admin login hash NOT in final image /etc/shadow"; exit 1
+            echo "::error::SSH root hash NOT in final image /etc/shadow"; exit 1
           fi
-          # (c) rpcd $p$root indirection present
-          grep -q "p\$root" /tmp/chk/sq/etc/config/rpcd \
-            && echo "::notice::rpcd \$p\$root indirection present" \
-            || echo "::warning::rpcd indirection not found (check auth)"
+          # (c) independent dashboard (root/admin) hash inside the final image's rpcd
+          if grep -qF -- "${RPCD_DASH_PROOF}" /tmp/chk/sq/etc/config/rpcd; then
+            echo "::notice::CONFIRMED independent dashboard admin hash in rpcd (decoupled from SSH)"
+          else
+            echo "::error::dashboard admin hash NOT in final image rpcd"; exit 1
+          fi
           # (d) wireless enabled inside the final image
           ! grep -q "option disabled '1'" /tmp/chk/sq/etc/config/wireless \
             && echo "::notice::radios+ssids enabled in final image" \
             || { echo "::error::wireless ships disabled in final image"; exit 1; }
+          # (e) dual-boot failover fix inside the final image: fw_setenv from
+          #     uboot-envtools + the bootflags service that resets the flags
+          [ -e /tmp/chk/sq/usr/sbin/fw_setenv ] \
+            && echo "::notice::fw_setenv present (uboot-envtools built in)" \
+            || { echo "::error::fw_setenv missing — uboot-envtools not built"; exit 1; }
+          [ -e /tmp/chk/sq/etc/init.d/cr6608-bootflags ] \
+            && echo "::notice::cr6608-bootflags service present" \
+            || { echo "::error::cr6608-bootflags service missing"; exit 1; }
+          # (f) wired-LAN LED daemon inside the final image, and no stale static
+          #     blue:net binding left to fight it
+          [ -e /tmp/chk/sq/etc/init.d/cr6608-lanled ] && [ -e /tmp/chk/sq/usr/sbin/cr6608-lanled ] \
+            && echo "::notice::cr6608-lanled daemon present" \
+            || { echo "::error::cr6608-lanled daemon missing"; exit 1; }
+          ! grep -q "option sysfs 'blue:net'" /tmp/chk/sq/etc/config/system \
+            && echo "::notice::no static blue:net binding (daemon owns the LAN LED)" \
+            || { echo "::error::static blue:net binding still in /etc/config/system"; exit 1; }
           echo "ALL GATES PASSED"
 
       - name: Stage the delivered image + checksum

@@ -1,0 +1,58 @@
+#!/bin/sh
+
+# CR6608 wired-LAN LED daemon.  The board has exactly one LAN-capable LED
+# (blue:net) and the kernel netdev trigger can only follow one interface:
+# binding it to br-lan kept the LED lit from Wi-Fi alone (the bridge carrier
+# never drops while a radio is up), and binding it to lan1 hid lan2/lan3.
+#
+# This daemon follows the REAL wired carrier of every LAN port instead:
+#   - any of lan1..lan3 has a cable  -> netdev trigger on br-lan
+#     (LED on, blinking with traffic for all ports)
+#   - no wired port has a cable      -> trigger none, LED off
+#
+# The desired sysfs state is re-verified every cycle (reads are cheap; writes
+# only happen on mismatch), so a LuCI save & apply that rebinds the LED is
+# corrected within one interval instead of sticking until reboot.
+
+LED_DIR="${CR6608_LANLED_DIR:-/sys/class/leds/blue:net}"
+PORTS="${CR6608_LANLED_PORTS:-lan1 lan2 lan3}"
+INTERVAL="${CR6608_LANLED_INTERVAL:-1}"
+
+[ -d "$LED_DIR" ] || exit 0
+
+while :; do
+	up=0
+	for port in $PORTS; do
+		# carrier reads fail while an interface is admin-down; treat any
+		# unreadable/non-1 value as "no cable" on that port.
+		if [ "$(cat "/sys/class/net/$port/carrier" 2>/dev/null)" = "1" ]; then
+			up=1
+			break
+		fi
+	done
+
+	trigger="$(cat "$LED_DIR/trigger" 2>/dev/null)"
+	if [ "$up" = "1" ]; then
+		case "$trigger" in
+		*"[netdev]"*) ;;
+		*) echo netdev > "$LED_DIR/trigger" 2>/dev/null ;;
+		esac
+		if [ "$(cat "$LED_DIR/device_name" 2>/dev/null)" != "br-lan" ] ||
+			[ "$(cat "$LED_DIR/link" 2>/dev/null)" != "1" ]; then
+			# device_name first: writing it resets the mode flags.
+			echo br-lan > "$LED_DIR/device_name" 2>/dev/null
+			echo 1 > "$LED_DIR/link" 2>/dev/null
+			echo 1 > "$LED_DIR/tx" 2>/dev/null
+			echo 1 > "$LED_DIR/rx" 2>/dev/null
+		fi
+	else
+		case "$trigger" in
+		*"[none]"*) ;;
+		*) echo none > "$LED_DIR/trigger" 2>/dev/null ;;
+		esac
+		[ "$(cat "$LED_DIR/brightness" 2>/dev/null)" = "0" ] ||
+			echo 0 > "$LED_DIR/brightness" 2>/dev/null
+	fi
+
+	sleep "$INTERVAL"
+done

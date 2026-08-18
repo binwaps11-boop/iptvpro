@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+
+# Supervise the wired-LAN LED daemon (see /usr/sbin/cr6608-lanled): blue:net
+# on only while a wired LAN port actually has link, off when every cable is
+# unplugged.  procd respawns it if it ever dies.
+
+START=96
+USE_PROCD=1
+
+PROG=/usr/sbin/cr6608-lanled
+
+start_service() {
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "xiaomi,mi-router-cr6608" ] || return 0
+	[ -x "$PROG" ] || return 0
+
+	procd_open_instance cr6608-lanled
+	procd_set_param command "$PROG"
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}

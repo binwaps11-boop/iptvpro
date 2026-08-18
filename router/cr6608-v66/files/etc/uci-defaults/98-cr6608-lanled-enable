@@ -1,0 +1,10 @@
+#!/bin/sh
+# Enable the wired-LAN LED daemon on every boot, and start it once now so a
+# freshly flashed unit shows correct cable state without waiting for a reboot.
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = "xiaomi,mi-router-cr6608" ] || exit 0
+
+[ -x /etc/init.d/cr6608-lanled ] || exit 0
+/etc/init.d/cr6608-lanled enable >/dev/null 2>&1 || true
+/etc/init.d/cr6608-lanled start >/dev/null 2>&1 || true
+exit 0

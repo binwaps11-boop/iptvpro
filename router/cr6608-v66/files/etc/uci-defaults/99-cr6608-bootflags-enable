@@ -1,0 +1,10 @@
+#!/bin/sh
+# Enable the dual-boot failover pacifier for every boot, and run it once now so
+# a freshly flashed unit is protected without waiting for the next reboot.
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = "xiaomi,mi-router-cr6608" ] || exit 0
+
+[ -x /etc/init.d/cr6608-bootflags ] || exit 0
+/etc/init.d/cr6608-bootflags enable >/dev/null 2>&1 || true
+/etc/init.d/cr6608-bootflags start >/dev/null 2>&1 || true
+exit 0

@@ -1,7 +1,8 @@
 #!/bin/sh
 
-# This is a FLEET image: it ships a working root credential in /etc/shadow so a
-# freshly flashed unit opens with root/admin on every device. A keep-settings
+# This is a FLEET image: it ships a working root credential in /etc/shadow so
+# SSH/console open with the owner's fixed password on every device (the
+# dashboard/LuCI credential lives separately in rpcd). A keep-settings
 # sysupgrade, however, restores the retained /etc/shadow (base-files-essential
 # keeps it) OVER the shipped one — if that retained record is LOCKED or invalid
 # (the classic broken-v66 state), the device would boot with no usable password
