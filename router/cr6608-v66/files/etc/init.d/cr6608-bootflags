@@ -1,75 +1,25 @@
 #!/bin/sh /etc/rc.common
-# Pacify the Xiaomi CR6608 vendor u-boot dual-boot failover.
+# Late-boot belt-and-braces for the Xiaomi CR6608 single-boot pin.
 #
-# The MT7621 Xiaomi bootloader has an A/B boot selector. OpenWrt installs ONE
-# kernel at "system 1" (0x200000); "system 2" (0x600000) is where OpenWrt's UBI
-# lives, NOT a kernel. If the u-boot boot flags ever route to system 2, u-boot
-# reads a bad magic there and drops to bootloader/recovery ("boot mode") — a
-# plain power cycle can then no longer boot the OS until a re-flash.
+# The real work lives in /usr/sbin/cr6608-bootflags-apply (see its header):
+# it pins the vendor u-boot's A/B selector flags so ONLY system 1 (the
+# OpenWrt kernel at 0x200000) is ever booted and the empty second slot can
+# never be selected ("boot mode" brick).
 #
-# Stock userspace resets these flags after every successful boot; OpenWrt for
-# cr660x does not. We do it here, LATE in boot (reaching START=99 means the boot
-# succeeded), forcing u-boot to always pick system 1 (the OpenWrt kernel).
-#
-# Values are the reverse-engineered stock-u-boot "activate" set (xmir-patcher),
-# with fw_num=0 (system 1). Traced through the real u-boot algorithm: with these
-# a successful boot never changes them, so once correct the write never repeats.
-#
-# Safety: writes go to the u-boot env whose location comes from OpenWrt's own
-# uboot-envtools board map (/dev/mtd1 0x0 0x10000 0x20000 for cr6608 — never
-# hardcoded here). The write is a SINGLE atomic fw_setenv batch and only runs
-# when a flag actually differs, minimising the flash-write window. Every value
-# keeps u-boot pointed at system 1, so no failure path can select the empty slot.
+# The applier already ran seconds into boot from /lib/preinit/81_cr6608_bootflags;
+# reaching START=99 proves a fully successful boot, and the applier is
+# idempotent (reads only, no flash write, unless a flag actually differs), so
+# this second pass costs nothing in steady state while catching anything that
+# touched the env after preinit (failsafe sessions, sysupgrade, stock tools).
 
 START=99
 
-FW_PRINTENV="/usr/sbin/fw_printenv"
-FW_SETENV="/usr/sbin/fw_setenv"
-
-cr6608_bootflags_apply() {
-	# Only this board.
-	local board
-	board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
-	[ "$board" = "xiaomi,mi-router-cr6608" ] || return 0
-
-	[ -x "$FW_PRINTENV" ] && [ -x "$FW_SETENV" ] || return 0
-	# The env must be readable (valid /etc/fw_env.config from uboot-envtools);
-	# if not, do nothing rather than risk a blind write.
-	"$FW_PRINTENV" >/dev/null 2>&1 || return 0
-
-	# Desired flags: fw_num=0 => always boot system 1 (the OpenWrt kernel).
-	# name=value pairs.
-	set -- \
-		flag_ota_reboot 0 \
-		flag_boot_success 1 \
-		flag_last_success 0 \
-		flag_try_sys1_failed 0 \
-		flag_try_sys2_failed 0 \
-		flag_boot_rootfs 0
-
-	# Idempotent: only write if something differs (avoids needless flash writes).
-	local need=0 name want have batch=""
-	while [ $# -ge 2 ]; do
-		name="$1"; want="$2"; shift 2
-		have="$("$FW_PRINTENV" -n "$name" 2>/dev/null)"
-		[ "$have" = "$want" ] || need=1
-		batch="${batch}${name} ${want}
-"
-	done
-	[ "$need" = 1 ] || return 0
-
-	# One atomic write of the whole set.
-	if printf '%s' "$batch" | "$FW_SETENV" -s - >/dev/null 2>&1; then
-		logger -t cr6608-bootflags "reset Xiaomi dual-boot flags -> always boot OpenWrt (system 1)"
-	else
-		logger -t cr6608-bootflags "WARNING: could not write u-boot env (read-only or unavailable); boot failover not pacified"
-	fi
-}
-
 boot() {
-	cr6608_bootflags_apply
+	[ -x /usr/sbin/cr6608-bootflags-apply ] || return 0
+	/usr/sbin/cr6608-bootflags-apply late-boot
 }
 
 start() {
-	cr6608_bootflags_apply
+	[ -x /usr/sbin/cr6608-bootflags-apply ] || return 0
+	/usr/sbin/cr6608-bootflags-apply start
 }

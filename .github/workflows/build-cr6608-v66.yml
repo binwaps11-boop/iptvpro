@@ -184,7 +184,7 @@ jobs:
           # Normalize modes the way the shipped image expects.
           find files -type d -exec chmod 0755 {} +
           find files -type f -exec chmod 0644 {} +
-          for d in etc/init.d etc/hotplug.d etc/uci-defaults usr/bin usr/sbin usr/libexec www/cgi-bin; do
+          for d in etc/init.d etc/hotplug.d etc/uci-defaults lib/preinit usr/bin usr/sbin usr/libexec www/cgi-bin; do
             [ -d "files/$d" ] && find "files/$d" -type f -exec chmod 0755 {} + || true
           done
           [ -f files/etc/shadow ] && chmod 0600 files/etc/shadow || true
@@ -299,8 +299,10 @@ jobs:
             && echo "::notice::fw_setenv present (uboot-envtools built in)" \
             || { echo "::error::fw_setenv missing — uboot-envtools not built"; exit 1; }
           [ -e /tmp/chk/sq/etc/init.d/cr6608-bootflags ] \
-            && echo "::notice::cr6608-bootflags service present" \
-            || { echo "::error::cr6608-bootflags service missing"; exit 1; }
+            && [ -e /tmp/chk/sq/usr/sbin/cr6608-bootflags-apply ] \
+            && [ -e /tmp/chk/sq/lib/preinit/81_cr6608_bootflags ] \
+            && echo "::notice::single-boot pin present (preinit hook + applier + late service)" \
+            || { echo "::error::cr6608-bootflags applier/preinit/service missing"; exit 1; }
           # (f) wired-LAN LED daemon inside the final image, and no stale static
           #     blue:net binding left to fight it
           [ -e /tmp/chk/sq/etc/init.d/cr6608-lanled ] && [ -e /tmp/chk/sq/usr/sbin/cr6608-lanled ] \

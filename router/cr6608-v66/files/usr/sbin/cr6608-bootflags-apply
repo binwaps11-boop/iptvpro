@@ -1,0 +1,81 @@
+#!/bin/sh
+
+# Force the Xiaomi CR6608 vendor u-boot to SINGLE-BOOT OpenWrt (system 1).
+#
+# The MT7621 Xiaomi bootloader has an A/B boot selector. OpenWrt installs ONE
+# kernel at "system 1" (0x200000); "system 2" (0x600000) is where OpenWrt's UBI
+# lives, NOT a kernel. If the u-boot boot flags ever route to system 2, u-boot
+# reads a bad magic there and drops to bootloader/recovery ("boot mode") — a
+# plain power cycle can then no longer boot the OS until a re-flash.
+#
+# This applier pins every selector flag to the reverse-engineered stock-u-boot
+# "activate system 1" set (xmir-patcher, fw_num=0), effectively disabling the
+# A/B failover: no flag combination is ever left that could select the empty
+# slot. It is called from TWO places:
+#   - /lib/preinit/81_cr6608_bootflags — seconds after the kernel starts,
+#     before any service, so even a power cut during boot leaves the flags
+#     already corrected for the next power-on;
+#   - /etc/init.d/cr6608-bootflags     — again late in boot as belt-and-braces
+#     (also re-arms after sysupgrade/failsafe sessions).
+#
+# Safety: the env location comes from OpenWrt's own uboot-envtools board map
+# (/dev/mtd1 0x0 0x10000 0x20000 for cr6608 — never hardcoded here). The write
+# is a SINGLE atomic fw_setenv batch and only happens when a flag actually
+# differs, so steady-state boots never touch the flash at all.
+
+FW_PRINTENV="${CR6608_FW_PRINTENV:-/usr/sbin/fw_printenv}"
+FW_SETENV="${CR6608_FW_SETENV:-/usr/sbin/fw_setenv}"
+MODE="$1"
+
+cr6608_is_this_board() {
+	board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	case "$board" in
+	xiaomi,mi-router-cr6608) return 0 ;;
+	"") ;; # sysinfo not populated yet — fall through to device-tree
+	*) return 1 ;;
+	esac
+	grep -q "xiaomi,mi-router-cr6608" /proc/device-tree/compatible 2>/dev/null
+}
+
+cr6608_is_this_board || exit 0
+
+[ -x "$FW_PRINTENV" ] && [ -x "$FW_SETENV" ] || exit 0
+
+# fw_setenv/fw_printenv take a lock under /var/lock, which may not exist yet in
+# preinit (/var is a symlink to /tmp).
+mkdir -p /var/lock 2>/dev/null
+
+# The env must be readable (valid /etc/fw_env.config from uboot-envtools); if
+# not, do nothing rather than risk a blind write.
+"$FW_PRINTENV" >/dev/null 2>&1 || exit 0
+
+# Desired flags: fw_num=0 => always boot system 1 (the OpenWrt kernel).
+set -- \
+	flag_ota_reboot 0 \
+	flag_boot_success 1 \
+	flag_last_success 0 \
+	flag_try_sys1_failed 0 \
+	flag_try_sys2_failed 0 \
+	flag_boot_rootfs 0
+
+# Idempotent: only write if something differs (avoids needless flash writes).
+need=0
+batch=""
+while [ $# -ge 2 ]; do
+	name="$1"
+	want="$2"
+	shift 2
+	have="$("$FW_PRINTENV" -n "$name" 2>/dev/null)"
+	[ "$have" = "$want" ] || need=1
+	batch="${batch}${name} ${want}
+"
+done
+[ "$need" = 1 ] || exit 0
+
+# One atomic write of the whole set.
+if printf '%s' "$batch" | "$FW_SETENV" -s - >/dev/null 2>&1; then
+	logger -t cr6608-bootflags "pinned Xiaomi boot flags -> single-boot OpenWrt (system 1)${MODE:+ [$MODE]}" 2>/dev/null
+	exit 0
+fi
+logger -t cr6608-bootflags "WARNING: could not write u-boot env; boot failover not pacified" 2>/dev/null
+exit 1

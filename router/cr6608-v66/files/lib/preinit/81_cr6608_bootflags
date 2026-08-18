@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pin the Xiaomi CR6608 boot flags to system 1 as EARLY as userspace allows —
+# right after the root filesystem is mounted, before any service starts. This
+# closes the window where a power cut during boot could leave the vendor
+# u-boot's A/B selector pointing at the empty second slot (= "boot mode"
+# brick). Runs again late in boot via /etc/init.d/cr6608-bootflags; both call
+# the same idempotent applier, which never writes flash unless a flag differs.
+
+preinit_cr6608_bootflags() {
+	[ -x /usr/sbin/cr6608-bootflags-apply ] || return 0
+	/usr/sbin/cr6608-bootflags-apply preinit || true
+}
+
+boot_hook_add preinit_main preinit_cr6608_bootflags
