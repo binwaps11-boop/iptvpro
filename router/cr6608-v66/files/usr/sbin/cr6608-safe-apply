@@ -12,6 +12,7 @@ POINTER="${CR6608_SAFE_POINTER:-/tmp/smartap-rollback-backup}"
 META="${CR6608_SAFE_META:-/tmp/smartap-rollback-meta}"
 ARMED="${CR6608_SAFE_ARMED:-/tmp/smartap-rollback-armed}"
 READY="${CR6608_SAFE_READY:-/tmp/cr6608-safe-apply-ready}"
+CONFIRMED="${CR6608_SAFE_CONFIRMED:-/tmp/cr6608-safe-apply-confirmed}"
 RETAINED_IP="${CR6608_SAFE_RETAINED_IP:-/tmp/cr6608-safe-retained-ip}"
 LOCK="${CR6608_SAFE_LOCK:-/var/run/cr6608-apply.lock}"
 SELF="${CR6608_SAFE_SELF:-/usr/sbin/cr6608-safe-apply}"
@@ -520,7 +521,7 @@ do_arm() {
 		log "refusing to replace an existing pending rollback transaction"
 		return 3
 	fi
-	rm -f "$READY" 2>/dev/null || return 1
+	rm -f "$READY" "$CONFIRMED" 2>/dev/null || return 1
 	if ! cleanup_retained_ip; then
 		log "refusing to arm while temporary management address cleanup is pending"
 		return 1
@@ -557,6 +558,7 @@ do_confirm() {
 	fi
 	confirmed_token="$token"
 	clear_pending
+	( umask 077; printf '%s\n' "$confirmed_token" >"$CONFIRMED" 2>/dev/null ) || true
 	spawn_alias_cleanup "$confirmed_token" || cleanup_retained_ip "$confirmed_token" >/dev/null 2>&1 || true
 	log "pending rollback confirmed"
 }
@@ -629,20 +631,29 @@ do_rollback() {
 		fi
 		log "rollback attempt $rollback_try did not complete cleanly"
 	done
-	# An unrecoverable rollback must not leave /etc/smartap-pending-rollback in
-	# place forever: do_arm refuses to stack on it, which permanently bricked
-	# every future apply on unattended fleet devices. Quarantine the transaction
-	# state (the config backup itself is preserved for manual recovery) so the
-	# next apply can proceed from the current — possibly partial — state.
-	rollback_quarantine="${STATE}.failed"
-	{
-		printf 'backup=%s\n' "$backup"
-		cat "$STATE" 2>/dev/null
-	} >"$rollback_quarantine" 2>/dev/null || true
-	chmod 0600 "$rollback_quarantine" 2>/dev/null || true
-	clear_pending
-	rm -f "$POINTER" "$META"
-	log "rollback failed twice; state quarantined to $rollback_quarantine, backup preserved at $backup — configuration may be partial"
+	# Scope recovery by caller. Only an ARMED-state rollback ($STATE present)
+	# blocks future do_arm calls, so only that case needs quarantine.
+	if [ "$from_state" = "1" ]; then
+		# An unrecoverable armed rollback must not leave /etc/smartap-pending-rollback
+		# in place forever: do_arm refuses to stack on it, which permanently bricked
+		# every future apply on unattended fleet devices. Quarantine the transaction
+		# state (the config backup itself is preserved for manual recovery) so the
+		# next apply can proceed from the current — possibly partial — state.
+		rollback_quarantine="${STATE}.failed"
+		{
+			printf 'backup=%s\n' "$backup"
+			cat "$STATE" 2>/dev/null
+		} >"$rollback_quarantine" 2>/dev/null || true
+		chmod 0600 "$rollback_quarantine" 2>/dev/null || true
+		clear_pending
+		rm -f "$POINTER" "$META"
+		log "armed rollback failed twice; state quarantined to $rollback_quarantine, backup preserved at $backup — configuration may be partial"
+		return 1
+	fi
+	# Manual-pointer path: nothing blocks future applies; keep the pointer so the
+	# rollback can simply be retried (old behavior).
+	printf '%s\n' "$backup" >"$POINTER"
+	log "manual rollback did not complete cleanly; pointer preserved for retry"
 	return 1
 }
 

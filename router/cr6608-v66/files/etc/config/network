@@ -6,7 +6,10 @@ config interface 'loopback'
 	option netmask '255.0.0.0'
 
 config globals 'globals'
-	option packet_steering '2'
+	# '1' (per-queue steering) is the value OpenWrt hand-places specifically for
+	# the mt7621 target. '2' (all_cpus) makes RPS contend with the NAPI-loaded
+	# core on this 2-core SoC and hurts, rather than helps, forwarding.
+	option packet_steering '1'
 
 config device
 	option name 'br-lan'

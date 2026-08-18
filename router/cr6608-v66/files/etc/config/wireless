@@ -22,7 +22,8 @@ config wifi-device 'radio0'
 	option he_su_beamformer '1'
 	option he_su_beamformee '1'
 	option he_mu_beamformer '1'
-	option he_bss_color '1'
+	# he_bss_color left to the driver default (random) so fleet APs get distinct
+	# colours and OBSS-PD spatial reuse can classify inter-BSS frames.
 	option he_bss_color_enabled '1'
 	option he_spr_sr_control '3'
 	option he_spr_psr_enabled '0'
@@ -34,13 +35,18 @@ config wifi-device 'radio0'
 	option rx_stbc '1'
 	option short_gi_20 '1'
 	option short_gi_40 '1'
+	# 2.4 GHz AC_BE TXOP bursting (radio1/5G gets this implicitly via the VHT
+	# path; 2.4 GHz needs it set explicitly).
+	option tx_burst '2.0'
 	# Fleet-flashable SmartAP image: both radios ship ENABLED so a freshly
 	# flashed device is immediately usable without per-device provisioning.
 	# The default WiFi passphrase (see the wifi-iface sections) and the
 	# root/admin dashboard login are meant to be changed from the dashboard.
 	option disabled '0'
 	option txpower '38'
-	option legacy_rates '1'
+	# OFDM basic rates (6/12/24) instead of 1 Mbps CCK: ~6x less beacon/mgmt
+	# airtime on 2.4 GHz. Set 1 only if 802.11b-only IoT must associate.
+	option legacy_rates '0'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
@@ -57,7 +63,7 @@ config wifi-device 'radio1'
 	option mu_beamformer '1'
 	option su_beamformer '1'
 	option su_beamformee '1'
-	option he_bss_color '1'
+	# he_bss_color left to the driver default (random) — see radio0.
 	option he_bss_color_enabled '1'
 	option he_spr_sr_control '3'
 	option he_spr_psr_enabled '0'
@@ -93,12 +99,16 @@ config wifi-iface 'wifinet0'
 	option bss_transition '1'
 	option ieee80211r '1'
 	option ft_over_ds '0'
-	option ft_psk_generate_local '1'
+	# Pinned mobility domain so every fleet AP (and the quick-apply executor)
+	# agrees; b1a0 = md5("Smart ap\n") which is hostapd's own default for this
+	# SSID. ft_psk_generate_local is intentionally omitted: under sae-mixed
+	# hostapd then auto-derives wildcard r0kh/r1kh from md5(mobility_domain/key),
+	# so FT works for BOTH FT-PSK and FT-SAE clients across the fleet.
+	option mobility_domain 'b1a0'
 	option wnm_sleep_mode '1'
 	option disassoc_low_ack '0'
 	option multicast_to_unicast '1'
 	option dtim_period '2'
-	option mcast_rate '6000'
 	option wmm '1'
 	option isolate '0'
 	option uapsd '1'
@@ -120,12 +130,11 @@ config wifi-iface 'wifinet1'
 	option bss_transition '1'
 	option ieee80211r '1'
 	option ft_over_ds '0'
-	option ft_psk_generate_local '1'
+	option mobility_domain 'b1a0'
 	option wnm_sleep_mode '1'
 	option disassoc_low_ack '0'
 	option multicast_to_unicast '1'
 	option dtim_period '2'
-	option mcast_rate '6000'
 	option wmm '1'
 	option isolate '0'
 

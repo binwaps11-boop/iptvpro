@@ -159,7 +159,8 @@ return view.extend({
 		var adminPassword = self.adminPasswordOption ? self.adminPasswordOption.formvalue('default') : '';
 		// this.handleSave flushes the form widgets into the in-memory uci session, so
 		// uci.get returns exactly what the user typed (no disk round-trip needed).
-		return this.handleSave(ev).then(function() {
+		var postAttempted = false;
+			return this.handleSave(ev).then(function() {
 			var payload = {};
 			self.FIELDS.forEach(function(k) {
 				// The rendered form is the source of truth. Several widgets display
@@ -172,7 +173,17 @@ return view.extend({
 				var v = null;
 				try {
 					var lookup = self._qmap ? self._qmap.lookupOption(k, 'default') : null;
-					if (lookup && lookup[0]) v = lookup[0].formvalue('default');
+					if (lookup && lookup[0]) {
+						// Flag.formvalue() ignores depends/isActive, so a hidden
+						// mode-gated toggle (smart_connect/fast_transition) would leak
+						// its checked '1' and 409-reject mesh/WDS applies. Trust
+						// formvalue only for an ACTIVE widget; send the disabled value
+						// for an inactive one.
+						if (typeof lookup[0].isActive === 'function' && !lookup[0].isActive('default'))
+							v = (lookup[0].disabled !== undefined && lookup[0].disabled !== null) ? String(lookup[0].disabled) : '0';
+						else
+							v = lookup[0].formvalue('default');
+					}
 				} catch (e) { v = null; }
 				if (v === null || v === undefined)
 					v = uci.get('cr6608quick', 'default', k);
@@ -185,7 +196,8 @@ return view.extend({
 			// pass the live LuCI ubus session id explicitly so the CGI can authenticate
 			// even if cookie parsing is unreliable behind the browser.
 			try { payload.luci_sid = rpc.getSessionID(); } catch (e) {}
-			return self.requestJson('/cgi-bin/cr6608-quick-apply', {
+			postAttempted = true;
+				return self.requestJson('/cgi-bin/cr6608-quick-apply', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(payload),
@@ -215,11 +227,21 @@ return view.extend({
 				ui.addNotification(null, E('p', _('حُفظ الإعداد لكن التطبيق أرجع خطأ: ') + ((j && (j.detail || j.code)) || '?')), 'warning');
 			window.setTimeout(function() { window.location.reload(); }, 1800);
 		}).catch(function(e) {
+			// Only a dropped POST *response* is recoverable via the guard probe.
+			// A rejection BEFORE the POST was sent — e.g. LuCI form datatype
+			// validation inside handleSave — must surface as a plain error and
+			// must NOT reload the page (that would discard the user's edits).
+			var transport = postAttempted && (e && (e.code === 'request_timeout' || e instanceof TypeError));
+			if (!transport) {
+				releaseApplyButton();
+				ui.addNotification(null, E('p', _('لم يُرسل التطبيق (تحقّق من صحة الحقول): ') + e), 'error');
+				return;
+			}
 			// The apply itself restarts Wi-Fi/network, which routinely kills this
 			// HTTP response while the router-side transaction continues — the old
 			// code gave up here, so the rollback token was lost and the guard
-			// reverted every apply made over Wi-Fi. Probe the guard instead and
-			// recover the pending confirmation.
+			// reverted every apply made over Wi-Fi. Probe the guard and recover
+			// the pending confirmation instead.
 			ui.addNotification(null, E('p', _('انقطع الاتصال أثناء التطبيق؛ جارٍ التحقق من حالة الحارس الآمن...')), 'info');
 			return self.recoverPendingApply(14, 3000).then(function(probe) {
 				if (probe && probe.confirmation_ready && probe.rollback_token) {
@@ -228,6 +250,9 @@ return view.extend({
 				}
 				releaseApplyButton();
 				if (probe && probe.state === 'clean') {
+					// 'clean' means the transaction settled — kept OR auto-rolled-back;
+					// we cannot tell which, so reload the CURRENT origin to re-read
+					// the live config rather than hopping to a maybe-reverted address.
 					ui.addNotification(null, E('p', _('اكتملت المعاملة (تثبيت أو رجوع آمن). يُعاد تحميل الصفحة للتحقق من الإعدادات.')), 'info');
 					window.setTimeout(function() { window.location.reload(); }, 1500);
 				} else {
@@ -317,7 +342,21 @@ return view.extend({
 				// else consumes the token — verify via the guard probe and finish.
 				if (c && c.error === 'not_ready' && keepSendCount > 1 && remaining > 0) {
 					return self.probeSafeApply().then(function(p) {
-						if (p && p.state === 'clean') { finishKeepSuccess(); return; }
+						// Finish as SUCCESS only if the guard recorded a real confirm
+						// (outcome 'confirmed'). A plain settled/clean state can also be
+						// a completed auto-rollback, so do not redirect to a maybe-
+						// reverted address — reload the current origin to re-read config.
+						if (p && p.outcome === 'confirmed') { finishKeepSuccess(); return; }
+						if (p && (p.state === 'clean' || p.outcome === 'settled')) {
+							if (!finished) {
+								finished = true;
+								window.clearInterval(timer);
+								releaseApplyState();
+								ui.hideModal();
+								window.setTimeout(function() { window.location.reload(); }, 1200);
+							}
+							return;
+						}
 						throw new Error(_('The guarded transaction did not match.'));
 					});
 				}

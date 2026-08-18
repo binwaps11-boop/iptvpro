@@ -350,10 +350,18 @@ case "$mode" in ap|ap_vlan|mesh|mesh_vlan|wds_sender|wds_sender_vlan|wds_receive
 ip="$(pick lan_ipaddr ipaddr device_ip)"; [ -n "$ip" ] || ip="$(qget network.lan.ipaddr)"; [ -n "$ip" ] || ip='192.168.1.1'
 nm="$(pick lan_netmask netmask)"; [ -n "$nm" ] || nm="$(qget network.lan.netmask)"; [ -n "$nm" ] || nm='255.255.255.0'
 vlan="$(resolved "$(pick vlan_id)" vlan_id '')"
-ssid="$(resolved "$(pick ssid ssid24)" ssid 'Smart ap 2.4G')"
-ssid5="$(resolved "$(pick ssid5)" ssid5 "${ssid}-5G")"
-smart_connect="$(normalize_bool "$(resolved "$(pick smart_connect)" smart_connect 0)" 0)" || fail_request "400 Bad Request" "smart_connect" "Invalid Smart Connect setting"
-fast_transition="$(normalize_bool "$(resolved "$(pick fast_transition)" fast_transition 0)" 0)" || fail_request "400 Bad Request" "fast_transition" "Invalid 802.11r setting"
+ssid="$(resolved "$(pick ssid ssid24)" ssid 'Smart ap')"
+ssid5="$(resolved "$(pick ssid5)" ssid5 "$ssid")"
+# smart_connect/fast_transition are mode-gated. Do NOT let the cr6608quick
+# mirror's default (now '1') stand in as explicit intent for a request that
+# omitted the field — that would 409-reject legitimate mesh/WDS/single-radio
+# applies and silently overwrite a distinct ssid5. Fall back to 0 (coded
+# default), never the mirror, for these two fields.
+sc_raw="$(pick smart_connect)"
+smart_connect="$(normalize_bool "${sc_raw:-0}" 0)" || fail_request "400 Bad Request" "smart_connect" "Invalid Smart Connect setting"
+ft_raw="$(pick fast_transition)"
+fast_transition="$(normalize_bool "${ft_raw:-0}" 0)" || fail_request "400 Bad Request" "fast_transition" "Invalid 802.11r setting"
+# Only unify the 5 GHz SSID when Smart Connect was explicitly requested on.
 [ "$smart_connect" = "1" ] && ssid5="$ssid"
 c24="$(wireless_resolved "$(pick channel24 ch24)" radio0.channel channel24 '')"
 c5="$(wireless_resolved "$(pick channel5 ch5)" radio1.channel channel5 '')"

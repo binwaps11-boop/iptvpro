@@ -111,7 +111,21 @@ if [ "$(jget probe)" = "1" ] || [ "$(jget probe)" = "true" ]; then
 	else
 		probe_token=""
 	fi
-	reply "" "{\"ok\":true,\"probe\":true,\"state\":\"$probe_state\",\"confirmation_ready\":$probe_ready,\"rollback_token\":\"$probe_token\",\"rollback_timeout_s\":$probe_timeout,\"rollback_remaining_s\":$probe_remaining}"
+	# Distinguish a KEPT transaction from a completed AUTO-ROLLBACK: both leave
+	# the guard state=clean, but do_confirm persists a token marker only on Keep.
+	probe_outcome="unknown"
+	CONFIRMED_MARK="${CR6608_SAFE_CONFIRMED:-/tmp/cr6608-safe-apply-confirmed}"
+	if [ "$probe_state" = "clean" ]; then
+		if [ -f "$CONFIRMED_MARK" ] && [ ! -L "$CONFIRMED_MARK" ]; then
+			probe_outcome="confirmed"
+		else
+			probe_outcome="settled"
+		fi
+	fi
+	# The management address the browser should land on after a Keep (the apply
+	# already committed the new LAN IP). Sanitised to a bare IPv4.
+	probe_mgmt="$(uci -q get network.lan.ipaddr 2>/dev/null | sed 's/[^0-9.]//g' | cut -c1-15)"
+	reply "" "{\"ok\":true,\"probe\":true,\"state\":\"$probe_state\",\"outcome\":\"$probe_outcome\",\"confirmation_ready\":$probe_ready,\"rollback_token\":\"$probe_token\",\"rollback_timeout_s\":$probe_timeout,\"rollback_remaining_s\":$probe_remaining,\"management_ip\":\"$probe_mgmt\"}"
 fi
 
 token="$(jget token)"

@@ -5,7 +5,11 @@ config defaults
 	option output 'ACCEPT'
 	option forward 'REJECT'
 	option flow_offloading '1'
-	option flow_offloading_hw '0'
+	# MT7621 has a PPE (offload_version 1) that does IPv4 NAT + PPPoE header
+	# insertion in the ethernet engine. Enabling HW offload roughly doubles
+	# routed/PPPoE throughput vs the software fastpath; fw4 falls back to
+	# software offload automatically for flows the PPE can't handle.
+	option flow_offloading_hw '1'
 	option drop_invalid '1'
 
 config zone

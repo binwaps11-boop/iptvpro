@@ -969,6 +969,17 @@ apply_config() {
 	radio1_enabled="$(canonical_bool "$(setting radio1_enabled)" 1)" || { log "invalid radio1_enabled"; return 2; }
 	smart_connect="$(canonical_bool "$(setting smart_connect)" 0)" || { log "invalid smart_connect"; return 2; }
 	fast_transition="$(canonical_bool "$(setting fast_transition)" 0)" || { log "invalid fast_transition"; return 2; }
+	# The shipped cr6608quick mirror enables smart_connect/fast_transition by
+	# default. That default must NOT be treated as explicit user intent for a
+	# request that never mentioned these fields: otherwise a mode change to
+	# mesh/WDS, or a single-radio apply, is hard-rejected below. When the request
+	# omits the field, degrade the mirror-sourced value to what the mode/radios
+	# actually allow instead of failing.
+	if [ -z "$(rget smart_connect)" ]; then
+		case "$mode" in ap|ap_vlan|pppoe) ;; *) smart_connect=0 ;; esac
+		[ "$radio0_enabled" = "1" ] && [ "$radio1_enabled" = "1" ] || smart_connect=0
+	fi
+	[ "$smart_connect" = "1" ] || { [ -z "$(rget fast_transition)" ] && fast_transition=0; }
 	change_password="$(canonical_bool "$(setting change_password)" 0)" || { log "invalid change_password"; return 2; }
 	[ "$smart_connect" = "1" ] && ssid5="$ssid"
 	target_network='lan'
@@ -1016,7 +1027,10 @@ apply_config() {
 	if [ "$fast_transition" = "1" ]; then
 		[ "$smart_connect" = "1" ] || { log "802.11r requires Smart Connect and one shared SSID"; return 2; }
 		case "$security" in wpa2|wpa3|mixed) ;; *) log "802.11r requires protected WPA2/WPA3 security"; return 2 ;; esac
-		mobility_domain="$(printf '%s' "$ssid" | md5sum 2>/dev/null | cut -c1-4)"
+		# Use the SAME derivation hostapd's generator uses (echo adds a newline),
+		# so the executor reproduces the shipped/hostapd default and a quick apply
+		# never changes the mobility domain out from under a roaming fleet.
+		mobility_domain="$(printf '%s\n' "$ssid" | md5sum 2>/dev/null | cut -c1-4)"
 		case "$mobility_domain" in ???? ) ;; *) log "could not derive the 802.11r mobility domain"; return 2 ;; esac
 		case "$mobility_domain" in *[!0-9a-fA-F]*) log "invalid derived 802.11r mobility domain"; return 2 ;; esac
 	fi

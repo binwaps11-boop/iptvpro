@@ -15,6 +15,9 @@ config usteer 'main'
 	option signal_diff_threshold '0'
 	option load_balancing_threshold '0'
 	option load_kick_enabled '0'
-	option band_steering_interval '0'
+	# Non-zero intervals are REQUIRED or band_steering.c / local_node.c return
+	# early and no steering runs at all — an enabled usteer with 0 intervals is
+	# a silent no-op. These drive 5 GHz-preferred band steering conservatively.
+	option band_steering_interval '120000'
 	option band_steering_min_snr '-60'
-	option link_measurement_interval '0'
+	option link_measurement_interval '30000'
