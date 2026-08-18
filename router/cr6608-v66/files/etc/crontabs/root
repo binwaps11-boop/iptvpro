@@ -2,3 +2,4 @@
 30 3 * * * /usr/sbin/smartap-autochannel >/dev/null 2>&1
 */5 * * * * /usr/sbin/cr6608-wifi-sentinel >/dev/null 2>&1
 * * * * * /usr/sbin/cr6608-session-reaper >/dev/null 2>&1
+17 4 * * * /usr/sbin/cr6608-cert-renew >/dev/null 2>&1

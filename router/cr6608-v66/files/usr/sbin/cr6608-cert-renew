@@ -1,0 +1,26 @@
+#!/bin/sh
+# Renew the uhttpd self-signed TLS cert before it expires. The cert is minted
+# once on first boot with a 397-day life; without renewal HTTPS breaks fleet-wide
+# after ~13 months. If the cert expires within 30 days (or is missing/unreadable),
+# drop it so uhttpd's init regenerates a fresh keypair on restart.
+CRT="${CR6608_UHTTPD_CRT:-/etc/uhttpd.crt}"
+KEY="${CR6608_UHTTPD_KEY:-/etc/uhttpd.key}"
+INITD="${CR6608_INITD_UHTTPD:-/etc/init.d/uhttpd}"
+
+renew=0
+if [ ! -s "$CRT" ] || [ ! -s "$KEY" ]; then
+	renew=1
+elif command -v openssl >/dev/null 2>&1; then
+	# uhttpd ships a DER cert; fall back to PEM if the DER probe fails.
+	if ! openssl x509 -checkend 2592000 -noout -inform der -in "$CRT" >/dev/null 2>&1 &&
+	   ! openssl x509 -checkend 2592000 -noout -in "$CRT" >/dev/null 2>&1; then
+		renew=1
+	fi
+fi
+
+[ "$renew" = 1 ] || exit 0
+rm -f "$CRT" "$KEY"
+# uhttpd's init regenerates the keypair (px5g/ustream) when the files are absent.
+"$INITD" restart >/dev/null 2>&1 || true
+logger -t cr6608-cert "regenerated the uhttpd TLS certificate before expiry"
+exit 0

@@ -2035,7 +2035,18 @@ case "$action" in
       emit true "Switch / Ports" "Port disabled temporarily" "[]" "Backup: $backup\n$port will be restored automatically after 30 seconds to prevent a permanent management lockout." "[]" "[]"; exit 0
     fi
     ip link set "$port" up 2>/tmp/dashctl.action || { emit false "Switch / Ports" "Port action failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0; }
-    emit true "Switch / Ports" "Port enabled" "[]" "Backup: $backup\nRuntime port $port is up. Network config was not rewritten." "[]" "[]"; exit 0 ;;
+    # With bridge VLAN filtering active, a bare 'ip link up' leaves the port with
+    # no bridge-VLAN membership (link up but no L2 path / no DHCP). Rebuild the
+    # membership so the re-enabled port actually carries traffic.
+    port_note="Runtime port $port is up. Network config was not rewritten."
+    if [ "$(cat "/sys/class/net/br-lan/bridge/vlan_filtering" 2>/dev/null)" = "1" ] && [ -x /usr/sbin/cr6608-security-apply ]; then
+      if run_limit 30 /usr/sbin/cr6608-security-apply vlan >/dev/null 2>&1; then
+        port_note="Runtime port $port is up and its VLAN membership was rebuilt."
+      else
+        port_note="Runtime port $port link is up, but VLAN membership could not be rebuilt automatically — reapply the Switch/VLAN settings if the port has no connectivity."
+      fi
+    fi
+    emit true "Switch / Ports" "Port enabled" "[]" "Backup: $backup\n$port_note" "[]" "[]"; exit 0 ;;
   set_admin_password)
     confirm_required "Administration"
     p1_decode_valid=1

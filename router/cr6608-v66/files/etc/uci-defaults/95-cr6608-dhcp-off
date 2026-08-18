@@ -133,17 +133,23 @@ if [ "$ipv6_router" = '1' ]; then
 	uset dhcp.lan.ndp=disabled
 else
 	uset dhcp.odhcpd.disabled=1
+	# An AP must NEVER originate RA/DHCPv6 on the LAN (it would fight the real
+	# upstream router). odhcpd ignores the master 'disabled' flag, so the only
+	# reliable off-switch is (a) neutralising any retained per-interface pool and
+	# (b) stopping the service. Do (a) unconditionally in non-router mode — a
+	# keep-settings upgrade from a former PPPoE/router config carries
+	# dhcp.lan.ra=server which would otherwise be served.
+	if uget dhcp.lan >/dev/null 2>&1; then
+		uset dhcp.lan.dhcpv6=disabled
+		uset dhcp.lan.ra=disabled
+		udelete dhcp.lan.ra_slaac
+		uset dhcp.lan.ndp=disabled
+	fi
 	if [ "$ipv6_policy_enabled" = '0' ]; then
 		uset network.lan.ipv6=0
 		uset network.lan.delegate=0
 		if uget network.wan >/dev/null 2>&1; then uset network.wan.ipv6=0; fi
 		if uget network.wan6 >/dev/null 2>&1; then uset network.wan6.disabled=1; fi
-		if uget dhcp.lan >/dev/null 2>&1; then
-			uset dhcp.lan.dhcpv6=disabled
-			uset dhcp.lan.ra=disabled
-			udelete dhcp.lan.ra_slaac
-			uset dhcp.lan.ndp=disabled
-		fi
 	fi
 fi
 
@@ -162,8 +168,15 @@ rm -f -- "$LEGACY_IPV6_SYSCTL"
 "$SYSCTL_BIN" -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
 
 if [ -x "$INITD_DIR/odhcpd" ]; then
-	"$INITD_DIR/odhcpd" enable >/dev/null 2>&1 || true
-	"$INITD_DIR/odhcpd" restart >/dev/null 2>&1 || true
+	if [ "$ipv6_router" = '1' ]; then
+		"$INITD_DIR/odhcpd" enable >/dev/null 2>&1 || true
+		"$INITD_DIR/odhcpd" restart >/dev/null 2>&1 || true
+	else
+		# AP mode: stop the RA/DHCPv6 daemon at the service level (the UCI
+		# 'disabled' option is not honoured by odhcpd).
+		"$INITD_DIR/odhcpd" disable >/dev/null 2>&1 || true
+		"$INITD_DIR/odhcpd" stop >/dev/null 2>&1 || true
+	fi
 fi
 [ "$legacy_ipv6_policy" != '1' ] || "$INITD_DIR/firewall" reload >/dev/null 2>&1 || true
 "$INITD_DIR/dnsmasq" reload >/dev/null 2>&1 || true

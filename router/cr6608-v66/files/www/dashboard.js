@@ -3299,7 +3299,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
     }
     box.dataset.loaded = "1";
     box.className = "ctl-status";
-    box.textContent = actionName ? "Running control..." : "Loading router controls...";
+    box.textContent = actionName ? (state.lang === "ar" ? "جارٍ تنفيذ الإجراء..." : "Running control...") : (state.lang === "ar" ? "جارٍ تحميل عناصر التحكم..." : "Loading router controls...");
     var stopProgress = actionName ? startControlProgress(box, actionName) : function () {};
     try {
       var url = authUrl(CTL + "?section=" + encodeURIComponent(section));
@@ -3377,7 +3377,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         return;
       }
       box.className = "ctl-status";
-      box.textContent = "Control API error: " + e.message;
+      box.textContent = (state.lang === "ar" ? "خطأ في واجهة التحكم: " : "Control API error: ") + e.message;
     } finally {
       stopProgress();
       if (state.controlReadController === readController) {
@@ -3497,7 +3497,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         var current = tabs.indexOf(button), next = current;
         if (ev.key === "Home") next = 0;
         else if (ev.key === "End") next = tabs.length - 1;
-        else next = (current + (ev.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        else { var rtl = (document.documentElement.dir === "rtl") || (state.lang === "ar"); var fwd = rtl ? (ev.key === "ArrowLeft") : (ev.key === "ArrowRight"); next = (current + (fwd ? 1 : -1) + tabs.length) % tabs.length; }
         ev.preventDefault();
         tabs[next].focus();
         activate(tabs[next]);

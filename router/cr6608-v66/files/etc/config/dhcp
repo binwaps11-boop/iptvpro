@@ -30,5 +30,8 @@ config dnsmasq
 # AP default: do not originate RA/DHCPv6. The packaged odhcpd service is enabled
 # only by configuration when dual-stack PPPoE router mode is selected.
 config odhcpd 'odhcpd'
-	option disabled '1'
+	# NOTE: odhcpd does NOT honour a master-section 'disabled' flag (it parses
+	# only maindhcp/leasefile/... ), so IPv6 RA/DHCPv6 off-state in AP mode is
+	# enforced at the SERVICE level by 95-cr6608-dhcp-off (odhcpd disable+stop)
+	# plus the absence of any 'config dhcp lan' with ra/dhcpv6=server.
 	option maindhcp '0'
