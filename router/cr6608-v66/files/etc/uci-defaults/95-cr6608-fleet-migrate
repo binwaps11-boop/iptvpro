@@ -45,19 +45,36 @@ for if in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=w
 	# Unify the SSID only when it is still an unconfigured default (never clobber
 	# an operator-chosen name).
 	ssid="$(uci -q get "wireless.$if.ssid")"
-	case "$ssid" in ''|'Smart ap 2.4G'|'Smart ap 5G'|'Smart ap 2.4'|'Smart ap 5') set_w "$if.ssid" 'Smart ap' ;; esac
+	default_named=0
+	case "$ssid" in ''|'Smart ap'|'Smart ap 2.4G'|'Smart ap 5G'|'Smart ap 2.4'|'Smart ap 5')
+		default_named=1
+		[ "$ssid" = 'Smart ap' ] || set_w "$if.ssid" 'Smart ap' ;;
+	esac
 
-	# Ensure an encrypted default network is actually reachable after flash.
+	# Owner policy: the fleet Wi-Fi is OPEN (no passphrase). Apply it to
+	# default-named networks only; an operator-customized SSID keeps whatever
+	# security the operator chose.
+	if [ "$default_named" = "1" ]; then
+		[ "$(uci -q get "wireless.$if.encryption")" = "none" ] || set_w "$if.encryption" 'none'
+		del_w "$if.key"
+		del_w "$if.ieee80211w"
+		del_w "$if.ieee80211r"
+		del_w "$if.ft_over_ds"
+		del_w "$if.mobility_domain"
+	fi
+
+	# Roaming FT options only make sense on ENCRYPTED networks; 11k/v below
+	# works everywhere including open BSSes.
 	enc="$(uci -q get "wireless.$if.encryption")"
 	case "$enc" in
 		''|none|open) : ;;
-		*) [ -n "$(uci -q get "wireless.$if.key")" ] || set_w "$if.key" 'smartap2038' ;;
+		*)
+			[ -n "$(uci -q get "wireless.$if.key")" ] || set_w "$if.key" 'smartap2038'
+			[ "$(uci -q get "wireless.$if.ieee80211r")" = "1" ] || set_w "$if.ieee80211r" 1
+			[ -n "$(uci -q get "wireless.$if.ft_over_ds")" ] || set_w "$if.ft_over_ds" 0
+			[ -n "$(uci -q get "wireless.$if.mobility_domain")" ] || set_w "$if.mobility_domain" 'b1a0'
+			;;
 	esac
-
-	# Roaming + steering + BSS-transition options (additive).
-	[ "$(uci -q get "wireless.$if.ieee80211r")" = "1" ] || set_w "$if.ieee80211r" 1
-	[ -n "$(uci -q get "wireless.$if.ft_over_ds")" ] || set_w "$if.ft_over_ds" 0
-	[ -n "$(uci -q get "wireless.$if.mobility_domain")" ] || set_w "$if.mobility_domain" 'b1a0'
 	[ "$(uci -q get "wireless.$if.ieee80211k")" = "1" ] || set_w "$if.ieee80211k" 1
 	[ "$(uci -q get "wireless.$if.ieee80211v")" = "1" ] || set_w "$if.ieee80211v" 1
 	[ "$(uci -q get "wireless.$if.bss_transition")" = "1" ] || set_w "$if.bss_transition" 1

@@ -95,22 +95,16 @@ config wifi-iface 'wifinet0'
 	# and one 802.11r mobility domain across the whole fleet (the domain is
 	# derived from the SSID, so every AP with this SSID roams seamlessly).
 	option ssid 'Smart ap'
-	option encryption 'sae-mixed'
-	option key 'smartap2038'
-	option ieee80211w '1'
+	# OPEN network by owner decision: clients join with no Wi-Fi password.
+	# (Dashboard/SSH login root/admin is separate and stays protected.)
+	# FT/PMF options omitted: they apply only to encrypted BSSes; open fleet
+	# roaming needs no 802.11r, and 11k/v steering still works.
+	option encryption 'none'
 	option disabled '0'
 	option mbo '1'
 	option ieee80211k '1'
 	option ieee80211v '1'
 	option bss_transition '1'
-	option ieee80211r '1'
-	option ft_over_ds '0'
-	# Pinned mobility domain so every fleet AP (and the quick-apply executor)
-	# agrees; b1a0 = md5("Smart ap\n") which is hostapd's own default for this
-	# SSID. ft_psk_generate_local is intentionally omitted: under sae-mixed
-	# hostapd then auto-derives wildcard r0kh/r1kh from md5(mobility_domain/key),
-	# so FT works for BOTH FT-PSK and FT-SAE clients across the fleet.
-	option mobility_domain 'b1a0'
 	option wnm_sleep_mode '1'
 	option disassoc_low_ack '0'
 	option multicast_to_unicast '1'
@@ -126,17 +120,12 @@ config wifi-iface 'wifinet1'
 	option network 'lan'
 	option mode 'ap'
 	option ssid 'Smart ap'
-	option encryption 'sae-mixed'
-	option key 'smartap2038'
-	option ieee80211w '1'
+	option encryption 'none'
 	option disabled '0'
 	option mbo '1'
 	option ieee80211k '1'
 	option ieee80211v '1'
 	option bss_transition '1'
-	option ieee80211r '1'
-	option ft_over_ds '0'
-	option mobility_domain 'b1a0'
 	option wnm_sleep_mode '1'
 	option disassoc_low_ack '0'
 	option multicast_to_unicast '1'
