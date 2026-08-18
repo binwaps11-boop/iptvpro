@@ -25,7 +25,10 @@ config wifi-device 'radio0'
 	# he_bss_color left to the driver default (random) so fleet APs get distinct
 	# colours and OBSS-PD spatial reuse can classify inter-BSS frames.
 	option he_bss_color_enabled '1'
-	option he_spr_sr_control '3'
+	# 0 => hostapd computes SR Control = 5 (Non-SRG OBSS-PD ALLOWED + offset
+	# present). The stock default 3 leaves bit1 set = OBSS-PD disallowed, so
+	# spatial reuse never activates. This enables AX spatial reuse.
+	option he_spr_sr_control '0'
 	option he_spr_psr_enabled '0'
 	option he_spr_non_srg_obss_pd_max_offset '5'
 	option he_default_pe_duration '4'
@@ -65,7 +68,10 @@ config wifi-device 'radio1'
 	option su_beamformee '1'
 	# he_bss_color left to the driver default (random) — see radio0.
 	option he_bss_color_enabled '1'
-	option he_spr_sr_control '3'
+	# 0 => hostapd computes SR Control = 5 (Non-SRG OBSS-PD ALLOWED + offset
+	# present). The stock default 3 leaves bit1 set = OBSS-PD disallowed, so
+	# spatial reuse never activates. This enables AX spatial reuse.
+	option he_spr_sr_control '0'
 	option he_spr_psr_enabled '0'
 	option he_spr_non_srg_obss_pd_max_offset '5'
 	option he_default_pe_duration '4'

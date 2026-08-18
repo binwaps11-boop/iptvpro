@@ -2380,6 +2380,12 @@ EOF
       # control. Do not silently leave two contradictory accelerators enabled.
       uci set firewall.@defaults[0].flow_offloading='0'
       uci set firewall.@defaults[0].flow_offloading_hw='0'
+    else
+      # Symmetric restore: turning SQM OFF must bring back the shipped hardware
+      # offload (PPE) defaults, otherwise the device is stuck at software-offload
+      # throughput forever after a single SQM enable/disable cycle.
+      uci set firewall.@defaults[0].flow_offloading='1'
+      uci set firewall.@defaults[0].flow_offloading_hw='1'
     fi
     action_arm_rollback "SQM" || exit 0
     action_commit sqm "SQM" || exit 0

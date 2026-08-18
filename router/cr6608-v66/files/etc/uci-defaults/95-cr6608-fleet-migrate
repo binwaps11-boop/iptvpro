@@ -26,7 +26,11 @@ for rd in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=w
 	[ "$(uci -q get "wireless.$rd.disabled")" = "1" ] && set_w "$rd.disabled" 0
 	# 2.4 GHz: OFDM basic rates + TXOP burst; harmless on 5 GHz too.
 	if [ "$(uci -q get "wireless.$rd.band")" = "2g" ]; then
-		[ "$(uci -q get "wireless.$rd.legacy_rates")" = "1" ] && set_w "$rd.legacy_rates" 0
+		# Respect the 802.11b opt-in (smartap.wifi.legacy_11b): only force the fast
+		# default when 11b was NOT requested, so this does not fight
+		# 95-cr6608-enable-legacy-11b in the same boot.
+		[ "$(uci -q get smartap.wifi.legacy_11b 2>/dev/null)" = "1" ] || \
+			{ [ "$(uci -q get "wireless.$rd.legacy_rates")" = "1" ] && set_w "$rd.legacy_rates" 0; }
 		[ -n "$(uci -q get "wireless.$rd.tx_burst")" ] || set_w "$rd.tx_burst" "2.0"
 	fi
 	# Pinned-random BSS colour: drop a hard-coded colour so OBSS-PD works fleet-wide.

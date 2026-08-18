@@ -923,8 +923,13 @@
     var now = Date.now(), rx = data.traffic ? Number(data.traffic.rx_bytes) || 0 : 0, tx = data.traffic ? Number(data.traffic.tx_bytes) || 0 : 0;
     var rxBps = data.traffic ? Number(data.traffic.rx_bps) || 0 : 0, txBps = data.traffic ? Number(data.traffic.tx_bps) || 0 : 0;
     var signature = data.traffic ? String(data.traffic.counter_signature || "") : "missing-client-edge";
-    if (updateBaseline && (!rxBps && !txBps) && signature && state.previousTraffic &&
-        state.previousTraffic.signature === signature && state.previousAt) {
+    // Use the client byte-delta as the single consistent rate source whenever a
+    // matching-signature baseline exists (server rx_bps/tx_bps is only the
+    // first-sample fallback). Mixing the server's ~10-60s average with the
+    // client's ~poll-interval delta made the headline/sparkline jump periodically.
+    if (updateBaseline && signature && state.previousTraffic &&
+        state.previousTraffic.signature === signature && state.previousAt &&
+        now > state.previousAt) {
       var dt = Math.max(1, (now - state.previousAt) / 1000);
       rxBps = Math.max(0, (rx - state.previousTraffic.rx) / dt);
       txBps = Math.max(0, (tx - state.previousTraffic.tx) / dt);
@@ -981,8 +986,8 @@
     var downLabel = state.lang === "ar" ? "تنزيل" : "Download";
     var upLabel = state.lang === "ar" ? "رفع" : "Upload";
     return '<div class="grid two" style="margin-top:8px">' +
-      '<div class="traffic-box"><span>' + downLabel + '</span><b class="latin">' + bps(t.down) + '</b><small class="muted">' + bytes(t.downBytes) + '</small></div>' +
-      '<div class="traffic-box"><span>' + upLabel + '</span><b class="latin">' + bps(t.up) + '</b><small class="muted">' + bytes(t.upBytes) + '</small></div></div>';
+      '<div class="traffic-box"><span>' + downLabel + '</span><b class="latin">' + bps(t.down) + '</b><small class="muted">' + bytesNet(t.downBytes) + '</small></div>' +
+      '<div class="traffic-box"><span>' + upLabel + '</span><b class="latin">' + bps(t.up) + '</b><small class="muted">' + bytesNet(t.upBytes) + '</small></div></div>';
   }
   function parseStationRateDetail(sta, direction) {
     sta = sta || {};
@@ -1559,20 +1564,20 @@
     var txLabel = "↑ " + tr("upload");
     var complete = !!(data.traffic && data.traffic.topology_complete === true);
     var body = '<canvas id="' + canvasId + '"></canvas><div class="grid two" style="margin-top:12px">' +
-      '<div class="traffic-box"><span>' + rxLabel + '</span><b class="latin">' + bps(rates.rx) + '</b><small class="muted">' + bytes(rates.totalRx) + '</small></div>' +
-      '<div class="traffic-box"><span>' + txLabel + '</span><b class="latin">' + bps(rates.tx) + '</b><small class="muted">' + bytes(rates.totalTx) + '</small></div></div>' +
+      '<div class="traffic-box"><span>' + rxLabel + '</span><b class="latin">' + bps(rates.rx) + '</b><small class="muted">' + bytesNet(rates.totalRx) + '</small></div>' +
+      '<div class="traffic-box"><span>' + txLabel + '</span><b class="latin">' + bps(rates.tx) + '</b><small class="muted">' + bytesNet(rates.totalTx) + '</small></div></div>' +
       (complete ? "" : '<p class="ctl-note">' + esc(trafficCoverageNote(data)) + '</p>');
     scheduleChartDraw(canvasId, function (canvas) {
       return drawChart(canvas, samples, { keys:["rx","tx"], labels:[tr("download"),tr("upload")] });
     });
-    return card(tr("networkTitle"), body, complete ? "60s peaks" : (state.lang === "ar" ? "حواف Wi-Fi فقط" : "Wi-Fi edges only"), "net");
+    return card(tr("networkTitle"), body, snapshotIsStale(data) ? cachedStatusLabel() : (complete ? "60s peaks" : (state.lang === "ar" ? "حواف Wi-Fi فقط" : "Wi-Fi edges only")), "net");
   }
   // Client-edge download / upload split for a counter window — three clean rows.
   // so the numbers never wrap/overlap on a narrow phone screen.
   function usageRow(icon, label, val, color) {
     return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:3px 0;font-size:12px">' +
       '<span class="muted">' + icon + ' ' + esc(label) + '</span>' +
-      '<b class="latin" style="color:' + color + ';white-space:nowrap">' + bytes(val) + '</b></div>';
+      '<b class="latin" style="color:' + color + ';white-space:nowrap">' + bytesNet(val) + '</b></div>';
   }
   function usageSplit(label, download, upload) {
     return '<div class="traffic-box" style="text-align:start">' +
@@ -1587,7 +1592,7 @@
     var totalLabel = u.topologyComplete ? tr("total") : (state.lang === "ar" ? "الإجمالي المرصود" : "Observed subtotal");
     var body = '<div class="grid two">' +
       usageSplit(tr("counterWindow"), u.rx, u.tx) +
-      '<div class="traffic-box" style="text-align:start"><span style="font-weight:700">' + esc(totalLabel) + '</span><b class="latin" style="display:block;font-size:22px;margin-top:8px;color:var(--accent)">' + bytes(u.total) + '</b><small class="muted">' + esc(tr("routerCounter")) + '</small></div>' +
+      '<div class="traffic-box" style="text-align:start"><span style="font-weight:700">' + esc(totalLabel) + '</span><b class="latin" style="display:block;font-size:22px;margin-top:8px;color:var(--accent)">' + bytesNet(u.total) + '</b><small class="muted">' + esc(tr("routerCounter")) + '</small></div>' +
       '</div><p class="muted">' + esc(tr("noQuota")) + '</p>' +
       (u.topologyComplete ? "" : '<p class="ctl-note">' + esc(tr("topologyPartial")) + '</p>');
     return card(tr("traffic"), body, tr("routerCounter"), "bolt");
@@ -2445,7 +2450,7 @@
   var H = {
     get lang() { return state.lang; },
     card: card, bar: bar, gauge: gauge, spark: spark, esc: esc, fmt: fmt,
-    bytes: bytes, bps: bps, num: num, finite: finite, clamp: clamp, pct: pct,
+    bytes: bytes, bytesNet: bytesNet, bps: bps, num: num, finite: finite, clamp: clamp, pct: pct,
     quality: quality, distanceM: distanceM, proximity: proximity, tr: tr,
     cssVar: cssVar, hexA: hexA, wifiBand: wifiBand, mergeDevices: mergeDevices,
     secLevel: secLevel, levelColor: levelColor,
@@ -2495,7 +2500,7 @@
 {key:"live_throughput",ar:"حركة العملاء الحية",en:"Live Client Traffic",cat:"Traffic & Bandwidth",fn:function(d,H){var t=d.traffic||{},download=H.num(t.rx_bps)||0,upload=H.num(t.tx_bps)||0,complete=t.topology_complete===true;var body="<div class='grid two'><div class='traffic-box'><span>↓ "+(H.lang==='ar'?'تنزيل':'Download')+"</span><b class='latin' style='color:var(--accent)'>"+H.bps(download)+"</b></div><div class='traffic-box'><span>↑ "+(H.lang==='ar'?'رفع':'Upload')+"</span><b class='latin' style='color:var(--primary)'>"+H.bps(upload)+"</b></div></div><div style='margin-top:10px'>"+H.bar(download+upload?download/(download+upload)*100:50,100,"var(--accent)")+"</div>";if(!complete)body+="<small class='muted'>"+H.esc(H.trafficCoverageNote(d))+"</small>";return H.card(H.lang==="ar"?"حركة العملاء الحية":"Live Client Traffic",body,complete?null:(H.lang==='ar'?'Wi-Fi فقط':'Wi-Fi only'),"net");}},
 {key:"iface_data_rank",ar:"ترتيب عدادات الواجهات الخام",en:"Raw Interface Counter Ranking",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',ifs=d.interfaces||[],title=a?'ترتيب عدادات الواجهات الخام':'Raw Interface Counter Ranking';if(!ifs.length)return H.card(title,"<div class='empty'>—</div>",null,"net");var rows=ifs.map(function(i){return {n:i.name,b:(H.num(i.rx_bytes)||0)+(H.num(i.tx_bytes)||0)};}).sort(function(x,y){return y.b-x.b;}),max=rows[0].b||1,body=rows.slice(0,7).map(function(i){return "<div style='margin:6px 0'><div style='display:flex;justify-content:space-between;font-size:12px'><span class='latin'>"+H.esc(i.n)+"</span><span class='latin'>"+H.bytes(i.b)+"</span></div>"+H.bar(i.b,max,"var(--primary)")+"</div>";}).join('');body+="<small class='muted'>"+(a?'عدادات خام مستقلة وغير قابلة للجمع؛ قد تتداخل طبقات الشبكة وتُصفّر كل واجهة مستقلاً.':'Independent, non-additive raw counters; network layers can overlap and each interface can reset independently.')+"</small>";return H.card(title,body,ifs.length+"","net");}},
 {key:"error_drop_watch",ar:"مراقب الأخطاء والفقد",en:"Errors & Drops",cat:"Traffic & Bandwidth",fn:function(d,H){var ifs=d.interfaces||[];if(!ifs.length)return H.card(H.lang==="ar"?"الأخطاء":"Errors","<div class='empty'>—</div>",null,"net");var bad=ifs.map(function(i){return {n:i.name,e:(H.num(i.rx_errors)||0)+(H.num(i.tx_errors)||0),dr:(H.num(i.rx_dropped)||0)+(H.num(i.tx_dropped)||0)};}).filter(function(i){return i.e||i.dr;}).sort(function(a,b){return (b.e+b.dr)-(a.e+a.dr);});var body=bad.length?bad.map(function(i){return "<div class='kv'><div><span class='latin'>"+H.esc(i.n)+"</span><b class='latin' style='color:var(--weak)'>"+i.e+" err · "+i.dr+" drop</b></div></div>";}).join(""):"<div style='color:var(--excellent)'>"+(H.lang==="ar"?"لا أخطاء ولا فقد":"No errors or drops")+"</div>";return H.card(H.lang==="ar"?"مراقب الأخطاء والفقد":"Errors & Drops",body,bad.length+"","shield");}},
-{key:"total_data",ar:"لقطة عدادات حافة العملاء",en:"Client-edge Counter Snapshot",cat:"Traffic & Bandwidth",fn:function(d,H){var t=d.traffic||{},download=H.num(t.rx_bytes)||0,upload=H.num(t.tx_bytes)||0,complete=t.topology_complete===true;var body="<div class='grid two'><div class='traffic-box'><span>"+(H.lang==="ar"?"تنزيل":"Download")+"</span><b class='latin'>"+H.bytes(download)+"</b></div><div class='traffic-box'><span>"+(H.lang==="ar"?"رفع":"Upload")+"</span><b class='latin'>"+H.bytes(upload)+"</b></div></div><p class='muted' style='margin-top:8px'>"+(complete?(H.lang==="ar"?"إجمالي حافة العملاء":"Client-edge total"):(H.lang==="ar"?"الإجمالي المرصود (طوبولوجيا جزئية)":"Observed subtotal (partial topology)"))+": "+H.bytes(download+upload)+"</p><small class='muted'>"+(H.lang==='ar'?'منذ إعادة ضبط الواجهة؛ ليس أسبوعياً أو شهرياً.':'Since interface reset; not a weekly or monthly total.')+"</small>"+(complete?"":"<small class='muted'>"+H.esc(H.trafficCoverageNote(d))+"</small>");return H.card(H.lang==="ar"?"لقطة عدادات حافة العملاء":"Client-edge Counter Snapshot",body,complete?(H.lang==='ar'?'طوبولوجيا مكتملة':'complete topology'):(H.lang==='ar'?'Wi-Fi فقط':'Wi-Fi only'),"net");}},
+{key:"total_data",ar:"لقطة عدادات حافة العملاء",en:"Client-edge Counter Snapshot",cat:"Traffic & Bandwidth",fn:function(d,H){var t=d.traffic||{},download=H.num(t.rx_bytes)||0,upload=H.num(t.tx_bytes)||0,complete=t.topology_complete===true;var body="<div class='grid two'><div class='traffic-box'><span>"+(H.lang==="ar"?"تنزيل":"Download")+"</span><b class='latin'>"+H.bytesNet(download)+"</b></div><div class='traffic-box'><span>"+(H.lang==="ar"?"رفع":"Upload")+"</span><b class='latin'>"+H.bytesNet(upload)+"</b></div></div><p class='muted' style='margin-top:8px'>"+(complete?(H.lang==="ar"?"إجمالي حافة العملاء":"Client-edge total"):(H.lang==="ar"?"الإجمالي المرصود (طوبولوجيا جزئية)":"Observed subtotal (partial topology)"))+": "+H.bytesNet(download+upload)+"</p><small class='muted'>"+(H.lang==='ar'?'منذ إعادة ضبط الواجهة؛ ليس أسبوعياً أو شهرياً.':'Since interface reset; not a weekly or monthly total.')+"</small>"+(complete?"":"<small class='muted'>"+H.esc(H.trafficCoverageNote(d))+"</small>");return H.card(H.lang==="ar"?"لقطة عدادات حافة العملاء":"Client-edge Counter Snapshot",body,complete?(H.lang==='ar'?'طوبولوجيا مكتملة':'complete topology'):(H.lang==='ar'?'Wi-Fi فقط':'Wi-Fi only'),"net");}},
   {key:"updown_ratio",ar:"نسبة التنزيل/الرفع",en:"Download / Upload Ratio",cat:"Traffic & Bandwidth",fn:function(d,H){var a=H.lang==='ar',t=d.traffic||{},download=H.num(t.rx_bytes)||0,upload=H.num(t.tx_bytes)||0,tot=download+upload,title=a?'نسبة التنزيل/الرفع':'Download / Upload Ratio';if(!tot)return H.card(title,"<div class='empty'>—</div>",null,"net");var pd=download/tot*100,pu=upload/tot*100;var body="<div style='display:flex;height:24px;border-radius:6px;overflow:hidden'><div style='width:"+pd.toFixed(1)+"%;background:var(--accent)'></div><div style='width:"+pu.toFixed(1)+"%;background:var(--primary)'></div></div><div style='display:flex;justify-content:space-between;margin-top:6px;font-size:12px'><span style='color:var(--accent)'>↓ "+(a?'تنزيل ':'Download ')+H.fmt(pd,0)+"%</span><span style='color:var(--primary)'>↑ "+(a?'رفع ':'Upload ')+H.fmt(pu,0)+"%</span></div>";if(t.topology_complete!==true)body+="<small class='muted'>"+H.esc(H.trafficCoverageNote(d))+"</small>";return H.card(title,body,null,"net");}},
 {key:"backhaul_status",ar:"حالة الوصلة العلوية",en:"Backhaul Status",cat:"Traffic & Bandwidth",fn:function(d,H){var b=d.backhaul||{},on=!!b.online,col=on?"var(--excellent)":"var(--mid)";var body="<div class='kv'><div><span>"+(H.lang==="ar"?"الحالة":"Status")+"</span><b style='color:"+col+"'>"+(on?(H.lang==="ar"?"متصل":"Online"):(H.lang==="ar"?"LAN فقط":"LAN only"))+"</b></div><div><span>"+(H.lang==="ar"?"البوابة":"Gateway")+"</span><b class='latin'>"+H.esc(b.gateway||"—")+"</b></div><div><span>"+(H.lang==="ar"?"المنفذ":"Device")+"</span><b class='latin'>"+H.esc(b.device||"—")+"</b></div></div>";return H.card(H.lang==="ar"?"حالة الوصلة العلوية":"Backhaul Status",body,on?"up":"lan","net");}},
 // ---------- System & Health ----------
@@ -3016,7 +3021,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       '<div><span>' + (state.lang === "ar" ? "الحالة" : "State") + '</span><b style="color:' + (identityEnabled && identity.state === "active" ? "var(--excellent)" : "var(--mid)") + '">' + esc(identityEnabled ? (identity.state || "starting") : "disabled") + '</b></div>' +
       '<div><span>' + (state.lang === "ar" ? "البروتوكول" : "Protocol") + '</span><b class="latin">MNDP · UDP 5678</b></div></div>';
     return sectionHead(tr("overview"), tr("subtitle"), nowTime()) + '<div class="grid two">' +
-      card(tr("networkTitle"), throughput, complete ? "live" : (state.lang === "ar" ? "حواف Wi-Fi فقط" : "Wi-Fi edges only"), "net") +
+      card(tr("networkTitle"), throughput, snapshotIsStale(data) ? cachedStatusLabel() : (complete ? "live" : (state.lang === "ar" ? "حواف Wi-Fi فقط" : "Wi-Fi edges only")), "net") +
       card(state.lang === "ar" ? "الراديو والبث" : "Radios & TX", radios || '<div class="empty">—</div>', "iw", "wifi") +
       card(state.lang === "ar" ? "حالة الاتصال" : "Connection status", status, snapshotIsStale(data) ? cachedStatusLabel() : (data.ok ? tr("online") : tr("offline")), "bolt") +
       card(state.lang === "ar" ? "هوية العميل في الميكروتك" : "MikroTik customer identity", identityBody, identityEnabled ? "MNDP" : "off", "device") +
@@ -3315,6 +3320,16 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       }
       if (res.status === 403) return requireLogin(tr("sessionExpired"));
       if (controlActionAffectsSnapshot(actionName)) queueFullRefresh(250);
+      // A failed POST must NOT repaint the panel to a one-line error (that discards
+      // the user's typed form and, for guarded actions, erases the Keep/Rollback
+      // buttons of a still-armed transaction). Surface the message and re-fetch the
+      // authoritative device state instead.
+      if (actionName && data && data.ok === false) {
+        if (data.summary || data.text) toast(data.summary || data.text);
+        if (actionName === "keep_changes" || actionName === "rollback_last") return;
+        delete box.dataset.loaded;
+        return loadControl(section);
+      }
       if (data && data.ok === true && data.confirmation_ready === true && /^[0-9a-f]{32}$/.test(data.rollback_token || ""))
         state.controlTokens[section] = data.rollback_token;
       if (data && data.ok && (actionName === "keep_changes" || actionName === "rollback_last")) {
