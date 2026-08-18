@@ -651,6 +651,16 @@
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
     return fmt(v, i === 0 ? 0 : v >= 100 ? 0 : v >= 10 ? 1 : 2) + " " + u[i];
   }
+  // Decimal (SI) bytes for TRAFFIC contexts so cumulative totals are consistent
+  // with the decimal bps()/Mbps figures on the same page. bytes() stays binary
+  // for RAM/storage gauges.
+  function bytesNet(v) {
+    v = Number(v);
+    if (!isFinite(v) || v < 0) return tr("unavailable");
+    var u = ["B","KB","MB","GB","TB"], i = 0;
+    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+    return fmt(v, i === 0 ? 0 : v >= 100 ? 0 : v >= 10 ? 1 : 2) + " " + u[i];
+  }
   function bps(v) {
     var bits = Number(v) * 8;
     if (!isFinite(bits) || bits < 0) bits = 0;
@@ -2066,7 +2076,11 @@
   }
   function renderNetwork(data, rates) {
     var ar = state.lang === "ar";
-    var interfaces = data.interfaces || [];
+    var interfaces = (data.interfaces || []).slice().sort(function (a, b) {
+      // Array.prototype.sort is stable (ES2019): keeps the server's
+      // br-lan/eth0/wan/lanN order inside each group, connected rows first.
+      return (b.connected === true) - (a.connected === true);
+    });
     var labels = ar
       ? ["الواجهة","الحالة","السرعة","RX الآن","TX الآن","RX الإجمالي","TX الإجمالي","أخطاء / إسقاط منذ إعادة ضبط الواجهة"]
       : ["Interface","Status","Speed","RX now","TX now","RX total","TX total","Errors / Drops since interface reset"];
@@ -2076,7 +2090,7 @@
       interfaces.map(function (i) {
         var irx = num(i.rx_bps), itx = num(i.tx_bps);
         var faults = (i.rx_errors||0) + (i.tx_errors||0) + (i.rx_dropped||0) + (i.tx_dropped||0);
-        return '<tr><td class="latin traffic-iface">' + esc(i.name) + '</td><td><span class="chip ' + (i.connected ? "ok" : "bad") + '">' + (i.connected ? (ar ? "يعمل" : "up") : (ar ? "متوقف" : "down")) + '</span></td><td class="latin">' + (i.speed_mbps ? i.speed_mbps + " Mbps" : tr("unavailable")) + '</td><td class="latin">' + (finite(irx) ? bps(irx) : "—") + '</td><td class="latin">' + (finite(itx) ? bps(itx) : "—") + '</td><td class="latin">' + bytes(i.rx_bytes) + '</td><td class="latin">' + bytes(i.tx_bytes) + '</td><td class="latin ' + (faults ? "traffic-fault" : "traffic-clean") + '">' + (i.rx_errors||0) + "/" + (i.tx_errors||0) + " · " + (i.rx_dropped||0) + "/" + (i.tx_dropped||0) + '</td></tr>';
+        return '<tr><td class="latin traffic-iface">' + esc(i.name) + '</td><td><span class="chip ' + (i.connected ? "ok" : "bad") + '">' + (i.connected ? (ar ? "يعمل" : "up") : (ar ? "متوقف" : "down")) + '</span></td><td class="latin">' + (i.speed_mbps ? i.speed_mbps + " Mbps" : tr("unavailable")) + '</td><td class="latin">' + (finite(irx) ? bps(irx) : "—") + '</td><td class="latin">' + (finite(itx) ? bps(itx) : "—") + '</td><td class="latin">' + bytesNet(i.rx_bytes) + '</td><td class="latin">' + bytesNet(i.tx_bytes) + '</td><td class="latin ' + (faults ? "traffic-fault" : "traffic-clean") + '">' + (i.rx_errors||0) + "/" + (i.tx_errors||0) + " · " + (i.rx_dropped||0) + "/" + (i.tx_dropped||0) + '</td></tr>';
       }).join("") +
       '</tbody></table></div>';
     var latencyHistory = (state.histories.latency || []).filter(finite);

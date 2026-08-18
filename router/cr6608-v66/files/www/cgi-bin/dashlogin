@@ -65,6 +65,17 @@ RATE_DIR=/tmp/dashlogin-rate
 umask 077
 cr6608_prepare_root_dir "$RATE_DIR" 0700 ||
 	reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
+# Anti-exhaustion: an on-link host can cycle IPv6 addresses out of its /64 and
+# mint one rate bucket (counter + .lock) per source in tmpfs. Cap the directory
+# and evict the oldest buckets by mtime before creating a new one, so the RAM/
+# inode footprint is bounded regardless of source-address churn.
+rate_count="$(ls -1 "$RATE_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+case "$rate_count" in ''|*[!0-9]*) rate_count=0 ;; esac
+if [ "$rate_count" -ge 512 ] 2>/dev/null; then
+	ls -1t "$RATE_DIR" 2>/dev/null | tail -n +384 | while IFS= read -r victim; do
+		[ -n "$victim" ] && rm -f "$RATE_DIR/$victim" 2>/dev/null
+	done
+fi
 rate_id="$(printf '%s' "$client" | md5sum | cut -c1-32)"
 rate_file="$RATE_DIR/$rate_id"
 rate_lock="$rate_file.lock"
@@ -143,6 +154,9 @@ unset pass login_request login_reply
 rm -f "$rate_file" 2>/dev/null || reply "503 Service Unavailable" '{"ok":false,"message":"login limiter unavailable"}'
 flock -u 8 2>/dev/null || true
 exec 8>&-
+# The lock file was never cleaned up before, so it lingered in tmpfs forever
+# even for a one-time successful login. Remove it now that the fd is closed.
+rm -f "$rate_lock" 2>/dev/null || true
 
 cr6608_luci_session_lock || reply "503 Service Unavailable" '{"ok":false,"message":"session lock unavailable"}'
 existing_tok="$(cr6608_session_from_request)"
@@ -186,9 +200,15 @@ if ! cr6608_write_luci_map_unlocked "$tok" "$login_sid"; then
 fi
 PENDING_LUCI_SID=""
 unset login_sid
-for stale_file in $(find /tmp/dashsess -type f ! -name '.luci-session.lock' -mmin +720 -print 2>/dev/null); do
+# Reap by the SAME monotonic-uptime validity used to accept sessions, not by
+# wall-clock mtime: after the first NTP step the file mtimes look hours old and
+# an -mmin sweep would revoke still-valid peer sessions.
+for stale_file in /tmp/dashsess/*; do
+	[ -f "$stale_file" ] || continue
 	stale_sid="${stale_file##*/}"
-	cr6608_valid_hex32 "$stale_sid" && cr6608_revoke_session_unlocked "$stale_sid" >/dev/null 2>&1 || true
+	case "$stale_sid" in .luci-session.lock) continue ;; esac
+	cr6608_valid_hex32 "$stale_sid" || continue
+	cr6608_session_valid "$stale_sid" >/dev/null 2>&1 || cr6608_revoke_session_unlocked "$stale_sid" >/dev/null 2>&1 || true
 done
 secure_cookie=""
 [ "${HTTPS:-off}" = on ] && secure_cookie=" Secure;"

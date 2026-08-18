@@ -801,7 +801,13 @@ iface_json() {
     rx_rate="$(dashapi_counter_rate "$rx" "$old_rx" "$now_s" "$old_ts")"
     tx_rate="$(dashapi_counter_rate "$tx" "$old_tx" "$now_s" "$old_ts")"
   fi
-  printf '%s %s %s\n' "$rx" "$tx" "$now_s" > "$prev" 2>/dev/null
+  # Only advance the baseline when the sample window is strictly positive.
+  # Two full collections inside the same 1-second uptime tick give dt=0, which
+  # would publish 0 bps AND reset the baseline; skipping the rewrite lets the
+  # next run average over a valid longer window instead.
+  if [ ! -r "$prev" ] || [ "${old_ts:-0}" -lt "$now_s" ] 2>/dev/null; then
+    printf '%s %s %s\n' "$rx" "$tx" "$now_s" > "$prev" 2>/dev/null
+  fi
   oper="$(catv "/sys/class/net/$dev/operstate")"; [ -n "$oper" ] || oper="unknown"
   speed="$(catv "/sys/class/net/$dev/speed")"; [ "$speed" = "-1" ] && speed=0; [ -n "$speed" ] || speed=0
   carrier="$(catv "/sys/class/net/$dev/carrier")"; [ "$carrier" = "1" ] && connected=true || connected=false
@@ -850,7 +856,9 @@ if [ -r "$traffic_prev" ]; then
   rx_bps="$(dashapi_scoped_counter_rate "$traffic_rx" "$old_rx" "$traffic_now" "$old_ts" "$traffic_counter_signature" "$old_signature")"
   tx_bps="$(dashapi_scoped_counter_rate "$traffic_tx" "$old_tx" "$traffic_now" "$old_ts" "$traffic_counter_signature" "$old_signature")"
 fi
-printf '%s %s %s %s\n' "$traffic_rx" "$traffic_tx" "$traffic_now" "$traffic_counter_signature" > "$traffic_prev" 2>/dev/null
+if [ ! -r "$traffic_prev" ] || [ "${old_ts:-0}" -lt "$traffic_now" ] 2>/dev/null; then
+  printf '%s %s %s %s\n' "$traffic_rx" "$traffic_tx" "$traffic_now" "$traffic_counter_signature" > "$traffic_prev" 2>/dev/null
+fi
 
 client_ip() {
   m="$(printf '%s' "$1" | tr A-F a-f)"

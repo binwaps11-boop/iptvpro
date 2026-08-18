@@ -1,20 +1,37 @@
 #!/bin/sh
 
-# A generic image must never install a fleet-wide root credential. Keep a
-# valid nine-field root record and preserve every existing operator password
-# on a keep-settings sysupgrade. Historical shared credentials are rejected by
-# cr6608-retail-audit, but are not auto-locked here: that would lock an operator
-# out before the device has been uniquely provisioned.
+# This is a FLEET image: it ships a working root credential in /etc/shadow so a
+# freshly flashed unit opens with root/admin on every device. A keep-settings
+# sysupgrade, however, restores the retained /etc/shadow (base-files-essential
+# keeps it) OVER the shipped one — if that retained record is LOCKED or invalid
+# (the classic broken-v66 state), the device would boot with no usable password
+# and the dashboard/SSH/LuCI would be locked out again. So when the current root
+# record is locked/empty/invalid, restore the image's shipped credential from
+# /rom instead of leaving it locked. A real operator-set password (any $-hash)
+# is always preserved untouched.
 shadow_file="${CR6608_SHADOW_FILE:-/etc/shadow}"
+rom_shadow="${CR6608_ROM_SHADOW_FILE:-/rom/etc/shadow}"
 [ -f "$shadow_file" ] && [ ! -L "$shadow_file" ] || exit 1
 cur="$(awk -F: '/^root:/{print $2; exit}' "$shadow_file" 2>/dev/null)"
 next="$cur"
 
 case "$cur" in
-	""|"!"|"x"|"*"|"!*") next='!' ;;
+	""|"!"|"x"|"*"|"!*")
+		# Prefer the shipped fleet hash from the read-only /rom; fall back to a
+		# locked account only if /rom is somehow unavailable.
+		ship="$(awk -F: '/^root:/{print $2; exit}' "$rom_shadow" 2>/dev/null)"
+		case "$ship" in
+			\$*) next="$ship" ;;
+			*) next='!' ;;
+		esac
+		;;
 esac
-[ "$next" = "$cur" ] || logger -t cr6608 \
-	"kept the unprovisioned root account locked"
+if [ "$next" != "$cur" ]; then
+	case "$next" in
+		'!') logger -t cr6608 "root record was invalid and /rom credential unavailable; kept locked" ;;
+		*)   logger -t cr6608 "restored the shipped fleet root credential over a locked/invalid record" ;;
+	esac
+fi
 
 # Normalize password aging so a malformed record cannot expire the account.
 days="$(( $(date +%s 2>/dev/null) / 86400 ))"

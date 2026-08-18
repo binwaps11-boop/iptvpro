@@ -1,0 +1,101 @@
+#!/bin/sh
+
+# Fleet self-heal for keep-settings sysupgrades.
+#
+# A keep-settings sysupgrade restores the device's OWN retained /etc/config over
+# the freshly flashed image, so a unit upgraded from a broken v66 keeps its old
+# state: radios disabled, split/again-default SSIDs, no 802.11r, the FT-breaking
+# ft_psk_generate_local, dead mcast_rate, usteer off, HW offload off. On a clean
+# flash the shipped configs are already correct and this script is a harmless
+# re-assertion. It is gated on a version marker so it runs once per image, and it
+# never overwrites a genuinely operator-chosen SSID/key.
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+MARKER='smartap.migration.fleet_wireless_version'
+VERSION='1'
+[ "$(uci -q get "$MARKER" 2>/dev/null)" = "$VERSION" ] && exit 0
+
+changed_w=0
+set_w() { uci -q set "wireless.$1=$2" && changed_w=1; }
+del_w() { uci -q get "wireless.$1" >/dev/null 2>&1 && { uci -q delete "wireless.$1"; changed_w=1; }; }
+
+# 1) Both radios enabled (a disabled radio is never intended on an AP).
+for rd in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	[ "$(uci -q get "wireless.$rd.disabled")" = "1" ] && set_w "$rd.disabled" 0
+	# 2.4 GHz: OFDM basic rates + TXOP burst; harmless on 5 GHz too.
+	if [ "$(uci -q get "wireless.$rd.band")" = "2g" ]; then
+		[ "$(uci -q get "wireless.$rd.legacy_rates")" = "1" ] && set_w "$rd.legacy_rates" 0
+		[ -n "$(uci -q get "wireless.$rd.tx_burst")" ] || set_w "$rd.tx_burst" "2.0"
+	fi
+	# Pinned-random BSS colour: drop a hard-coded colour so OBSS-PD works fleet-wide.
+	[ "$(uci -q get "wireless.$rd.he_bss_color")" = "1" ] && del_w "$rd.he_bss_color"
+done
+
+# 2) Every AP interface on the LAN: heal the roaming/steering block.
+for if in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+	[ "$(uci -q get "wireless.$if.mode")" = "ap" ] || continue
+	case " $(uci -q get "wireless.$if.network") " in *" lan "*) ;; *) continue ;; esac
+
+	# Unify the SSID only when it is still an unconfigured default (never clobber
+	# an operator-chosen name).
+	ssid="$(uci -q get "wireless.$if.ssid")"
+	case "$ssid" in ''|'Smart ap 2.4G'|'Smart ap 5G'|'Smart ap 2.4'|'Smart ap 5') set_w "$if.ssid" 'Smart ap' ;; esac
+
+	# Ensure an encrypted default network is actually reachable after flash.
+	enc="$(uci -q get "wireless.$if.encryption")"
+	case "$enc" in
+		''|none|open) : ;;
+		*) [ -n "$(uci -q get "wireless.$if.key")" ] || set_w "$if.key" 'smartap2038' ;;
+	esac
+
+	# Roaming + steering + BSS-transition options (additive).
+	[ "$(uci -q get "wireless.$if.ieee80211r")" = "1" ] || set_w "$if.ieee80211r" 1
+	[ -n "$(uci -q get "wireless.$if.ft_over_ds")" ] || set_w "$if.ft_over_ds" 0
+	[ -n "$(uci -q get "wireless.$if.mobility_domain")" ] || set_w "$if.mobility_domain" 'b1a0'
+	[ "$(uci -q get "wireless.$if.ieee80211k")" = "1" ] || set_w "$if.ieee80211k" 1
+	[ "$(uci -q get "wireless.$if.ieee80211v")" = "1" ] || set_w "$if.ieee80211v" 1
+	[ "$(uci -q get "wireless.$if.bss_transition")" = "1" ] || set_w "$if.bss_transition" 1
+	[ "$(uci -q get "wireless.$if.mbo")" = "1" ] || set_w "$if.mbo" 1
+
+	# Remove the options that BREAK FT-SAE / are dead in AP mode.
+	del_w "$if.ft_psk_generate_local"
+	del_w "$if.mcast_rate"
+done
+
+[ "$changed_w" -eq 0 ] || uci -q commit wireless
+
+# 3) usteer: enabled with working steering intervals.
+changed_u=0
+[ -n "$(uci -q get usteer.main)" ] || { uci -q set usteer.main=usteer; changed_u=1; }
+[ "$(uci -q get usteer.main.enabled)" = "1" ] || { uci -q set usteer.main.enabled=1; changed_u=1; }
+[ -n "$(uci -q get usteer.main.network)" ] || { uci -q set usteer.main.network=lan; changed_u=1; }
+[ "$(uci -q get usteer.main.band_steering_interval)" -gt 0 ] 2>/dev/null || { uci -q set usteer.main.band_steering_interval=120000; changed_u=1; }
+[ "$(uci -q get usteer.main.link_measurement_interval)" -gt 0 ] 2>/dev/null || { uci -q set usteer.main.link_measurement_interval=30000; changed_u=1; }
+[ "$changed_u" -eq 0 ] || uci -q commit usteer
+
+# 4) Firewall hardware flow offload (MT7621 PPE).
+if [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" != "1" ]; then
+	uci -q set firewall.@defaults[0].flow_offloading_hw=1
+	uci -q set firewall.@defaults[0].flow_offloading=1
+	uci -q commit firewall
+fi
+
+# 5) packet_steering tuned for the 2-core mt7621.
+if [ "$(uci -q get network.@globals[0].packet_steering)" != "1" ]; then
+	uci -q set network.@globals[0].packet_steering=1
+	uci -q commit network
+fi
+
+# Mark done only after the wireless heal committed (the load-bearing part). If an
+# earlier commit failed, uci-defaults retries this idempotent migration next boot.
+uci -q get smartap.migration >/dev/null 2>&1 || uci -q set smartap.migration=migration
+uci -q set "$MARKER=$VERSION" || exit 1
+uci -q commit smartap || exit 1
+
+logger -t cr6608-migration "applied fleet wireless/roaming migration v${VERSION}"
+
+# Reload so the healed config takes effect without a manual reboot on upgrade.
+/sbin/wifi reload >/dev/null 2>&1 || true
+exit 0

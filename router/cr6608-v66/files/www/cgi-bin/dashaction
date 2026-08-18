@@ -160,6 +160,7 @@ toggle_radio() {
     return
   }
   uci commit wireless || {
+    uci -q revert wireless 2>/dev/null || true
     cp -f "$backup" /etc/config/wireless 2>/dev/null
     rm -f "$backup"
     json_msg false "تعذر تثبيت حالة $label."

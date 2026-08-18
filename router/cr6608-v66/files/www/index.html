@@ -1167,6 +1167,14 @@
       .traffic-table { border-radius:13px; }
       .traffic-table table { min-width:720px; font-size:11px; }
     }
+    @media(max-width:480px) {
+      /* Drop the cumulative RX/TX-total columns (6,7) on narrow phones — the
+         same totals are shown in the traffic cards — so name/status/speed/live
+         rates/errors fit without a long horizontal scroll. */
+      .traffic-table table { min-width:520px; }
+      .traffic-table th:nth-child(6), .traffic-table td:nth-child(6),
+      .traffic-table th:nth-child(7), .traffic-table td:nth-child(7) { display:none; }
+    }
     /* Mobile notifications get their own temporary viewport lane above the
        bottom navigation. They remain readable without covering cards or nav. */
     @media(max-width:820px) {

@@ -38,9 +38,9 @@
 +					CR6608_FIRMWARE_RATE_DELTA_2G ||
 +	    persisted[MT_EE_RATE_DELTA_5G] !=
 +					CR6608_FIRMWARE_RATE_DELTA_5G) {
-+		dev_err(dev->mt76.dev,
-+			"CR6608-RF firmware EEPROM shadow rejected: persisted identity or rate deltas do not match the audited CR6608 layout\n");
-+		return -EINVAL;
++		dev_info_once(dev->mt76.dev,
++			"CR6608-RF firmware EEPROM shadow skipped: persisted identity/rate deltas differ from the audited CR6608 layout; this unit keeps stock calibration and still has working Wi-Fi\n");
++		return 0;
 +	}
 +
 +	for (chain = 0; chain < CR6608_FIRMWARE_CHAINS; chain++) {

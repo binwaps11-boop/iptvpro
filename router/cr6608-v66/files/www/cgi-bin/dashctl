@@ -1842,8 +1842,10 @@ case "$action" in
   service_enable|service_disable|service_restart)
     confirm_required "Startup"
     svc="$(safe_word "$(param service_name)")"; [ -x "/etc/init.d/$svc" ] || { emit false "Startup" "Unknown service" "[]" "Service script not found." "[]" "[]"; exit 0; }
-    case "$action" in service_enable) /etc/init.d/"$svc" enable >/tmp/dashctl.action 2>&1; msg="enabled" ;; service_disable) /etc/init.d/"$svc" disable >/tmp/dashctl.action 2>&1; msg="disabled" ;; *) /etc/init.d/"$svc" restart >/tmp/dashctl.action 2>&1; msg="restarted" ;; esac
-    emit true "Startup" "Service $msg" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; exit 0 ;;
+    # Bounded so a wedged init script cannot hang the CGI while it holds the
+    # apply + cache-mutation locks; report the real result instead of always true.
+    case "$action" in service_enable) run_limit "${CR6608_SERVICE_TIMEOUT:-45}" /etc/init.d/"$svc" enable >/tmp/dashctl.action 2>&1; svc_rc=$?; msg="enabled" ;; service_disable) run_limit "${CR6608_SERVICE_TIMEOUT:-45}" /etc/init.d/"$svc" disable >/tmp/dashctl.action 2>&1; svc_rc=$?; msg="disabled" ;; *) run_limit "${CR6608_SERVICE_TIMEOUT:-45}" /etc/init.d/"$svc" restart >/tmp/dashctl.action 2>&1; svc_rc=$?; msg="restarted" ;; esac
+    if [ "${svc_rc:-1}" -eq 0 ]; then emit true "Startup" "Service $msg" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; else emit false "Startup" "Service action failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"; fi; exit 0 ;;
   save_interface)
     confirm_required "Interfaces"
     ifname="$(safe_word "$(param if_name)")"; proto="$(safe_word "$(param if_proto)")"; dev="$(safe_word "$(param if_device)")"
@@ -2397,7 +2399,8 @@ EOF
     if [ "$enabled" = "1" ]; then
       printf '%s %s * * * /sbin/reboot # CR6608 scheduled reboot\n' "$minute" "$hour" >> /tmp/smartap.cron
     fi
-    crontab /tmp/smartap.cron; rm -f /tmp/smartap.cron
+    crontab /tmp/smartap.cron || { rm -f /tmp/smartap.cron; emit false "Reboot schedule" "Crontab install failed" "[]" "Could not write the cron table; the previous schedule is unchanged." "[]" "[]"; exit 0; }
+    rm -f /tmp/smartap.cron
     action_reload "Reboot schedule" "Cron reload failed" /etc/init.d/cron reload || exit 0
     emit true "Reboot schedule" "Schedule saved" "[]" "Backup: $backup\nScheduled reboot enabled=$enabled at $hour:$minute." "[]" "[]"; exit 0 ;;
   set_led)
@@ -2466,8 +2469,8 @@ EOF
     load_identity_params
     identity_params_valid || { emit false "MikroTik Neighbors" "Invalid customer identity" "[]" "$identity_error" "[]" "[]"; exit 0; }
     action_backup customer-identity || exit 0
-    smartap_heal
-    store_identity_config
+    smartap_heal || { uci -q revert smartap 2>/dev/null || true; emit false "MikroTik Neighbors" "Save failed" "[]" "Could not prepare the identity config; nothing was changed." "[]" "[]"; exit 0; }
+    store_identity_config || { uci -q revert smartap 2>/dev/null || true; emit false "MikroTik Neighbors" "Save failed" "[]" "Could not stage the identity config; nothing was changed." "[]" "[]"; exit 0; }
     action_commit smartap "MikroTik Neighbors" || exit 0
     [ -x /usr/sbin/cr6608-neighbor-service ] && /usr/sbin/cr6608-neighbor-service --once >/dev/null 2>&1 || true
     neighbor_state="$(sed -n 's/^state=//p' /tmp/cr6608-neighbor.status 2>/dev/null | head -n1)"
@@ -3028,7 +3031,13 @@ EOF
     action_backup loopguard || exit 0
     [ -n "$BRIDGE_CFG" ] || { emit false "Loop Guard" "Bridge not found" "[]" "br-lan could not be identified." "[]" "[]"; exit 0; }
     uci set "$BRIDGE_CFG.stp=1"
+    # cr6608-security-apply recomputes bridge STP from smartap.security.loop_guard
+    # on every 'apply'/reload and would flip STP back off if this stays 0. Keep
+    # the authoritative flag in sync so the committed STP=1 sticks.
+    uci -q get smartap.security >/dev/null 2>&1 || uci set smartap.security=smartap
+    uci set smartap.security.loop_guard=1
     action_arm_rollback "Loop Guard" || exit 0
+    action_commit smartap "Loop Guard" || exit 0
     action_commit network "Loop Guard" || exit 0
     action_reload "Loop Guard" "Network reload failed" /etc/init.d/network reload || exit 0
     emit true "Loop Guard" "STP enabled" "[]" "Backup: $backup\nBridge STP is enabled on br-lan. TX Power untouched." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
@@ -3126,6 +3135,11 @@ EOF
     # In AP mode an isolated routed subnet has no default route; silently
     # creating one produced the old "connected, no Internet" failure.
     enabled="$(safe_num "$(param guest_enabled)")"; gssid="$(param guest_ssid | cut -c1-32)"; gpass="$(param guest_pass | cut -c1-64)"; gsecurity="$(safe_word "$(param guest_security)")"; guest_ipv6=0
+    # The guest BSS is forced onto radio0, but a retained config may have it on
+    # radio1. Reload just radio0 normally, but widen to all radios when the
+    # previous placement differs so no stale guest BSS is left live.
+    prev_guest_radio="$(uci -q get wireless.smartap_guest.device 2>/dev/null)"
+    case "$prev_guest_radio" in ''|radio0) guest_reload_scope="radio0" ;; *) guest_reload_scope="all" ;; esac
     case "$enabled" in 0|1) : ;; *) emit false "Guest Wi-Fi" "Invalid state" "[]" "Guest enabled must be 0 or 1. Nothing was changed." "[]" "[]"; exit 0 ;; esac
     if [ "$enabled" = "1" ]; then
       [ "$(uci -q get network.wan.proto 2>/dev/null)" = "pppoe" ] && [ "$(uci -q get network.wan.disabled 2>/dev/null)" != "1" ] || {
@@ -3191,7 +3205,7 @@ EOF
     action_commit wireless "Guest Wi-Fi" || exit 0
     action_commit firewall "Guest Wi-Fi" || exit 0
     action_reload "Guest Wi-Fi" "Network reload failed or timed out" /etc/init.d/network reload || exit 0
-    action_wifi_reload "Guest Wi-Fi" "Wi-Fi runtime verification failed" radio0 || exit 0
+    action_wifi_reload "Guest Wi-Fi" "Wi-Fi runtime verification failed" "$guest_reload_scope" || exit 0
     action_reload "Guest Wi-Fi" "dnsmasq restart failed" /etc/init.d/dnsmasq restart || exit 0
     if [ -x /etc/init.d/odhcpd ]; then
       action_reload "Guest Wi-Fi" "odhcpd restart failed" /etc/init.d/odhcpd restart || exit 0
