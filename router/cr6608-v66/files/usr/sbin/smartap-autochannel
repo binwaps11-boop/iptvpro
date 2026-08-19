@@ -121,6 +121,27 @@ if [ -e /etc/smartap-pending-rollback ] || [ -L /etc/smartap-pending-rollback ] 
   exit 5
 fi
 
+# Respect the nightly Wi-Fi off-window: the 03:30 cron firing would otherwise
+# scan with the radios down (empty result) and, worse, the reload at the end
+# would turn Wi-Fi back on in the middle of the scheduled off period.
+wifi_schedule_off_now() {
+  [ -r /etc/crontabs/root ] || return 1
+  off_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="down" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+  on_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="up" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+  now_min="$(date '+%H %M' 2>/dev/null | awk '{ print ($1 * 60) + $2 }')"
+  case "$off_min:$on_min:$now_min" in *[!0-9:]* | :* | *::* | *:) return 1 ;; esac
+  [ "$off_min" -ne "$on_min" ] || return 1
+  if [ "$off_min" -lt "$on_min" ]; then
+    [ "$now_min" -ge "$off_min" ] && [ "$now_min" -lt "$on_min" ]
+  else
+    [ "$now_min" -ge "$off_min" ] || [ "$now_min" -lt "$on_min" ]
+  fi
+}
+if wifi_schedule_off_now; then
+  log "inside the scheduled Wi-Fi off window; automatic channel selection skipped"
+  exit 0
+fi
+
 enabled_channels() {
   iw phy "$1" channels 2>/dev/null |
     awk '
@@ -147,6 +168,10 @@ parsed="$(printf '%s\n' "$scan" | awk '
   /^BSS /{ if(fr)print ch(fr); fr=0 }
   /^[ \t]*freq:/{ fr=$2 }
   END{ if(fr)print ch(fr) }')"
+# A zero-information scan (radios down, driver busy, no neighbors visible)
+# must not "choose" a channel — the weighting would just pick the first
+# allowed one. Keep the current channels and try again on the next firing.
+[ -n "$parsed" ] || { log "scan returned no networks; keeping current channels"; exit 0; }
 best24="$(printf '%s\n' "$parsed" | awk -v allowed="$allowed24" '
   $1>0&&$1<=14{c[$1]++}
   END{
@@ -204,7 +229,7 @@ restore_channels() {
     uci -q delete cr6608quick.default.channel5 || true
   fi
   uci -q get smartap.quick >/dev/null 2>&1 ||
-    uci set smartap.quick=quicksettings || restore_failed=1
+    uci set smartap.quick=smartap || restore_failed=1
   if [ "$cur24_present" = 1 ]; then
     uci set smartap.quick.ch24="$cur24" || restore_failed=1
   else
@@ -262,7 +287,7 @@ if [ "$quick_changed" = 1 ]; then
 fi
 if [ "$smart_changed" = 1 ]; then
   uci -q get smartap.quick >/dev/null 2>&1 ||
-    uci set smartap.quick=quicksettings ||
+    uci set smartap.quick=smartap ||
     { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not create smartap quick metadata"; exit 1; }
   uci set smartap.quick.ch24="$best24" ||
     { uci -q revert wireless; uci -q revert cr6608quick; uci -q revert smartap; log "could not stage smartap 2.4 GHz metadata"; exit 1; }

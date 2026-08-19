@@ -1,6 +1,11 @@
 #!/bin/sh
-# enable the Smart AP security applier so saved policy is reapplied on every boot
+# Enable the Smart AP security applier so saved policy is reapplied on every
+# boot. The immediate start is best-effort only: uci-defaults run at S10,
+# before netifd has enslaved the LAN ports, so port-level operations (bridge
+# isolation) legitimately fail here and are replayed by the S98 rc.d pass and
+# the interface hotplug. Exiting non-zero for that would violate the
+# uci-defaults contract (the script would re-run — and re-fail — forever).
 [ -x /etc/init.d/cr6608-security ] || exit 1
 /etc/init.d/cr6608-security enable || exit 1
-/etc/init.d/cr6608-security start || exit 1
+/etc/init.d/cr6608-security start >/dev/null 2>&1 || true
 exit 0

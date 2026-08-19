@@ -1,8 +1,11 @@
 #!/bin/sh
 
 # Run on both a clean install and a sysupgrade that preserved /etc/config.
-# Every Dropbear instance is pinned to the single management port requested
-# for this device, so a saved port 22 cannot silently survive an upgrade.
+# Heal only the DEFAULT state: a saved port 22 (or a missing port) is moved to
+# the device's management port 2003. An operator-chosen custom port and the
+# operator's enable/disable choice (both settable from the dashboard's admin
+# access page) are preserved — pinning unconditionally would clobber them on
+# every upgrade and lock the admin out of their own configuration.
 rollback_and_fail() {
 	uci -q revert dropbear >/dev/null 2>&1 || true
 	exit 1
@@ -14,16 +17,21 @@ sections="$(
 )"
 
 if [ -z "$sections" ]; then
+	# Freshly created section: no operator choice exists to preserve.
 	section="$(uci -q add dropbear dropbear 2>/dev/null)" || rollback_and_fail
 	[ -n "$section" ] || rollback_and_fail
+	uci -q set "dropbear.${section}.enable=1" || rollback_and_fail
 	sections="$section"
 fi
 
 for section in $sections; do
-	uci -q set "dropbear.${section}.enable=1" || rollback_and_fail
-	uci -q set "dropbear.${section}.Port=2003" || rollback_and_fail
-	[ "$(uci -q get "dropbear.${section}.Port" 2>/dev/null)" = 2003 ] ||
-		rollback_and_fail
+	case "$(uci -q get "dropbear.${section}.Port" 2>/dev/null)" in
+	'' | 22)
+		uci -q set "dropbear.${section}.Port=2003" || rollback_and_fail
+		[ "$(uci -q get "dropbear.${section}.Port" 2>/dev/null)" = 2003 ] ||
+			rollback_and_fail
+		;;
+	esac
 done
 
 uci -q commit dropbear || rollback_and_fail

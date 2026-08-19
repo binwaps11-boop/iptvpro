@@ -1,8 +1,9 @@
 #!/bin/sh
-# CR6608: guarantee the Wi-Fi rescue IP 221.221.221.221 exists as a network interface.
-# The merged image ships no static /etc/config/network and no smartap-bootstrap, and
-# 99-cr6608-stable only provisions network.lan — so without this the owner's recovery
-# escape hatch (open http://221.221.221.221/ over any Wi-Fi network) would be missing.
+# CR6608: guarantee the Wi-Fi rescue IP 221.221.221.221 exists as a network
+# interface. The overlay ships it in /etc/config/network, but a keep-settings
+# upgrade restores the unit's OLD network config — which may predate the
+# rescue interface or have had it deleted — so re-assert it here to keep the
+# owner's recovery escape hatch (http://221.221.221.221/ over any Wi-Fi).
 # Idempotent: only creates/repairs the interface, never overwrites a user-moved device.
 [ -n "$(uci -q get network.wlanrescue)" ] || uci set network.wlanrescue='interface'
 uci set network.wlanrescue.proto='static'

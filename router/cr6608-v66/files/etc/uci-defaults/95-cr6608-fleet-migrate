@@ -38,51 +38,54 @@ for rd in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=w
 done
 
 # 2) Every AP interface on the LAN: heal the roaming/steering block.
-for if in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
-	[ "$(uci -q get "wireless.$if.mode")" = "ap" ] || continue
-	case " $(uci -q get "wireless.$if.network") " in *" lan "*) ;; *) continue ;; esac
+for sec in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+	[ "$(uci -q get "wireless.$sec.mode")" = "ap" ] || continue
+	case " $(uci -q get "wireless.$sec.network") " in *" lan "*) ;; *) continue ;; esac
 
 	# Unify the SSID only when it is still an unconfigured default (never clobber
 	# an operator-chosen name).
-	ssid="$(uci -q get "wireless.$if.ssid")"
+	ssid="$(uci -q get "wireless.$sec.ssid")"
 	default_named=0
 	case "$ssid" in ''|'Smart ap'|'Smart ap 2.4G'|'Smart ap 5G'|'Smart ap 2.4'|'Smart ap 5')
 		default_named=1
-		[ "$ssid" = 'Smart ap' ] || set_w "$if.ssid" 'Smart ap' ;;
+		[ "$ssid" = 'Smart ap' ] || set_w "$sec.ssid" 'Smart ap' ;;
 	esac
 
 	# Owner policy: the fleet Wi-Fi is OPEN (no passphrase). Apply it to
 	# default-named networks only; an operator-customized SSID keeps whatever
-	# security the operator chose.
-	if [ "$default_named" = "1" ]; then
-		[ "$(uci -q get "wireless.$if.encryption")" = "none" ] || set_w "$if.encryption" 'none'
-		del_w "$if.key"
-		del_w "$if.ieee80211w"
-		del_w "$if.ieee80211r"
-		del_w "$if.ft_over_ds"
-		del_w "$if.mobility_domain"
+	# security the operator chose. A RETAIL-provisioned unit (marker file
+	# survives sysupgrade via keep.d) is also exempt: retail may set WPA3
+	# while leaving the default SSID, and this heal must never silently
+	# strip that encryption.
+	if [ "$default_named" = "1" ] && [ ! -e /etc/cr6608-retail-provisioned ]; then
+		[ "$(uci -q get "wireless.$sec.encryption")" = "none" ] || set_w "$sec.encryption" 'none'
+		del_w "$sec.key"
+		del_w "$sec.ieee80211w"
+		del_w "$sec.ieee80211r"
+		del_w "$sec.ft_over_ds"
+		del_w "$sec.mobility_domain"
 	fi
 
 	# Roaming FT options only make sense on ENCRYPTED networks; 11k/v below
 	# works everywhere including open BSSes.
-	enc="$(uci -q get "wireless.$if.encryption")"
+	enc="$(uci -q get "wireless.$sec.encryption")"
 	case "$enc" in
 		''|none|open) : ;;
 		*)
-			[ -n "$(uci -q get "wireless.$if.key")" ] || set_w "$if.key" 'smartap2038'
-			[ "$(uci -q get "wireless.$if.ieee80211r")" = "1" ] || set_w "$if.ieee80211r" 1
-			[ -n "$(uci -q get "wireless.$if.ft_over_ds")" ] || set_w "$if.ft_over_ds" 0
-			[ -n "$(uci -q get "wireless.$if.mobility_domain")" ] || set_w "$if.mobility_domain" 'b1a0'
+			[ -n "$(uci -q get "wireless.$sec.key")" ] || set_w "$sec.key" 'smartap2038'
+			[ "$(uci -q get "wireless.$sec.ieee80211r")" = "1" ] || set_w "$sec.ieee80211r" 1
+			[ -n "$(uci -q get "wireless.$sec.ft_over_ds")" ] || set_w "$sec.ft_over_ds" 0
+			[ -n "$(uci -q get "wireless.$sec.mobility_domain")" ] || set_w "$sec.mobility_domain" 'b1a0'
 			;;
 	esac
-	[ "$(uci -q get "wireless.$if.ieee80211k")" = "1" ] || set_w "$if.ieee80211k" 1
-	[ "$(uci -q get "wireless.$if.ieee80211v")" = "1" ] || set_w "$if.ieee80211v" 1
-	[ "$(uci -q get "wireless.$if.bss_transition")" = "1" ] || set_w "$if.bss_transition" 1
-	[ "$(uci -q get "wireless.$if.mbo")" = "1" ] || set_w "$if.mbo" 1
+	[ "$(uci -q get "wireless.$sec.ieee80211k")" = "1" ] || set_w "$sec.ieee80211k" 1
+	[ "$(uci -q get "wireless.$sec.ieee80211v")" = "1" ] || set_w "$sec.ieee80211v" 1
+	[ "$(uci -q get "wireless.$sec.bss_transition")" = "1" ] || set_w "$sec.bss_transition" 1
+	[ "$(uci -q get "wireless.$sec.mbo")" = "1" ] || set_w "$sec.mbo" 1
 
 	# Remove the options that BREAK FT-SAE / are dead in AP mode.
-	del_w "$if.ft_psk_generate_local"
-	del_w "$if.mcast_rate"
+	del_w "$sec.ft_psk_generate_local"
+	del_w "$sec.mcast_rate"
 done
 
 [ "$changed_w" -eq 0 ] || uci -q commit wireless

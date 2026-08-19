@@ -10,7 +10,9 @@ done
 
 # The package-owned usteer start action deliberately returns non-zero when its
 # config is disabled. Install the rc.d link unconditionally, but only start the
-# daemon after the owner has explicitly enabled Smart Connect.
+# daemon while usteer.main.enabled=1 (the shipped default ENABLES Smart
+# Connect; the owner can turn it off from the dashboard, and then this start
+# is skipped).
 [ -x /etc/init.d/usteer ] || exit 1
 /etc/init.d/usteer enable || exit 1
 if [ "$(uci -q get usteer.main.enabled 2>/dev/null)" = "1" ]; then

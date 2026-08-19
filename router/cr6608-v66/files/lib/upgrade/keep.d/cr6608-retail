@@ -1,2 +1,4 @@
 /etc/cr6608-retail-provisioned
 /etc/smartap-time-anchor
+/root/factory.orig
+/root/factory.orig.sha256

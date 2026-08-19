@@ -1,21 +1,27 @@
 #!/bin/sh
 
-# Keep boot/failsafe/upgrade LEDs under the DTS diagnostic state machine. Older
-# images reused them for ethernet links, which made boot state ambiguous.
-for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
-	case "$(uci -q get "system.$s.sysfs")" in
-		blue:sys|yellow:sys) uci -q delete "system.$s" ;;
-	esac
-done
-
-# blue:net is owned by the cr6608-lanled daemon (on only while a wired LAN
-# port has real link; the old br-lan netdev binding kept it lit from Wi-Fi
-# alone, and lan1-only hid lan2/lan3). Remove any static UCI binding that
-# would fight the daemon on keep-settings upgrades.
-for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
-	case "$(uci -q get "system.$s.sysfs")" in
-		blue:net) uci -q delete "system.$s" ;;
-	esac
+# Keep boot/failsafe/upgrade LEDs under the DTS diagnostic state machine
+# (older images reused them for ethernet links, making boot state ambiguous),
+# and remove any static blue:net binding: that LED is owned by the
+# cr6608-lanled daemon (on only while a wired LAN port has real link; the old
+# br-lan netdev binding kept it lit from Wi-Fi alone, and lan1-only hid
+# lan2/lan3).
+#
+# Delete ONE victim per pass and re-resolve: anonymous sections are addressed
+# as @led[N], and deleting one shifts every later index — a pre-collected
+# list would delete the wrong sections on units with LuCI-created LED entries.
+while :; do
+	victim=""
+	for s in $(uci -q show system | sed -n "s/^system\.\([^.=]*\)=led$/\1/p"); do
+		case "$(uci -q get "system.$s.sysfs")" in
+			blue:sys | yellow:sys | blue:net)
+				victim="$s"
+				break
+				;;
+		esac
+	done
+	[ -n "$victim" ] || break
+	uci -q delete "system.$victim" || break
 done
 
 uci -q set system.led_lan2='led'

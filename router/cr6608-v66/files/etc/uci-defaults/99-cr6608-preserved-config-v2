@@ -24,7 +24,11 @@ find_section_by_option() {
 
 	while [ "$index" -lt 64 ]; do
 		section="@${type}[${index}]"
-		value="$("$UCI_BIN" -q get "${package}.${section}.${option}" 2>/dev/null)" || break
+		# Stop only when the SECTION no longer exists; a section that merely
+		# lacks the option must not end the scan (a root login behind it
+		# would be missed and the migration would fail forever).
+		"$UCI_BIN" -q get "${package}.${section}" >/dev/null 2>&1 || break
+		value="$("$UCI_BIN" -q get "${package}.${section}.${option}" 2>/dev/null)"
 		if [ "$value" = "$expected" ]; then
 			printf '%s\n' "$section"
 			return 0

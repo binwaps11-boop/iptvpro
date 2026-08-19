@@ -1,9 +1,10 @@
 
 config system
 	option hostname 'CR6608'
-	# A clean image has a locked root account, so the serial console is the only
-	# provisioning path. Retail provisioning flips this to 1 after installing a
-	# unique root credential, restoring password-gated console login.
+	# The image ships a working root credential, so ttylogin 0 means the serial
+	# console (physical access only) gives a shell without asking for it.
+	# Retail provisioning flips this to 1, restoring password-gated console
+	# login for units deployed outside the owner's control.
 	option ttylogin '0'
 	option log_size '128'
 	option urandom_seed '0'

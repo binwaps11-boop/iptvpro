@@ -118,6 +118,11 @@ valid_backup() {
 		return 1
 	fi
 	while IFS= read -r member; do
+		# Reject traversal names outright: "etc/config/../x" matches the
+		# whitelist glob below but escapes the intended tree on extraction.
+		case "$member" in
+			*..*) rm -f "$members"; return 1 ;;
+		esac
 		case "$member" in
 			etc|etc/|etc/config|etc/config/|etc/config/*|etc/crontabs|etc/crontabs/|etc/crontabs/root|etc/passwd|etc/shadow|etc/rc.button|etc/rc.button/|etc/rc.button/reset|etc/rc.button/reset.smartap-orig) ;;
 			*) rm -f "$members"; return 1 ;;

@@ -125,9 +125,10 @@ case "$user" in
 	*) login_failed ;;
 esac
 
-# Authenticate through rpcd's root login. The $p$root indirection validates
-# the live /etc/shadow credential, keeping Smart AP, LuCI, SSH and console
-# authentication synchronized without copying a password hash into UCI.
+# Authenticate through rpcd's root login. By owner decision the dashboard
+# credential is a FIXED literal hash in /etc/config/rpcd (root/admin),
+# deliberately decoupled from the SSH/console root password in /etc/shadow —
+# changing one never changes the other.
 [ -r /usr/share/libubox/jshn.sh ] || reply "503 Service Unavailable" '{"ok":false,"message":"authentication service unavailable"}'
 . /usr/share/libubox/jshn.sh || reply "503 Service Unavailable" '{"ok":false,"message":"authentication service unavailable"}'
 json_init

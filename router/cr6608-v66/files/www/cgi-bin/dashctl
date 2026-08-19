@@ -2060,7 +2060,7 @@ case "$action" in
       emit false "Administration" "Password update failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
       exit 0
     }
-    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nThe synchronized root password for Smart AP, LuCI, SSH, and the console was updated. Confirm the matching Safe Apply transaction after verifying access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    emit true "Administration" "Password updated with rollback" "[]" "Backup: $backup\nThe SSH/console root password was updated. The web dashboard/LuCI login is a SEPARATE fixed credential (root/admin) and is not affected by this change. Confirm the matching Safe Apply transaction after verifying SSH access. Password is not printed." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   save_admin_access)
     confirm_required "Administration"
     ssh_port="$(safe_port "$(param ssh_port)")"; ssh_enabled="$(safe_num "$(param ssh_enabled)")"; http_port="$(safe_port "$(param http_port)")"
