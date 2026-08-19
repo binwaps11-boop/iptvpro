@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       openwrt_ref:
-        description: 'OpenWrt git ref/commit to build (v66 was authored against v25.12.5 = f0a60eee)'
-        required: true
-        default: 'f0a60eee2fe051741c643ea6118718aae1ef17fb'
+        description: 'OpenWrt git ref/commit to build. Leave EMPTY for the pinned v25.12.5 ref (env.OPENWRT_PIN below) that v66 was authored against.'
+        required: false
+        default: ''
       publish:
         description: 'Publish the built .bin to the cr6608-v66-delivery branch'
         required: false
@@ -55,6 +55,8 @@ env:
   SRC: router/cr6608-v66
   MARKER: CR6608-RF-38DBM
   DEVICE: xiaomi_mi-router-cr6608
+  # Single source of truth for the pinned OpenWrt ref (v25.12.5, r33051).
+  OPENWRT_PIN: f0a60eee2fe051741c643ea6118718aae1ef17fb
   SHADOW_PROOF: 'root:$6$CR6608sshOwn$'
   RPCD_DASH_PROOF: '$6$CR6608dashAdm$'
 
@@ -85,10 +87,12 @@ jobs:
 
       - name: Clone OpenWrt at the pinned ref
         env:
-          OPENWRT_REF: ${{ github.event.inputs.openwrt_ref || 'f0a60eee2fe051741c643ea6118718aae1ef17fb' }}
+          OPENWRT_REF: ${{ github.event.inputs.openwrt_ref || env.OPENWRT_PIN }}
         run: |
           retry(){ n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; echo "retry $n/5: $*"; sleep $((n*10)); done; }
-          retry git clone https://git.openwrt.org/openwrt/openwrt.git ow
+          # rm -rf inside the retry: a killed clone leaves a partial ow/ that
+          # would make every later attempt fail with "already exists".
+          retry sh -c 'rm -rf ow && git clone https://git.openwrt.org/openwrt/openwrt.git ow'
           cd ow
           git checkout --detach --force "$OPENWRT_REF"
           git log -1 --oneline
@@ -120,16 +124,19 @@ jobs:
           cd ow
           P="$GITHUB_WORKSPACE/$SRC/patches"
 
+          # -F0 on the patch(1) fallback: default fuzz could land a hunk on the
+          # wrong of several identical-looking regions (the DTS has three
+          # partitions with the same label:/reg:/read-only shape).
           apply_git() { # <patchfile> — apply at the OpenWrt worktree root
             echo "== git apply $(basename "$1") =="
             if git apply --check "$1" 2>/dev/null; then git apply -v "$1";
-            elif patch -p1 --dry-run < "$1" >/dev/null 2>&1; then patch -p1 < "$1";
+            elif patch -p1 -F0 --dry-run < "$1" >/dev/null 2>&1; then patch -p1 -F0 < "$1";
             else echo "::error::failed to apply $(basename "$1")"; exit 1; fi
           }
           apply_feed() { # <patchfile> <feeddir> — apply inside a feed
             echo "== feed apply $(basename "$1") into $2 =="
             if git -C "$2" apply --check "$1" 2>/dev/null; then git -C "$2" apply -v "$1";
-            elif patch -p1 -d "$2" --dry-run < "$1" >/dev/null 2>&1; then patch -p1 -d "$2" < "$1";
+            elif patch -p1 -F0 -d "$2" --dry-run < "$1" >/dev/null 2>&1; then patch -p1 -F0 -d "$2" < "$1";
             else echo "::error::failed to apply $(basename "$1") into $2"; exit 1; fi
           }
 
@@ -199,6 +206,10 @@ jobs:
           grep -qF -- "${RPCD_DASH_PROOF}" files/etc/config/rpcd && echo "rpcd dashboard-hash present" \
             || { echo "::error::overlay rpcd missing the dashboard admin hash"; exit 1; }
           echo "== wireless enabled (no disabled '1') =="
+          # Assert the file exists first: `! grep` on a MISSING file also exits 0,
+          # which would let this gate pass without inspecting anything.
+          [ -f files/etc/config/wireless ] \
+            || { echo "::error::overlay wireless config missing"; exit 1; }
           ! grep -q "option disabled '1'" files/etc/config/wireless && echo "radios+ssids enabled" \
             || { echo "::error::wireless still ships disabled"; exit 1; }
 
@@ -217,12 +228,27 @@ jobs:
             grep -qxF "$sym" .config || missing="$missing ${sym%=y}"
           done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9._-]+=y' "$GITHUB_WORKSPACE/$SRC/cr6608.seed.config")
           [ -n "$missing" ] && echo "::warning::packages not literal =y after defconfig (may be virtual/dependency-provided):$missing" || echo "all curated packages survived defconfig"
+          # HARD-fail on the packages the image is useless without: if defconfig
+          # resolves one of these away (dependency conflict), nothing later in
+          # the pipeline would notice — the gates grep configs, not binaries.
+          for sym in CONFIG_PACKAGE_wpad-openssl=y \
+                     CONFIG_PACKAGE_kmod-mt7915e=y \
+                     CONFIG_PACKAGE_uboot-envtools=y \
+                     CONFIG_PACKAGE_prplmesh=y \
+                     CONFIG_PACKAGE_luci=y; do
+            grep -qxF "$sym" .config \
+              || { echo "::error::critical package dropped by defconfig: $sym"; exit 1; }
+          done
+          echo "critical package set intact after defconfig"
 
       - name: Download sources
         run: cd ow && make download -j8 V=s
 
       - name: Prepare kernel, mt76 and mac80211 (applies the driver patches)
         run: |
+          # Without pipefail, a failed `make ... | tail` would exit 0 and this
+          # step's in-step gates would run against a half-patched tree.
+          set -o pipefail
           cd ow
           make package/kernel/mt76/clean V=s || true
           make package/kernel/mac80211/clean V=s || true
@@ -263,6 +289,8 @@ jobs:
         run: |
           cd ow
           sudo apt-get install -y squashfs-tools >/dev/null 2>&1 || true
+          command -v unsquashfs >/dev/null \
+            || { echo "::error::unsquashfs unavailable — cannot verify the image"; exit 1; }
           BIN="$(ls bin/targets/ramips/mt7621/*${DEVICE}*squashfs-sysupgrade.bin 2>/dev/null | head -1)"
           echo "sysupgrade image: ${BIN:-NONE}"
           [ -n "$BIN" ] || { echo "::error::no CR6608 sysupgrade .bin produced"; exit 1; }
@@ -289,10 +317,18 @@ jobs:
           else
             echo "::error::dashboard admin hash NOT in final image rpcd"; exit 1
           fi
-          # (d) wireless enabled inside the final image
+          # (d) wireless enabled inside the final image. The file must EXIST
+          #     first: `! grep` on a missing file also exits 0 (vacuous pass).
+          [ -f /tmp/chk/sq/etc/config/wireless ] \
+            || { echo "::error::wireless config missing from image"; exit 1; }
           ! grep -q "option disabled '1'" /tmp/chk/sq/etc/config/wireless \
             && echo "::notice::radios+ssids enabled in final image" \
             || { echo "::error::wireless ships disabled in final image"; exit 1; }
+          # (d2) the AP userspace itself must be in the image — a dropped wpad
+          #      would beacon nothing while every config grep still passes.
+          [ -e /tmp/chk/sq/usr/sbin/wpad ] || [ -e /tmp/chk/sq/usr/sbin/hostapd ] \
+            && echo "::notice::wpad/hostapd present in final image" \
+            || { echo "::error::wpad/hostapd missing from final image"; exit 1; }
           # (e) dual-boot failover fix inside the final image: fw_setenv from
           #     uboot-envtools + the bootflags service that resets the flags
           [ -e /tmp/chk/sq/usr/sbin/fw_setenv ] \
@@ -308,6 +344,8 @@ jobs:
           [ -e /tmp/chk/sq/etc/init.d/cr6608-lanled ] && [ -e /tmp/chk/sq/usr/sbin/cr6608-lanled ] \
             && echo "::notice::cr6608-lanled daemon present" \
             || { echo "::error::cr6608-lanled daemon missing"; exit 1; }
+          [ -f /tmp/chk/sq/etc/config/system ] \
+            || { echo "::error::system config missing from image"; exit 1; }
           ! grep -q "option sysfs 'blue:net'" /tmp/chk/sq/etc/config/system \
             && echo "::notice::no static blue:net binding (daemon owns the LAN LED)" \
             || { echo "::error::static blue:net binding still in /etc/config/system"; exit 1; }
@@ -344,14 +382,19 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Publish onto an orphan-style delivery branch that carries only dist/.
-          git fetch origin cr6608-v66-delivery || true
-          git checkout -B cr6608-v66-delivery
+          # A TRUE orphan commit that carries ONLY dist/: `checkout -B` from the
+          # feature branch would republish the entire repository history behind
+          # the delivery link.
+          git checkout --orphan cr6608-v66-delivery
+          git rm -rf --cached -q . || true
           mkdir -p dist
           cp out/*.bin out/*.sha256 out/*.tar.gz dist/
           ( cd dist && sha256sum *.bin *.tar.gz > SHA256SUMS )
           git add -f dist/*
           git commit -m "Deliver corrected v66 CR6608 image (login-fixed, flash-and-go, 38 dBm) [run ${GITHUB_RUN_ID}]"
+          # Prove the orphan commit really carries only dist/ before pushing.
+          extra="$(git ls-tree -r --name-only HEAD | grep -v '^dist/' || true)"
+          [ -z "$extra" ] || { echo "::error::delivery commit carries non-dist files:"; echo "$extra"; exit 1; }
           n=0
           until git push -f -u origin cr6608-v66-delivery; do
             n=$((n+1)); [ $n -ge 4 ] && { echo "push failed"; exit 1; }

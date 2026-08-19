@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# One-shot backup of the CR6608's critical vendor partitions (Bootloader,
+# Nvram, Bdata, Factory — the parts that can NEVER be rebuilt if lost).
+# Produces /tmp/cr6608-backup.tar.gz; copy it OFF the device, e.g.:
+#   scp root@192.168.31.1:/tmp/cr6608-backup.tar.gz .
+# With these dumps, even the worst imaginable flash accident is recoverable
+# via vendor tools or a programmer; without them, Factory (RF calibration
+# + MACs) is gone for good. Read-only: this tool never writes to flash.
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+[ "$board" = "xiaomi,mi-router-cr6608" ] || {
+	echo "cr6608-bootbackup: not a CR6608 (board: ${board:-unknown}), refusing" >&2
+	exit 1
+}
+
+OUT="${CR6608_BACKUP_DIR:-/tmp/cr6608-backup}"
+TARBALL="${CR6608_BACKUP_TARBALL:-/tmp/cr6608-backup.tar.gz}"
+rm -rf "$OUT" && mkdir -p "$OUT" || exit 1
+
+saved=0
+for name in Bootloader Nvram Bdata Factory; do
+	idx="$(sed -n "s/^mtd\([0-9]*\):.*\"$name\"\$/\1/p" /proc/mtd | head -1)"
+	if [ -z "$idx" ]; then
+		echo "cr6608-bootbackup: partition $name not found, skipping" >&2
+		continue
+	fi
+	if dd if="/dev/mtdblock$idx" of="$OUT/$name.bin" bs=64k 2>/dev/null; then
+		echo "saved $name (mtd$idx, $(wc -c <"$OUT/$name.bin") bytes)"
+		saved=$((saved + 1))
+	else
+		echo "cr6608-bootbackup: FAILED to read $name (mtd$idx)" >&2
+	fi
+done
+
+[ "$saved" -gt 0 ] || { echo "cr6608-bootbackup: nothing saved" >&2; exit 1; }
+
+( cd "$OUT" && sha256sum *.bin > SHA256SUMS ) || exit 1
+tar -C "$(dirname "$OUT")" -czf "$TARBALL" "$(basename "$OUT")" || exit 1
+
+echo ""
+echo "backup ready: $TARBALL ($saved partitions + SHA256SUMS)"
+echo "copy it OFF the device now — /tmp is wiped on reboot:"
+echo "  scp root@<router-ip>:$TARBALL ."
+exit 0
