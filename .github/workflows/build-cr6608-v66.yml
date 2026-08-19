@@ -18,6 +18,7 @@ name: Build CR6608 v66 (login-fixed, fleet-flashable, 38 dBm from source)
 # same source with OpenWrt's own tooling instead, so no private keys are needed.
 #
 # Run it: GitHub -> Actions -> this workflow -> "Run workflow" (pick this branch).
+# (retry nonce 2026-08-19a: previous run hung in the runner's apt step)
 # ~1-2 hours. The final .bin is uploaded as an artifact AND published to the
 # cr6608-v66-delivery branch for a direct git/raw download link.
 
