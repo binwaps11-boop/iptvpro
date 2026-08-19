@@ -236,6 +236,7 @@ jobs:
                      CONFIG_PACKAGE_kmod-mt7915e=y \
                      CONFIG_PACKAGE_uboot-envtools=y \
                      CONFIG_PACKAGE_prplmesh=y \
+                     CONFIG_PACKAGE_lldpd=y \
                      CONFIG_PACKAGE_luci=y; do
             grep -qxF "$sym" .config \
               || { echo "::error::critical package dropped by defconfig: $sym"; exit 1; }

@@ -93,7 +93,7 @@
 	<link rel="apple-touch-icon" sizes="180x180" href="{{ media }}/icon/apple-icon-180x180.png">
 	<link rel="manifest" href="{{ media }}/icon/manifest.json" crossorigin="use-credentials">
 
-	<link rel="stylesheet" href="{{ media }}/css/cascade.css{# ?v=PKG_VERSION #}">
+	<link rel="stylesheet" href="{{ media }}/css/cascade.css?v=20260819-argon-v67">
 	<style title="text/css">
 		{% if (mode == 'normal'): %}
 			@media (prefers-color-scheme: dark) {
@@ -124,7 +124,7 @@
 	</style>
 	{% endif -%}
 	<link rel="stylesheet" href="{{ media }}/css/cr6608-mobile.css?v=20260816-argon-mobile-v64-rtlfix1">
-	<script src="{{ media }}/js/jquery.min.js"></script>
+	<script src="{{ media }}/js/jquery.min.js?v=20260819-argon-v67"></script>
 	<script src="{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}"></script>
 	<script src="{{ resource }}/cbi.js?v={{ version.luciversion }}"></script>
 	<script defer src="{{ media }}/js/cr6608-localtime.js?v=20260816-argon-localtime-v64-rtlfix1"></script>
