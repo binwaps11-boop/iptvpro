@@ -300,10 +300,15 @@ apply_wifi_isolation() {
 	case "$iso24" in 1) iso24=1 ;; *) iso24=0 ;; esac
 	case "$iso5" in 1) iso5=1 ;; *) iso5=0 ;; esac
 	before="$(wifi_isolation_snapshot)"
+	# Only the main LAN-bridged SmartAP interfaces: the Guest network carries
+	# its own MANDATORY isolate=1 (set at guest creation) that a lan-scoped
+	# Isolation-page apply must never flatten away.
 	for section in $(configured_ap_sections radio0); do
+		case " $(g "wireless.${section}.network") " in *" lan "*) ;; *) continue ;; esac
 		uci set "wireless.${section}.isolate=$iso24" || return 1
 	done
 	for section in $(configured_ap_sections radio1); do
+		case " $(g "wireless.${section}.network") " in *" lan "*) ;; *) continue ;; esac
 		uci set "wireless.${section}.isolate=$iso5" || return 1
 	done
 	uci commit wireless || return 1
@@ -315,18 +320,16 @@ apply_wifi_isolation() {
 
 # ------------------------------------------------------------------ ports
 apply_ports() {
-	local enabled
-	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
+	# Port enable/isolate are PORT CONTROLS, not "protections": they apply
+	# independently of the master security switch. The old behavior forced
+	# every port up/un-isolated when the master switch was off while the
+	# dashboard kept rendering the stored disabled/isolated state — the UI
+	# claimed a state the applier deliberately did not apply.
 	for p in $PORTS; do
 		[ -d "/sys/class/net/$p" ] || continue
 		local en iso
-		if [ "$enabled" = "1" ]; then
-			en="$(g $STATE.$p.enabled)"; en="${en:-1}"
-			iso="$(g $STATE.$p.isolate)"; iso="${iso:-0}"
-		else
-			en=1
-			iso=0
-		fi
+		en="$(g $STATE.$p.enabled)"; en="${en:-1}"
+		iso="$(g $STATE.$p.isolate)"; iso="${iso:-0}"
 		if [ "$en" = "0" ]; then
 			ip link set dev "$p" down 2>/dev/null || { log "port $p down failed"; return 1; }
 			log "port $p down"
@@ -352,9 +355,10 @@ apply_vlan() {
 	# settings VLAN (Wi-Fi side) is respected: unset LAN policy follows it as a trunk.
 	[ -r /usr/libexec/cr6608-vlan-lib ] || { log "vlan lib missing; ports unchanged"; return 1; }
 	. /usr/libexec/cr6608-vlan-lib || { log "vlan lib load failed"; return 1; }
-	local qvid="" enabled ignore_policy=0 dev_before dev_after network_before network_after
-	enabled="$(g $STATE.security.enabled)"; enabled="${enabled:-1}"
-	[ "$enabled" = "1" ] || ignore_policy=1
+	# VLAN membership is a port control like enable/isolate (see apply_ports):
+	# it applies independently of the master security switch, so the UI's
+	# rendered VLAN state always matches the wire.
+	local qvid="" ignore_policy=0 dev_before dev_after network_before network_after
 	qvid="$(uci -q get network.cr6608_vlan.device 2>/dev/null | sed -n 's/^br-lan\.\([0-9]\+\)$/\1/p')"
 	dev_before="$(uci -q get network.lan.device 2>/dev/null)"
 	network_before="$(uci -q show network 2>/dev/null)"

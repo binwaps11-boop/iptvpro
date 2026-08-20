@@ -171,20 +171,32 @@ return view.extend({
 				// apply would silently revert live settings. formvalue() returns
 				// exactly what the user sees regardless of staging.
 				var v = null;
+				var omit = false;
 				try {
 					var lookup = self._qmap ? self._qmap.lookupOption(k, 'default') : null;
 					if (lookup && lookup[0]) {
 						// Flag.formvalue() ignores depends/isActive, so a hidden
 						// mode-gated toggle (smart_connect/fast_transition) would leak
 						// its checked '1' and 409-reject mesh/WDS applies. Trust
-						// formvalue only for an ACTIVE widget; send the disabled value
-						// for an inactive one.
-						if (typeof lookup[0].isActive === 'function' && !lookup[0].isActive('default'))
-							v = (lookup[0].disabled !== undefined && lookup[0].disabled !== null) ? String(lookup[0].disabled) : '0';
-						else
+						// formvalue only for an ACTIVE widget. For an inactive one:
+						// a Flag sends its defined disabled value, but any other
+						// widget (Value/ListValue — reset_seconds, vlan_id, mesh_id,
+						// wds_ssid, pppoe_*) is OMITTED entirely: sending the old
+						// '0' fallback made the CGI hard-reject the payload, breaking
+						// Save & Apply whenever any dependency-hidden field existed.
+						// Omission lets the CGI's resolved()/wireless_resolved()
+						// fallback supply the live value instead.
+						if (typeof lookup[0].isActive === 'function' && !lookup[0].isActive('default')) {
+							if (lookup[0].disabled !== undefined && lookup[0].disabled !== null)
+								v = String(lookup[0].disabled);
+							else
+								omit = true;
+						} else {
 							v = lookup[0].formvalue('default');
+						}
 					}
-				} catch (e) { v = null; }
+				} catch (e) { v = null; omit = false; }
+				if (omit) return;
 				if (v === null || v === undefined)
 					v = uci.get('cr6608quick', 'default', k);
 				if (v !== null && v !== undefined) payload[k] = String(v);

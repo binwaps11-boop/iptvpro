@@ -1,8 +1,16 @@
 #!/bin/sh
-# Per-client bridge rate guard using nftables. Values are stored as Mbit/s in
-# smartap qos sections (mac, down, up). The bridge forward hook covers AP-mode
-# switching; input/output cover traffic routed through this device (PPPoE).
-# Excess traffic is dropped; normal traffic is not queued or redirected.
+# Per-client bridge rate guard AND MAC blocks using nftables. Rates are stored
+# as Mbit/s in smartap qos sections (mac, down, up); blocks come from firewall
+# rules named CR6608-Block-<mac> (the dashboard's block_mac action — the fw4
+# rule alone only filters ROUTED traffic, but AP-mode clients are L2-bridged,
+# so the actual enforcement happens here in the bridge family). The bridge
+# forward hook covers AP-mode switching; input/output cover traffic routed
+# through this device (PPPoE). Excess/blocked traffic is dropped.
+#
+# fw4 flushes the whole ruleset on every firewall reload, destroying foreign
+# tables like this one — so the generated table is ALSO written to
+# /usr/share/nftables.d/ruleset-post/, which fw4 replays at ruleset scope on
+# every reload, keeping the policy alive without any hotplug race.
 
 TABLE=smartap_qos
 NFT_BIN="${CR6608_QOS_NFT_BIN:-nft}"
@@ -21,9 +29,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+RULESET_POST="${CR6608_QOS_RULESET_POST:-/usr/share/nftables.d/ruleset-post/smartap-qos.nft}"
+
 remove_table() {
 	"$NFT_BIN" delete table bridge "$TABLE" >/dev/null 2>&1 || true
-	rm -f "$ACTIVE"
+	rm -f "$ACTIVE" "$RULESET_POST"
 }
 
 valid_rate() {
@@ -32,13 +42,29 @@ valid_rate() {
 }
 
 entries="$("$UCI_BIN" -q show smartap 2>/dev/null | awk -F'[.=]' '/=qos$/{print $2}')"
-[ -n "$entries" ] || { remove_table; exit 0; }
+# Blocked MACs: every firewall rule the dashboard names CR6608-Block-<mac>.
+blocked_macs="$("$UCI_BIN" -q show firewall 2>/dev/null |
+	sed -n "s/^firewall\.[^.]*\.name='CR6608-Block-\([0-9a-f:]\{17\}\)'\$/\1/p" | sort -u)"
+[ -n "$entries" ] || [ -n "$blocked_macs" ] || { remove_table; exit 0; }
 
 : > "$FORWARD_RULES" || exit 1
 : > "$INPUT_RULES" || exit 1
 : > "$OUTPUT_RULES" || exit 1
 
 rules=0
+for mac in $blocked_macs; do
+	case "$mac" in
+		[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+		*) continue ;;
+	esac
+	for dir_rule in "ether saddr $mac counter drop comment \"SmartAP block src\"" \
+			"ether daddr $mac counter drop comment \"SmartAP block dst\""; do
+		printf '  %s\n' "$dir_rule" >> "$FORWARD_RULES"
+		printf '  %s\n' "$dir_rule" >> "$INPUT_RULES"
+		printf '  %s\n' "$dir_rule" >> "$OUTPUT_RULES"
+	done
+	rules=$((rules + 2))
+done
 for sec in $entries; do
 	mac="$("$UCI_BIN" -q get smartap."$sec".mac 2>/dev/null | tr A-F a-f)"
 	dn="$("$UCI_BIN" -q get smartap."$sec".down 2>/dev/null)"
@@ -99,5 +125,12 @@ remove_table
 	exit 1
 }
 cp -f "$TMP" "$ACTIVE"
-"$LOGGER_BIN" -t smartap-qos "installed $rules per-client rates across bridge and routed paths"
+# Persist across fw4 reloads: fw4 replays ruleset-post files at ruleset scope
+# after flushing, so the table survives every firewall reload/restart.
+if mkdir -p "$(dirname "$RULESET_POST")" 2>/dev/null && cp -f "$TMP" "$RULESET_POST" 2>/dev/null; then
+	:
+else
+	"$LOGGER_BIN" -t smartap-qos "WARNING: could not persist ruleset-post copy; policy will not survive a firewall reload"
+fi
+"$LOGGER_BIN" -t smartap-qos "installed $rules per-client rate/block rules across bridge and routed paths"
 exit 0

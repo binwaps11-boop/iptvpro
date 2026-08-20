@@ -1427,7 +1427,12 @@
     document.documentElement.dataset.theme = state.theme;
     $("heroSubtitle").textContent = tr("subtitle");
     $("refreshBtn").textContent = tr("refresh");
-    $("themeBtn").textContent = state.theme === "dark" ? tr("dark") : tr("light");
+    // In auto mode the label must say Auto on EVERY repaint (language switch,
+    // login render), not only right after clicking the toggle — otherwise the
+    // control claims dark/light while the auto preference is still active.
+    var chromeThemePref = null;
+    try { chromeThemePref = localStorage.getItem(LS + "themePref"); } catch (e0) {}
+    $("themeBtn").textContent = chromeThemePref === "auto" ? (state.lang === "ar" ? "تلقائي" : "Auto") : (state.theme === "dark" ? tr("dark") : tr("light"));
     $("themeBtn").classList.toggle("active", state.theme === "dark");
     $("themeBtn").setAttribute("aria-pressed", state.theme === "dark" ? "true" : "false");
     if ($("logoutBtn")) $("logoutBtn").textContent = tr("logout");
@@ -1959,8 +1964,10 @@
       }
       var readyToken = j.confirmation_ready === true && /^[0-9a-f]{32}$/.test(j.rollback_token || "");
       if (readyToken) {
-        showSection("quick");
-        var quickBox = $("ctl_wizard");
+        // quickSafeApplyBox cancels the wizard GET that showSection starts,
+        // so a late response cannot erase the Keep/Rollback buttons and
+        // auto-rollback a successful channel change.
+        var quickBox = quickSafeApplyBox();
         if (!quickBox || !presentPendingApply("wizard", quickBox, j)) {
           toast(state.lang === "ar" ? "تعذر عرض تأكيد Safe Apply؛ سيبقى الرجوع التلقائي هو المرجع" : "Safe Apply confirmation is unavailable; automatic rollback remains authoritative");
           return;
@@ -1974,8 +1981,7 @@
       queueFullRefresh(800);
     } catch (e) {
       stopProgress();
-      showSection("quick");
-      var recoveryBox = $("ctl_wizard");
+      var recoveryBox = quickSafeApplyBox();
       if (controlPostNeedsRecovery(e) && await recoverControlAction("wizard", "apply_best_channels", recoveryBox)) return;
       toast(e.message);
     } finally { stopProgress(); }
@@ -3330,7 +3336,15 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
       // authoritative device state instead.
       if (actionName && data && data.ok === false) {
         if (data.summary || data.text) toast(data.summary || data.text);
-        if (actionName === "keep_changes" || actionName === "rollback_last") return;
+        if (actionName === "keep_changes" || actionName === "rollback_last") {
+          // The pre-POST "Running control..." paint already erased the
+          // Keep/Rollback buttons; rebuild them from the still-armed token so
+          // a rejected confirmation never strands the user on a frozen box.
+          var armedToken = state.controlTokens[section];
+          if (armedToken && /^[0-9a-f]{32}$/.test(armedToken))
+            presentPendingApply(section, box, { ok: true, confirmation_ready: true, rollback_token: armedToken, summary: data.summary || "" });
+          return;
+        }
         delete box.dataset.loaded;
         return loadControl(section);
       }
@@ -3344,7 +3358,7 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         return loadControl(section);
       }
       state.controlCache[section] = data;
-      if (data && data.ok && actionName === "save_royal" && section === "wizard") {
+      if (data && data.ok && (actionName === "save_royal" || actionName === "save_identity") && section === "wizard") {
         if (isControlRequestCurrent(generation, section, box)) {
           if (data.summary) toast(data.summary);
           return loadControl(section);
@@ -3541,7 +3555,13 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
         if (!mac || !act) return toast(tr("simulated"));
         if (act === "__limit") { // bandwidth-hog "limit" -> ask Mbps, set per-client QoS
           var mb = window.prompt(tr("limitPrompt"), "10"); if (mb === null) return;
-          mb = String(mb).replace(/[^0-9]/g, ""); if (!mb) return;
+          // Strict whole number: stripping non-digits turned "2.5" into 25 —
+          // a silently 10x-too-high limit.
+          mb = String(mb).trim();
+          if (!/^\d+$/.test(mb) || +mb < 1 || +mb > 1000) {
+            toast(state.lang === "ar" ? "أدخل رقماً صحيحاً بالميغابت من 1 إلى 1000" : "Enter a whole number of Mbps (1-1000)");
+            return;
+          }
           try {
             var result = await postJsonLocked(CTL, { credentials:"same-origin", cache:"no-store", headers:authHeaders({ "Content-Type":"application/x-www-form-urlencoded" }),
               body:"section=devices&action=set_client_limit&mac=" + encodeURIComponent(mac) + "&limit_down=" + mb + "&limit_up=" + mb + "&" + sidQuery() + "&_=" + Date.now() }, 20000, b);
@@ -3581,8 +3601,13 @@ return H.card(A?'أبعد العملاء':'Distance Leaderboard',h,String(L.leng
           body:"section=selftest&action=run_selftest&" + sidQuery() + "&_=" + Date.now() }, SCAN_TIMEOUT_MS, stBtn);
         var r = result.response;
         if (r.status === 403) return requireLogin(tr("sessionExpired"));
-        state.selftest = result.data;
-        if (state.latest) render(state.latest);
+        // A failure reply must not silently erase the previous report.
+        if (!result.data || result.data.ok === false) {
+          toast((result.data && (result.data.summary || result.data.text)) || (state.lang === "ar" ? "فشل الفحص الذاتي" : "Self-test failed"));
+        } else {
+          state.selftest = result.data;
+          if (state.latest) render(state.latest);
+        }
         showSection("system");
       } catch (e) { toast("selftest: " + e.message); stBtn.disabled = false; stBtn.textContent = old; }
     };

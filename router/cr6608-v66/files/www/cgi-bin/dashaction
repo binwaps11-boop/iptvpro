@@ -172,6 +172,13 @@ toggle_radio() {
     if [ "$rc" = "1" ]; then
       rm -f "$backup"
       json_msg false "Radio apply failed; the previous Wi-Fi configuration and runtime were restored."
+    elif [ "$rc" = "3" ]; then
+      # rc=3: the reload helper exited BEFORE touching the runtime (its cache
+      # mutation lock was unavailable). Undo the already-committed toggle so
+      # it cannot silently apply at the next unrelated wifi reload/reboot.
+      cp -f "$backup" /etc/config/wireless 2>/dev/null || true
+      rm -f "$backup"
+      json_msg false "النظام مشغول بعملية أخرى؛ لم يتغير شيء — حاول مرة أخرى."
     else
       json_msg false "Radio apply failed and restored runtime could not be verified. Safety backup retained at $backup."
     fi

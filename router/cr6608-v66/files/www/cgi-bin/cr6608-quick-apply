@@ -606,7 +606,9 @@ if [ "$rc" = "0" ]; then
 	reply_json "" "{\"ok\":true,\"applied\":true,\"pending_confirmation\":true,\"rollback_token\":\"$rollback_token\",\"management_ip\":\"$ip\",\"rollback_timeout_s\":$rollback_timeout,\"rollback_remaining_s\":$rollback_remaining}"
 fi
 
-tail_text="$(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ' | tr -cd '\11\40-\176' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-300)"
+# Truncate BEFORE escaping: cutting after would land mid two-byte escape
+# sequence (a trailing lone backslash) and emit invalid JSON.
+tail_text="$(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ' | tr -cd '\11\40-\176' | cut -c1-300 | sed 's/\\/\\\\/g; s/"/\\"/g')"
 headers "500 Internal Server Error"
 printf '{"ok":false,"applied":false,"code":%s,"detail":"%s"}\n' "$rc" "$tail_text"
 exit 0

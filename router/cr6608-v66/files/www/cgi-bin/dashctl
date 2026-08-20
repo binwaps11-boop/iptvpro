@@ -443,6 +443,11 @@ form_json() {
 }
 emit() {
   ok="${1:-true}"; title="$2"; summary="$3"; cards="${4:-[]}"; text="$5"; actions="${6:-[]}"; form="${7:-[]}"
+  # Callers write "...\n..." inside double quotes, which the shell keeps as a
+  # literal backslash+n; json_escape would then escape the backslash and the
+  # browser shows a literal "\n" instead of a line break. Expand the escapes
+  # into real newlines here (json_escape turns them back into JSON \n).
+  case "$text" in *'\n'*) text="$(printf '%b' "$text")" ;; esac
   # Finish the generation bracket before the browser receives success or
   # failure.  This is idempotent and the EXIT trap is the signal-safe fallback.
   command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
@@ -724,8 +729,19 @@ load_royal_params() {
     valid_ch5 "$ch5" || ch5="149"
   fi
 
-  htmode24="$(param htmode24)"; [ -n "$htmode24" ] || htmode24="HE20"
-  htmode5="$(param htmode5)"; [ -n "$htmode5" ] || htmode5="HE80"
+  # Mode-hidden fields fall back to the LIVE config (like ch24/ch5), not to
+  # constants: programming WDS-receiver mode must not silently reset the
+  # still-active 2.4G AP's width or un-hide a deliberately hidden SSID.
+  htmode24="$(param htmode24)"
+  if [ -z "$htmode24" ]; then
+    htmode24="$(uci -q get wireless.radio0.htmode 2>/dev/null)"
+    case "$htmode24" in HE20|HE40|HT20|HT40) : ;; *) htmode24="HE20" ;; esac
+  fi
+  htmode5="$(param htmode5)"
+  if [ -z "$htmode5" ]; then
+    htmode5="$(uci -q get wireless.radio1.htmode 2>/dev/null)"
+    case "$htmode5" in HE80|HE40|HE20|VHT80|HT20) : ;; *) htmode5="HE80" ;; esac
+  fi
   case "$htmode5" in HE160|VHT160) htmode5="HE80" ;; esac
   country24="$(param country24)"
   [ -n "$country24" ] || country24="$(uci -q get wireless.radio0.country 2>/dev/null)"
@@ -744,7 +760,12 @@ load_royal_params() {
     [ -n "$wds_peer_ssid" ] || wds_peer_ssid="$(uci -q get cr6608quick.default.wds_ssid 2>/dev/null)"
     [ -n "$wds_peer_ssid" ] || wds_peer_ssid="$ssid"
   fi
-  hide_ssid="$(param hide_ssid)"; [ -n "$hide_ssid" ] || hide_ssid="0"
+  hide_ssid="$(param hide_ssid)"
+  if [ -z "$hide_ssid" ]; then
+    _royal_hide_ifc="$(config_radio_iface radio0)"; [ -n "$_royal_hide_ifc" ] || _royal_hide_ifc="wifinet0"
+    hide_ssid="$(uci -q get wireless."$_royal_hide_ifc".hidden 2>/dev/null)"
+    case "$hide_ssid" in 0|1) : ;; *) hide_ssid="0" ;; esac
+  fi
 
   security="$(param security)"
   if [ -z "$security" ]; then
@@ -810,7 +831,15 @@ load_royal_params() {
       *) [ "$(uci -q get network.lan.ipv6 2>/dev/null)" = "0" ] && ipv6_enabled="0" || ipv6_enabled="1" ;;
     esac
   fi
-  watchcat_enabled="$(param watchcat_enabled)"; [ -n "$watchcat_enabled" ] || watchcat_enabled="0"
+  watchcat_enabled="$(param watchcat_enabled)"
+  if [ -z "$watchcat_enabled" ]; then
+    # The wizard emits no watchcat field: fall back to the STORED value (like
+    # ipv6_enabled) instead of a constant 0 that would silently disable the
+    # LuCI-page setting on every wizard save.
+    watchcat_enabled="$(uci -q get smartap.quick.watchcat_enabled 2>/dev/null)"
+    case "$watchcat_enabled" in 0|1) : ;; *) watchcat_enabled="$(uci -q get cr6608quick.default.watchcat_enabled 2>/dev/null)" ;; esac
+    case "$watchcat_enabled" in 0|1) : ;; *) watchcat_enabled="0" ;; esac
+  fi
   broadband_enabled="$(param broadband_enabled)"; [ -n "$broadband_enabled" ] || broadband_enabled="0"
   fake_mesh="$(param fake_mesh)"; [ -n "$fake_mesh" ] || fake_mesh="0"
   radio0_enabled="$(param radio0_enabled)"; [ -n "$radio0_enabled" ] || radio0_enabled="1"
@@ -868,6 +897,14 @@ royal_params_valid() {
   [ -n "$royal_error" ] || { valid_text_field "$ssid5" 32 && [ -n "$ssid5" ]; } || royal_error="The derived 5 GHz SSID is invalid."
   [ -n "$royal_error" ] || { valid_text_field "$mesh_id" 48 && [ -n "$mesh_id" ]; } || royal_error="Mesh ID must be 1-48 bytes and contain no control characters."
   [ -n "$royal_error" ] || { valid_text_field "$wds_peer_ssid" 32 && [ -n "$wds_peer_ssid" ]; } || royal_error="WDS peer SSID must be 1-32 bytes and contain no control characters."
+  # '|' is the wizard form's column delimiter: a value containing it cannot
+  # round-trip through the pipe-delimited form rows (the field would render
+  # truncated with a bogus mode list and disappear from the wizard forever).
+  if [ -z "$royal_error" ]; then
+    case "${ssid}${ssid5}${mesh_id}${wds_peer_ssid}${pppoe_user}" in
+      *"|"*) royal_error="SSID, Mesh ID, WDS peer SSID and PPPoE username must not contain the '|' character." ;;
+    esac
+  fi
   if [ -z "$royal_error" ]; then case "$ch24" in auto|1|2|3|4|5|6|7|8|9|10|11|12|13) : ;; *) royal_error="2.4 GHz channel must be Automatic or 1-13." ;; esac; fi
   [ -n "$royal_error" ] || valid_ch5 "$ch5" || royal_error="Unsupported 5 GHz channel."
   if [ -z "$royal_error" ]; then case "$htmode24" in HT20|HT40|HE20|HE40|VHT20|VHT40) : ;; *) royal_error="Unsupported 2.4 GHz channel width." ;; esac; fi
@@ -1635,6 +1672,16 @@ case "$action" in
       emit false "System time" "Rejected" "[]" "Browser time is outside the accepted range." "[]" "[]"
       exit 0
     fi
+    # Plausibility bound: when the router clock is itself sane, refuse a
+    # browser epoch more than 30 days AHEAD of it — the forward-only
+    # persistent time floor would otherwise be advanced permanently by one
+    # wrongly-set browser and could never be rolled back.
+    now_epoch="$(date +%s 2>/dev/null)"
+    if [ -n "$now_epoch" ] && [ "$now_epoch" -ge 1704067200 ] 2>/dev/null && \
+       [ "$epoch" -gt $((now_epoch + 2592000)) ] 2>/dev/null; then
+      emit false "System time" "Rejected" "[]" "Browser time is more than 30 days ahead of the router clock; fix the device clock first." "[]" "[]"
+      exit 0
+    fi
     /usr/sbin/smartap-time-anchor set "$epoch" >/tmp/dashctl.action 2>&1 || {
       emit false "System time" "Set failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
       exit 0
@@ -1731,12 +1778,14 @@ case "$action" in
         run_limit "${CR6608_SERVICE_TIMEOUT:-45}" /etc/init.d/firewall start >/dev/null 2>&1 || isolation_abort "Could not enable the firewall service within its bounded timeout."
     fi
     [ -x /usr/sbin/cr6608-security-apply ] || isolation_abort "The security policy helper is unavailable."
-    run_limit "${CR6608_SECURITY_TIMEOUT:-120}" /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1 || isolation_abort "Could not apply the security and VLAN policy within its bounded timeout."
+    run_limit "${CR6608_SECURITY_TIMEOUT:-120}" /usr/sbin/cr6608-security-apply apply >/dev/null 2>&1 || isolation_abort "The security/VLAN policy could not be applied (invalid combination or runtime failure — check the system log); everything was rolled back."
     run_limit "${CR6608_SERVICE_TIMEOUT:-45}" /etc/init.d/cr6608-security enable >/dev/null 2>&1 || isolation_abort "Could not enable the security service."
     emit true "الحماية والمنافذ" "تم التطبيق مع حماية رجوع مؤقتة" "[]" "اختبر عزل الواي فاي ومسار VLAN والمنافذ فعلياً، ثم اضغط الاحتفاظ بالتغييرات للعملية المطابقة. إذا لم تؤكدها يرجع الجهاز تلقائياً. طاقة البث لم تُلمس." '[{"id":"keep_changes","label":"الاحتفاظ بالتغييرات"},{"id":"rollback_last","label":"إرجاع الآن","confirm":true}]' "[]"; exit 0 ;;
   rollback_last)
     requested_rollback_token="$(param rollback_token)"
-    safe_apply_ready_clear
+    # Clear the READY marker only on SUCCESS (below): clearing it up front
+    # meant a mismatched/failed rollback attempt irreversibly withdrew the
+    # Keep option for a still-armed healthy transaction.
     if valid_rollback_token "$requested_rollback_token" && [ -x /usr/sbin/cr6608-safe-apply ] && \
       /usr/sbin/cr6608-safe-apply rollback "$requested_rollback_token" >/dev/null 2>&1; then
       safe_apply_ready_clear
@@ -1836,7 +1885,9 @@ case "$action" in
     line="$(param cron_line | tr -d '\r\n' | cut -c1-180)"
     [ -n "$line" ] || { emit false "Scheduled Tasks" "Missing cron line" "[]" "Enter a full cron line." "[]" "[]"; exit 0; }
     action_backup cron || exit 0
-    ( crontab -l 2>/dev/null; printf '%s\n' "$line" ) | crontab -
+    ( crontab -l 2>/dev/null; printf '%s\n' "$line" ) | crontab - || {
+      emit false "Scheduled Tasks" "Crontab install failed" "[]" "Could not write the cron table; the previous schedule is unchanged." "[]" "[]"; exit 0
+    }
     action_reload "Scheduled Tasks" "Cron reload failed" /etc/init.d/cron reload || exit 0
     emit true "Scheduled Tasks" "Cron line added" "[]" "Backup: $backup\nCron was reloaded." "[]" "[]"; exit 0 ;;
   service_enable|service_disable|service_restart)
@@ -2431,7 +2482,9 @@ EOF
     emit true "LED" "Runtime LED updated" "[]" "LED runtime state sent. Persistent LED UCI can still be edited through Raw UCI inside the Xiaomi CR6608 panel." "[]" "[]"; exit 0 ;;
   kill_process)
     confirm_required "Processes"
-    pid="$(safe_num "$(param process_pid)")"; sig="$(safe_num "$(param process_signal)")"
+    # PIDs routinely exceed 9999 — safe_num's 4-digit cap would signal a
+    # different, unintended process.
+    pid="$(safe_bignum "$(param process_pid)")"; sig="$(safe_num "$(param process_signal)")"
     [ -n "$pid" ] || { emit false "Processes" "Missing PID" "[]" "PID is required." "[]" "[]"; exit 0; }
     [ -n "$sig" ] || sig=15
     kill "-$sig" "$pid" >/tmp/dashctl.action 2>&1
@@ -2909,14 +2962,18 @@ EOF
     #    reveals devices sitting behind a switch), and DHCP leases (MAC -> hostname),
     #  * reverse-DNS the rest (an upstream Mikrotik usually registers lease names in DNS).
     st="/tmp/lanscan.$$"; mkdir -p "$st"
-    # every /24 the router has an address on (br-lan static + the upstream-DHCP subnet)
-    prefixes="$(ip -4 addr show 2>/dev/null | awk '/inet /{split($2,a,"/"); n=split(a[1],o,"."); if(o[1]!="127") print o[1]"."o[2]"."o[3]}' | sort -u | head -3)"
+    # LAN-side /24s only (br-lan): sweeping upstream/PPPoE subnets tripled the
+    # runtime past the browser's request timeout and scanned networks that are
+    # not the user's LAN anyway.
+    prefixes="$(ip -4 addr show dev br-lan 2>/dev/null | awk '/inet /{split($2,a,"/"); n=split(a[1],o,"."); if(o[1]!="127") print o[1]"."o[2]"."o[3]}' | sort -u | head -2)"
     for pfx in $prefixes; do
       i=1
       while [ "$i" -le 254 ]; do
         j=0
         while [ "$j" -lt 48 ] && [ "$i" -le 254 ]; do
-          run_limit 1 ping -c 1 -W 1 "$pfx.$i" >/dev/null 2>&1 &
+          # plain ping: -W1 already bounds it to ~1s; the run_limit wrapper's
+          # 1s poll floor added ~0.1-0.3s per host and dominated the sweep.
+          ping -c 1 -W 1 "$pfx.$i" >/dev/null 2>&1 &
           i=$((i+1)); j=$((j+1))
         done
         wait
@@ -3011,9 +3068,17 @@ EOF
     IFS="$OIFS"
     neigh_json="$neigh_json]"
     # least-congested channel advice (overlap-weighted 2.4G; exact-count non-DFS 5G)
-    best24="$(printf '%s' "$parsed" | awk -F'\t' '$3>0&&$3<=11{cnt[$3]++} END{ best=1; bw=1e9; split("1 6 11",cand," "); for(i in cand){c=cand[i]; w=0; for(ch in cnt) if((ch-c)<=2&&(c-ch)<=2) w+=cnt[ch]; if(w<bw){bw=w; best=c}} print best }')"
-    best5="$(printf '%s' "$parsed" | awk -F'\t' '$3>=149{cnt[$3]++} END{ best=149; bw=1e9; split("149 153 157 161",cand," "); for(i in cand){c=cand[i]; w=cnt[c]+0; if(w<bw){bw=w; best=c}} print best }')"
-    [ -n "$best24" ] || best24=1; [ -n "$best5" ] || best5=149
+    if [ -z "$parsed" ]; then
+      # Zero-information scan (radios busy/down, no neighbors visible): never
+      # fabricate a recommendation — null best channels suppress the
+      # recommendation cards and the Apply button in the UI, matching the
+      # same guard in the nightly smartap-autochannel path.
+      best24=""; best5=""
+    else
+      best24="$(printf '%s' "$parsed" | awk -F'\t' '$3>0&&$3<=11{cnt[$3]++} END{ best=1; bw=1e9; split("1 6 11",cand," "); for(i in cand){c=cand[i]; w=0; for(ch in cnt) if((ch-c)<=2&&(c-ch)<=2) w+=cnt[ch]; if(w<bw){bw=w; best=c}} print best }')"
+      best5="$(printf '%s' "$parsed" | awk -F'\t' '$3>=149{cnt[$3]++} END{ best=149; bw=1e9; split("149 153 157 161",cand," "); for(i in cand){c=cand[i]; w=cnt[c]+0; if(w<bw){bw=w; best=c}} print best }')"
+      [ -n "$best24" ] || best24=1; [ -n "$best5" ] || best5=149
+    fi
     cur24="$(uci -q get wireless.radio0.channel)"; cur5="$(uci -q get wireless.radio1.channel)"
     printf '{"ok":true,"section":"wifiscan","total":%s,"rogues":%s,"best24":%s,"best5":%s,"cur24":%s,"cur5":%s,"neighbors":%s}\n' \
       "$(jnum "$total")" "$(jnum "$rogues")" "$(jnum "$best24")" "$(jnum "$best5")" "$(jnum "$cur24")" "$(jnum "$cur5")" "$neigh_json"
@@ -3052,8 +3117,17 @@ EOF
   run_autochannel_now)
     smartap_heal || { emit false "أفضل قناة الآن" "تعذر فتح الإعدادات" "[]" "لم تتغير القنوات لأن إعدادات Smart AP غير قابلة للقراءة." "[]" "[]"; exit 0; }
     uci -q get smartap.autochannel >/dev/null 2>&1 || uci set smartap.autochannel='autochannel' || { emit false "أفضل قناة الآن" "تعذر حفظ الإعدادات" "[]" "لم يبدأ الفحص لأن قسم autochannel لم يُنشأ." "[]" "[]"; exit 0; }
+    # The applier gates on enabled=1; flip it only for THIS run, then restore
+    # the owner's saved choice — a one-off manual scan must not permanently
+    # enable the nightly 03:30 schedule as a side effect.
+    prev_ac="$(uci -q get smartap.autochannel.enabled 2>/dev/null)"
     uci set smartap.autochannel.enabled='1' && uci commit smartap || { uci -q revert smartap >/dev/null 2>&1 || true; emit false "أفضل قناة الآن" "تعذر حفظ الإعدادات" "[]" "لم يبدأ الفحص لأن تفعيل autochannel لم يُحفظ." "[]" "[]"; exit 0; }
-    if ! /usr/sbin/smartap-autochannel >/tmp/dashctl.action 2>&1; then
+    ac_rc=0
+    /usr/sbin/smartap-autochannel >/tmp/dashctl.action 2>&1 || ac_rc=$?
+    if [ "$prev_ac" != "1" ]; then
+      uci set smartap.autochannel.enabled="${prev_ac:-0}" && uci commit smartap || true
+    fi
+    if [ "$ac_rc" != "0" ]; then
       c24="$(uci -q get wireless.radio0.channel)"; c5="$(uci -q get wireless.radio1.channel)"
       emit false "أفضل قناة الآن" "فشل الفحص أو التطبيق" "[]" "لم تُعتمد قنوات جديدة. القنوات الحالية: 2.4G=$c24 · 5G=$c5" "[]" "[]"; exit 0
     fi
@@ -3078,22 +3152,43 @@ EOF
     confirm_required "Block device"
     mac="$(safe_mac "$(param mac)")"; [ "${#mac}" = 17 ] || { emit false "Block device" "Invalid MAC" "[]" "Enter MAC as aa:bb:cc:dd:ee:ff." "[]" "[]"; exit 0; }
     action_backup block-mac || exit 0
+    # Idempotent: a MAC that is already blocked must not accumulate duplicate
+    # rules (duplicates also broke the old index-based unblock).
+    if uci -q show firewall 2>/dev/null | grep -qF "name='CR6608-Block-$mac'"; then
+      emit true "Connected Devices" "Already blocked" "[]" "A block rule for $mac already exists; nothing was changed." "[]" "[]"; exit 0
+    fi
     rule="$(uci add firewall rule)"
-    uci set firewall."$rule".name="CR6608-Block-$mac"; uci set firewall."$rule".src='lan'; uci set firewall."$rule".src_mac="$mac"; uci set firewall."$rule".target='REJECT'; uci set firewall."$rule".family='ipv4'
+    # dest='*' makes fw4 emit a FORWARD rule (src-only would be INPUT-only and
+    # never touch routed client traffic).
+    uci set firewall."$rule".name="CR6608-Block-$mac"; uci set firewall."$rule".src='lan'; uci set firewall."$rule".dest='*'; uci set firewall."$rule".src_mac="$mac"; uci set firewall."$rule".target='REJECT'; uci set firewall."$rule".family='ipv4'
     action_arm_rollback "Block device" || exit 0
     action_commit firewall "Block device" || exit 0
     action_reload "Block device" "Firewall reload failed" /etc/init.d/firewall reload || exit 0
-    emit true "Connected Devices" "MAC blocked" "[]" "Backup: $backup\nFirewall reject rule added for $mac." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    # AP-mode clients are L2-bridged and never traverse fw4: the real
+    # enforcement is the bridge-family drop installed by smartap-qos-apply,
+    # which reads the CR6608-Block-* firewall rules just committed.
+    [ -x /usr/sbin/smartap-qos-apply ] && /usr/sbin/smartap-qos-apply >/dev/null 2>&1 || true
+    emit true "Connected Devices" "MAC blocked" "[]" "Backup: $backup\nBlocked $mac on both the routed path (firewall) and the bridged Wi-Fi/LAN path (bridge drop)." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   unblock_mac)
     confirm_required "Unblock device"
     mac="$(safe_mac "$(param mac)")"
     [ "${#mac}" = 17 ] || { emit false "Connected Devices" "Invalid MAC" "[]" "Enter a full MAC (aa:bb:cc:dd:ee:ff). An empty/partial MAC is rejected so it cannot mass-unblock." "[]" "[]"; exit 0; }
     action_backup unblock-mac || exit 0
-    for s in $(uci show firewall | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m"\047" {print $2}'); do uci delete firewall."$s" 2>/dev/null; done
+    # Delete one match per pass and re-resolve: anonymous sections are
+    # @rule[N] indices that SHIFT after every delete — a pre-collected list
+    # deleted in ascending order removes the WRONG section when the same MAC
+    # has more than one rule.
+    while :; do
+      s="$(uci show firewall 2>/dev/null | awk -F'[.=]' -v m="$mac" '$0 ~ "CR6608-Block-"m"\047" {print $2; exit}')"
+      [ -n "$s" ] || break
+      uci delete firewall."$s" 2>/dev/null || break
+    done
     action_arm_rollback "Unblock device" || exit 0
     action_commit firewall "Unblock device" || exit 0
     action_reload "Unblock device" "Firewall reload failed" /etc/init.d/firewall reload || exit 0
-    emit true "Connected Devices" "MAC unblock attempted" "[]" "Backup: $backup\nMatching CR6608 block rules removed for $mac." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
+    # Drop the matching bridge-family block as well.
+    [ -x /usr/sbin/smartap-qos-apply ] && /usr/sbin/smartap-qos-apply >/dev/null 2>&1 || true
+    emit true "Connected Devices" "MAC unblock attempted" "[]" "Backup: $backup\nMatching CR6608 block rules removed for $mac on both the routed and bridged paths." '[{"id":"keep_changes","label":"Keep changes"},{"id":"rollback_last","label":"Rollback now","confirm":true}]' "[]"; exit 0 ;;
   set_client_limit)
     # Per-client bridge policer: nftables matches the client MAC in both
     # directions and drops only traffic above the configured ceiling. This is
@@ -3112,7 +3207,10 @@ EOF
     [ -n "$up" ] && uci set smartap."$key".up="$up" || uci -q delete smartap."$key".up
     uci commit smartap
     /usr/sbin/smartap-qos-apply >/tmp/dashctl.action 2>&1 || {
-      emit false "Speed limit" "QoS apply failed" "[]" "$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
+      # Do not leave a committed limit that the runtime refused: remove the
+      # section again so the stored config always mirrors the active policy.
+      uci -q delete smartap."$key" 2>/dev/null; uci -q commit smartap 2>/dev/null || true
+      emit false "Speed limit" "QoS apply failed" "[]" "The limit was NOT applied and was not saved.\n$(cat /tmp/dashctl.action 2>/dev/null | redact)" "[]" "[]"
       exit 0
     }
     emit true "Speed limit" "Per-client policer active" "[]" "Client $mac ceiling: download ${dn:-unlimited} Mbps, upload ${up:-unlimited} Mbps. This nftables policer is restored after reboot; WAN latency control is configured separately under SQM/CAKE." "[]" "[]"; exit 0 ;;
@@ -3452,7 +3550,7 @@ wds_peer_ssid|اسم مرسل WDS|${wds_peer:-Smart-AP}|اسم الشبكة ال
 hide_ssid|إخفاء البث|${hide_ssid:-0}|1 إخفاء، 0 ظهور (يطبّق على 2.4G و5G)|select|0|device|ap,ap_vlan,mesh,mesh_vlan,wds_sender,wds_sender_vlan,pppoe_ap|0:ظاهر,1:مخفي
 security|نوع الحماية|${royal_security:-wpa2}|Open / WPA2 / WPA3 / Mixed|select|0|device|all|open:مفتوح,wpa2:WPA2,wpa3:WPA3 SAE,mixed:WPA2/WPA3 mixed
 wifi_password|كلمة مرور Wi-Fi||اتركها فارغة للاحتفاظ بالمفتاح الحالي|password|0|device|all|
-device_password|تغيير كلمة root الموحدة||اختياري؛ تُستخدم لواجهة Smart AP وLuCI وSSH والكونسول|password|0|device|all|
+device_password|تغيير كلمة root (SSH/كونسول)||اختياري؛ تغيّر كلمة SSH والكونسول فقط — دخول واجهة Smart AP وLuCI يبقى بكلمة اللوحة المنفصلة (root/admin)|password|0|device|all|
 neighbor_enabled|إظهار الجهاز في MikroTik Neighbors|${neighbor_enabled:-1}|يرسل إعلان MNDP حقيقي من الراوتر عبر UDP 5678|select|0|device|all|1:مفعّل,0:متوقف
 customer_name|اسم العميل|${customer_name}|يظهر داخل خانة Identity في Neighbors؛ يدعم العربية|text|0|device|all|
 customer_device|اسم جهاز العميل|${customer_device:-CR6608}|اسم النقطة أو موقعها، مثل منزل أحمد أو الفرع 2|text|0|device|all|
