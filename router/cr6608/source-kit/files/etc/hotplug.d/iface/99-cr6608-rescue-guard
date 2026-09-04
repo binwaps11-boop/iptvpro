@@ -1,0 +1,16 @@
+#!/bin/sh
+# Re-establish the fail-closed rescue gate after an L3 bridge/VLAN transition.
+[ "$ACTION" = ifup ] || exit 0
+case "$INTERFACE" in
+	lan|cr6608_vlan)
+		INIT=/etc/init.d/cr6608-rescue-guard
+		[ -x "$INIT" ] || exit 1
+		if "$INIT" running >/dev/null 2>&1; then
+			exec "$INIT" reload
+		fi
+		# Never create/replace a procd instance from hotplug. S99 owns initial
+		# publication and procd owns respawn; absence must remain fail-closed.
+		exit 0
+		;;
+esac
+exit 0

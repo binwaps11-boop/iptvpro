@@ -1,0 +1,711 @@
+#!/bin/sh
+# Read-only CR6608 transmit-power evidence collector.
+# Driver/MCU values are explicitly not external conducted-power measurements.
+
+OUT_DIR=""
+INTERVAL=0
+COUNT=1
+SAMPLES_WRITTEN=0
+INCOMPLETE=0
+SNAPSHOT_MAX_AGE_SEC="${CR6608_SNAPSHOT_MAX_AGE_SEC:-5}"
+SYS_ROOT="${CR6608_SYS_ROOT:-/sys}"
+PROC_ROOT="${CR6608_PROC_ROOT:-/proc}"
+JSHN_LIB="${CR6608_JSHN_LIB:-/usr/share/libubox/jshn.sh}"
+RF_PARAM_ROOT="${CR6608_RF_PARAM_ROOT:-$SYS_ROOT/module/mt7915e/parameters}"
+
+usage() {
+	echo "usage: cr6608-txpower-collect [--out DIR] [--interval SEC] [--count N]" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--out) [ "$#" -ge 2 ] || usage; OUT_DIR="$2"; shift 2 ;;
+		--interval) [ "$#" -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
+		--count) [ "$#" -ge 2 ] || usage; COUNT="$2"; shift 2 ;;
+		--once) INTERVAL=0; COUNT=1; shift ;;
+		-h|--help) usage ;;
+		*) usage ;;
+	esac
+done
+
+case "$INTERVAL:$COUNT:$SNAPSHOT_MAX_AGE_SEC" in
+	*[!0-9:]*|:*) usage ;;
+esac
+[ "$COUNT" -gt 0 ] 2>/dev/null || usage
+[ "$SNAPSHOT_MAX_AGE_SEC" -gt 0 ] 2>/dev/null || usage
+
+snapshot_once() {
+	uci show wireless > "$RAW_DIR/uci-wireless.txt" 2>&1
+	iw reg get > "$RAW_DIR/iw-reg-get.txt" 2>&1
+	iw list > "$RAW_DIR/iw-list.txt" 2>&1
+	iw dev > "$RAW_DIR/iw-dev.txt" 2>&1
+	dmesg > "$RAW_DIR/dmesg.txt" 2>&1
+	ubus call system board > "$RAW_DIR/system-board.json" 2>&1
+}
+
+radio_sections() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+resolve_radio_iface_phy() {
+	radio="$1"
+	status="$(ubus call network.wireless status 2>/dev/null)" || return 1
+	ifaces="$(printf '%s\n' "$status" |
+		jsonfilter -e "@.${radio}.interfaces[*].ifname" 2>/dev/null)"
+
+	for iface in $ifaces; do
+		wiphy="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "wiphy" { print $2; exit }')"
+		case "$wiphy" in
+			''|*[!0-9]*) continue ;;
+		esac
+		printf '%s|phy%s\n' "$iface" "$wiphy"
+		return 0
+	done
+	return 1
+}
+
+kv() {
+	line="$1"
+	key="$2"
+	for token in $line; do
+		case "$token" in
+			"$key"=*) printf '%s\n' "${token#*=}"; return 0 ;;
+		esac
+	done
+	return 0
+}
+
+module_bool_is_true() {
+	case "$1" in
+		1|Y|y|true|on) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+read_rf_telemetry_snapshot() (
+	# The driver publishes one scalar per read-only module parameter. Its
+	# generation is a seqlock: odd means an update is in progress. Reading it
+	# before and after all fields gives userspace one rejectable atomic witness.
+	rf_band="$1"
+	rf_prefix="$RF_PARAM_ROOT/cr6608_rf_band${rf_band}_"
+	rf_generation_start="$(cat "${rf_prefix}generation" 2>/dev/null)" || exit 1
+	for rf_field in requested_dbm kernel_dbm regulatory_dbm frequency_mhz \
+		channel path_delta_half_dbm sar_bounded_per_path_half_dbm \
+		rate_limited_per_path_half_dbm eeprom_target_per_path_half_dbm \
+		sku_applied_per_path_half_dbm override_active mcu_generation \
+		channel_ready mcu_result; do
+		eval "rf_${rf_field}=\$(cat \"\${rf_prefix}${rf_field}\" 2>/dev/null)" ||
+			exit 1
+	done
+	rf_factory38_persisted_match="$(cat "$RF_PARAM_ROOT/cr6608_factory38_persisted_match" 2>/dev/null)" ||
+		exit 1
+	rf_generation_end="$(cat "${rf_prefix}generation" 2>/dev/null)" || exit 1
+	printf '%s\n' \
+		"band=$rf_band generation_start=$rf_generation_start generation=$rf_generation_end requested_dbm=$rf_requested_dbm kernel_dbm=$rf_kernel_dbm regulatory_dbm=$rf_regulatory_dbm frequency_mhz=$rf_frequency_mhz channel=$rf_channel path_delta_half_dbm=$rf_path_delta_half_dbm sar_bounded_per_path_half_dbm=$rf_sar_bounded_per_path_half_dbm rate_limited_per_path_half_dbm=$rf_rate_limited_per_path_half_dbm eeprom_target_per_path_half_dbm=$rf_eeprom_target_per_path_half_dbm sku_applied_per_path_half_dbm=$rf_sku_applied_per_path_half_dbm override_active=$rf_override_active factory38_persisted_match=$rf_factory38_persisted_match mcu_generation=$rf_mcu_generation channel_ready=$rf_channel_ready mcu_result=$rf_mcu_result"
+)
+
+rf_snapshot_pair_is_stable() (
+	rf_before="$1"
+	rf_after="$2"
+	[ -n "$rf_before" ] && [ "$rf_before" = "$rf_after" ] || return 1
+	rf_generation_start="$(kv "$rf_after" generation_start)"
+	rf_generation="$(kv "$rf_after" generation)"
+	case "$rf_generation_start:$rf_generation" in
+		*[!0-9:]*) return 1 ;;
+	esac
+	[ "$rf_generation_start" = "$rf_generation" ] &&
+		[ "$rf_generation" -gt 0 ] &&
+		[ $((rf_generation % 2)) -eq 0 ]
+)
+
+rf_snapshot_context_matches() (
+	rf_line="$1"
+	rf_band="$2"
+	rf_channel="$3"
+	rf_freq="$4"
+	[ "$(kv "$rf_line" band)" = "$rf_band" ] &&
+		[ "$(kv "$rf_line" channel)" = "$rf_channel" ] &&
+		[ "$(kv "$rf_line" frequency_mhz)" = "$rf_freq" ]
+)
+
+half_dbm_with_path_to_dbm() (
+	rf_half="$1"
+	rf_delta="$2"
+	awk -v half="$rf_half" -v delta="$rf_delta" '
+		BEGIN {
+			if (half !~ /^-?[0-9]+$/ || delta !~ /^-?[0-9]+$/)
+				exit 1
+			printf "%.1f\n", (half + delta) / 2
+		}
+	'
+)
+
+select_trace_line() {
+	trace_file="$1"
+	stage="$2"
+	trace_phy="$3"
+	trace_channel="$4"
+	trace_freq="$5"
+
+	awk -v stage="$stage" -v phy="$trace_phy" \
+	    -v channel="$trace_channel" -v freq="$trace_freq" '
+		function has_token(line, key, value, token) {
+			token = key "=" value
+			return index(" " line " ", " " token " ") > 0
+		}
+		index($0, "CR6608-TXTRACE stage=" stage " ") &&
+		has_token($0, "channel", channel) &&
+		has_token($0, "freq", freq) &&
+		(phy == "" || has_token($0, "wiphy", phy)) { last = $0 }
+		END { if (last != "") print last }
+	' "$trace_file"
+}
+
+trace_uptime_seconds() {
+	line="$1"
+	printf '%s\n' "$line" | awk '
+		match($0, /^\[[[:space:]]*[0-9]+([.][0-9]+)?\]/) {
+			stamp = substr($0, RSTART + 1, RLENGTH - 2)
+			gsub(/[[:space:]]/, "", stamp)
+			print stamp
+			exit
+		}
+	'
+}
+
+trace_is_current_boot() {
+	line="$1"
+	now_uptime="$2"
+	trace_uptime="$(trace_uptime_seconds "$line")"
+	[ -n "$trace_uptime" ] || return 1
+	awk -v now="$now_uptime" -v stamp="$trace_uptime" '
+		BEGIN { exit !(stamp >= 0 && stamp <= now) }
+	'
+}
+
+init_trace_scope_for() {
+	line="$1"
+	now_uptime="$2"
+	if [ -z "$line" ]; then
+		echo optional_missing
+		return 0
+	fi
+	if trace_is_current_boot "$line" "$now_uptime"; then
+		echo optional_audit_current_boot
+		return 0
+	fi
+	echo optional_invalid
+	return 1
+}
+
+snapshot_is_fresh() {
+	line="$1"
+	now_uptime_ms="$2"
+	max_age_sec="$3"
+	stamp="$(kv "$line" snapshot_uptime_ms)"
+	[ -n "$stamp" ] || return 1
+	awk -v now="$now_uptime_ms" -v stamp="$stamp" -v max="$max_age_sec" '
+		BEGIN {
+			exit !(stamp ~ /^[0-9]+$/ && now ~ /^[0-9]+$/ &&
+			       stamp <= now && now - stamp <= max * 1000)
+		}
+	'
+}
+
+snapshot_pair_is_stable() {
+	before="$1"
+	after="$2"
+	before_seq="$(kv "$before" snapshot_seq)"
+	after_seq="$(kv "$after" snapshot_seq)"
+	before_inflight="$(kv "$before" inflight)"
+	after_inflight="$(kv "$after" inflight)"
+	[ "$(kv "$before" valid)" = 1 ] || return 1
+	[ "$(kv "$after" valid)" = 1 ] || return 1
+	[ -z "$before_inflight" ] || [ "$before_inflight" = 0 ] || return 1
+	[ -z "$after_inflight" ] || [ "$after_inflight" = 0 ] || return 1
+	[ -n "$before_seq" ] && [ "$before_seq" != 0 ] &&
+		[ "$before_seq" = "$after_seq" ]
+}
+
+snapshot_context_matches() {
+	# BusyBox ash variables are global unless explicitly declared local.  Keep
+	# these names isolated so validating the debugfs width code does not clobber
+	# collect_radio's MHz-valued "width" before the iw before/after check and
+	# JSON/CSV serialization.
+	snapshot_ctx_line="$1"
+	snapshot_ctx_wiphy="$2"
+	snapshot_ctx_channel="$3"
+	snapshot_ctx_freq="$4"
+	snapshot_ctx_width="$5"
+	[ "$(kv "$snapshot_ctx_line" wiphy)" = "$snapshot_ctx_wiphy" ] &&
+		[ "$(kv "$snapshot_ctx_line" channel)" = "$snapshot_ctx_channel" ] &&
+		[ "$(kv "$snapshot_ctx_line" freq)" = "$snapshot_ctx_freq" ] &&
+		[ "$(kv "$snapshot_ctx_line" width)" = "$snapshot_ctx_width" ]
+}
+
+numeric_equal() {
+	left="$1"
+	right="$2"
+	awk -v left="$left" -v right="$right" '
+		BEGIN {
+			num = "^-?[0-9]+([.][0-9]+)?$"
+			exit !(left ~ num && right ~ num && left + 0 == right + 0)
+		}
+	'
+}
+
+unchanged_value() {
+	[ "$1" = "$2" ]
+}
+
+sum_equals() {
+	left="$1"
+	right="$2"
+	total="$3"
+	awk -v left="$left" -v right="$right" -v total="$total" '
+		BEGIN {
+			num = "^-?[0-9]+$"
+			exit !(left ~ num && right ~ num && total ~ num &&
+			       left + right == total)
+		}
+	'
+}
+
+mcu_rate_status_from_snapshot() (
+	line="$1"
+	generation_start="$(kv "$line" generation_start)"
+	generation="$(kv "$line" generation)"
+	mcu_generation="$(kv "$line" mcu_generation)"
+	mcu_result="$(kv "$line" mcu_result)"
+	if [ "$generation_start" != "$generation" ] ||
+	   [ $((generation % 2)) -ne 0 ] 2>/dev/null ||
+	   [ "$mcu_generation" = -1 ]; then
+		echo in_progress
+		return 1
+	fi
+	if [ "$mcu_result" = 0 ] && [ "$mcu_generation" = "$generation" ] &&
+	   [ "$(kv "$line" channel_ready)" = 1 ] &&
+	   [ "$(kv "$line" sku_applied_per_path_half_dbm)" -ge 0 ] 2>/dev/null; then
+		echo completed
+		return 0
+	fi
+	echo rejected
+	return 1
+)
+
+mcu_path_status_from_snapshot() (
+	line="$1"
+	path_configured="$2"
+	if ! mcu_rate_status_from_snapshot "$line" >/dev/null; then
+		mcu_rate_status_from_snapshot "$line"
+		return 1
+	fi
+	if [ "$path_configured" = 1 ]; then
+		echo completed
+	else
+		echo not_configured
+	fi
+	return 0
+)
+
+width_code_from_mhz() {
+	case "$1" in
+		20) echo 1 ;;
+		40) echo 2 ;;
+		80) echo 3 ;;
+		160) echo 5 ;;
+		320) echo 13 ;;
+		*) echo -1 ;;
+	esac
+}
+
+available_antenna_masks() {
+	awk '/Available Antennas:/ { print $4 " " $6; exit }'
+}
+
+nss_from_mask() {
+	case "$1" in
+		0x0|0) echo 0 ;;
+		0x1|0x2|0x4|0x8|1|2|4|8) echo 1 ;;
+		0x3|0x5|0x6|0x9|0xa|0xc|3|5|6|9|10|12) echo 2 ;;
+		0x7|0xb|0xd|0xe|7|11|13|14) echo 3 ;;
+		0xf|15) echo 4 ;;
+		*) echo -1 ;;
+	esac
+}
+
+temperature_for_phy() {
+	phy="$1"
+	for file in \
+		"$SYS_ROOT"/class/ieee80211/"$phy"/device/hwmon/hwmon*/temp1_input \
+		"$SYS_ROOT"/class/hwmon/hwmon*/temp1_input \
+		"$SYS_ROOT"/class/thermal/thermal_zone*/temp; do
+		[ -r "$file" ] || continue
+		cat "$file" 2>/dev/null
+		return
+	done
+	echo ''
+}
+
+sku_range() {
+	awk -F: '
+		/\(TMAC\)/ {
+			for (i=2; i<=NF; i++) {
+				n=split($i, a, /[[:space:]]+/)
+				for (j=1; j<=n; j++)
+					if (a[j] ~ /^-?[0-9]+$/ && a[j] < 127) {
+						if (!seen || a[j] < min) min=a[j]
+						if (!seen || a[j] > max) max=a[j]
+						seen=1
+					}
+			}
+		}
+		END { if (seen) printf "%d %d\n", min, max; else print " " }
+	' "$1"
+}
+
+path_is_configured() {
+	awk -F: '
+		/:/ && $1 !~ /Band|T1S/ {
+			for (i=2; i<=NF; i++) {
+				n=split($i, a, /[[:space:]]+/)
+				for (j=1; j<=n; j++)
+					if (a[j] ~ /^-?[0-9]+$/ && a[j] != 0 && a[j] != 127)
+						found=1
+			}
+		}
+		END { print found ? 1 : 0 }
+	' "$1"
+}
+
+collect_radio() {
+	radio="$1"
+	mapping="$(resolve_radio_iface_phy "$radio")" || mapping=''
+	if [ -z "$mapping" ]; then
+		echo "collector error: no live interface/phy mapping for $radio" >&2
+		INCOMPLETE=1
+		return 0
+	fi
+	iface="${mapping%%|*}"
+	phy="${mapping#*|}"
+	band="$(uci -q get wireless."$radio".band)"
+	requested="$(uci -q get wireless."$radio".txpower)"
+	case "$band" in
+		2g) expected_band_idx=0 ;;
+		5g) expected_band_idx=1 ;;
+		*)
+			echo "collector error: unsupported band '$band' for $radio" >&2
+			INCOMPLETE=1
+			return 0
+			;;
+	esac
+
+	epoch="$(date +%s)"
+	timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	mac_before_file="$RAW_DIR/${epoch}-${phy}-mac-state-before.txt"
+	mac_after_file="$RAW_DIR/${epoch}-${phy}-mac-state-after.txt"
+	driver_before_file="$RAW_DIR/${epoch}-${phy}-driver-state-before.txt"
+	driver_after_file="$RAW_DIR/${epoch}-${phy}-driver-state-after.txt"
+	sku_before_file="$RAW_DIR/${epoch}-${phy}-txpower_sku-before.txt"
+	sku_file="$RAW_DIR/${epoch}-${phy}-txpower_sku-after.txt"
+	path_file="$RAW_DIR/${epoch}-${phy}-txpower_path.txt"
+	trace_file="$RAW_DIR/dmesg.txt"
+
+	info_before="$(iw dev "$iface" info 2>/dev/null)"
+	cat "$SYS_ROOT/kernel/debug/ieee80211/$phy/txpower_state" > "$mac_before_file" 2>&1
+	read_rf_telemetry_snapshot "$expected_band_idx" > "$driver_before_file" 2>&1
+	rf_active_before="$(cat "$RF_PARAM_ROOT/cr6608_rf_38dbm_active" 2>/dev/null)"
+	cat "$SYS_ROOT/kernel/debug/ieee80211/$phy/mt76/txpower_sku" > "$sku_before_file" 2>&1
+	cat "$SYS_ROOT/kernel/debug/ieee80211/$phy/mt76/txpower_sku" > "$sku_file" 2>&1
+	cat "$SYS_ROOT/kernel/debug/ieee80211/$phy/mt76/txpower_path" > "$path_file" 2>&1
+	info="$(iw dev "$iface" info 2>/dev/null)"
+	read_rf_telemetry_snapshot "$expected_band_idx" > "$driver_after_file" 2>&1
+	rf_active="$(cat "$RF_PARAM_ROOT/cr6608_rf_38dbm_active" 2>/dev/null)"
+	cat "$SYS_ROOT/kernel/debug/ieee80211/$phy/txpower_state" > "$mac_after_file" 2>&1
+	requested_after="$(uci -q get wireless."$radio".txpower)"
+
+	mac_before="$(cat "$mac_before_file" 2>/dev/null)"
+	mac_state="$(cat "$mac_after_file" 2>/dev/null)"
+	driver_before="$(cat "$driver_before_file" 2>/dev/null)"
+	driver_state="$(cat "$driver_after_file" 2>/dev/null)"
+	channel_before="$(printf '%s\n' "$info_before" | awk '$1=="channel" {print $2; exit}')"
+	freq_before="$(printf '%s\n' "$info_before" | awk '$1=="channel" {gsub(/[()]/, "", $3); print $3; exit}')"
+	width_before="$(printf '%s\n' "$info_before" | awk -F'width: ' '/channel / {split($2,a," "); print a[1]; exit}')"
+	applied_before="$(printf '%s\n' "$info_before" | awk '$1=="txpower" {print $2; exit}')"
+	channel="$(printf '%s\n' "$info" | awk '$1=="channel" {print $2; exit}')"
+	freq="$(printf '%s\n' "$info" | awk '$1=="channel" {gsub(/[()]/, "", $3); print $3; exit}')"
+	width="$(printf '%s\n' "$info" | awk -F'width: ' '/channel / {split($2,a," "); print a[1]; exit}')"
+	width_code="$(width_code_from_mhz "$width")"
+	applied="$(printf '%s\n' "$info" | awk '$1=="txpower" {print $2; exit}')"
+	phy_info="$(iw phy "$phy" info 2>/dev/null)"
+	set -- $(printf '%s\n' "$phy_info" | available_antenna_masks)
+	available_tx_mask="${1:-}"
+	available_rx_mask="${2:-}"
+	iw_channel_max="$(printf '%s\n' "$phy_info" | awk -v c="$channel" '
+		index($0, "[" c "]") && /dBm/ {
+			for (i=1; i<=NF; i++) if ($i == "dBm)") {
+				gsub(/[()]/, "", $(i-1)); print $(i-1); exit
+			}
+		}')"
+
+	sku_bbp_before="$(awk '/Tx power \(bbp\)/ {print $NF; exit}' "$sku_before_file")"
+	sku_bbp="$(awk '/Tx power \(bbp\)/ {print $NF; exit}' "$sku_file")"
+	set -- $(sku_range "$sku_file")
+	sku_min="${1:-}"
+	sku_max="${2:-}"
+	path_configured="$(path_is_configured "$path_file")"
+	now_uptime="$(awk 'NR == 1 { print $1; exit }' "$PROC_ROOT/uptime" 2>/dev/null)"
+	now_uptime_ms="$(awk 'NR == 1 { printf "%.0f\n", $1 * 1000; exit }' "$PROC_ROOT/uptime" 2>/dev/null)"
+
+	evidence_errors=''
+
+	mac_user="$(kv "$mac_state" user_dbm)"
+	chandef_max="$(kv "$mac_state" chandef_dbm)"
+	vif_power="$(kv "$mac_state" vif_dbm)"
+	mac_result="$(kv "$mac_state" result_dbm)"
+	telemetry_requested="$(kv "$driver_state" requested_dbm)"
+	kernel_power="$(kv "$driver_state" kernel_dbm)"
+	regulatory_raw="$(kv "$driver_state" regulatory_dbm)"
+	eeprom_target="$(kv "$driver_state" eeprom_target_per_path_half_dbm)"
+	sar_power="$(kv "$driver_state" sar_bounded_per_path_half_dbm)"
+	path_delta="$(kv "$driver_state" path_delta_half_dbm)"
+	rate_limit="$(kv "$driver_state" rate_limited_per_path_half_dbm)"
+	sku_applied="$(kv "$driver_state" sku_applied_per_path_half_dbm)"
+	override_active="$(kv "$driver_state" override_active)"
+	factory38_persisted_match="$(kv "$driver_state" factory38_persisted_match)"
+	channel_ready="$(kv "$driver_state" channel_ready)"
+	band_idx="$(kv "$driver_state" band)"
+	driver_generation="$(kv "$driver_state" generation)"
+	mcu_generation="$(kv "$driver_state" mcu_generation)"
+	mcu_result="$(kv "$driver_state" mcu_result)"
+	mac_seq="$(kv "$mac_state" snapshot_seq)"
+	mac_snapshot_uptime_ms="$(kv "$mac_state" snapshot_uptime_ms)"
+	temperature="$(temperature_for_phy "$phy")"
+	verified_driver_dbm="$(half_dbm_with_path_to_dbm "$sku_applied" "$path_delta" 2>/dev/null)"
+	nss="$(nss_from_mask "$available_tx_mask")"
+
+	if ! mcu_status="$(mcu_rate_status_from_snapshot "$driver_state")"; then
+		evidence_errors="$evidence_errors mcu_rate_state_invalid"
+	fi
+	if ! mcu_path_status="$(mcu_path_status_from_snapshot "$driver_state" "$path_configured")"; then
+		evidence_errors="$evidence_errors mcu_path_state_invalid"
+	fi
+
+	snapshot_pair_is_stable "$mac_before" "$mac_state" ||
+		evidence_errors="$evidence_errors mac_snapshot_seq_mismatch"
+	rf_snapshot_pair_is_stable "$driver_before" "$driver_state" ||
+		evidence_errors="$evidence_errors rf_telemetry_generation_mismatch"
+	snapshot_is_fresh "$mac_before" "$now_uptime_ms" "$SNAPSHOT_MAX_AGE_SEC" &&
+		snapshot_is_fresh "$mac_state" "$now_uptime_ms" "$SNAPSHOT_MAX_AGE_SEC" ||
+		evidence_errors="$evidence_errors mac_snapshot_stale"
+	snapshot_context_matches "$mac_state" "$phy" "$channel" "$freq" "$width_code" ||
+		evidence_errors="$evidence_errors mac_snapshot_context_mismatch"
+	rf_snapshot_context_matches "$driver_state" "$expected_band_idx" "$channel" "$freq" ||
+		evidence_errors="$evidence_errors rf_telemetry_context_mismatch"
+	[ "$channel_before" = "$channel" ] && [ "$freq_before" = "$freq" ] &&
+		[ "$width_before" = "$width" ] && numeric_equal "$applied_before" "$applied" ||
+		evidence_errors="$evidence_errors iw_context_changed_during_snapshot"
+	[ "$requested" = "$mac_user" ] ||
+		evidence_errors="$evidence_errors uci_mac_user_mismatch"
+	[ "$requested" = "$telemetry_requested" ] ||
+		evidence_errors="$evidence_errors uci_rf_request_mismatch"
+	[ "$requested" = "$kernel_power" ] ||
+		evidence_errors="$evidence_errors uci_kernel_request_mismatch"
+	unchanged_value "$requested" "$requested_after" ||
+		evidence_errors="$evidence_errors uci_request_changed_during_snapshot"
+	[ "$mac_user" != -2147483648 ] ||
+		evidence_errors="$evidence_errors mac_user_unset"
+	numeric_equal "$mac_result" "$applied" ||
+		evidence_errors="$evidence_errors mac_iw_applied_mismatch"
+	numeric_equal "$verified_driver_dbm" "$applied" ||
+		evidence_errors="$evidence_errors mcu_readback_iw_applied_mismatch"
+	numeric_equal "$verified_driver_dbm" "$requested" ||
+		evidence_errors="$evidence_errors mcu_readback_request_mismatch"
+	[ "$sku_bbp_before" = "$sku_bbp" ] ||
+		evidence_errors="$evidence_errors sku_bbp_changed_during_snapshot"
+	numeric_equal "$sku_bbp" "$sku_applied" ||
+		evidence_errors="$evidence_errors sku_bbp_mcu_readback_mismatch"
+	[ "$sku_max" = "$sku_applied" ] ||
+		evidence_errors="$evidence_errors sku_max_mcu_readback_mismatch"
+	[ "$rate_limit" = "$sku_applied" ] ||
+		evidence_errors="$evidence_errors rate_limit_mcu_readback_mismatch"
+	case "$requested:$path_delta" in
+		*[!0-9:]*) expected_rate_peak='' ;;
+		*) expected_rate_peak=$((requested * 2 - path_delta)) ;;
+	esac
+	[ -n "$expected_rate_peak" ] && [ "$sku_applied" = "$expected_rate_peak" ] ||
+		evidence_errors="$evidence_errors exact_half_dbm_accounting_mismatch"
+	[ "$sar_power" = "$expected_rate_peak" ] ||
+		evidence_errors="$evidence_errors sar_bound_exact_peak_mismatch"
+	[ "$override_active" = 1 ] ||
+		evidence_errors="$evidence_errors rf_override_not_active"
+	[ "$channel_ready" = 1 ] ||
+		evidence_errors="$evidence_errors rf_channel_not_ready"
+	module_bool_is_true "$rf_active_before" &&
+		module_bool_is_true "$rf_active" ||
+		evidence_errors="$evidence_errors rf_gate_not_active"
+	[ "$nss" = 2 ] ||
+		evidence_errors="$evidence_errors exact_two_chain_witness_missing"
+	[ "$band_idx" = "$(kv "$mac_state" band)" ] ||
+		evidence_errors="$evidence_errors mac_driver_band_mismatch"
+	case "$band:$band_idx" in
+		2g:0|5g:1) ;;
+		*) evidence_errors="$evidence_errors uci_driver_band_mismatch" ;;
+	esac
+
+	[ "$kernel_power" = "$chandef_max" ] ||
+		evidence_errors="$evidence_errors snapshot_chandef_limit_mismatch"
+	numeric_equal "$kernel_power" "$iw_channel_max" ||
+		evidence_errors="$evidence_errors snapshot_iw_limit_mismatch"
+
+	missing=''
+	for required in requested channel freq width mac_user chandef_max vif_power \
+		mac_result telemetry_requested kernel_power regulatory_raw iw_channel_max \
+		eeprom_target available_tx_mask available_rx_mask sar_power path_delta \
+		rate_limit sku_applied verified_driver_dbm override_active \
+		factory38_persisted_match channel_ready \
+		driver_generation mcu_generation mcu_result applied sku_bbp temperature \
+		now_uptime; do
+		eval "required_value=\${$required}"
+		[ -n "$required_value" ] || missing="$missing $required"
+	done
+	[ -z "$evidence_errors" ] || missing="$missing evidence:$evidence_errors"
+	trace_status=current
+	if [ -n "$missing" ]; then
+		trace_status=invalid
+		echo "collector error: incomplete $radio/$phy fields:$missing" >&2
+		INCOMPLETE=1
+	fi
+
+	json_init
+	json_add_string collector_schema 5
+	json_add_string timestamp_utc "$timestamp"
+	json_add_string epoch "$epoch"
+	json_add_string radio "$radio"
+	json_add_string phy "$phy"
+	json_add_string interface "$iface"
+	json_add_string band "$band"
+	json_add_string channel "$channel"
+	json_add_string freq_mhz "$freq"
+	json_add_string width_mhz "$width"
+	json_add_string available_tx_antennas_mask "$available_tx_mask"
+	json_add_string available_rx_antennas_mask "$available_rx_mask"
+	json_add_string nss "$nss"
+	json_add_string requested_uci_dbm "$requested"
+	json_add_string mac80211_user_dbm "$mac_user"
+	json_add_string chandef_max_dbm "$chandef_max"
+	json_add_string vif_dbm "$vif_power"
+	json_add_string mac80211_result_dbm "$mac_result"
+	json_add_string rf_requested_dbm "$telemetry_requested"
+	json_add_string kernel_request_dbm "$kernel_power"
+	json_add_string regulatory_driver_dbm "$regulatory_raw"
+	json_add_string iw_reported_channel_max_dbm "$iw_channel_max"
+	json_add_string eeprom_target_per_path_half_dbm "$eeprom_target"
+	json_add_string sar_bounded_per_path_half_dbm "$sar_power"
+	json_add_string path_delta_half_dbm "$path_delta"
+	json_add_string rate_limited_per_path_half_dbm "$rate_limit"
+	json_add_string sku_applied_per_path_half_dbm "$sku_applied"
+	json_add_string verified_driver_dbm "$verified_driver_dbm"
+	json_add_string applied_driver_dbm "$applied"
+	json_add_string sku_bbp_half_dbm "$sku_bbp"
+	json_add_string sku_min_half_dbm "$sku_min"
+	json_add_string sku_max_half_dbm "$sku_max"
+	json_add_string path_sku_configured "$path_configured"
+	json_add_string rf_override_active "$override_active"
+	json_add_string factory38_persisted_match "$factory38_persisted_match"
+	json_add_string rf_channel_ready "$channel_ready"
+	json_add_string rf_generation "$driver_generation"
+	json_add_string rf_mcu_generation "$mcu_generation"
+	json_add_string rf_mcu_result "$mcu_result"
+	json_add_string mcu_rate_command_status "$mcu_status"
+	json_add_string mcu_path_command_status "$mcu_path_status"
+	json_add_string trace_status "$trace_status"
+	json_add_string snapshot_max_age_sec "$SNAPSHOT_MAX_AGE_SEC"
+	json_add_string mac_snapshot_seq "$mac_seq"
+	json_add_string mac_snapshot_uptime_ms "$mac_snapshot_uptime_ms"
+	json_add_string temperature_millic "$temperature"
+	json_add_null external_conducted_dbm
+	json_add_string external_measurement_status unmeasured
+	json_dump >> "$JSONL"
+
+	printf '%s\n' "$timestamp,$epoch,$radio,$phy,$iface,$band,$channel,$freq,$width,$available_tx_mask,$available_rx_mask,$nss,$requested,$mac_user,$chandef_max,$vif_power,$mac_result,$telemetry_requested,$kernel_power,$regulatory_raw,$iw_channel_max,$eeprom_target,$sar_power,$path_delta,$rate_limit,$sku_applied,$verified_driver_dbm,$applied,$sku_bbp,$sku_min,$sku_max,$path_configured,$override_active,$factory38_persisted_match,$channel_ready,$driver_generation,$mcu_generation,$mcu_result,$mcu_status,$mcu_path_status,$trace_status,$SNAPSHOT_MAX_AGE_SEC,$mac_seq,$mac_snapshot_uptime_ms,$temperature,,unmeasured" >> "$CSV"
+	SAMPLES_WRITTEN=$((SAMPLES_WRITTEN + 1))
+}
+
+if [ "${CR6608_TXPOWER_COLLECTOR_LIBRARY_ONLY:-0}" = 1 ]; then
+	return 0 2>/dev/null || exit 0
+fi
+
+PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+[ -r "$PRIVATE_RUNTIME_LIB" ] || { echo "collector error: private runtime helper unavailable" >&2; exit 1; }
+. "$PRIVATE_RUNTIME_LIB" || exit 1
+TXPOWER_RUNTIME_DIR="$(cr6608_private_runtime_dir txpower-collect)" || exit 1
+umask 077
+if [ -z "$OUT_DIR" ]; then
+	OUT_DIR="$(mktemp -d "$TXPOWER_RUNTIME_DIR/evidence.XXXXXX" 2>/dev/null)" || exit 1
+	cr6608_private_dir_secure "$OUT_DIR" || exit 1
+else
+	case "$OUT_DIR" in /root/*) ;; *) echo "collector error: --out must be a direct directory under /root" >&2; exit 2 ;; esac
+	case "${OUT_DIR#/root/}" in ''|*/*|*..*|*[!A-Za-z0-9_.-]*) echo "collector error: unsafe output directory" >&2; exit 2 ;; esac
+	cr6608_private_parent_secure /root || { echo "collector error: insecure /root directory" >&2; exit 1; }
+	[ ! -e "$OUT_DIR" ] && [ ! -L "$OUT_DIR" ] || {
+		echo "collector error: output directory already exists; refusing overwrite" >&2
+		exit 1
+	}
+	mkdir -m 0700 "$OUT_DIR" 2>/dev/null || exit 1
+	cr6608_private_dir_secure "$OUT_DIR" || exit 1
+fi
+
+[ -r "$JSHN_LIB" ] || { echo "collector error: missing $JSHN_LIB" >&2; exit 1; }
+. "$JSHN_LIB"
+
+JSONL="$OUT_DIR/txpower-trace.jsonl"
+CSV="$OUT_DIR/txpower-trace.csv"
+RAW_DIR="$OUT_DIR/raw"
+mkdir -m 0700 "$RAW_DIR" || exit 1
+cr6608_private_dir_secure "$RAW_DIR" || exit 1
+
+CSV_HEADER='timestamp_utc,epoch,radio,phy,interface,band,channel,freq_mhz,width_mhz,available_tx_antennas_mask,available_rx_antennas_mask,nss,requested_uci_dbm,mac80211_user_dbm,chandef_max_dbm,vif_dbm,mac80211_result_dbm,rf_requested_dbm,kernel_request_dbm,regulatory_driver_dbm,iw_reported_channel_max_dbm,eeprom_target_per_path_half_dbm,sar_bounded_per_path_half_dbm,path_delta_half_dbm,rate_limited_per_path_half_dbm,sku_applied_per_path_half_dbm,verified_driver_dbm,applied_driver_dbm,sku_bbp_half_dbm,sku_min_half_dbm,sku_max_half_dbm,path_sku_configured,rf_override_active,factory38_persisted_match,rf_channel_ready,rf_generation,rf_mcu_generation,rf_mcu_result,mcu_rate_command_status,mcu_path_command_status,trace_status,snapshot_max_age_sec,mac_snapshot_seq,mac_snapshot_uptime_ms,temperature_millic,external_conducted_dbm,external_measurement_status'
+if [ -s "$CSV" ]; then
+	[ "$(sed -n '1p' "$CSV")" = "$CSV_HEADER" ] || {
+		echo "collector error: refusing to append schema 5 data to an incompatible CSV" >&2
+		exit 1
+	}
+else
+	printf '%s\n' "$CSV_HEADER" > "$CSV"
+fi
+
+snapshot_once
+radios="$(radio_sections)"
+radio_count="$(printf '%s\n' "$radios" | awk 'NF { count++ } END { print count + 0 }')"
+if [ "$radio_count" -eq 0 ]; then
+	echo "collector error: no wifi-device sections" >&2
+	INCOMPLETE=1
+fi
+
+i=0
+while [ "$i" -lt "$COUNT" ]; do
+	for radio in $radios; do
+		collect_radio "$radio"
+	done
+	i=$((i + 1))
+	[ "$i" -ge "$COUNT" ] && break
+	[ "$INTERVAL" -gt 0 ] || break
+	sleep "$INTERVAL"
+done
+
+expected_samples=$((COUNT * radio_count))
+if [ "$SAMPLES_WRITTEN" -ne "$expected_samples" ]; then
+	echo "collector error: wrote $SAMPLES_WRITTEN samples, expected $expected_samples" >&2
+	INCOMPLETE=1
+fi
+
+(cd "$OUT_DIR" && sha256sum txpower-trace.jsonl txpower-trace.csv raw/* > evidence-sha256.txt) || INCOMPLETE=1
+
+echo "jsonl=$JSONL"
+echo "csv=$CSV"
+echo "external_measurement_status=unmeasured"
+[ "$INCOMPLETE" -eq 0 ] || exit 1

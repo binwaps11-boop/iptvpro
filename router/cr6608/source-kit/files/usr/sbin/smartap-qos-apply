@@ -1,0 +1,315 @@
+#!/bin/sh
+# Per-client bridge rate guard using nftables. Values are stored as Mbit/s in
+# smartap qos sections (mac, down, up). The bridge forward hook covers AP-mode
+# switching; input/output cover traffic routed through this device (PPPoE).
+# Excess traffic is dropped; normal traffic is not queued or redirected.
+
+TABLE=smartap_qos
+NFT_BIN="${CR6608_QOS_NFT_BIN:-nft}"
+UCI_BIN="${CR6608_QOS_UCI_BIN:-uci}"
+LOGGER_BIN="${CR6608_QOS_LOGGER_BIN:-logger}"
+RUNTIME_DIR="${CR6608_QOS_RUNTIME_DIR:-}"
+FLOCK_BIN="${CR6608_QOS_FLOCK_BIN:-flock}"
+umask 077
+
+runtime_dir_secure() {
+	local actual_uid owner_mode
+	[ -d "$RUNTIME_DIR" ] && [ ! -L "$RUNTIME_DIR" ] || return 1
+	actual_uid="$(id -u 2>/dev/null)" || return 1
+	owner_mode="$(stat -c '%u:%a' "$RUNTIME_DIR" 2>/dev/null)" || return 1
+	[ "$owner_mode" = "$actual_uid:700" ]
+}
+
+if [ -z "$RUNTIME_DIR" ]; then
+	PRIVATE_RUNTIME_LIB="${CR6608_QOS_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+	[ -r "$PRIVATE_RUNTIME_LIB" ] && . "$PRIVATE_RUNTIME_LIB" || exit 1
+	RUNTIME_DIR="$(cr6608_private_runtime_dir qos)" || exit 1
+fi
+runtime_dir_secure || exit 1
+
+LOCK_FILE="$RUNTIME_DIR/apply.lock"
+
+qos_log() {
+	"$LOGGER_BIN" -t smartap-qos "$*"
+}
+
+lock_file_secure() {
+	local actual_uid owner_mode
+	[ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || return 1
+	actual_uid="$(id -u 2>/dev/null)" || return 1
+	owner_mode="$(stat -c '%u:%a' "$LOCK_FILE" 2>/dev/null)" || return 1
+	[ "$owner_mode" = "$actual_uid:600" ]
+}
+
+prepare_lock_file() {
+	if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+		lock_file_secure
+		return $?
+	fi
+	# The parent is owner-only and never replaced.  Concurrent first callers
+	# may both open this empty inode, but flock serializes them before policy IO.
+	: >"$LOCK_FILE" || return 1
+	chmod 0600 "$LOCK_FILE" 2>/dev/null || return 1
+	lock_file_secure
+}
+
+release_apply_lock() {
+	[ "${QOS_LOCK_OWNER:-0}" = 1 ] || return 0
+	"$FLOCK_BIN" -u 9 >/dev/null 2>&1 || true
+	exec 9>&-
+	QOS_LOCK_OWNER=0
+}
+
+qos_lock_signal_exit() {
+	local rc="$1"
+	trap - EXIT HUP INT TERM
+	release_apply_lock
+	exit "$rc"
+}
+
+serialize_apply() {
+	local wait_max waited=0
+	prepare_lock_file || { qos_log "refusing insecure QoS apply lock"; exit 1; }
+	wait_max="${CR6608_QOS_LOCK_WAIT_MAX:-10}"
+	case "$wait_max" in ''|*[!0-9]*) wait_max=10 ;; esac
+	[ "$wait_max" -ge 1 ] 2>/dev/null && [ "$wait_max" -le 60 ] 2>/dev/null || wait_max=10
+	command -v "$FLOCK_BIN" >/dev/null 2>&1 || {
+		qos_log "QoS apply serialization unavailable"
+		exit 1
+	}
+	exec 9>"$LOCK_FILE" || { qos_log "cannot open QoS apply lock"; exit 1; }
+	# BusyBox-compatible form: the lock is attached to inherited FD 9 and stays
+	# held by this shell across the complete UCI -> nft -> ACTIVE transaction.
+	# The kernel releases it automatically on process exit; explicit traps make
+	# signal and test behavior immediate without stale PID/lock-dir recovery.
+	while ! "$FLOCK_BIN" -xn 9 >/dev/null 2>&1; do
+		waited=$((waited + 1))
+		if [ "$waited" -ge "$wait_max" ]; then
+			exec 9>&-
+			qos_log "timed out waiting for serialized QoS apply"
+			exit 1
+		fi
+		sleep 1
+	done
+	QOS_LOCK_OWNER=1
+	trap release_apply_lock EXIT
+	trap 'qos_lock_signal_exit 129' HUP
+	trap 'qos_lock_signal_exit 130' INT
+	trap 'qos_lock_signal_exit 143' TERM
+}
+
+serialize_apply "$@"
+
+ACTIVE="$RUNTIME_DIR/cr6608-smartap-qos.active.nft"
+
+active_secure() {
+	local actual_uid owner_mode
+	[ -e "$ACTIVE" ] || [ -L "$ACTIVE" ] || return 0
+	[ -f "$ACTIVE" ] && [ ! -L "$ACTIVE" ] || return 1
+	actual_uid="$(id -u 2>/dev/null)" || return 1
+	owner_mode="$(stat -c '%u:%a' "$ACTIVE" 2>/dev/null)" || return 1
+	[ "$owner_mode" = "$actual_uid:600" ]
+}
+
+publish_active() {
+	local ruleset="$1" tmp
+	active_secure || return 1
+	tmp="$(mktemp "$RUNTIME_DIR/.smartap-qos-active.XXXXXX" 2>/dev/null)" || return 1
+	[ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+	chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+	printf '%s\n' "$ruleset" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+	mv -f -- "$tmp" "$ACTIVE" || { rm -f -- "$tmp"; return 1; }
+	active_secure
+}
+
+table_absent() {
+	"$NFT_BIN" list table bridge "$TABLE" >/dev/null 2>&1 && return 1
+	# A failed specific lookup is absence only when nft can still enumerate the
+	# family. Permission/socket/runtime failures must preserve ACTIVE.
+	"$NFT_BIN" list tables bridge >/dev/null 2>&1
+}
+
+remove_table() {
+	if "$NFT_BIN" list table bridge "$TABLE" >/dev/null 2>&1; then
+		"$NFT_BIN" delete table bridge "$TABLE" >/dev/null 2>&1 || return 1
+	fi
+	table_absent || return 1
+	rm -f -- "$ACTIVE" || return 1
+	return 0
+}
+
+valid_rate() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 10000 ] 2>/dev/null
+}
+
+valid_unicast_mac() {
+	local mac="$1" first_octet low_nibble
+	case "$mac" in
+		[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+		*) return 1 ;;
+	esac
+	[ "$mac" != "00:00:00:00:00:00" ] && [ "$mac" != "ff:ff:ff:ff:ff:ff" ] || return 1
+	first_octet="${mac%%:*}"
+	low_nibble="${first_octet#?}"
+	# IEEE group addresses have the low bit of the first octet set.  Rejecting
+	# them prevents a poisoned entry from turning a per-client rule into a
+	# multicast/broadcast-wide drop or rate limit.
+	case "$low_nibble" in 1|3|5|7|9|b|d|f) return 1 ;; esac
+	return 0
+}
+
+active_secure || {
+	"$LOGGER_BIN" -t smartap-qos "refusing insecure active-policy path"
+	exit 1
+}
+
+smartap_show="$("$UCI_BIN" -q show smartap 2>/dev/null || true)"
+entries="$(printf '%s\n' "$smartap_show" | awk -F= '
+	$2 == "qos" && $1 ~ /^smartap\.(@qos\[[0-9]+\]|[A-Za-z0-9_]+)$/ {
+		sub(/^smartap\./, "", $1); print $1
+	}')"
+
+firewall_show="$("$UCI_BIN" -q show firewall 2>/dev/null)" || {
+	"$LOGGER_BIN" -t smartap-qos "cannot read firewall block policy; previous bridge policy kept"
+	exit 1
+}
+firewall_entries="$(printf '%s\n' "$firewall_show" | awk -F= '
+	$2 == "rule" && $1 ~ /^firewall\.(@rule\[[0-9]+\]|[A-Za-z0-9_]+)$/ {
+		sub(/^firewall\./, "", $1); print $1
+	}')"
+
+forward_rules=""
+input_rules=""
+output_rules=""
+rules=0
+blocks=0
+blocked_macs=""
+
+# fw4 cannot enforce a MAC block for traffic switched entirely inside an AP
+# bridge.  Mirror only the exact dashboard-owned firewall rule contract into
+# bridge-family hooks.  Any malformed CR6608 rule aborts before nft is touched,
+# preserving the previously active fail-closed policy.
+for sec in $firewall_entries; do
+	name="$("$UCI_BIN" -q get "firewall.$sec.name" 2>/dev/null)" || continue
+	case "$name" in CR6608-Block-*) ;; *) continue ;; esac
+	name_mac="${name#CR6608-Block-}"
+	name_mac="$(printf '%s' "$name_mac" | tr 'A-F' 'a-f')"
+	src_mac="$("$UCI_BIN" -q get "firewall.$sec.src_mac" 2>/dev/null | tr 'A-F' 'a-f')" || src_mac=""
+	target="$("$UCI_BIN" -q get "firewall.$sec.target" 2>/dev/null)" || target=""
+	if ! valid_unicast_mac "$name_mac" || ! valid_unicast_mac "$src_mac" ||
+	   [ "$name_mac" != "$src_mac" ] || [ "$target" != "REJECT" ]; then
+		"$LOGGER_BIN" -t smartap-qos "malformed CR6608 block rule; previous bridge policy kept"
+		exit 1
+	fi
+	case " $blocked_macs " in *" $src_mac "*) continue ;; esac
+	blocked_macs="$blocked_macs $src_mac"
+	forward_rules="${forward_rules}  ether saddr $src_mac counter drop comment \"SmartAP block source $src_mac\"
+  ether daddr $src_mac counter drop comment \"SmartAP block destination $src_mac\"
+"
+	input_rules="${input_rules}  ether saddr $src_mac counter drop comment \"SmartAP block source $src_mac\"
+"
+	output_rules="${output_rules}  ether daddr $src_mac counter drop comment \"SmartAP block destination $src_mac\"
+"
+	blocks=$((blocks + 1))
+done
+
+for sec in $entries; do
+	mac="$("$UCI_BIN" -q get "smartap.$sec.mac" 2>/dev/null | tr 'A-F' 'a-f')"
+	dn="$("$UCI_BIN" -q get "smartap.$sec.down" 2>/dev/null)"
+	up="$("$UCI_BIN" -q get "smartap.$sec.up" 2>/dev/null)"
+	valid_unicast_mac "$mac" || {
+		"$LOGGER_BIN" -t smartap-qos "invalid per-client QoS MAC; previous bridge policy kept"
+		exit 1
+	}
+	if valid_rate "$dn"; then
+		rate=$((dn * 125)); burst=$((rate / 10)); [ "$burst" -ge 64 ] || burst=64
+		rule="  ether daddr $mac limit rate over $rate kbytes/second burst $burst kbytes counter drop comment \"SmartAP down $mac\""
+		forward_rules="${forward_rules}${rule}
+"
+		output_rules="${output_rules}${rule}
+"
+		rules=$((rules + 1))
+	fi
+	if valid_rate "$up"; then
+		rate=$((up * 125)); burst=$((rate / 10)); [ "$burst" -ge 64 ] || burst=64
+		rule="  ether saddr $mac limit rate over $rate kbytes/second burst $burst kbytes counter drop comment \"SmartAP up $mac\""
+		forward_rules="${forward_rules}${rule}
+"
+		input_rules="${input_rules}${rule}
+"
+		rules=$((rules + 1))
+	fi
+done
+
+[ "$rules" -gt 0 ] || [ "$blocks" -gt 0 ] || {
+	remove_table || { "$LOGGER_BIN" -t smartap-qos "failed to remove empty bridge policy; active snapshot kept"; exit 1; }
+	exit 0
+}
+ruleset="table bridge $TABLE {
+ chain forward {
+  type filter hook forward priority 10; policy accept;
+${forward_rules} }
+ chain input {
+  type filter hook input priority 10; policy accept;
+${input_rules} }
+ chain output {
+  type filter hook output priority 10; policy accept;
+${output_rules} }
+}"
+
+previous_rules=""
+if [ -s "$ACTIVE" ]; then
+	previous_rules="$(cat -- "$ACTIVE")" || exit 1
+fi
+if "$NFT_BIN" list table bridge "$TABLE" >/dev/null 2>&1; then
+	deployment_ruleset="delete table bridge $TABLE
+$ruleset"
+else
+	deployment_ruleset="$ruleset"
+fi
+
+# Validate and apply the exact same in-memory nft transaction over stdin. No
+# attacker-replaceable pathname exists between check and use, and nft keeps the
+# previous live table when a batch replacement fails.
+printf '%s\n' "$deployment_ruleset" | "$NFT_BIN" -c -f - >/dev/null 2>&1 || {
+	"$LOGGER_BIN" -t smartap-qos "invalid generated bridge policy; previous table kept"
+	exit 1
+}
+
+if ! printf '%s\n' "$deployment_ruleset" | "$NFT_BIN" -f -; then
+	if [ -n "$previous_rules" ] && "$NFT_BIN" list table bridge "$TABLE" >/dev/null 2>&1; then
+		"$LOGGER_BIN" -t smartap-qos "new bridge policy failed atomically; previous policy kept"
+	else
+		"$LOGGER_BIN" -t smartap-qos "failed to install bridge policy; live policy state is unknown"
+	fi
+	exit 1
+fi
+
+if ! publish_active "$ruleset"; then
+	restore_ok=0
+	if [ -n "$previous_rules" ]; then
+		if "$NFT_BIN" list table bridge "$TABLE" >/dev/null 2>&1; then
+			restore_ruleset="delete table bridge $TABLE
+$previous_rules"
+		else
+			restore_ruleset="$previous_rules"
+		fi
+		if printf '%s\n' "$restore_ruleset" | "$NFT_BIN" -c -f - >/dev/null 2>&1 &&
+		   printf '%s\n' "$restore_ruleset" | "$NFT_BIN" -f - >/dev/null 2>&1 &&
+		   publish_active "$previous_rules"; then
+			restore_ok=1
+		fi
+	elif remove_table; then
+		restore_ok=1
+	fi
+	if [ "$restore_ok" = 1 ]; then
+		"$LOGGER_BIN" -t smartap-qos "installed policy could not be published safely; previous policy restored"
+	else
+		"$LOGGER_BIN" -t smartap-qos "installed policy could not be published and rollback verification failed"
+	fi
+	exit 1
+fi
+
+"$LOGGER_BIN" -t smartap-qos "installed $rules per-client rates and $blocks blocked MACs across bridge and routed paths"
+exit 0

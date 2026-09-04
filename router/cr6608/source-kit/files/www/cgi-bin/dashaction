@@ -1,0 +1,276 @@
+#!/bin/sh
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+if [ ! -r "$SESSION_AUTH_LIB" ]; then
+  printf 'Status: 503 Service Unavailable\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src '\''none'\''; frame-ancestors '\''none'\''\r\n\r\n'
+  printf '{"ok":false,"error":"authentication_unavailable"}\n'
+  exit 0
+fi
+. "$SESSION_AUTH_LIB"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+if [ -r "$CACHE_STATE_LIB" ]; then
+  . "$CACHE_STATE_LIB"
+fi
+reject_request() {
+  printf 'Status: %s\r\n' "$1"
+  [ "$1" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+  printf 'Content-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src '\''none'\''; frame-ancestors '\''none'\''\r\n\r\n'
+  printf '{"ok":false,"error":"%s"}\n' "$2"
+  exit 0
+}
+[ "${REQUEST_METHOD:-GET}" = POST ] || reject_request "405 Method Not Allowed" "method"
+body_len="${CONTENT_LENGTH:-0}"
+case "$body_len" in ''|*[!0-9]*) reject_request "400 Bad Request" "content_length" ;; esac
+[ "${#body_len}" -le 4 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+[ "$body_len" -le 4096 ] 2>/dev/null || reject_request "413 Payload Too Large" "payload_too_large"
+REQ=""
+[ "$body_len" -gt 0 ] 2>/dev/null && REQ="$(dd bs=1 count="$body_len" 2>/dev/null)"
+# --- safety: no system command may hang the API ---
+close_dashboard_fds() { exec 4>&- 5>&- 6>&- 7>&- 8>&-; }
+run_limit() {
+  sec="$1"; shift
+  ( close_dashboard_fds; exec "$@" ) & pid=$!
+  ( close_dashboard_fds; sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & guard=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  guard_children="$(pgrep -P "$guard" 2>/dev/null)"
+  kill "$guard" 2>/dev/null
+  [ -n "$guard_children" ] && kill $guard_children 2>/dev/null
+  wait "$guard" 2>/dev/null
+  return "$rc"
+}
+ubus() { run_limit 5 /bin/ubus "$@" 2>/dev/null; }
+iwinfo() { run_limit 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+iw() { run_limit 6 /usr/sbin/iw "$@" 2>/dev/null; }
+param() {
+  printf '%s' "$REQ" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1
+}
+deny_auth() {
+  printf 'Status: 403 Forbidden\r\n'
+  printf 'Content-Type: application/json; charset=utf-8\r\n'
+  printf 'Cache-Control: no-store\r\n'
+  printf 'X-Content-Type-Options: nosniff\r\n'
+  printf 'Referrer-Policy: no-referrer\r\n'
+  printf 'X-Frame-Options: DENY\r\n'
+  printf 'Content-Security-Policy: default-src '\''none'\''; frame-ancestors '\''none'\''\r\n'
+  printf '\r\n'
+  printf '{"ok":false,"message":"valid Xiaomi CR6608 session required"}\n'
+  exit 0
+}
+json_msg() {
+  msg="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g' | tr '\n' ' ')"
+  command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+    cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+  printf '{"ok":%s,"message":"%s"}\n' "$1" "$msg"
+}
+
+apply_lock="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+apply_lock_owner=0
+apply_lock_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+release_apply_lock() {
+  command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+    cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+  [ "$apply_lock_owner" = 1 ] || return 0
+  read owner_pid owner_start <"$apply_lock/owner" 2>/dev/null || return 0
+  [ "$owner_pid" = "$$" ] && [ "$owner_start" = "$apply_start" ] || return 0
+  rm -f "$apply_lock/owner" 2>/dev/null
+  rmdir "$apply_lock" 2>/dev/null || true
+  apply_lock_owner=0
+}
+apply_signal_exit() {
+  apply_signal_rc="$1"
+  trap - EXIT HUP INT TERM
+  release_apply_lock
+  exit "$apply_signal_rc"
+}
+acquire_apply_lock() {
+  attempts=0
+  ownerless=0
+  apply_start="$(apply_lock_start "$$")"
+  [ -n "$apply_start" ] || return 1
+  while ! mkdir "$apply_lock" 2>/dev/null; do
+    owner_pid=""; owner_start=""
+    read owner_pid owner_start <"$apply_lock/owner" 2>/dev/null || true
+    case "$owner_pid:$owner_start" in
+      *[!0-9:]*|:|*:)
+        ownerless=$((ownerless + 1))
+        attempts=$((attempts + 1))
+        if [ "$ownerless" -ge 3 ]; then
+          rm -f "$apply_lock/owner" 2>/dev/null
+          rmdir "$apply_lock" 2>/dev/null || true
+        else
+          sleep 1
+        fi
+        [ "$attempts" -le 3 ] || return 1
+        continue
+        ;;
+    esac
+    live_start="$(apply_lock_start "$owner_pid")"
+    if [ -z "$live_start" ] || [ "$live_start" != "$owner_start" ]; then
+      rm -f "$apply_lock/owner" 2>/dev/null
+      rmdir "$apply_lock" 2>/dev/null || true
+    else
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 3 ] || return 1
+  done
+  printf '%s %s\n' "$$" "$apply_start" >"$apply_lock/owner" || {
+    rmdir "$apply_lock" 2>/dev/null
+    return 1
+  }
+  apply_lock_owner=1
+  trap release_apply_lock EXIT
+  trap 'apply_signal_exit 129' HUP
+  trap 'apply_signal_exit 130' INT
+  trap 'apply_signal_exit 143' TERM
+}
+
+toggle_radio() {
+  radio="$1"
+  other="$2"
+  label="$3"
+  backup="$(mktemp /tmp/cr6608-radio-toggle.XXXXXX 2>/dev/null)" || {
+    json_msg false "Could not create a unique Wi-Fi safety backup."
+    return
+  }
+  chmod 0600 "$backup" 2>/dev/null || {
+    rm -f "$backup"
+    json_msg false "Could not protect the Wi-Fi safety backup."
+    return
+  }
+  current="$(uci -q get wireless."$radio".disabled)"; current="${current:-0}"
+  other_state="$(uci -q get wireless."$other".disabled)"; other_state="${other_state:-0}"
+  if [ "$current" = 0 ] && [ "$other_state" = 1 ]; then
+    json_msg false "لا يمكن إطفاء الراديوين معاً. شغّل الحزمة الأخرى أولاً."
+    return
+  fi
+  if [ "$current" = 0 ]; then
+    next=1
+    state="تم إيقاف $label فقط"
+  else
+    next=0
+    state="تم تشغيل $label"
+  fi
+  cp -f /etc/config/wireless "$backup" 2>/dev/null || {
+    json_msg false "Could not create a Wi-Fi safety backup."
+    return
+  }
+  uci set wireless."$radio".disabled="$next" || {
+    rm -f "$backup"
+    json_msg false "تعذر حفظ حالة $label."
+    return
+  }
+  uci commit wireless || {
+    cp -f "$backup" /etc/config/wireless 2>/dev/null
+    rm -f "$backup"
+    json_msg false "تعذر تثبيت حالة $label."
+    return
+  }
+  CR6608_INHERIT_CACHE_LOCK=1 /usr/sbin/cr6608-safe-wifi-reload 20 "$backup" "$radio" >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" != "0" ]; then
+    if [ "$rc" = "1" ]; then
+      rm -f "$backup"
+      json_msg false "Radio apply failed; the previous Wi-Fi configuration and runtime were restored."
+    else
+      json_msg false "Radio apply failed and restored runtime could not be verified. Safety backup retained at $backup."
+    fi
+    return
+  fi
+  rm -f "$backup"
+  json_msg true "$state. لم يتم تغيير الراديو الآخر."
+}
+
+sid="$(cr6608_session_from_request)"
+cr6608_session_valid "$sid" || deny_auth
+
+printf 'Content-Type: application/json; charset=utf-8\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf 'Referrer-Policy: no-referrer\r\n'
+printf 'X-Frame-Options: DENY\r\n'
+printf 'Content-Security-Policy: default-src '\''none'\''; frame-ancestors '\''none'\''\r\n'
+printf '\r\n'
+
+action="$(param action)"
+confirm="$(param confirm)"
+
+case "$action" in
+  refresh|speedtest|'') ;;
+  *)
+    acquire_apply_lock || {
+      json_msg false "Another configuration transaction is active."
+      exit 0
+    }
+    if ! command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 ||
+       ! cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1; then
+      json_msg false "The dashboard cache lock is unavailable; no action was run. Retry the action."
+      exit 0
+    fi
+    if [ -e /etc/smartap-pending-rollback ] || [ -L /etc/smartap-pending-rollback ] ||
+       [ -e /var/run/cr6608-private/safe-apply/armed ] || [ -L /var/run/cr6608-private/safe-apply/armed ]; then
+      json_msg false "Confirm or roll back the pending Safe Apply transaction first."
+      exit 0
+    fi
+    ;;
+esac
+
+case "$action" in
+  refresh)
+    json_msg true "تم تحديث البيانات من الواجهة."
+    ;;
+  speedtest)
+    json_msg true "اختبار السرعة الخارجي غير مفعل لأن اللوحة تعمل offline؛ استخدم الاختبار المحلي داخل الواجهة."
+    ;;
+  reconnect)
+    if [ "$confirm" = "1" ]; then
+      # Renew the WAN client without bouncing the LAN bridge or both radios.
+      ifdown wan >/dev/null 2>&1 || true
+      sleep 1
+      ifup wan >/dev/null 2>&1 || {
+        json_msg false "WAN renewal failed; Wi-Fi was not interrupted."
+        return
+      }
+      waited=0
+      wan_up=false
+      while [ "$waited" -lt 20 ]; do
+        wan_up="$(ubus call network.interface.wan status 2>/dev/null |
+          jsonfilter -e '@.up' 2>/dev/null)"
+        [ "$wan_up" = "true" ] && break
+        sleep 1
+        waited=$((waited + 1))
+      done
+      if [ "$wan_up" != "true" ]; then
+        json_msg false "WAN did not reach the up state; Wi-Fi radios were not restarted."
+        return
+      fi
+      json_msg true "WAN is up after renewal. Wi-Fi radios were not restarted."
+    else
+      json_msg false "إعادة الاتصال تحتاج تأكيداً (اضغط الزر مرة أخرى)."
+    fi
+    ;;
+  wifi_radio0)
+    if [ "$confirm" = "1" ]; then
+      toggle_radio radio0 radio1 "Wi-Fi 2.4G"
+    else
+      json_msg false "تغيير حالة Wi-Fi 2.4G يحتاج تأكيداً."
+    fi
+    ;;
+  wifi_radio1)
+    if [ "$confirm" = "1" ]; then
+      toggle_radio radio1 radio0 "Wi-Fi 5G"
+    else
+      json_msg false "تغيير حالة Wi-Fi 5G يحتاج تأكيداً."
+    fi
+    ;;
+  reboot)
+    if [ "$confirm" = "1" ]; then
+      (close_dashboard_fds; sleep 2; reboot) >/dev/null 2>&1 &
+      json_msg true "تم إرسال أمر إعادة التشغيل. سيعود الراوتر بعد قليل."
+    else
+      json_msg false "إعادة التشغيل تحتاج تأكيداً."
+    fi
+    ;;
+  *)
+    json_msg false "إجراء غير معروف."
+    ;;
+esac

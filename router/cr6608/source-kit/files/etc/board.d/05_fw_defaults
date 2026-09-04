@@ -1,0 +1,24 @@
+. /lib/functions/uci-defaults.sh
+
+# uboot-envtools generates /etc/fw_env.config later from uci-defaults.  On
+# CR6608 the generic board-default import otherwise probes an undefined NVMEM
+# layout during preinit and emits misleading parser errors.  Factory settings
+# are supplied by the device tree and our explicit first-boot policy, so defer
+# this optional environment import until a valid layout is present.
+[ -r /etc/fw_env.config ] || exit 0
+
+fw_loadenv
+
+board_config_update
+
+[ -f /var/run/uboot-env/owrt_ssid -a -f /var/run/uboot-env/owrt_wifi_key ] &&
+	ucidef_set_wireless all "$(cat /var/run/uboot-env/owrt_ssid)" sae-mixed "$(cat /var/run/uboot-env/owrt_wifi_key)"
+[ -f /var/run/uboot-env/owrt_country ] && ucidef_set_country "$(cat /var/run/uboot-env/owrt_country)"
+[ -f /var/run/uboot-env/owrt_ssh_auth_key ] && ucidef_set_ssh_authorized_key "$(cat /var/run/uboot-env/owrt_ssh_auth_key)"
+[ -f /var/run/uboot-env/owrt_root_password_plain ] && ucidef_set_root_password_plain "$(cat /var/run/uboot-env/owrt_root_password_plain)"
+[ -f /var/run/uboot-env/owrt_root_password_hash ] && ucidef_set_root_password_hash "$(cat /var/run/uboot-env/owrt_root_password_hash)"
+[ -f /var/run/uboot-env/owrt_timezone ] && ucidef_set_timezone "$(cat /var/run/uboot-env/owrt_timezone)"
+
+board_config_flush
+
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# Enable each overlay-provided product runtime whose state must survive reboot.
+# Every command is idempotent.  Rescue is enabled here but deliberately not
+# started from the START=10 UCI-defaults phase: its START=99 service ordering,
+# plus LAN/AP hotplug on first boot, guarantees that netifd and hostapd exist
+# before activation.
+[ -x /etc/init.d/cr6608-rescue-guard ] || exit 1
+/etc/init.d/cr6608-rescue-guard enable || exit 1
+
+for service in cr6608-ipv4-only smartap-qos cr6608-quicksettings cr6608-management-guard; do
+	[ -x "/etc/init.d/$service" ] || exit 1
+	"/etc/init.d/$service" enable || exit 1
+	"/etc/init.d/$service" start || exit 1
+done
+
+# v86 and earlier could install a boot-time dashboard prewarm service.  The
+# live-only UI has no boot collector and no retained response, so remove any
+# preserved rc.d links or overlay copies during upgrade without starting a
+# replacement.
+rm -f -- \
+	/etc/rc.d/S99cr6608-dashboard-cache \
+	/etc/rc.d/K99cr6608-dashboard-cache \
+	/etc/init.d/cr6608-dashboard-cache \
+	/usr/sbin/cr6608-dashboard-prewarm 2>/dev/null || exit 1
+
+# The package-owned usteer start action deliberately returns non-zero when its
+# config is disabled. Install the rc.d link unconditionally, but only start the
+# daemon after the owner has explicitly enabled Smart Connect.
+[ -x /etc/init.d/usteer ] || exit 1
+/etc/init.d/usteer enable || exit 1
+if [ "$(uci -q get usteer.main.enabled 2>/dev/null)" = "1" ]; then
+	/etc/init.d/usteer start || exit 1
+else
+	/etc/init.d/usteer stop >/dev/null 2>&1 || true
+fi
+
+exit 0

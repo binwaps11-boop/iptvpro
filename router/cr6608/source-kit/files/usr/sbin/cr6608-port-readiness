@@ -1,0 +1,272 @@
+#!/bin/sh
+# Non-disruptive DSA/VLAN/WAN readiness probe.  It never cycles a PHY, changes
+# UCI, or sends test traffic.  With --require-traffic, an external traffic
+# generator must exercise each requested port during --observe.
+
+set -u
+
+LIB="${CR6608_PORT_READINESS_LIB:-/usr/libexec/cr6608-port-readiness-lib}"
+[ -r "$LIB" ] || { printf 'result=FAIL reason=missing-library\n'; exit 1; }
+. "$LIB" || exit 1
+CR6608_PORT_SLEEP_BIN="${CR6608_PORT_SLEEP_BIN:-/bin/sleep}"
+
+observe=0
+require_carrier=""
+require_traffic=""
+status=0
+snapshot=""
+
+cleanup() {
+	[ -z "$snapshot" ] || rm -f -- "$snapshot" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+usage() {
+	printf '%s\n' \
+		'usage: cr6608-port-readiness [--observe 1..86400] [--require-carrier PORTS] [--require-traffic PORTS]' \
+		'PORTS is a comma-separated subset of lan1,lan2,lan3,wan.'
+}
+
+normalize_ports() {
+	local raw="$1" port out=""
+	[ -n "$raw" ] || return 0
+	case "$raw" in *[!A-Za-z0-9,_-]*) return 1 ;; esac
+	for port in $(printf '%s' "$raw" | tr ',' ' '); do
+		cr6608_port_token_valid "$port" || return 1
+		case " $out " in *" $port "*) ;; *) out="${out}${out:+ }$port" ;; esac
+	done
+	[ -n "$out" ] || return 1
+	printf '%s\n' "$out"
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--observe)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			observe="$2"; shift 2
+			;;
+		--require-carrier)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			require_carrier="$(normalize_ports "$2")" || { usage >&2; exit 2; }
+			shift 2
+			;;
+		--require-traffic)
+			[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+			require_traffic="$(normalize_ports "$2")" || { usage >&2; exit 2; }
+			shift 2
+			;;
+		-h|--help) usage; exit 0 ;;
+		*) usage >&2; exit 2 ;;
+	esac
+done
+
+case "$observe" in ''|*[!0-9]*) usage >&2; exit 2 ;; esac
+[ "$observe" -le 86400 ] 2>/dev/null || { usage >&2; exit 2; }
+[ -z "$require_traffic" ] || [ "$observe" -gt 0 ] 2>/dev/null || {
+	printf 'reason=require-traffic-needs-observation\n'
+	printf 'result=FAIL\n'
+	exit 2
+}
+
+contains_port() {
+	case " $1 " in *" $2 "*) return 0 ;; esac
+	return 1
+}
+
+port_admin_down_proven() {
+	local flags hex
+	flags="$(cat "$CR6608_PORT_SYS_CLASS_NET/$1/flags" 2>/dev/null)" || return 1
+	case "$flags" in 0x*) ;; *) return 1 ;; esac
+	hex="${flags#0x}"
+	case "$hex" in ''|*[!0-9A-Fa-f]*) return 1 ;; esac
+	[ "$((flags & 1))" -eq 0 ] 2>/dev/null
+}
+
+read_counter() {
+	local value
+	value="$(cat "$CR6608_PORT_SYS_CLASS_NET/$1/statistics/$2" 2>/dev/null)" || return 1
+	case "$value" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$value"
+}
+
+write_snapshot() {
+	local port rx_packets tx_packets rx_errors tx_errors rx_dropped tx_dropped
+	for port in lan1 lan2 lan3 wan; do
+		rx_packets="$(read_counter "$port" rx_packets)" || return 1
+		tx_packets="$(read_counter "$port" tx_packets)" || return 1
+		rx_errors="$(read_counter "$port" rx_errors)" || return 1
+		tx_errors="$(read_counter "$port" tx_errors)" || return 1
+		rx_dropped="$(read_counter "$port" rx_dropped)" || return 1
+		tx_dropped="$(read_counter "$port" tx_dropped)" || return 1
+		printf '%s %s %s %s %s %s %s\n' "$port" \
+			"$rx_packets" "$tx_packets" "$rx_errors" "$tx_errors" \
+			"$rx_dropped" "$tx_dropped"
+	done
+}
+
+umask 077
+snapshot="$(mktemp /tmp/cr6608-port-readiness.XXXXXX 2>/dev/null)" || {
+	printf 'reason=temporary-state\n'; printf 'result=FAIL\n'; exit 1;
+}
+if ! write_snapshot > "$snapshot"; then
+	printf 'reason=counter-snapshot\n'
+	printf 'result=FAIL\n'
+	exit 1
+fi
+
+printf 'scope=read-only-no-phy-cycle-no-generated-traffic\n'
+printf 'observation_seconds=%s\n' "$observe"
+
+if cr6608_bridge_membership_valid; then
+	printf 'bridge_contract=PASS\n'
+else
+	printf 'bridge_contract=FAIL\n'; status=1
+fi
+if cr6608_vlan_contract_valid; then
+	printf 'vlan_contract=PASS\n'
+else
+	printf 'vlan_contract=FAIL\n'; status=1
+fi
+wan_state=invalid
+if wan_state="$(cr6608_wan_contract)"; then
+	printf 'wan_contract=PASS state=%s\n' "$wan_state"
+else
+	printf 'wan_contract=FAIL state=invalid\n'; status=1
+fi
+
+for port in lan1 lan2 lan3 wan; do
+	if [ ! -d "$CR6608_PORT_SYS_CLASS_NET/$port" ]; then
+		printf 'port.%s.present=0\n' "$port"
+		status=1
+		continue
+	fi
+	printf 'port.%s.present=1\n' "$port"
+	master="$(cr6608_port_master "$port" 2>/dev/null || true)"
+	case "$port" in
+		lan1|lan2|lan3)
+			if [ "$master" = br-lan ]; then topology=PASS; else topology=FAIL; status=1; fi
+			;;
+		wan)
+			if [ -z "$master" ]; then topology=PASS; else topology=FAIL; status=1; fi
+			;;
+	esac
+	link_telemetry=PASS
+	reserved_admin_down=0
+	if [ "$port" = wan ] && [ "$wan_state" = reserved ] &&
+	   ! contains_port "$require_carrier" wan &&
+	   ! contains_port "$require_traffic" wan &&
+	   port_admin_down_proven wan; then
+		reserved_admin_down=1
+	fi
+	if carrier="$(cat "$CR6608_PORT_SYS_CLASS_NET/$port/carrier" 2>/dev/null)"; then
+		case "$carrier" in 0|1) ;; *) carrier=unknown; link_telemetry=FAIL ;; esac
+	else
+		if [ "$reserved_admin_down" -eq 1 ]; then carrier=unavailable
+		else carrier=unreadable; link_telemetry=FAIL
+		fi
+	fi
+	if operstate="$(cat "$CR6608_PORT_SYS_CLASS_NET/$port/operstate" 2>/dev/null)"; then
+		case "$operstate" in up|down|dormant|lowerlayerdown|notpresent|testing|unknown) ;;
+			*) operstate=invalid; link_telemetry=FAIL ;;
+		esac
+	else
+		operstate=unreadable; link_telemetry=FAIL
+	fi
+	if speed="$(cat "$CR6608_PORT_SYS_CLASS_NET/$port/speed" 2>/dev/null)"; then
+		case "$speed" in
+			-1) speed=unavailable ;;
+			''|*[!0-9]*) speed=invalid; link_telemetry=FAIL ;;
+		esac
+	else
+		if [ "$reserved_admin_down" -eq 1 ]; then speed=unavailable
+		else speed=unreadable; link_telemetry=FAIL
+		fi
+	fi
+	if duplex="$(cat "$CR6608_PORT_SYS_CLASS_NET/$port/duplex" 2>/dev/null)"; then
+		duplex="$(printf '%s' "$duplex" | tr A-Z a-z)"
+		case "$duplex" in full|half|unknown) ;; *) duplex=invalid; link_telemetry=FAIL ;; esac
+	else
+		if [ "$reserved_admin_down" -eq 1 ]; then duplex=unavailable
+		else duplex=unreadable; link_telemetry=FAIL
+		fi
+	fi
+	# A down LAN port may legitimately report speed=-1 and duplex=unknown.  WAN
+	# telemetry may be unavailable only for the exact reserved, IFF_UP=0 state
+	# above; a configured or administratively-up WAN remains fail-closed.
+	if [ "$carrier" = 1 ]; then
+		case "$speed" in ''|0|unavailable|invalid|unreadable) link_telemetry=FAIL ;; esac
+		case "$duplex" in full|half) ;; *) link_telemetry=FAIL ;; esac
+	fi
+	if [ "$port" = wan ] && [ "$reserved_admin_down" -ne 1 ]; then
+		case "$speed" in unavailable|unreadable) link_telemetry=FAIL ;; esac
+		case "$duplex" in unknown|unavailable|unreadable) link_telemetry=FAIL ;; esac
+	fi
+	[ "$link_telemetry" = PASS ] || status=1
+	printf 'port.%s.topology=%s master=%s carrier=%s operstate=%s speed_mbps=%s duplex=%s reserved_admin_down=%s link_telemetry=%s\n' \
+		"$port" "$topology" "${master:-none}" "$carrier" "$operstate" "$speed" "$duplex" \
+		"$reserved_admin_down" "$link_telemetry"
+	rx_packets="$(read_counter "$port" rx_packets)" || { rx_packets=unknown; status=1; }
+	tx_packets="$(read_counter "$port" tx_packets)" || { tx_packets=unknown; status=1; }
+	rx_errors="$(read_counter "$port" rx_errors)" || { rx_errors=unknown; status=1; }
+	tx_errors="$(read_counter "$port" tx_errors)" || { tx_errors=unknown; status=1; }
+	rx_dropped="$(read_counter "$port" rx_dropped)" || { rx_dropped=unknown; status=1; }
+	tx_dropped="$(read_counter "$port" tx_dropped)" || { tx_dropped=unknown; status=1; }
+	printf 'port.%s.rx_packets=%s tx_packets=%s rx_errors=%s tx_errors=%s rx_dropped=%s tx_dropped=%s\n' \
+		"$port" "$rx_packets" "$tx_packets" "$rx_errors" "$tx_errors" \
+		"$rx_dropped" "$tx_dropped"
+	if contains_port "$require_carrier" "$port" && [ "$carrier" != 1 ]; then
+		printf 'port.%s.required_carrier=FAIL\n' "$port"; status=1
+	elif contains_port "$require_carrier" "$port"; then
+		printf 'port.%s.required_carrier=PASS\n' "$port"
+	fi
+done
+
+if [ "$observe" -gt 0 ] 2>/dev/null; then
+	if ! "$CR6608_PORT_SLEEP_BIN" "$observe"; then
+		printf 'observation_wait=FAIL\n'
+		status=1
+	else
+	while read -r port rx_before tx_before rxerr_before txerr_before rxdrop_before txdrop_before; do
+		counter_sample_ok=1
+		rx_now="$(read_counter "$port" rx_packets)" || counter_sample_ok=0
+		tx_now="$(read_counter "$port" tx_packets)" || counter_sample_ok=0
+		rxerr_now="$(read_counter "$port" rx_errors)" || counter_sample_ok=0
+		txerr_now="$(read_counter "$port" tx_errors)" || counter_sample_ok=0
+		rxdrop_now="$(read_counter "$port" rx_dropped)" || counter_sample_ok=0
+		txdrop_now="$(read_counter "$port" tx_dropped)" || counter_sample_ok=0
+		if [ "$counter_sample_ok" -ne 1 ]; then
+			printf 'port.%s.counter_sample=FAIL\n' "$port"
+			status=1
+			continue
+		fi
+		if [ "$rx_now" -ge "$rx_before" ] 2>/dev/null; then rx_delta=$((rx_now-rx_before)); else rx_delta=0; status=1; fi
+		if [ "$tx_now" -ge "$tx_before" ] 2>/dev/null; then tx_delta=$((tx_now-tx_before)); else tx_delta=0; status=1; fi
+		if [ "$rxerr_now" -ge "$rxerr_before" ] 2>/dev/null; then rxerr_delta=$((rxerr_now-rxerr_before)); else rxerr_delta=0; status=1; fi
+		if [ "$txerr_now" -ge "$txerr_before" ] 2>/dev/null; then txerr_delta=$((txerr_now-txerr_before)); else txerr_delta=0; status=1; fi
+		if [ "$rxdrop_now" -ge "$rxdrop_before" ] 2>/dev/null; then rxdrop_delta=$((rxdrop_now-rxdrop_before)); else rxdrop_delta=0; status=1; fi
+		if [ "$txdrop_now" -ge "$txdrop_before" ] 2>/dev/null; then txdrop_delta=$((txdrop_now-txdrop_before)); else txdrop_delta=0; status=1; fi
+		printf 'port.%s.delta_rx_packets=%s delta_tx_packets=%s delta_rx_errors=%s delta_tx_errors=%s delta_rx_dropped=%s delta_tx_dropped=%s\n' \
+			"$port" "$rx_delta" "$tx_delta" "$rxerr_delta" "$txerr_delta" "$rxdrop_delta" "$txdrop_delta"
+		if [ "$rxerr_delta" -gt 0 ] 2>/dev/null || [ "$txerr_delta" -gt 0 ] 2>/dev/null; then
+			printf 'port.%s.error_delta=FAIL\n' "$port"; status=1
+		fi
+		if [ "$rxdrop_delta" -gt 0 ] 2>/dev/null || [ "$txdrop_delta" -gt 0 ] 2>/dev/null; then
+			printf 'port.%s.drop_delta=FAIL\n' "$port"; status=1
+		fi
+		if contains_port "$require_traffic" "$port"; then
+			if [ "$rx_delta" -gt 0 ] 2>/dev/null && [ "$tx_delta" -gt 0 ] 2>/dev/null; then
+				printf 'port.%s.bidirectional_traffic=PASS\n' "$port"
+			else
+				printf 'port.%s.bidirectional_traffic=FAIL\n' "$port"; status=1
+			fi
+		fi
+	done < "$snapshot"
+	fi
+fi
+
+if [ "$status" -eq 0 ]; then
+	printf 'result=PASS\n'
+	exit 0
+fi
+printf 'result=FAIL\n'
+exit 1

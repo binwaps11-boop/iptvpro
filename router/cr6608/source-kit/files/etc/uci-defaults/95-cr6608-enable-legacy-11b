@@ -1,0 +1,25 @@
+#!/bin/sh
+# User-requested interoperability mode: allow legacy 802.11b on 2.4 GHz only.
+
+set -eu
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null || true)"
+[ "$board" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+changed=0
+radios="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+for radio in $radios; do
+	band="$(uci -q get "wireless.${radio}.band" 2>/dev/null || true)"
+	case "$band" in
+		2g|2.4g)
+			uci -q set "wireless.${radio}.legacy_rates=1"
+			changed=1
+			;;
+	esac
+done
+
+[ "$changed" -eq 1 ] || exit 1
+uci commit wireless
+logger -t cr6608-wireless 'legacy 802.11b rates enabled on the 2.4 GHz radio by requested policy'
+
+exit 0

@@ -1,0 +1,147 @@
+#!/bin/sh
+
+# Defense in depth for a legacy kernel or an external boot chain that presents
+# mtd7 as an attached UBI device while a TFTP-loaded initramfs is running. The
+# product kernel must skip auto-attach before this userspace fallback. Detach
+# only in an unmistakably memory-backed root and never while any UBI-backed
+# filesystem is mounted.
+
+CR6608_UBI_SLEEP_BIN="${CR6608_UBI_SLEEP_BIN:-/bin/sleep}"
+CR6608_UBI_FAIL_STOP_BIN="${CR6608_UBI_FAIL_STOP_BIN:-}"
+CR6608_UBI_CONSOLE_PATH="${CR6608_UBI_CONSOLE_PATH:-/dev/console}"
+
+cr6608_root_is_memory_backed() {
+	local source target fstype options dump pass
+
+	[ -r /proc/mounts ] || return 1
+	while read -r source target fstype options dump pass; do
+		[ "$target" = / ] || continue
+		case "$source:$fstype" in
+			rootfs:rootfs|rootfs:ramfs|rootfs:tmpfs|ramfs:ramfs|tmpfs:tmpfs|none:ramfs|none:tmpfs)
+				return 0
+				;;
+		esac
+		return 1
+	done </proc/mounts
+	return 1
+}
+
+cr6608_ubi_or_persistent_root_is_mounted() {
+	local source target fstype options dump pass
+
+	[ -r /proc/mounts ] || return 0
+	while read -r source target fstype options dump pass; do
+		case "$target" in
+			/rom|/overlay)
+				return 0
+				;;
+		esac
+		case "$source:$fstype" in
+			/dev/ubi*:*|ubi[0-9]*:*|*:ubifs)
+				return 0
+				;;
+		esac
+	done </proc/mounts
+	return 1
+}
+
+cr6608_ubi_detach_failure() {
+	local reason marker
+	reason="$*"
+	marker="CR6608_INITRAMFS_UBI_FAIL_STOP reason=$reason"
+	printf '%s\n' "$marker" >&2
+	if [ -n "$CR6608_UBI_CONSOLE_PATH" ]; then
+		printf '%s\n' "$marker" >>"$CR6608_UBI_CONSOLE_PATH" 2>/dev/null || :
+	fi
+
+	# OpenWrt's initramfs hook runner does not propagate hook return codes.  A
+	# normal `return 1` would therefore continue boot after a failed detach.
+	# Replace this process in tests when explicitly requested; production enters
+	# a non-returning, non-interactive halt with only the serial marker above.
+	trap '' HUP INT QUIT TERM
+	if [ -n "$CR6608_UBI_FAIL_STOP_BIN" ]; then
+		exec "$CR6608_UBI_FAIL_STOP_BIN" "$reason"
+		printf '%s\n' \
+			'CR6608_INITRAMFS_UBI_FAIL_STOP fail_stop_exec_failed=1' >&2
+	fi
+	while :; do
+		"$CR6608_UBI_SLEEP_BIN" 3600 >/dev/null 2>&1 || :
+	done
+}
+
+cr6608_initramfs_detach_mtd7() {
+	local ubi_path ubi_name mtd_num attached wait_count
+
+	[ "${INITRAMFS:-0}" = 1 ] || return 0
+	cr6608_root_is_memory_backed || return 0
+	cr6608_ubi_or_persistent_root_is_mounted && return 0
+	[ -d /sys/class/ubi ] || return 0
+
+	attached=
+	for ubi_path in /sys/class/ubi/ubi[0-9]*; do
+		[ -e "$ubi_path" ] || continue
+		ubi_name="${ubi_path##*/}"
+		# The class also contains volume nodes such as ubi0_0.  Only a
+		# top-level ubi<N> device is required to expose mtd_num.
+		case "$ubi_name" in
+			ubi*[!0-9]*) continue ;;
+			ubi[0-9]*) ;;
+			*) continue ;;
+		esac
+		[ -r "$ubi_path/mtd_num" ] || {
+			cr6608_ubi_detach_failure "$ubi_name/mtd_num is unreadable"
+		}
+		mtd_num=
+		IFS= read -r mtd_num <"$ubi_path/mtd_num" || {
+			cr6608_ubi_detach_failure "$ubi_name/mtd_num could not be read"
+		}
+		case "$mtd_num" in ''|*[!0-9]*)
+			cr6608_ubi_detach_failure "$ubi_name/mtd_num is malformed"
+			;;
+		esac
+		[ "$mtd_num" = 7 ] || continue
+		[ -z "$attached" ] || {
+			cr6608_ubi_detach_failure "multiple UBI devices claim mtd7"
+		}
+		attached="$ubi_name"
+	done
+	[ -n "$attached" ] || return 0
+	command -v ubidetach >/dev/null 2>&1 || {
+		cr6608_ubi_detach_failure "ubidetach is unavailable while $attached is attached"
+	}
+
+	# Re-evaluate both safety gates immediately before the detach ioctl.
+	cr6608_root_is_memory_backed || return 0
+	cr6608_ubi_or_persistent_root_is_mounted && return 0
+	mtd_num=
+	if ! IFS= read -r mtd_num <"/sys/class/ubi/$attached/mtd_num"; then
+		[ ! -e "/sys/class/ubi/$attached" ] && return 0
+		cr6608_ubi_detach_failure "$attached/mtd_num became unreadable before detach"
+	fi
+	case "$mtd_num" in ''|*[!0-9]*)
+		cr6608_ubi_detach_failure "$attached/mtd_num became malformed before detach"
+		;;
+	esac
+	[ "$mtd_num" = 7 ] || return 0
+
+	if ! ubidetach -m 7; then
+		cr6608_ubi_detach_failure "ubidetach returned non-zero for $attached"
+	fi
+
+	# sysfs removal is the only userspace witness that the detach completed.
+	# Wait at most five seconds; never report success merely because the ioctl
+	# command exited zero while the UBI device remains attached.
+	wait_count=0
+	while [ -e "/sys/class/ubi/$attached" ] && [ "$wait_count" -lt 5 ]; do
+		if ! "$CR6608_UBI_SLEEP_BIN" 1; then
+			cr6608_ubi_detach_failure "wait for $attached disappearance was interrupted"
+		fi
+		wait_count=$((wait_count + 1))
+	done
+	[ ! -e "/sys/class/ubi/$attached" ] || {
+		cr6608_ubi_detach_failure "$attached remained present after 5 seconds"
+	}
+	return 0
+}
+
+boot_hook_add initramfs cr6608_initramfs_detach_mtd7

@@ -1,0 +1,202 @@
+From: Smart AP firmware project
+Subject: [PATCH] openwrt: resolve netifd APs and DSA LAN interfaces
+
+Modern OpenWrt does not persist a generated ifname in wifi-iface sections.
+Use the explicit prplMesh radio-to-hostap mapping to resolve the owning
+wifi-iface before falling back to sysfs. The fallback must include the
+platform directory and must ignore mac80211's +N radio suffix.
+
+DSA configurations also use network.lan.device instead of the retired
+network.lan.ifname option. Returning the bridge device gives the agent a
+real, addressable LAN interface and avoids probing nonexistent eth0_N names.
+
+Empty STA and monitor-VAP options are valid for an Ethernet-backhauled AP.
+Read those optional values through the quiet UCI path so their absence does
+not become a false runtime error. The generic NL80211 backend has no second
+netlink-events descriptor; hostapd events and periodic polling remain active,
+so report that state as informational. A channel-extension disagreement is
+diagnostic because the canonical WifiChannel object is already derived from
+the primary and centre frequencies.
+
+--- a/framework/platform/bpl/cfg/uci/bpl_cfg_uci.cpp
++++ b/framework/platform/bpl/cfg/uci/bpl_cfg_uci.cpp
+@@ -130,6 +130,47 @@ int cfg_uci_get_wireless_from_ifname(enum paramType type, const char *interface_
+         }
+     }
+ 
++    // netifd normally creates AP interface names at runtime and therefore
++    // does not store an "ifname" option in the wifi-iface section.  prplMesh
++    // already has an explicit radio -> hostap interface mapping; use it to
++    // select the matching wifi-iface while keeping `s` on that section.
++    if (!is_section_found) {
++        uci_foreach_element(&p->sections, e)
++        {
++            s = uci_to_section(e);
++            if (strncmp(s->type, "wifi-iface", MAX_UCI_BUF_LEN))
++                continue;
++
++            std::string device_name;
++            uci_foreach_element(&s->options, n)
++            {
++                struct uci_option *o = uci_to_option(n);
++                if (o->type != UCI_TYPE_STRING)
++                    continue;
++                if (strncmp(n->name, "device", MAX_UCI_BUF_LEN))
++                    continue;
++                device_name = o->v.string;
++                break;
++            }
++            if (device_name.empty())
++                continue;
++
++            char hostap_path[MAX_UCI_BUF_LEN]      = "";
++            char configured_iface[MAX_UCI_BUF_LEN] = "";
++            mapf::utils::copy_string(
++                hostap_path,
++                (std::string("prplmesh.") + device_name + ".hostap_iface").c_str(),
++                MAX_UCI_BUF_LEN);
++            if (cfg_uci_get(hostap_path, configured_iface, MAX_UCI_BUF_LEN) != RETURN_OK)
++                continue;
++            if (strncmp(interface_name, configured_iface, MAX_UCI_BUF_LEN))
++                continue;
++
++            is_section_found = true;
++            break;
++        }
++    }
++
+     // If interface not found in etc/config/wireless 'config wifi-iface'.
+     // Try to get ifname using option path from 'config wifi-device'.
+     // This doesn't work for RDK-B, since there is no etc/config/wireless file.
+@@ -156,14 +197,19 @@ int cfg_uci_get_wireless_from_ifname(enum paramType type, const char *interface_
+                 if (strncmp(n->name, "path", MAX_UCI_BUF_LEN))
+                     continue;
+ 
++                std::string device_path(o->v.string);
++                const auto radio_suffix = device_path.rfind('+');
++                if (radio_suffix != std::string::npos)
++                    device_path.erase(radio_suffix);
++
+                 // Different platform has different option path. We take only soc/* part.
+                 // If soc/* is not part of the string we will use the whole string.
+-                size_t pos = std::string(o->v.string).find("soc/");
++                size_t pos = device_path.find("soc/");
+                 if (pos != std::string::npos) {
+                     path_interface_name =
+-                        "/sys/devices/platform/" + std::string(o->v.string).substr(pos) + "/net";
++                        "/sys/devices/platform/" + device_path.substr(pos) + "/net";
+                 } else {
+-                    path_interface_name = "/sys/devices/" + std::string(o->v.string) + "/net";
++                    path_interface_name = "/sys/devices/platform/" + device_path + "/net";
+                 }
+ 
+                 if ((dir = opendir(path_interface_name.c_str())) != NULL) {
+@@ -177,9 +223,8 @@ int cfg_uci_get_wireless_from_ifname(enum paramType type, const char *interface_
+                     closedir(dir);
+                 } else {
+                     // Could not open directory
+-                    LOG(ERROR) << __FUNCTION__ << ", could not open directory "
++                    LOG(DEBUG) << __FUNCTION__ << ", could not open optional directory "
+                                << path_interface_name.c_str();
+-                    return RETURN_ERR;
+                 }
+ 
+                 if (!is_section_found)
+@@ -315,9 +360,16 @@ int cfg_uci_get_lan_interfaces(const std::string &network_name, std::string &int
+     if (cfg_uci_get(path, value, MAX_UCI_BUF_LEN) == RETURN_OK) {
+         interface_names.assign(value);
+     } else {
+-
+-        // In case of read error, fill default ethernet name list for RDKB (PPM-1269).
+-        interface_names.assign(DEFAULT_UCI_LAN_INTERFACE_NAMES);
++        mapf::utils::copy_string(path,
++                                 std::string("network." + network_name + ".device").c_str(),
++                                 MAX_UCI_BUF_LEN);
++        if (cfg_uci_get(path, value, MAX_UCI_BUF_LEN) == RETURN_OK) {
++            interface_names.assign(value);
++        } else {
++            // Preserve the legacy RDK-B fallback only when neither OpenWrt
++            // interface form exists.
++            interface_names.assign(DEFAULT_UCI_LAN_INTERFACE_NAMES);
++        }
+     }
+     return RETURN_OK;
+ }
+--- a/framework/platform/bpl/cfg/uci/bpl_cfg_wifi.cpp
++++ b/framework/platform/bpl/cfg/uci/bpl_cfg_wifi.cpp
+@@ -477,13 +477,18 @@ int cfg_get_sta_iface(const char iface[BPL_IFNAME_LEN], char sta_iface[BPL_IFNAM
+     }
+ 
+     // Get the name of the STA interface for the given Host AP interface
+-    std::string option_value;
+-    if (!uci_get_option(package_name, section_type, section_name, "sta_iface", option_value)) {
++    char option_path[MAX_UCI_BUF_LEN]  = "";
++    char option_value[MAX_UCI_BUF_LEN] = "";
++    mapf::utils::copy_string(
++        option_path, (package_name + "." + section_name + ".sta_iface").c_str(),
++        MAX_UCI_BUF_LEN);
++    if (cfg_uci_get(option_path, option_value, MAX_UCI_BUF_LEN) != RETURN_OK ||
++        option_value[0] == '\0') {
+         sta_iface[0] = '\0';
+         return RETURN_OK;
+     }
+ 
+-    mapf::utils::copy_string(sta_iface, option_value.c_str(), BPL_IFNAME_LEN);
++    mapf::utils::copy_string(sta_iface, option_value, BPL_IFNAME_LEN);
+ 
+     return RETURN_OK;
+ }
+@@ -526,19 +531,22 @@ bool bpl_cfg_get_monitored_BSSs_by_radio_iface(const std::string &iface,
+         return false;
+     }
+     // Once the correct section is found we can get the monitored_bsss option.
+-    const std::string package_name = "prplmesh";
+-    const std::string section_type = "wifi-device";
+-    const std::string option_name  = "hostap_iface_monitor_vaps";
+-    std::string monitored_bsss;
+-    if (!uci_get_option(package_name, section_type, (*it).first, option_name, monitored_bsss)) {
+-        LOG(DEBUG) << "Failed to get 'hostap_iface_monitor_vaps' from section " << (*it).first;
++    char option_path[MAX_UCI_BUF_LEN]  = "";
++    char option_value[MAX_UCI_BUF_LEN] = "";
++    mapf::utils::copy_string(
++        option_path,
++        (std::string("prplmesh.") + (*it).first + ".hostap_iface_monitor_vaps").c_str(),
++        MAX_UCI_BUF_LEN);
++    if (cfg_uci_get(option_path, option_value, MAX_UCI_BUF_LEN) != RETURN_OK ||
++        option_value[0] == '\0') {
++        monitored_BSSs.clear();
+         return true;
+     }
+     // the monitored_bsss option is a list seperated by the ',' delimiter
+-    auto monitored_BSSs_vec = beerocks::string_utils::str_split(monitored_bsss, ',');
++    auto monitored_BSSs_vec =
++        beerocks::string_utils::str_split(std::string(option_value), ',');
+     monitored_BSSs = std::set<std::string>(monitored_BSSs_vec.begin(), monitored_BSSs_vec.end());
+     return true;
+-    // break monitor vaps to vector
+ }
+ 
+ } // namespace bpl
+--- a/agent/src/beerocks/fronthaul_manager/monitor/monitor.cpp
++++ b/agent/src/beerocks/fronthaul_manager/monitor/monitor.cpp
+@@ -451,7 +451,8 @@ bool Monitor::monitor_fsm()
+                 }
+                 LOG(DEBUG) << "Netlink events queue with fd = " << m_mon_hal_nl_events;
+             } else {
+-                LOG(ERROR) << "Couldn't get NL socket ";
++                LOG(INFO) << "Optional NL80211 events socket is unavailable; hostapd events and "
++                             "periodic monitor polling remain active";
+                 m_mon_hal_nl_events = beerocks::net::FileDescriptor::invalid_descriptor;
+             }
+ 
+--- a/agent/src/beerocks/slave/son_slave_thread.cpp
++++ b/agent/src/beerocks/slave/son_slave_thread.cpp
+@@ -5336,7 +5336,7 @@ void slave_thread::save_channel_params_to_db(const std::string &fronthaul_iface,
+                               static_cast<beerocks::eWiFiBandwidth>(params.bandwidth));
+ 
+     if (params.channel_ext_above_primary != radio->wifi_channel.get_ext_above_primary()) {
+-        LOG(ERROR) << "the channel_ext_above_primary" << params.channel_ext_above_primary
++        LOG(WARNING) << "the channel_ext_above_primary" << params.channel_ext_above_primary
+                    << " does not the same as wifi channel's channel_ext_above_primary"
+                    << radio->wifi_channel.get_ext_above_primary();
+     }

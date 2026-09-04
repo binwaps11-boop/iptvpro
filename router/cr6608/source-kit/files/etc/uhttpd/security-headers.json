@@ -1,0 +1,12 @@
+{
+	"request": [
+		[
+			["add-header", "X-Content-Type-Options", "nosniff"],
+			["add-header", "X-Frame-Options", "SAMEORIGIN"],
+			["add-header", "Referrer-Policy", "no-referrer"],
+			["add-header", "Permissions-Policy", "camera=(), microphone=(), geolocation=()"],
+			["add-header", "Cross-Origin-Resource-Policy", "same-origin"],
+			["add-header", "Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"]
+		]
+	]
+}

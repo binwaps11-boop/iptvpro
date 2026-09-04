@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+
+START=96
+STOP=10
+
+start() {
+	/usr/sbin/cr6608-ipv4-only apply >/dev/null 2>&1
+}
+
+reload_service() {
+	start
+}
+
+restart() {
+	start
+}

@@ -1,0 +1,19 @@
+{
+  "board_name": "xiaomi,mi-router-cr6608",
+  "uci": {
+    "rpcd.@login[0]": "login",
+    "rpcd.@login[0].username": "readonly",
+    "rpcd.@login[0].password": "readonly-hash-must-not-change",
+    "rpcd.@login[0].read": "unauthenticated",
+    "smartap.security": "smartap",
+    "smartap.migration": "migration",
+    "smartap.migration.preserved_config_version": "6",
+    "network.globals": "globals",
+    "network.globals.packet_steering": "2",
+    "factory.calibration.sha256": "missing-root-calibration-must-not-change"
+  },
+  "files": {
+    "etc/shadow": "root:$6$operator$missing-root-ssh-hash-must-not-change:20800:0:99999:7:::\n",
+    "factory.bin": "CR6608 MISSING ROOT FACTORY SENTINEL\n"
+  }
+}

@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# This file is deliberately present in the immutable rc.d queue. procd globs
+# that queue before START=10 applies UCI defaults, so a newly enabled S96 link
+# is not guaranteed to run on the same boot. Reconcile only after all defaults
+# have committed; this prevents the guard's mandatory reboot from interrupting
+# another migration script.
+
+GUARD_INIT="${CR6608_UL_MURU_GUARD_INIT:-/etc/init.d/cr6608-ul-muru-guard}"
+
+[ "${1:-}" = boot ] || exit 0
+[ -x "$GUARD_INIT" ] || exit 1
+
+guard_policy="$(uci -q get smartap.experimental.ul_muru_guard 2>/dev/null || true)"
+reconcile="$(uci -q get smartap.experimental.ul_muru_reconcile 2>/dev/null || true)"
+[ "$guard_policy" = 1 ] || [ "$reconcile" = 1 ] || exit 0
+
+if ! "$GUARD_INIT" running >/dev/null 2>&1; then
+	"$GUARD_INIT" start || exit 1
+fi
+
+exit 0

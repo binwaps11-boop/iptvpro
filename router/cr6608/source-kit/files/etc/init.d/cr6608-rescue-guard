@@ -1,0 +1,158 @@
+#!/bin/sh /etc/rc.common
+# Fail-closed Wi-Fi rescue endpoint plus continuous nft/address health monitor.
+
+START=99
+STOP=10
+USE_PROCD=1
+
+GUARD='/usr/sbin/cr6608-rescue-guard'
+PROCD_UBUS_BIN='/bin/ubus'
+PROCD_JSONFILTER_BIN='/usr/bin/jsonfilter'
+PROCD_SERVICE='cr6608-rescue-guard'
+RESCUE_START_PREPARED=0
+RESCUE_INSTANCE=''
+RESCUE_REGISTRATION_ATTEMPTS=30
+RESCUE_ACTIVATION_ATTEMPTS=30
+
+rescue_process_start_ticks() {
+	awk '
+		{
+			line=$0; close_at=0
+			for (i=length(line)-1; i>0; i--)
+				if (substr(line,i,2)==") ") { close_at=i; break }
+			if (!close_at) exit 1
+			count=split(substr(line,close_at+2), field, " ")
+			if (count < 20 || field[20] !~ /^[0-9]+$/) exit 1
+			print field[20]
+		}' "/proc/$$/stat" 2>/dev/null
+}
+
+rescue_instance_valid() {
+	case "${1:-}" in
+		monitor-*-*)
+			rescue_instance_identity="${1#monitor-}"
+			rescue_instance_pid="${rescue_instance_identity%%-*}"
+			rescue_instance_ticks="${rescue_instance_identity#*-}"
+			;;
+		*) return 1 ;;
+	esac
+	case "$rescue_instance_pid" in ''|*[!0-9]*) return 1 ;; esac
+	case "$rescue_instance_ticks" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+rescue_instance_running() {
+	rescue_running_instance="${1:-}"
+	rescue_instance_valid "$rescue_running_instance" || return 1
+	service_running "$rescue_running_instance" >/dev/null 2>&1 && return 0
+	# During late rcS execution procd can publish and run the named instance
+	# before the rc.common convenience probe observes it. Prove the exact same
+	# validated instance directly from procd; never accept wildcard ownership.
+	[ -x "$PROCD_UBUS_BIN" ] && [ -x "$PROCD_JSONFILTER_BIN" ] || return 1
+	rescue_running_value="$($PROCD_UBUS_BIN -S call service list \
+		"{\"name\":\"$PROCD_SERVICE\"}" 2>/dev/null | \
+		$PROCD_JSONFILTER_BIN -e \
+		"@['$PROCD_SERVICE'].instances['$rescue_running_instance'].running" \
+		2>/dev/null)" || return 1
+	[ "$rescue_running_value" = true ]
+}
+
+start_service() {
+	# rc.common does not publish the procd instance until this callback returns.
+	# Keep the endpoint durably quiesced while the monitor instance is prepared;
+	# service_started is the only callback which may activate it, after procd
+	# reports the monitor as registered and running.
+	RESCUE_START_PREPARED=0
+	[ -x "$GUARD" ] || return 1
+	"$GUARD" quiesce >/dev/null 2>&1 || return 1
+	rescue_start_ticks="$(rescue_process_start_ticks)" || return 1
+	RESCUE_INSTANCE="monitor-$$-$rescue_start_ticks"
+	rescue_instance_valid "$RESCUE_INSTANCE" || return 1
+
+	procd_open_instance "$RESCUE_INSTANCE" || return 1
+	procd_set_param command "$GUARD" monitor || return 1
+	procd_set_param stdout 1 || return 1
+	procd_set_param stderr 1 || return 1
+	procd_set_param term_timeout 5 || return 1
+	# The monitor stays alive in deny-only state with bounded retries/backoff.
+	# Retry unexpected process failures for the complete service lifetime.
+	procd_set_param respawn 10 2 0 || return 1
+	procd_close_instance || return 1
+	RESCUE_START_PREPARED=1
+}
+
+service_started() {
+	# Never activate when start_service did not finish constructing the instance.
+	if [ "${RESCUE_START_PREPARED:-0}" != 1 ] ||
+	   ! rescue_instance_valid "${RESCUE_INSTANCE:-}"; then
+		[ -x "$GUARD" ] && "$GUARD" quiesce >/dev/null 2>&1 || true
+		return 1
+	fi
+	start_verify_attempt=0
+	while [ "$start_verify_attempt" -lt "$RESCUE_REGISTRATION_ATTEMPTS" ]; do
+		rescue_instance_running "$RESCUE_INSTANCE" && break
+		start_verify_attempt=$((start_verify_attempt + 1))
+		sleep 1
+	done
+	if ! rescue_instance_running "$RESCUE_INSTANCE"; then
+		[ -x "$GUARD" ] && "$GUARD" quiesce >/dev/null 2>&1 || true
+		return 1
+	fi
+
+	# Registration now owns recovery.  Only at this point may the explicit start
+	# clear the quiesce marker and attach the verified /32 endpoint.
+	RESCUE_START_PREPARED=0
+	activation_attempt=0
+	activation_ok=0
+	while [ "$activation_attempt" -lt "$RESCUE_ACTIVATION_ATTEMPTS" ]; do
+		# Wi-Fi AP netdevs can appear after procd has registered the monitor.
+		# Retry only while this exact per-start monitor remains owned and live.
+		if ! rescue_instance_running "$RESCUE_INSTANCE"; then
+			"$GUARD" quiesce >/dev/null 2>&1 || true
+			return 1
+		fi
+		if "$GUARD" start; then
+			activation_ok=1
+			break
+		fi
+		activation_attempt=$((activation_attempt + 1))
+		[ "$activation_attempt" -lt "$RESCUE_ACTIVATION_ATTEMPTS" ] && sleep 1
+	done
+	if [ "$activation_ok" != 1 ]; then
+		"$GUARD" quiesce >/dev/null 2>&1 || true
+		return 1
+	fi
+	# Close again if ownership vanished during the synchronous activation.
+	if ! rescue_instance_running "$RESCUE_INSTANCE"; then
+		"$GUARD" quiesce >/dev/null 2>&1 || true
+		return 1
+	fi
+	return 0
+}
+
+reload_service() {
+	# Rebuild the AP-interface set after network/wireless/firewall changes.  A
+	# live monitor is the ownership proof, so explicit start may safely clear a
+	# startup quiesce once AP netdevs are ready. Operator Stop kills the monitor,
+	# therefore hotplug/reload cannot undo an operator stop.
+	[ -x "$GUARD" ] || return 1
+	"$GUARD" start
+}
+
+stop_service() {
+	[ -x "$GUARD" ] || return 0
+	# OpenWrt rc.common invokes stop_service before procd_kill. Publish a durable
+	# stop intent first so a monitor wake in that interval cannot re-activate.
+	"$GUARD" quiesce >/dev/null
+}
+
+service_stopped() {
+	# rc.common calls this after procd_kill. Re-prove CLOSED after the monitor and
+	# any recovery child have been terminated.
+	[ -x "$GUARD" ] || return 0
+	"$GUARD" close >/dev/null
+}
+
+service_triggers() {
+	procd_add_reload_trigger network wireless firewall uhttpd
+}

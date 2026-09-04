@@ -1,0 +1,115 @@
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -3148,6 +3148,58 @@ int mt7915_mcu_set_chan_info(struct mt7915_phy *phy, int cmd)
+ 	return mt76_mcu_send_msg(&dev->mt76, cmd, &req, sizeof(req), true);
+ }
+ 
++static int
++mt7915_cr6608_prepare_firmware_eeprom_shadow(struct mt7915_dev *dev,
++					     u8 *shadow, u16 eeprom_size)
++{
++#define CR6608_FIRMWARE_WIFI_CONF7	0x15
++#define CR6608_FIRMWARE_RATE_DELTA_2G	0xc6
++#define CR6608_FIRMWARE_RATE_DELTA_5G	0xc4
++#define CR6608_FIRMWARE_TARGET_2G	0x40
++#define CR6608_FIRMWARE_TARGET_5G	0x42
++#define CR6608_FIRMWARE_CHAINS		4
++#define CR6608_FIRMWARE_5G_GROUPS	8
++	const u8 *persisted = dev->mt76.eeprom.data;
++	size_t required = MT_EE_TX0_POWER_5G +
++			  (CR6608_FIRMWARE_CHAINS - 1) * 12 +
++			  CR6608_FIRMWARE_5G_GROUPS;
++	int chain, group;
++
++	if (!mt7915_cr6608_rf_request_enabled(dev))
++		return 0;
++	if (!persisted || !shadow || eeprom_size < required)
++		return -EINVAL;
++
++	/* The physical Factory partition remains read-only.  Require the
++	 * audited CR6608 identity and rate deltas, then change only target-power
++	 * bytes in the private buffer sent to firmware.  The firmware otherwise
++	 * reloads the persisted 0x28/0x26 targets and clips a later 0x46 SKU write
++	 * back to 46/42 half-dBm before the driver's MCU readback.
++	 */
++	if (get_unaligned_le16(persisted + MT_EE_CHIP_ID) != 0x7915 ||
++	    persisted[MT_EE_WIFI_CONF + 7] != CR6608_FIRMWARE_WIFI_CONF7 ||
++	    persisted[MT_EE_RATE_DELTA_2G] !=
++					CR6608_FIRMWARE_RATE_DELTA_2G ||
++	    persisted[MT_EE_RATE_DELTA_5G] !=
++					CR6608_FIRMWARE_RATE_DELTA_5G) {
++		dev_err(dev->mt76.dev,
++			"CR6608-RF firmware EEPROM shadow rejected: persisted identity or rate deltas do not match the audited CR6608 layout\n");
++		return -EINVAL;
++	}
++
++	for (chain = 0; chain < CR6608_FIRMWARE_CHAINS; chain++) {
++		shadow[MT_EE_TX0_POWER_2G + chain * 3] =
++			CR6608_FIRMWARE_TARGET_2G;
++		for (group = 0; group < CR6608_FIRMWARE_5G_GROUPS; group++)
++			shadow[MT_EE_TX0_POWER_5G + chain * 12 + group] =
++				CR6608_FIRMWARE_TARGET_5G;
++	}
++
++	dev_info_once(dev->mt76.dev,
++		      "CR6608-RF firmware EEPROM shadow active: physical Factory stays read-only; MCU receives 2G=0x40 and all 5G groups=0x42 so rate-SKU readback can witness 70 half-dBm\n");
++	return 0;
++}
++
+ static int mt7915_mcu_set_eeprom_flash(struct mt7915_dev *dev)
+ {
+ #define MAX_PAGE_IDX_MASK	GENMASK(7, 5)
+@@ -3157,12 +3209,22 @@ static int mt7915_mcu_set_eeprom_flash(struct mt7915_dev *dev)
+ 	u16 eeprom_size = mt7915_eeprom_size(dev);
+ 	u8 total = DIV_ROUND_UP(eeprom_size, PER_PAGE_SIZE);
+ 	u8 *eep = (u8 *)dev->mt76.eeprom.data;
+-	int eep_len;
+-	int i;
++	u8 *shadow = NULL;
++	int eep_len, i, ret = 0;
++
++	if (mt7915_cr6608_rf_request_enabled(dev)) {
++		shadow = kmemdup(eep, eeprom_size, GFP_KERNEL);
++		if (!shadow)
++			return -ENOMEM;
++		ret = mt7915_cr6608_prepare_firmware_eeprom_shadow(
++			dev, shadow, eeprom_size);
++		if (ret)
++			goto out;
++		eep = shadow;
++	}
+ 
+ 	for (i = 0; i < total; i++, eep += eep_len) {
+ 		struct sk_buff *skb;
+-		int ret;
+ 
+ 		if (i == total - 1 && !!(eeprom_size % PER_PAGE_SIZE))
+ 			eep_len = eeprom_size % PER_PAGE_SIZE;
+@@ -3171,8 +3233,10 @@ static int mt7915_mcu_set_eeprom_flash(struct mt7915_dev *dev)
+ 
+ 		skb = mt76_mcu_msg_alloc(&dev->mt76, NULL,
+ 					 sizeof(req) + eep_len);
+-		if (!skb)
+-			return -ENOMEM;
++		if (!skb) {
++			ret = -ENOMEM;
++			goto out;
++		}
+ 
+ 		req.format = FIELD_PREP(MAX_PAGE_IDX_MASK, total - 1) |
+ 			     FIELD_PREP(PAGE_IDX_MASK, i) | EE_FORMAT_WHOLE;
+@@ -3184,10 +3248,12 @@ static int mt7915_mcu_set_eeprom_flash(struct mt7915_dev *dev)
+ 		ret = mt76_mcu_skb_send_msg(&dev->mt76, skb,
+ 					    MCU_EXT_CMD(EFUSE_BUFFER_MODE), true);
+ 		if (ret)
+-			return ret;
++			goto out;
+ 	}
+ 
+-	return 0;
++out:
++	kfree(shadow);
++	return ret;
+ }
+ 
+ int mt7915_mcu_set_eeprom(struct mt7915_dev *dev)

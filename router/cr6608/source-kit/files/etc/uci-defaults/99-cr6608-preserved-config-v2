@@ -1,0 +1,313 @@
+#!/bin/sh
+
+# This board-scoped migration retains the open onboarding policy only for an
+# unprovisioned operator image. A retained retail marker is a security boundary:
+# on such a unit this script never changes rpcd credentials or any wireless
+# option. LAN, DHCP, guest/mesh/additional interfaces, calibration data, the
+# root account and flash partitions remain untouched in both paths.
+
+UCI_BIN="${CR6608_MIGRATION_UCI_BIN:-uci}"
+LOGGER_BIN="${CR6608_MIGRATION_LOGGER_BIN:-logger}"
+BOARD_NAME_FILE="${CR6608_MIGRATION_BOARD_NAME_FILE:-/tmp/sysinfo/board_name}"
+RETAIL_MARKER="${CR6608_MIGRATION_RETAIL_MARKER:-/etc/cr6608-retail-provisioned}"
+PENDING_MARKER="${CR6608_MIGRATION_PENDING_MARKER:-/etc/cr6608-retail-provisioning-pending}"
+STAT_BIN="${CR6608_MIGRATION_STAT_BIN:-/bin/stat}"
+ARTIFACT_PROFILE="${CR6608_MIGRATION_ARTIFACT_PROFILE:-/rom/etc/cr6608-artifact-profile}"
+RPCD_ROOT_PASSWORD='$6$CR6608dashAdm$BQqw1LRyISWT1W76KgXLbFMpuB0lDBY4CVz7vdm4PMg1YZ6y9fh.GZ0hKRp8X9NGb4FR5dGd7lsMiuCOK3hwl.'
+MARKER='smartap.migration.preserved_config_version'
+VERSION='8'
+
+[ "$(cat "$BOARD_NAME_FILE" 2>/dev/null)" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+# Older images do not have an immutable artifact marker and retain the legacy
+# operator behavior. A present Retail-v1 marker, or any malformed/symlinked
+# marker, must never enter the shared-credential/open-onboarding branch.
+artifact_mode=legacy-lab
+if [ -e "$ARTIFACT_PROFILE" ] || [ -L "$ARTIFACT_PROFILE" ]; then
+	if [ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] &&
+		[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=retail-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=retail-disabled' "$ARTIFACT_PROFILE"; then
+		artifact_mode=retail
+	elif [ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] &&
+		grep -Fqx 'profile=lab-operator-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$ARTIFACT_PROFILE"; then
+		artifact_mode=lab
+	elif [ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] &&
+		[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=ul-muru-ram-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$ARTIFACT_PROFILE"; then
+		artifact_mode=lab
+	elif [ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] &&
+		[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=ul-muru-forced-lab-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$ARTIFACT_PROFILE"; then
+		artifact_mode=lab
+	else
+		artifact_mode=invalid
+	fi
+fi
+
+fail_closed_pending() {
+	# An interrupted or malformed retail transaction must never fall through to
+	# the shared-credential/open-onboarding branch.  Preserve every credential
+	# and interface option, but administratively close both physical radios until
+	# the factory reruns the provisioner and publishes an audited complete marker.
+	close_rc=0
+	for close_radio in radio0 radio1; do
+		[ "$("$UCI_BIN" -q get "wireless.${close_radio}" 2>/dev/null)" = wifi-device ] || {
+			close_rc=1
+			continue
+		}
+		"$UCI_BIN" -q set "wireless.${close_radio}.disabled=1" || close_rc=1
+	done
+	"$UCI_BIN" -q commit wireless || close_rc=1
+	"$LOGGER_BIN" -t cr6608-migration \
+		"retail provisioning incomplete or marker invalid; Wi-Fi disabled fail-closed, credentials preserved" \
+		>/dev/null 2>&1 || true
+	return "$close_rc"
+}
+
+marker_value() {
+	marker_key="$1"
+	[ "$(grep -c "^${marker_key}=" "$RETAIL_MARKER" 2>/dev/null)" -eq 1 ] 2>/dev/null || return 1
+	sed -n "s/^${marker_key}=//p" "$RETAIL_MARKER"
+}
+
+complete_marker_valid() {
+	[ -f "$RETAIL_MARKER" ] && [ ! -L "$RETAIL_MARKER" ] || return 1
+	[ "$("$STAT_BIN" -c '%u' "$RETAIL_MARKER" 2>/dev/null)" = 0 ] || return 1
+	marker_mode="$("$STAT_BIN" -c '%a' "$RETAIL_MARKER" 2>/dev/null)"
+	case "$marker_mode" in 400|600) ;; *) return 1 ;; esac
+	[ "$(wc -l < "$RETAIL_MARKER" 2>/dev/null | tr -d '[:space:]')" = 8 ] || return 1
+	[ "$(marker_value profile)" = retail-v2 ] || return 1
+	marker_country="$(marker_value market_country)" || return 1
+	case "$marker_country" in [A-Z][A-Z]) [ "$marker_country" != 00 ] || return 1 ;; *) return 1 ;; esac
+	marker_ap0="$(marker_value primary_ap_radio0)" || return 1
+	marker_ap1="$(marker_value primary_ap_radio1)" || return 1
+	case "$marker_ap0" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+	case "$marker_ap1" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+	[ "$marker_ap0" != "$marker_ap1" ] || return 1
+	[ "$(marker_value sale_ready)" = NO ] || return 1
+	case "$(marker_value radio_policy)" in LAB_ARTIFACT_BLOCKED|retail-disabled-after-reboot) ;; *) return 1 ;; esac
+	[ "$(marker_value audit_complete)" = YES ] || return 1
+	case "$(marker_value provisioned_utc)" in ????-??-??T??:??:??Z) ;; *) return 1 ;; esac
+	return 0
+}
+
+retail_provisioned=0
+if [ -e "$PENDING_MARKER" ] || [ -L "$PENDING_MARKER" ]; then
+	fail_closed_pending || true
+	exit 1
+fi
+if [ -e "$RETAIL_MARKER" ] || [ -L "$RETAIL_MARKER" ]; then
+	# A malformed/incomplete replacement must not downgrade the unit to the
+	# destructive onboarding branch or preserve active unaudited radios.
+	complete_marker_valid || {
+		fail_closed_pending || true
+		exit 1
+	}
+	retail_provisioned=1
+fi
+
+if [ "$retail_provisioned" = 0 ] && [ "$artifact_mode" != lab ] &&
+	[ "$artifact_mode" != legacy-lab ]; then
+	# Generic retail/faulted artifacts expose neither the old shared Web hash
+	# nor an open WLAN. Leave this uci-default retryable until a trusted factory
+	# shell publishes a complete per-device provisioning marker.
+	fail_closed_pending || true
+	exit 1
+fi
+
+find_section_by_option() {
+	package="$1"
+	type="$2"
+	option="$3"
+	expected="$4"
+	index=0
+
+	while [ "$index" -lt 64 ]; do
+		section="@${type}[${index}]"
+		value="$("$UCI_BIN" -q get "${package}.${section}.${option}" 2>/dev/null)" || break
+		if [ "$value" = "$expected" ]; then
+			printf '%s\n' "$section"
+			return 0
+		fi
+		index=$((index + 1))
+	done
+
+	return 1
+}
+
+sha512_crypt_valid() {
+	# Accept the standard SHA-512 crypt form only.  This intentionally rejects
+	# rpcd's $p$ shadow indirection, locked values and truncated/corrupt hashes:
+	# those inputs must fall back to the current Lab onboarding credential.
+	crypt_value="$1"
+	case "$crypt_value" in '$6$'*) ;; *) return 1 ;; esac
+	crypt_rest="${crypt_value#\$6\$}"
+	case "$crypt_rest" in
+		rounds=*)
+			crypt_rounds_field="${crypt_rest%%\$*}"
+			[ "$crypt_rounds_field" != "$crypt_rest" ] || return 1
+			crypt_rounds="${crypt_rounds_field#rounds=}"
+			case "$crypt_rounds" in ''|*[!0-9]*) return 1 ;; esac
+			[ "${#crypt_rounds}" -le 9 ] || return 1
+			[ "$crypt_rounds" -ge 1000 ] 2>/dev/null || return 1
+			[ "$crypt_rounds" -le 999999999 ] 2>/dev/null || return 1
+			crypt_rest="${crypt_rest#*\$}"
+			;;
+	esac
+	crypt_salt="${crypt_rest%%\$*}"
+	[ "$crypt_salt" != "$crypt_rest" ] || return 1
+	crypt_digest="${crypt_rest#*\$}"
+	case "$crypt_salt" in ''|*[!./0-9A-Za-z]*) return 1 ;; esac
+	[ "${#crypt_salt}" -le 16 ] || return 1
+	case "$crypt_digest" in ''|*\$*|*[!./0-9A-Za-z]*) return 1 ;; esac
+	[ "${#crypt_digest}" -eq 86 ] || return 1
+	return 0
+}
+
+wireless_section_is() {
+	section="$1"
+	expected_type="$2"
+	[ "$("$UCI_BIN" -q get "wireless.${section}" 2>/dev/null)" = "$expected_type" ]
+}
+
+wireless_primary_ap_is() {
+	iface="$1"
+	radio="$2"
+	wireless_section_is "$iface" wifi-iface || return 1
+	[ "$("$UCI_BIN" -q get "wireless.${iface}.device" 2>/dev/null)" = "$radio" ] || return 1
+	[ "$("$UCI_BIN" -q get "wireless.${iface}.mode" 2>/dev/null)" = ap ]
+}
+
+wireless_open_defaults_complete() {
+	for radio in radio0 radio1; do
+		wireless_section_is "$radio" wifi-device || return 1
+		[ "$("$UCI_BIN" -q get "wireless.${radio}.disabled" 2>/dev/null)" = 0 ] || return 1
+	done
+
+	wireless_primary_ap_is wifinet0 radio0 || return 1
+	wireless_primary_ap_is wifinet1 radio1 || return 1
+	for iface in wifinet0 wifinet1; do
+		[ "$("$UCI_BIN" -q get "wireless.${iface}.disabled" 2>/dev/null)" = 0 ] || return 1
+		[ "$("$UCI_BIN" -q get "wireless.${iface}.hidden" 2>/dev/null)" = 0 ] || return 1
+		[ "$("$UCI_BIN" -q get "wireless.${iface}.encryption" 2>/dev/null)" = none ] || return 1
+		[ "$("$UCI_BIN" -q get "wireless.${iface}.ieee80211w" 2>/dev/null)" = 0 ] || return 1
+		! "$UCI_BIN" -q get "wireless.${iface}.key" >/dev/null 2>&1 || return 1
+		! "$UCI_BIN" -q get "wireless.${iface}.sae_password" >/dev/null 2>&1 || return 1
+	done
+
+	return 0
+}
+
+if [ "$retail_provisioned" = 0 ]; then
+	root_login="$(find_section_by_option rpcd login username root)" || {
+		# Repair a missing login only on the unprovisioned onboarding image. A
+		# provisioned unit must instead retain its unique Web credential exactly.
+		root_login="$("$UCI_BIN" -q add rpcd login 2>/dev/null)" || exit 1
+		[ -n "$root_login" ] || exit 1
+		"$UCI_BIN" -q set "rpcd.${root_login}.username=root" || exit 1
+	}
+	# On sysupgrade, retain an operator-selected Web credential instead of
+	# silently replacing it with the retired shared manufacturing verifier.
+	# Fresh installs already carry RPCD_ROOT_PASSWORD; malformed, locked and
+	# shadow-indirection values deliberately fail closed to that Lab default.
+	lab_rpcd_password="$RPCD_ROOT_PASSWORD"
+	preserved_rpcd_password="$("$UCI_BIN" -q get "rpcd.${root_login}.password" 2>/dev/null || true)"
+	if [ "$preserved_rpcd_password" != "$RPCD_ROOT_PASSWORD" ] &&
+		sha512_crypt_valid "$preserved_rpcd_password"; then
+		lab_rpcd_password="$preserved_rpcd_password"
+	fi
+fi
+
+migration_is_complete() {
+	[ "$("$UCI_BIN" -q get "$MARKER" 2>/dev/null)" = "$VERSION" ] || return 1
+	if [ "$retail_provisioned" = 0 ]; then
+		[ "$("$UCI_BIN" -q get "rpcd.${root_login}.password" 2>/dev/null)" = "$lab_rpcd_password" ] || return 1
+		[ "$("$UCI_BIN" -q get "rpcd.${root_login}.read" 2>/dev/null)" = '*' ] || return 1
+		[ "$("$UCI_BIN" -q get "rpcd.${root_login}.write" 2>/dev/null)" = '*' ] || return 1
+	fi
+	if "$UCI_BIN" -q get cr6608quick.default >/dev/null 2>&1; then
+		[ "$("$UCI_BIN" -q get cr6608quick.default.clear_previous 2>/dev/null)" = 0 ] || return 1
+	fi
+	if "$UCI_BIN" -q get smartap.quick >/dev/null 2>&1; then
+		[ "$("$UCI_BIN" -q get smartap.quick.delete_previous 2>/dev/null)" = 0 ] || return 1
+	fi
+	[ "$("$UCI_BIN" -q get network.globals.packet_steering 2>/dev/null)" = 0 ] || return 1
+	[ "$retail_provisioned" = 1 ] || wireless_open_defaults_complete || return 1
+	return 0
+}
+
+# A marker alone is not proof that the interrupted migration completed.  Check
+# every safety-critical result before suppressing writes on later boots.
+migration_is_complete && exit 0
+if [ "$retail_provisioned" = 0 ]; then
+	"$UCI_BIN" -q set "rpcd.${root_login}.password=${lab_rpcd_password}" || exit 1
+	"$UCI_BIN" -q delete "rpcd.${root_login}.read" 2>/dev/null || true
+	"$UCI_BIN" -q delete "rpcd.${root_login}.write" 2>/dev/null || true
+	"$UCI_BIN" -q add_list "rpcd.${root_login}.read=*" || exit 1
+	"$UCI_BIN" -q add_list "rpcd.${root_login}.write=*" || exit 1
+
+	"$UCI_BIN" -q commit rpcd || exit 1
+	[ "$("$UCI_BIN" -q get "rpcd.${root_login}.username" 2>/dev/null)" = root ] || exit 1
+	[ "$("$UCI_BIN" -q get "rpcd.${root_login}.password" 2>/dev/null)" = "$lab_rpcd_password" ] || exit 1
+
+	# Change only the two stock primary radios and their stock AP interfaces.
+	# A provisioned marker bypasses this entire block before any type lookup.
+	for radio in radio0 radio1; do
+		wireless_section_is "$radio" wifi-device || exit 1
+	done
+	wireless_primary_ap_is wifinet0 radio0 || exit 1
+	wireless_primary_ap_is wifinet1 radio1 || exit 1
+	for radio in radio0 radio1; do
+		"$UCI_BIN" -q set "wireless.${radio}.disabled=0" || exit 1
+	done
+	for iface in wifinet0 wifinet1; do
+		"$UCI_BIN" -q set "wireless.${iface}.disabled=0" || exit 1
+		"$UCI_BIN" -q set "wireless.${iface}.hidden=0" || exit 1
+		"$UCI_BIN" -q set "wireless.${iface}.encryption=none" || exit 1
+		"$UCI_BIN" -q set "wireless.${iface}.ieee80211w=0" || exit 1
+		"$UCI_BIN" -q delete "wireless.${iface}.key" 2>/dev/null || true
+		"$UCI_BIN" -q delete "wireless.${iface}.sae_password" 2>/dev/null || true
+	done
+	"$UCI_BIN" -q commit wireless || exit 1
+	wireless_open_defaults_complete || exit 1
+fi
+
+# v69 forced destructive cleanup and aggressive all-CPU packet steering.
+# OpenWrt 25.12.5 on MT7621 can later stall mtk_soc_eth TX queues when packet
+# steering is active, even while PHY counters remain clean. Keep it disabled
+# while preserving LAN/VLAN, non-primary wireless interfaces, their passwords
+# and every calibration value.
+if "$UCI_BIN" -q get cr6608quick.default >/dev/null 2>&1; then
+	"$UCI_BIN" -q set cr6608quick.default.clear_previous=0 || exit 1
+	"$UCI_BIN" -q commit cr6608quick || exit 1
+fi
+if "$UCI_BIN" -q get smartap.quick >/dev/null 2>&1; then
+	"$UCI_BIN" -q set smartap.quick.delete_previous=0 || exit 1
+	"$UCI_BIN" -q commit smartap || exit 1
+fi
+if [ "$("$UCI_BIN" -q get network.globals.packet_steering 2>/dev/null)" != 0 ]; then
+	"$UCI_BIN" -q set network.globals.packet_steering=0 || exit 1
+	"$UCI_BIN" -q commit network || exit 1
+fi
+
+# Write the marker only after every required package was committed.  If an
+# earlier commit fails, uci-defaults will retry this idempotent migration.
+"$UCI_BIN" -q set smartap.migration=migration || exit 1
+"$UCI_BIN" -q set "$MARKER=$VERSION" || exit 1
+"$UCI_BIN" -q commit smartap || exit 1
+
+if [ "$retail_provisioned" = 1 ]; then
+	"$LOGGER_BIN" -t cr6608-migration \
+		"applied preserved-config migration v${VERSION}; retained provisioned rpcd and Wi-Fi security"
+else
+	"$LOGGER_BIN" -t cr6608-migration "applied preserved-config migration v${VERSION}"
+fi
+exit 0

@@ -1,0 +1,81 @@
+#!/bin/sh
+
+if ! board="$(ubus call system board 2>/dev/null |
+	jsonfilter -e '@.board_name' 2>/dev/null)"; then
+	# uci-defaults deletes a script only after a successful exit.  A transient
+	# ubus/jsonfilter failure must be retried on the next boot, otherwise a
+	# preserved LuCI mapping can survive the upgrade.
+	exit 1
+fi
+[ -n "$board" ] || exit 1
+[ "$board" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+LUCI_HANDLER="${CR6608_LUCI_HANDLER:-/usr/share/ucode/luci/uhttpd.uc}"
+LUCI_MAPPING="/cgi-bin/luci=$LUCI_HANDLER"
+SECURITY_HEADERS="${CR6608_SECURITY_HEADERS:-/etc/uhttpd/security-headers.json}"
+[ -f "$LUCI_HANDLER" ] && [ ! -L "$LUCI_HANDLER" ] || exit 1
+[ -f "$SECURITY_HEADERS" ] && [ ! -L "$SECURITY_HEADERS" ] || exit 1
+
+# A preserved uhttpd configuration may contain multiple server instances and
+# old Lua or ucode LuCI mappings. Rewrite every instance to the official LuCI
+# ucode dispatcher. Ancestor or more-specific mappings that could shadow the
+# authenticated Smart AP -> LuCI handoff are discarded; unrelated handlers
+# are retained.
+sections="$(uci -q show uhttpd 2>/dev/null |
+	sed -n "s/^uhttpd\.\([^=]*\)=uhttpd$/\1/p")"
+[ -n "$sections" ] || exit 1
+
+changed=0
+abort_migration() {
+	uci -q revert uhttpd >/dev/null 2>&1 || true
+	exit 1
+}
+
+rewrite_prefixes() {
+	section="$1"
+	option="$2"
+	values="$(uci -q get "uhttpd.$section.$option" 2>/dev/null || true)"
+	if [ -n "$values" ]; then
+		uci -q delete "uhttpd.$section.$option" || abort_migration
+	fi
+	if [ "$option" = ucode_prefix ]; then
+		uci add_list "uhttpd.$section.ucode_prefix=$LUCI_MAPPING" || abort_migration
+		changed=1
+	fi
+	for value in $values; do
+		case "$value" in
+			/=*|/cgi-bin=*|/cgi-bin/luci=*|/cgi-bin/luci/*=*) changed=1 ;;
+			*) uci add_list "uhttpd.$section.$option=$value" || abort_migration ;;
+		esac
+	done
+}
+
+ensure_security_headers() {
+	section="$1"
+	values="$(uci -q get "uhttpd.$section.json_script" 2>/dev/null || true)"
+	existing=""
+	security_count=0
+	for value in $values; do
+		if [ "$value" = "$SECURITY_HEADERS" ]; then
+			security_count=$(( security_count + 1 ))
+		else
+			existing="${existing}${existing:+ }$value"
+		fi
+	done
+	desired="${existing}${existing:+ }$SECURITY_HEADERS"
+	[ "$security_count" -eq 1 ] && [ "$values" = "$desired" ] && return 0
+	uci set "uhttpd.$section.json_script=$desired" || abort_migration
+	changed=1
+}
+
+for section in $sections; do
+	rewrite_prefixes "$section" ucode_prefix
+	rewrite_prefixes "$section" lua_prefix
+	ensure_security_headers "$section"
+done
+
+if [ "$changed" = 1 ]; then
+	uci commit uhttpd || abort_migration
+fi
+
+exit 0

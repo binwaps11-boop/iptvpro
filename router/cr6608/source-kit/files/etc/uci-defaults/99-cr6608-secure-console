@@ -1,0 +1,61 @@
+#!/bin/sh
+
+# Password-gate the CR6608 serial console whenever a usable operator root
+# password exists. The operator image is already gated on clean boot; this
+# migration also repairs older settings-preserving installations.
+UCI_BIN="${UCI_BIN:-uci}"
+AWK_BIN="${AWK_BIN:-awk}"
+LOGGER_BIN="${LOGGER_BIN:-logger}"
+SHADOW_FILE="${SHADOW_FILE:-/etc/shadow}"
+BOARD_NAME_FILE="${BOARD_NAME_FILE:-/tmp/sysinfo/board_name}"
+
+log_notice() {
+	"$LOGGER_BIN" -t cr6608-secure-console -- "$*" >/dev/null 2>&1 || :
+}
+
+[ -f "$BOARD_NAME_FILE" ] && [ ! -L "$BOARD_NAME_FILE" ] || exit 1
+IFS= read -r board < "$BOARD_NAME_FILE" || exit 1
+[ "$board" = 'xiaomi,mi-router-cr6608' ] || exit 0
+
+[ -f "$SHADOW_FILE" ] && [ ! -L "$SHADOW_FILE" ] || exit 1
+root_record="$(
+	"$AWK_BIN" -F: '
+		$1 == "root" { print; found=1; exit }
+		END { if (!found) exit 1 }
+	' "$SHADOW_FILE" 2>/dev/null
+)" || exit 1
+root_hash="$(printf '%s\n' "$root_record" | "$AWK_BIN" -F: '{ print $2; exit }')" || exit 1
+
+# Empty, placeholder, or locked hashes cannot authenticate /bin/login.
+case "$root_hash" in
+	''|x|\!*|\**) exit 0 ;;
+esac
+
+uci_key='system.@system[0].ttylogin'
+old_value="$("$UCI_BIN" -q get "$uci_key" 2>/dev/null)" || exit 1
+[ "$old_value" = 1 ] && exit 0
+
+rollback() {
+	if [ -n "$old_value" ]; then
+		"$UCI_BIN" set "${uci_key}=${old_value}" >/dev/null 2>&1 || :
+	else
+		"$UCI_BIN" -q delete "$uci_key" >/dev/null 2>&1 || :
+	fi
+	"$UCI_BIN" commit system >/dev/null 2>&1 || :
+}
+
+"$UCI_BIN" set "${uci_key}=1" >/dev/null 2>&1 || {
+	rollback
+	exit 1
+}
+"$UCI_BIN" commit system >/dev/null 2>&1 || {
+	rollback
+	exit 1
+}
+[ "$("$UCI_BIN" -q get "$uci_key" 2>/dev/null || :)" = 1 ] || {
+	rollback
+	exit 1
+}
+
+log_notice 'enabled password-gated serial login for the preserved root credential'
+exit 0

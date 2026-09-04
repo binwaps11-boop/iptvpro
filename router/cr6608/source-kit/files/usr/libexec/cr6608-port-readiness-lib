@@ -1,0 +1,409 @@
+#!/bin/sh
+# Read-only CR6608 DSA/VLAN/WAN contract helpers.  Callers may override the
+# paths and UCI command for source tests; production defaults are immutable.
+
+CR6608_PORT_SYS_CLASS_NET="${CR6608_PORT_SYS_CLASS_NET:-/sys/class/net}"
+CR6608_PORT_UCI_BIN="${CR6608_PORT_UCI_BIN:-uci}"
+CR6608_WAN_VLAN_SECTION="${CR6608_WAN_VLAN_SECTION:-network.cr6608_wan_vlan}"
+CR6608_WAN_VLAN_OWNER="quicksettings-wan-vlan-v1"
+
+cr6608_port_token_valid() {
+	case "$1" in lan1|lan2|lan3|wan) return 0 ;; esac
+	return 1
+}
+
+cr6608_wan_vlan_id_valid() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 4094 ] 2>/dev/null
+}
+
+# Parse section/option presence from one successful `uci show network` snapshot.
+# An option that is absent from the snapshot is optional; an option that is
+# present but cannot subsequently be read is an I/O/query failure and must not
+# be silently collapsed into absence.
+cr6608_dump_section_type() { # $1=dump, $2=section reference
+	printf '%s\n' "$1" | awk -v prefix="$2=" '
+		index($0, prefix) == 1 { count++; value = substr($0, length(prefix) + 1) }
+		END {
+			if (count == 1) { print value; exit 0 }
+			if (count == 0) exit 1
+			exit 2
+	}'
+}
+
+cr6608_dump_option_declared() { # $1=dump, $2=option reference
+	printf '%s\n' "$1" | awk -v prefix="$2=" '
+		index($0, prefix) == 1 { found = 1; exit }
+		END { exit found ? 0 : 1 }
+	'
+}
+
+cr6608_optional_get_from_dump() { # $1=dump, $2=option reference
+	local dump="$1" reference="$2"
+	cr6608_dump_option_declared "$dump" "$reference" || return 0
+	"$CR6608_PORT_UCI_BIN" -q get "$reference" 2>/dev/null
+}
+
+# Print the VID only when the complete Quick Settings ownership record is
+# internally consistent.  A partially edited or name-colliding record is not
+# treated as ours: callers fail closed and leave it untouched.
+cr6608_managed_wan_vlan_vid() {
+	local section="$CR6608_WAN_VLAN_SECTION" dump section_type owner type ifname vid name
+	if [ "$#" -ge 1 ]; then
+		dump="$1"
+	else
+		dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	fi
+	section_type="$(cr6608_dump_section_type "$dump" "$section")" || return 1
+	[ "$section_type" = device ] || return 1
+	owner="$(cr6608_optional_get_from_dump "$dump" "$section.cr6608_owner")" || return 1
+	[ "$owner" = "$CR6608_WAN_VLAN_OWNER" ] || return 1
+	type="$(cr6608_optional_get_from_dump "$dump" "$section.type")" || return 1
+	[ "$type" = 8021q ] || return 1
+	ifname="$(cr6608_optional_get_from_dump "$dump" "$section.ifname")" || return 1
+	[ "$ifname" = wan ] || return 1
+	vid="$(cr6608_optional_get_from_dump "$dump" "$section.vid")" || return 1
+	cr6608_wan_vlan_id_valid "$vid" || return 1
+	name="$(cr6608_optional_get_from_dump "$dump" "$section.name")" || return 1
+	[ "$name" = "wan.$vid" ] || return 1
+	printf '%s\n' "$vid"
+}
+
+# Print `absent` only when a successful dump proves that the owned section is
+# absent.  Otherwise print `managed:<VID>` after validating every owner field.
+cr6608_managed_wan_vlan_state() {
+	local dump section_type rc vid
+	if [ "$#" -ge 1 ]; then
+		dump="$1"
+	else
+		dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	fi
+	if section_type="$(cr6608_dump_section_type "$dump" "$CR6608_WAN_VLAN_SECTION")"; then
+		[ "$section_type" = device ] || return 1
+	else
+		rc=$?
+		[ "$rc" -eq 1 ] || return 1
+		printf 'absent\n'
+		return 0
+	fi
+	vid="$(cr6608_managed_wan_vlan_vid "$dump")" || return 1
+	printf 'managed:%s\n' "$vid"
+}
+
+# Return success when a whitespace-delimited legacy ifname/device value contains
+# a direct or logical reference to WAN.  Checking the complete UCI value with a
+# shell case misses values such as `eth0 wan` and `wan lan1`.
+cr6608_wan_l3_reference_conflicts() {
+	printf '%s\n' "${1:-}" |
+		grep -Eq '(^|[[:space:]])@?wan([.][^[:space:]]*)?($|[[:space:]])'
+}
+
+# Bridge and bridge-VLAN list tokens may carry DSA suffixes (wan:t, wan:u*) in
+# addition to logical aliases.  Detect a WAN token anywhere in a list value.
+cr6608_wan_bridge_reference_conflicts() {
+	printf '%s\n' "${1:-}" |
+		grep -Eq '(^|[[:space:]])@?wan([.][^[:space:]:]*)?([:][^[:space:]]*)?($|[[:space:]])'
+}
+
+# `wan6` may legitimately be the IPv6 companion of network.wan by referencing
+# the logical interface as `@wan`.  It does not own the physical DSA port or a
+# second stacked device, so preserve only this exact canonical relationship.
+# Every other @wan/@wan.* reference remains a competing L3 owner.
+cr6608_wan_companion_alias_safe() { # $1=interface, $2=device, $3=legacy ifname, $4=dump
+	local iface="$1" device="$2" legacy_ifname="$3" dump="$4" proto
+	[ "$iface" = wan6 ] && [ "$device" = @wan ] && [ -z "$legacy_ifname" ] || return 1
+	proto="$(cr6608_optional_get_from_dump "$dump" network.wan6.proto)" || return 1
+	[ "$proto" = dhcpv6 ]
+}
+
+# Read-only, pre-mutation ownership gate shared by Quick Settings and the
+# readiness probe.  It rejects another L3 owner, a second WAN VLAN device, or
+# WAN participation in a bridge.  Explicit takeover may remove WAN only from
+# br-lan; it never authorizes deletion of another interface/device owner.
+cr6608_wan_ownership_available() { # $1=target VID or empty, $2=explicit br-lan takeover
+	local target_vid="${1:-}" takeover="${2:-0}" dump section iface owner_device owner_ifname
+	local name type ifname ports token base bridge_device managed_state wan_type rc
+	case "$takeover" in 0|1) ;; *) return 2 ;; esac
+	[ -z "$target_vid" ] || cr6608_wan_vlan_id_valid "$target_vid" || return 2
+
+	if [ "$#" -ge 3 ]; then
+		dump="$3"
+	else
+		dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	fi
+	managed_state="$(cr6608_managed_wan_vlan_state "$dump")" || return 1
+	if wan_type="$(cr6608_dump_section_type "$dump" network.wan)"; then
+		[ "$wan_type" = interface ] || return 1
+	else
+		rc=$?
+		[ "$rc" -eq 1 ] || return 1
+	fi
+
+	# network.wan is the sole L3 owner that this workflow may replace.
+	for iface in $(printf '%s\n' "$dump" |
+		sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
+		[ "$iface" = wan ] && continue
+		owner_device="$(cr6608_optional_get_from_dump "$dump" "network.$iface.device")" || return 1
+		owner_ifname="$(cr6608_optional_get_from_dump "$dump" "network.$iface.ifname")" || return 1
+		if cr6608_wan_l3_reference_conflicts "$owner_device" ||
+		   cr6608_wan_l3_reference_conflicts "$owner_ifname"; then
+			cr6608_wan_companion_alias_safe "$iface" "$owner_device" "$owner_ifname" "$dump" || return 1
+		fi
+	done
+
+	for section in $(printf '%s\n' "$dump" |
+		sed -n 's/^\(network\.[^.=]*\)=device$/\1/p'); do
+		[ "$section" = "$CR6608_WAN_VLAN_SECTION" ] && continue
+		name="$(cr6608_optional_get_from_dump "$dump" "$section.name")" || return 1
+		type="$(cr6608_optional_get_from_dump "$dump" "$section.type")" || return 1
+		ifname="$(cr6608_optional_get_from_dump "$dump" "$section.ifname")" || return 1
+		ports="$(cr6608_optional_get_from_dump "$dump" "$section.ports")" || return 1
+		# A physical `config device` for DSA wan (for example a MAC override)
+		# is compatible only when it is a plain physical device. A subtype,
+		# parent/ifname or ports list makes it a competing owner.
+		if [ "$name" = wan ]; then
+			[ -z "$type" ] && [ -z "$ifname" ] && [ -z "$ports" ] || return 1
+			continue
+		fi
+		cr6608_wan_l3_reference_conflicts "$name" && return 1
+		cr6608_wan_l3_reference_conflicts "$ifname" && return 1
+		cr6608_wan_bridge_reference_conflicts "$ports" || continue
+		[ "$type" = bridge ] || return 1
+		for token in $ports; do
+			base="${token%%:*}"
+			case "$base" in
+				@wan|@wan.*) return 1 ;;
+				wan|wan.*)
+					[ "$name" = br-lan ] && [ "$takeover" = 1 ] || return 1
+					;;
+			esac
+		done
+	done
+
+	# DSA bridge-VLAN membership of the physical WAN is also ownership.  Only
+	# an explicit br-lan takeover may remove it during the ensuing transaction.
+	for section in $(printf '%s\n' "$dump" |
+		sed -n 's/^\(network\.[^.=]*\)=bridge-vlan$/\1/p'); do
+		bridge_device="$(cr6608_optional_get_from_dump "$dump" "$section.device")" || return 1
+		ports="$(cr6608_optional_get_from_dump "$dump" "$section.ports")" || return 1
+		cr6608_wan_bridge_reference_conflicts "$ports" || continue
+		for token in $ports; do
+			base="${token%%:*}"
+			case "$base" in
+				@wan|@wan.*) return 1 ;;
+				wan|wan.*)
+					[ "$bridge_device" = br-lan ] && [ "$takeover" = 1 ] || return 1
+					;;
+			esac
+		done
+	done
+
+	return 0
+}
+
+cr6608_port_master() {
+	local port="$1" target
+	cr6608_port_token_valid "$port" || return 1
+	[ -L "$CR6608_PORT_SYS_CLASS_NET/$port/master" ] || return 1
+	target="$(readlink "$CR6608_PORT_SYS_CLASS_NET/$port/master" 2>/dev/null)" || return 1
+	printf '%s\n' "${target##*/}"
+}
+
+cr6608_bridge_section() {
+	local dump section section_type
+	dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	# There must be exactly one device named br-lan.  Selecting the first match
+	# would let a second, conflicting bridge definition escape the readiness
+	# contract and makes subsequent option reads ambiguous.
+	section="$(printf '%s\n' "$dump" | awk '
+		/^network\.[^.=]+[.]name='\''br-lan'\''$/ {
+			candidate = $0
+			sub(/[.]name='\''br-lan'\''$/, "", candidate)
+			count++
+			found = candidate
+		}
+		END {
+			if (count == 1) { print found; exit 0 }
+			exit 1
+		}'
+	)" || return 1
+	[ -n "$section" ] || return 1
+	section_type="$(cr6608_dump_section_type "$dump" "$section")" || return 1
+	[ "$section_type" = device ] || return 1
+	printf '%s\n' "$section"
+}
+
+cr6608_bridge_membership_valid() {
+	local section ports port
+	section="$(cr6608_bridge_section)" || return 1
+	ports="$("$CR6608_PORT_UCI_BIN" -q get "$section.ports" 2>/dev/null)" || return 1
+	for port in lan1 lan2 lan3; do
+		case " $ports " in *" $port "*) ;; *) return 1 ;; esac
+	done
+	case " $ports " in *' wan '*) return 1 ;; esac
+	for port in $ports; do
+		case "$port" in lan1|lan2|lan3) ;; *) return 1 ;; esac
+	done
+	return 0
+}
+
+cr6608_vlan_contract_valid() {
+	local dump section device vid ports token port suffix lan_device known_vids=""
+	dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	for section in $(printf '%s\n' "$dump" |
+		sed -n 's/^\(network\.[^.=]*\)=bridge-vlan$/\1/p'); do
+		device="$("$CR6608_PORT_UCI_BIN" -q get "$section.device" 2>/dev/null)" || return 1
+		[ "$device" = br-lan ] || continue
+		vid="$("$CR6608_PORT_UCI_BIN" -q get "$section.vlan" 2>/dev/null)" || return 1
+		case "$vid" in ''|*[!0-9]*) return 1 ;; esac
+		[ "$vid" -ge 1 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || return 1
+		case " $known_vids " in *" $vid "*) return 1 ;; esac
+		known_vids="$known_vids $vid"
+		ports="$("$CR6608_PORT_UCI_BIN" -q get "$section.ports" 2>/dev/null)" || return 1
+		[ -n "$ports" ] || return 1
+		for token in $ports; do
+			port="${token%%:*}"
+			[ "$port" != "$token" ] || return 1
+			suffix="${token#*:}"
+			case "$port:$suffix" in
+				lan1:t|lan2:t|lan3:t|lan1:u|lan2:u|lan3:u|lan1:u\*|lan2:u\*|lan3:u\*) ;;
+				*) return 1 ;;
+			esac
+		done
+	done
+
+	lan_device="$("$CR6608_PORT_UCI_BIN" -q get network.lan.device 2>/dev/null)" || return 1
+	case "$lan_device" in
+		br-lan) return 0 ;;
+		br-lan.*)
+			vid="${lan_device#br-lan.}"
+			case "$vid" in ''|*[!0-9]*) return 1 ;; esac
+			case " $known_vids " in *" $vid "*) return 0 ;; esac
+			return 1
+			;;
+	esac
+	return 1
+}
+
+# Validate the complete staged PPPoE state without consulting live sysfs.  The
+# caller supplies an empty VID for bare WAN or a validated owned WAN VID.
+cr6608_wan_uci_pppoe_active() { # $1=VID or empty, $2=optional network dump
+	local target_vid="${1:-}" dump managed_state expected_state wan_type
+	local proto device disabled auto username expected_device
+	[ -z "$target_vid" ] || cr6608_wan_vlan_id_valid "$target_vid" || return 1
+	if [ "$#" -ge 2 ]; then
+		dump="$2"
+	else
+		dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	fi
+	managed_state="$(cr6608_managed_wan_vlan_state "$dump")" || return 1
+	if [ -n "$target_vid" ]; then
+		expected_state="managed:$target_vid"
+		expected_device="wan.$target_vid"
+	else
+		expected_state=absent
+		expected_device=wan
+	fi
+	[ "$managed_state" = "$expected_state" ] || return 1
+	wan_type="$(cr6608_dump_section_type "$dump" network.wan)" || return 1
+	[ "$wan_type" = interface ] || return 1
+	cr6608_wan_ownership_available "$target_vid" 0 "$dump" || return 1
+	proto="$(cr6608_optional_get_from_dump "$dump" network.wan.proto)" || return 1
+	device="$(cr6608_optional_get_from_dump "$dump" network.wan.device)" || return 1
+	disabled="$(cr6608_optional_get_from_dump "$dump" network.wan.disabled)" || return 1
+	auto="$(cr6608_optional_get_from_dump "$dump" network.wan.auto)" || return 1
+	username="$(cr6608_optional_get_from_dump "$dump" network.wan.username)" || return 1
+	[ "$proto" = pppoe ] && [ "$device" = "$expected_device" ] &&
+		[ "$disabled" = 0 ] && [ "$auto" = 1 ] && [ -n "$username" ]
+}
+
+# Validate the staged UCI-only parked WAN state.  This intentionally does not
+# inspect live sysfs/netifd because callers use it before commit/reload.
+cr6608_wan_uci_parked() {
+	local dump managed_state wan_type proto device disabled auto
+	if [ "$#" -ge 1 ]; then
+		dump="$1"
+	else
+		dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	fi
+	managed_state="$(cr6608_managed_wan_vlan_state "$dump")" || return 1
+	[ "$managed_state" = absent ] || return 1
+	wan_type="$(cr6608_dump_section_type "$dump" network.wan)" || return 1
+	[ "$wan_type" = interface ] || return 1
+	cr6608_wan_ownership_available "" 0 "$dump" || return 1
+	proto="$(cr6608_optional_get_from_dump "$dump" network.wan.proto)" || return 1
+	device="$(cr6608_optional_get_from_dump "$dump" network.wan.device)" || return 1
+	disabled="$(cr6608_optional_get_from_dump "$dump" network.wan.disabled)" || return 1
+	auto="$(cr6608_optional_get_from_dump "$dump" network.wan.auto)" || return 1
+	# Parking is also the credential-erasure boundary.  A stale secret is not
+	# harmless merely because proto=none: it would be reused by a later partial
+	# PPPoE edit and remains sensitive configuration at rest.
+	if cr6608_dump_option_declared "$dump" network.wan.username ||
+	   cr6608_dump_option_declared "$dump" network.wan.password; then
+		return 1
+	fi
+	[ "$proto" = none ] && [ "$device" = wan ] && [ "$disabled" = 1 ] && [ "$auto" = 0 ]
+}
+
+# Print a stable state token on success.  The product WAN contract is either
+# absent/reserved, safely parked, or active PPPoE on bare wan / an explicitly
+# owned wan.<VID> 802.1Q device.
+cr6608_wan_contract() {
+	local dump managed_state wan_type rc proto device disabled auto managed_vid="" device_vid state username
+
+	if [ -L "$CR6608_PORT_SYS_CLASS_NET/wan/master" ]; then
+		return 1
+	fi
+	dump="$("$CR6608_PORT_UCI_BIN" -q show network 2>/dev/null)" || return 1
+	managed_state="$(cr6608_managed_wan_vlan_state "$dump")" || return 1
+	case "$managed_state" in
+		absent) ;;
+		managed:*) managed_vid="${managed_state#managed:}" ;;
+		*) return 1 ;;
+	esac
+	cr6608_wan_ownership_available "$managed_vid" 0 "$dump" || return 1
+	if wan_type="$(cr6608_dump_section_type "$dump" network.wan)"; then
+		[ "$wan_type" = interface ] || return 1
+	else
+		rc=$?
+		[ "$rc" -eq 1 ] || return 1
+		[ -z "$managed_vid" ] || return 1
+		printf 'reserved\n'
+		return 0
+	fi
+	proto="$(cr6608_optional_get_from_dump "$dump" network.wan.proto)" || return 1
+	device="$(cr6608_optional_get_from_dump "$dump" network.wan.device)" || return 1
+	disabled="$(cr6608_optional_get_from_dump "$dump" network.wan.disabled)" || return 1
+	auto="$(cr6608_optional_get_from_dump "$dump" network.wan.auto)" || return 1
+	case "$proto" in
+		pppoe)
+			case "$device" in
+				wan)
+					[ -z "$managed_vid" ] || return 1
+					state='pppoe-active'
+					;;
+				wan.*)
+					device_vid="${device#wan.}"
+					cr6608_wan_vlan_id_valid "$device_vid" || return 1
+					[ "$managed_vid" = "$device_vid" ] || return 1
+					state="pppoe-vlan-active:$device_vid"
+					;;
+				*) return 1 ;;
+				esac
+			# Runtime readiness must enforce the identical complete state accepted
+			# by the staging verifier.  Missing, empty, boolean-like, or otherwise
+			# malformed values are not equivalent to enabled/autostarted.
+			[ "$disabled" = 0 ] && [ "$auto" = 1 ] || return 1
+			username="$(cr6608_optional_get_from_dump "$dump" network.wan.username)" || return 1
+			[ -n "$username" ] || return 1
+			printf '%s\n' "$state"
+			;;
+		none|'')
+			# Use the identical strict staged-state contract at runtime.  This
+			# rejects incomplete legacy parking and retained PPPoE credentials.
+			cr6608_wan_uci_parked "$dump" || return 1
+			printf 'parked\n'
+			;;
+		*) return 1 ;;
+	esac
+}

@@ -1,0 +1,21 @@
+{
+  "board_name": "xiaomi,mi-router-cr6608",
+  "uci": {
+    "rpcd.@login[0]": "login",
+    "rpcd.@login[0].username": "root",
+    "rpcd.@login[0].password": "stale-password-hash-must-be-repaired",
+    "smartap.migration": "migration",
+    "smartap.migration.preserved_config_version": "3",
+    "network.lan": "interface",
+    "network.lan.proto": "static",
+    "network.lan.ipaddr": "192.168.1.1",
+    "wireless.radio0": "wifi-device",
+    "wireless.radio0.channel": "11",
+    "factory.calibration.sha256": "marker-v3-calibration-must-not-change"
+  },
+  "files": {
+    "etc/shadow": "root:$6$operator$ssh-hash-must-not-change:20800:0:99999:7:::\n",
+    "etc/config/wireless": "config wifi-device 'radio0'\n\toption channel '11'\n",
+    "factory.bin": "CR6608 MARKER V3 FACTORY SENTINEL\n"
+  }
+}

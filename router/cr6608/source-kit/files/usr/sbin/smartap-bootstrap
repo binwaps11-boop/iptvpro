@@ -1,0 +1,404 @@
+#!/bin/sh
+# Idempotent baseline for Smart AP installs on CR6608/OpenWrt.
+# Keeps dashboard access alive while enabling the UI-owned VLAN/mesh/port features.
+
+smartap_bootstrap_mode="${1:-normal}"
+case "$smartap_bootstrap_mode" in
+  normal|quiet|firstboot) ;;
+  *) printf 'usage: %s [quiet|firstboot]\n' "$0" >&2; exit 2 ;;
+esac
+
+# It can run below dashctl/security-apply.  Do not inherit their cache lock
+# descriptors into network/wifi service reloads.
+for cr6608_close_fd in 4 5 6 7 8; do
+  eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+changed=0
+changed_network=0
+changed_firewall=0
+changed_wireless=0
+changed_dhcp=0
+changed_smartap=0
+failed=0
+committed_network=0
+committed_firewall=0
+committed_wireless=0
+committed_dhcp=0
+
+mark_changed() {
+  changed=1
+  case "$1" in
+    network) changed_network=1 ;;
+    firewall) changed_firewall=1 ;;
+    wireless) changed_wireless=1 ;;
+    dhcp) changed_dhcp=1 ;;
+    smartap) changed_smartap=1 ;;
+  esac
+}
+
+g() { uci -q get "$1" 2>/dev/null; }
+
+ensure_section() {
+  key="$1"
+  type="$2"
+  cfg="$3"
+  uci -q get "$key" >/dev/null 2>&1 && return 0
+  if uci set "$key=$type" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+ensure_exact_section() {
+  key="$1"
+  type="$2"
+  cfg="$3"
+  [ "$(g "$key")" = "$type" ] && return 0
+  if uci set "$key=$type" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+section_shape_exact() {
+  shape_key="$1"
+  shape_type="$2"
+  shape_allowed="$3"
+  shape_output="$(uci -q show "$shape_key" 2>/dev/null)" || return 1
+  printf '%s\n' "$shape_output" |
+    awk -v prefix="$shape_key" -v type="$shape_type" -v allowed="$shape_allowed" '
+      $0 == prefix "=" type { type_seen++; next }
+      index($0, prefix ".") == 1 {
+        rest=substr($0,length(prefix)+2)
+        eq=index(rest,"=")
+        if (!eq) { bad=1; next }
+        option=substr(rest,1,eq-1)
+        if (!index(" " allowed " ", " " option " ")) bad=1
+        next
+      }
+      { bad=1 }
+      END { exit !(type_seen == 1 && !bad) }'
+}
+
+setv() {
+  key="$1"
+  val="$2"
+  cfg="$3"
+  [ "$(g "$key")" = "$val" ] && return 0
+  if uci set "$key=$val" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+seedv() {
+  key="$1"
+  val="$2"
+  cfg="$3"
+  [ -n "$(g "$key")" ] && return 0
+  if uci set "$key=$val" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+add_list_once() {
+  sec="$1"
+  opt="$2"
+  val="$3"
+  cfg="$4"
+  uci -q get "$sec.$opt" 2>/dev/null | tr ' ' '\n' | grep -qx "$val" && return 0
+  if uci add_list "$sec.$opt=$val" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+deletev() {
+  key="$1"
+  cfg="$2"
+  uci -q get "$key" >/dev/null 2>&1 || return 0
+  if uci -q delete "$key" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+del_list_once() {
+  sec="$1"
+  opt="$2"
+  val="$3"
+  cfg="$4"
+  uci -q get "$sec.$opt" 2>/dev/null | tr ' ' '\n' | grep -qx "$val" || return 0
+  if uci -q del_list "$sec.$opt=$val" 2>/dev/null; then
+    mark_changed "$cfg"
+  else
+    failed=1
+    return 1
+  fi
+}
+
+set_list_exact() {
+  sec="$1"
+  opt="$2"
+  values="$3"
+  cfg="$4"
+  [ "$(g "$sec.$opt")" = "$values" ] && return 0
+  uci -q delete "$sec.$opt" >/dev/null 2>&1 || true
+  for value in $values; do
+    uci add_list "$sec.$opt=$value" 2>/dev/null || { failed=1; return 1; }
+  done
+  mark_changed "$cfg"
+}
+
+find_lan_zone() {
+  uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^=]*\)\.name='lan'.*/\1/p" | head -n 1
+}
+
+find_radio0_ap() {
+  for s in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface/{print $2}'); do
+    [ "$s" = "smartap_mgmt" ] && continue
+    [ "$(g wireless.$s.device)" = "radio0" ] || continue
+    [ "$(g wireless.$s.mode)" = "ap" ] || continue
+    [ "$(g wireless.$s.disabled)" = "1" ] && continue
+    echo "$s"
+    return 0
+  done
+}
+
+host="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+[ -n "$host" ] || host="CR6608-SmartAP"
+
+# Smart AP defaults consumed by dashctl and cr6608-security-apply.
+ensure_section smartap.security security smartap
+seedv smartap.security.enabled 1 smartap
+seedv smartap.security.flood_guard 1 smartap
+seedv smartap.security.rogue_dhcp_guard 1 smartap
+seedv smartap.security.loop_guard 0 smartap
+seedv smartap.security.loop_guard_owner inherit smartap
+
+ensure_section smartap.management management smartap
+seedv smartap.management.vlan 1 smartap
+management_ip="$(g network.lan.ipaddr)"
+[ -n "$management_ip" ] || management_ip=192.168.1.1
+seedv smartap.management.ipaddr "$management_ip" smartap
+seedv smartap.management.recovery_always 0 smartap
+seedv smartap.management.recovery_wifi 0 smartap
+
+for n in 1 2 3; do
+  ensure_section "smartap.lan$n" port smartap
+  seedv "smartap.lan$n.enabled" 1 smartap
+  seedv "smartap.lan$n.isolate" 0 smartap
+  seedv "smartap.lan$n.vlan" 1 smartap
+  seedv "smartap.lan$n.vlan_mode" auto smartap
+done
+
+# A clean image starts at 192.168.1.1; Quick Settings may replace that address.
+ensure_section network.lan interface network
+# seed-only: set the 192.168.1.1 cable IP ONLY if no LAN IP exists yet — never overwrite
+# an operator-chosen IP (that clobber caused: apply reverts + reboot resets to default).
+[ -n "$(g network.lan.ipaddr)" ] || setv network.lan.ipaddr 192.168.1.1 network
+[ -n "$(g network.lan.netmask)" ] || setv network.lan.netmask 255.255.255.0 network
+
+# Recovery IP (192.168.66.1) removed by owner request. Any leftover recovery interface,
+# its DHCP pool, and its Wi-Fi SSID from an older build are deleted so they cannot reappear.
+# The selected LAN management address stays on cable; a guarded link-local IP is Wi-Fi rescue.
+deletev network.recovery network
+deletev dhcp.recovery dhcp
+deletev wireless.smartap_mgmt wireless
+
+# No DHCP client here. The device must never request an address from upstream nor hand
+# one out. Any leftover 'mgmt' DHCP-client interface from an older build is removed so it
+# can never reappear in LuCI or pull a lease.
+deletev network.mgmt network
+[ "$(g network.wan.proto)" = "pppoe" ] || deletev network.wan network
+
+# Trusted LAN zone: only the selected LAN management interface.  Rescue remains
+# in a separate REJECT zone and is admitted solely by its nft Wi-Fi guard.
+zone="$(find_lan_zone)"
+if [ -n "$zone" ]; then
+  setv "firewall.$zone.input" ACCEPT firewall
+  add_list_once "firewall.$zone" network lan firewall
+  del_list_once "firewall.$zone" network recovery firewall
+fi
+
+# Rescue UCI is addressless ownership metadata.  cr6608-rescue-guard resolves
+# the live primary-AP bridge/VLAN and installs the /32 plus client route only
+# after its nft rules pass syntax and health checks.
+rescue_configuration_safe=1
+[ -x /usr/sbin/cr6608-rescue-guard ] &&
+  /usr/sbin/cr6608-rescue-guard close >/dev/null 2>&1 || rescue_configuration_safe=0
+for rescue_owned_network_section in cr6608_rescue_dev wlanrescue; do
+  if uci -q get "network.$rescue_owned_network_section" >/dev/null 2>&1; then
+    [ "$(g "network.$rescue_owned_network_section.cr6608_owner")" = wlanrescue-v1 ] ||
+      rescue_configuration_safe=0
+  fi
+done
+for rescue_owned_section in \
+  cr6608_rescue_zone cr6608_rescue_web cr6608_rescue_ping \
+  cr6608_rescue_reject cr6608_rescue_guard_reload; do
+  if uci -q get "firewall.$rescue_owned_section" >/dev/null 2>&1; then
+    [ "$(g "firewall.$rescue_owned_section.cr6608_owner")" = wlanrescue-v1 ] ||
+      rescue_configuration_safe=0
+  fi
+done
+rescue_firewall_snapshot="$(uci show firewall 2>/dev/null)" || rescue_configuration_safe=0
+for rescue_zone in $(printf '%s\n' "$rescue_firewall_snapshot" |
+  sed -n "s/^firewall\.\([^=]*\)=zone$/\1/p"); do
+  case " $(g "firewall.$rescue_zone.network") " in
+    *' wlanrescue '*)
+      [ "$rescue_zone" = cr6608_rescue_zone ] || rescue_configuration_safe=0
+      ;;
+  esac
+done
+if [ "$rescue_configuration_safe" != 1 ]; then
+  failed=1
+else
+if uci -q get network.wlanrescue >/dev/null 2>&1 &&
+   ! section_shape_exact network.wlanrescue interface \
+     'cr6608_owner proto ipv6 delegate auto'; then
+  deletev network.wlanrescue network
+fi
+if uci -q get firewall.cr6608_rescue_zone >/dev/null 2>&1 &&
+   ! section_shape_exact firewall.cr6608_rescue_zone zone \
+     'name cr6608_owner network input output forward'; then
+  deletev firewall.cr6608_rescue_zone firewall
+fi
+if uci -q get firewall.cr6608_rescue_web >/dev/null 2>&1 &&
+   ! section_shape_exact firewall.cr6608_rescue_web rule \
+     'cr6608_owner name src dest_ip proto dest_port family mark target'; then
+  deletev firewall.cr6608_rescue_web firewall
+fi
+if uci -q get firewall.cr6608_rescue_ping >/dev/null 2>&1 &&
+   ! section_shape_exact firewall.cr6608_rescue_ping rule \
+     'cr6608_owner name src dest_ip proto icmp_type family mark target'; then
+  deletev firewall.cr6608_rescue_ping firewall
+fi
+if uci -q get firewall.cr6608_rescue_reject >/dev/null 2>&1 &&
+   ! section_shape_exact firewall.cr6608_rescue_reject rule \
+     'cr6608_owner name src dest_ip family target'; then
+  deletev firewall.cr6608_rescue_reject firewall
+fi
+if uci -q get firewall.cr6608_rescue_guard_reload >/dev/null 2>&1 &&
+   ! section_shape_exact firewall.cr6608_rescue_guard_reload include \
+     'cr6608_owner type path fw4_compatible'; then
+  deletev firewall.cr6608_rescue_guard_reload firewall
+fi
+deletev network.cr6608_rescue_dev network
+ensure_exact_section network.wlanrescue interface network
+setv network.wlanrescue.cr6608_owner wlanrescue-v1 network
+setv network.wlanrescue.proto none network
+setv network.wlanrescue.ipv6 0 network
+setv network.wlanrescue.delegate 0 network
+setv network.wlanrescue.auto 0 network
+
+ensure_exact_section firewall.cr6608_rescue_zone zone firewall
+setv firewall.cr6608_rescue_zone.name cr6608_rescue firewall
+setv firewall.cr6608_rescue_zone.cr6608_owner wlanrescue-v1 firewall
+set_list_exact firewall.cr6608_rescue_zone network wlanrescue firewall
+setv firewall.cr6608_rescue_zone.input REJECT firewall
+setv firewall.cr6608_rescue_zone.output ACCEPT firewall
+setv firewall.cr6608_rescue_zone.forward REJECT firewall
+deletev firewall.cr6608_rescue_zone.masq firewall
+
+ensure_exact_section firewall.cr6608_rescue_web rule firewall
+setv firewall.cr6608_rescue_web.cr6608_owner wlanrescue-v1 firewall
+setv firewall.cr6608_rescue_web.name CR6608-Rescue-Web firewall
+setv firewall.cr6608_rescue_web.src lan firewall
+setv firewall.cr6608_rescue_web.dest_ip 221.221.221.221 firewall
+setv firewall.cr6608_rescue_web.proto tcp firewall
+set_list_exact firewall.cr6608_rescue_web dest_port '80 443' firewall
+setv firewall.cr6608_rescue_web.family ipv4 firewall
+setv firewall.cr6608_rescue_web.mark 0x6608cafe/0xffffffff firewall
+setv firewall.cr6608_rescue_web.target ACCEPT firewall
+
+ensure_exact_section firewall.cr6608_rescue_ping rule firewall
+setv firewall.cr6608_rescue_ping.cr6608_owner wlanrescue-v1 firewall
+setv firewall.cr6608_rescue_ping.name CR6608-Rescue-Ping firewall
+setv firewall.cr6608_rescue_ping.src lan firewall
+setv firewall.cr6608_rescue_ping.dest_ip 221.221.221.221 firewall
+setv firewall.cr6608_rescue_ping.proto icmp firewall
+setv firewall.cr6608_rescue_ping.icmp_type echo-request firewall
+setv firewall.cr6608_rescue_ping.family ipv4 firewall
+setv firewall.cr6608_rescue_ping.mark 0x6608cafe/0xffffffff firewall
+setv firewall.cr6608_rescue_ping.target ACCEPT firewall
+
+ensure_exact_section firewall.cr6608_rescue_reject rule firewall
+setv firewall.cr6608_rescue_reject.cr6608_owner wlanrescue-v1 firewall
+setv firewall.cr6608_rescue_reject.name CR6608-Rescue-Reject-Other firewall
+setv firewall.cr6608_rescue_reject.src lan firewall
+setv firewall.cr6608_rescue_reject.dest_ip 221.221.221.221 firewall
+setv firewall.cr6608_rescue_reject.family ipv4 firewall
+setv firewall.cr6608_rescue_reject.target REJECT firewall
+
+ensure_exact_section firewall.cr6608_rescue_guard_reload include firewall
+setv firewall.cr6608_rescue_guard_reload.cr6608_owner wlanrescue-v1 firewall
+setv firewall.cr6608_rescue_guard_reload.type script firewall
+setv firewall.cr6608_rescue_guard_reload.path /usr/libexec/cr6608-rescue-firewall-include firewall
+setv firewall.cr6608_rescue_guard_reload.fw4_compatible 1 firewall
+fi
+
+
+
+# TX power is NOT touched here. It is owned by the first-boot script
+# etc/uci-defaults/94-cr6608-txpower (sets 38 on both radios) and by the dashboard
+# (set_txpower / Quick Settings). This script runs on EVERY boot via ensure_management, so
+# Writing txpower here would override the release baseline on every boot.
+
+# Recovery Wi-Fi SSID remains removed. Rescue uses 221.221.221.221 over a live AP
+# and never creates an additional open or experimental SSID.
+
+if [ "$changed_smartap" = 1 ]; then uci commit smartap 2>/dev/null || failed=1; fi
+if [ "$changed_network" = 1 ]; then
+  if uci commit network 2>/dev/null; then committed_network=1; else failed=1; fi
+fi
+if [ "$changed_firewall" = 1 ]; then
+  if uci commit firewall 2>/dev/null; then committed_firewall=1; else failed=1; fi
+fi
+if [ "$changed_wireless" = 1 ]; then
+  if uci commit wireless 2>/dev/null; then committed_wireless=1; else failed=1; fi
+fi
+if [ "$changed_dhcp" = 1 ]; then
+  if uci commit dhcp 2>/dev/null; then committed_dhcp=1; else failed=1; fi
+fi
+
+if [ "$smartap_bootstrap_mode" != firstboot ]; then
+  if [ "$committed_network" = 1 ]; then /etc/init.d/network reload >/dev/null 2>&1 || failed=1; fi
+  if [ "$committed_firewall" = 1 ] || { [ "$committed_network" = 1 ] && /etc/init.d/firewall enabled >/dev/null 2>&1; }; then
+    /etc/init.d/firewall reload >/dev/null 2>&1 || failed=1
+  fi
+  if [ "$committed_wireless" = 1 ]; then wifi reload >/dev/null 2>&1 || failed=1; fi
+  if [ "$committed_dhcp" = 1 ]; then /etc/init.d/dnsmasq restart >/dev/null 2>&1 || failed=1; fi
+fi
+
+if [ "$smartap_bootstrap_mode" = normal ]; then
+  if [ "$failed" = 1 ]; then
+    echo "Smart AP baseline did not apply completely." >&2
+  elif [ "$changed" = 1 ]; then
+    echo "Smart AP baseline applied."
+  else
+    echo "Smart AP baseline already OK."
+  fi
+fi
+
+if [ "$smartap_bootstrap_mode" != firstboot ] && [ "$changed" = 1 ] && \
+   [ -x /usr/sbin/cr6608-dashboard-invalidate ]; then
+  (CR6608_DASHBOARD_INVALIDATE_ATTEMPTS=2 \
+    /usr/sbin/cr6608-dashboard-invalidate </dev/null >/dev/null 2>&1) &
+fi
+
+[ "$failed" = 0 ] || exit 1
+exit 0

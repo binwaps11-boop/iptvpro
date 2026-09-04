@@ -1,0 +1,192 @@
+#!/bin/sh
+
+PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+[ -r "$PRIVATE_RUNTIME_LIB" ] || exit 1
+. "$PRIVATE_RUNTIME_LIB" || exit 1
+SELFTEST_RUNTIME_DIR="$(cr6608_private_runtime_dir selftest)" || exit 1
+counter_state="$SELFTEST_RUNTIME_DIR/port-counters"
+report_file="$SELFTEST_RUNTIME_DIR/report.json"
+counter_tmp=""
+report_tmp=""
+cleanup_private_temps() {
+  [ -z "$counter_tmp" ] || rm -f -- "$counter_tmp" 2>/dev/null || true
+  [ -z "$report_tmp" ] || rm -f -- "$report_tmp" 2>/dev/null || true
+}
+trap cleanup_private_temps EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# smartap-selftest — collects a root-private volatile health snapshot.
+# Run nightly by cron (04:00) and on demand from the dashboard (dashctl run_selftest).
+# Pure read-only: changes nothing on the system.
+
+run_limit() {
+  sec="$1"; shift
+  "$@" &
+  pid=$!
+  ( sleep "$sec"; kill "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  guard=$!
+  wait "$pid" 2>/dev/null
+  rc=$?
+  kill "$guard" 2>/dev/null
+  return "$rc"
+}
+iw() { run_limit 6 /usr/sbin/iw "$@" 2>/dev/null; }
+iwinfo() { run_limit 6 /usr/bin/iwinfo "$@" 2>/dev/null; }
+
+wifi_schedule_off_now() {
+  [ -r /etc/crontabs/root ] || return 1
+  off_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="down" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+  on_min="$(awk '$3=="*" && $4=="*" && $5=="*" && $6=="/usr/sbin/cr6608-wifi-schedule" && $7=="up" && index($0,"# smartap-wifi-timer") { print ($2 * 60) + $1; exit }' /etc/crontabs/root 2>/dev/null)"
+  now_min="$(date '+%H %M' 2>/dev/null | awk '{ print ($1 * 60) + $2 }')"
+  case "$off_min:$on_min:$now_min" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
+  [ "$off_min" -ne "$on_min" ] || return 1
+  if [ "$off_min" -lt "$on_min" ]; then
+    [ "$now_min" -ge "$off_min" ] && [ "$now_min" -lt "$on_min" ]
+  else
+    [ "$now_min" -ge "$off_min" ] || [ "$now_min" -lt "$on_min" ]
+  fi
+}
+
+ts="$(date '+%Y-%m-%d %H:%M' 2>/dev/null)"
+up="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; up="${up:-0}"
+
+temp=""
+for t in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
+  [ -r "$t" ] || continue
+  v="$(cat "$t" 2>/dev/null)"
+  case "$v" in ''|*[!0-9-]*) continue ;; esac
+  temp="$(awk -v v="$v" 'BEGIN{if (v > 1000) printf "%.0f", v/1000; else printf "%.0f", v}')"
+  break
+done
+
+mt="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; mt="${mt:-1}"
+ma="$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo 2>/dev/null)"; ma="${ma:-0}"
+mem_pct=$(( (mt - ma) * 100 / mt ))
+
+busy_max=0; clients=0; err_sum=0
+for IF in $(iw dev | awk '$1=="Interface"{print $2}'); do
+  case "$IF" in phy0-ap1) continue ;; esac
+  c="$(iw dev "$IF" station dump | grep -Ec '^Station ')"
+  [ "${c:-0}" -gt 0 ] 2>/dev/null || c="$(iwinfo "$IF" assoclist | grep -Ec '^[0-9A-Fa-f]{2}:')"
+  clients=$((clients + ${c:-0}))
+  b="$(iw dev "$IF" survey dump | awk '
+    /\[in use\]/{inuse=1; next}
+    inuse && /channel active time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) a=$i }
+    inuse && /channel busy time:/{ for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) b=$i }
+    inuse && /^[[:space:]]*$/{ inuse=0 }
+    END{ if (a>0) print int(b*100/a); else print 0 }')"
+  [ "${b:-0}" -gt "$busy_max" ] 2>/dev/null && busy_max="$b"
+  e="$(cat "/sys/class/net/$IF/statistics/tx_errors" 2>/dev/null)"
+  err_sum=$((err_sum + ${e:-0}))
+done
+
+# DSA port counters are read directly from sysfs, so this diagnostic never
+# cycles a PHY or interrupts traffic. rx_errors/tx_errors are aggregate
+# counters; adding their CRC/FIFO/carrier components again would double-count.
+port_errors_total=0; port_drops_total=0; tx_timeouts_total=0
+for IF in lan1 lan2 lan3 wan; do
+  [ -d "/sys/class/net/$IF/statistics" ] || continue
+  for counter in rx_errors tx_errors; do
+    v="$(cat "/sys/class/net/$IF/statistics/$counter" 2>/dev/null)"
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    port_errors_total=$((port_errors_total + v))
+  done
+  for counter in rx_dropped tx_dropped; do
+    v="$(cat "/sys/class/net/$IF/statistics/$counter" 2>/dev/null)"
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    port_drops_total=$((port_drops_total + v))
+  done
+done
+
+# MT7621 can stall a parent mtk_soc_eth TX queue while all DSA port error,
+# drop and PHY counters remain at zero. Count the per-queue watchdog counters
+# explicitly so the nightly health report can see that failure mode.
+for timeout_counter in /sys/class/net/eth[01]/queues/tx-*/tx_timeout; do
+  [ -r "$timeout_counter" ] || continue
+  v="$(cat "$timeout_counter" 2>/dev/null)"
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  tx_timeouts_total=$((tx_timeouts_total + v))
+done
+
+# Score new faults during the observation interval, not lifetime counters.
+# A repaired cable must be able to return to green without rebooting merely
+# to clear an old cumulative kernel statistic.
+now_epoch="$(date +%s 2>/dev/null)"; now_epoch="${now_epoch:-0}"
+prev_epoch=0; prev_errors="$port_errors_total"; prev_drops="$port_drops_total"; prev_timeouts="$tx_timeouts_total"
+if [ -r "$counter_state" ]; then
+  read prev_epoch prev_errors prev_drops prev_timeouts < "$counter_state" 2>/dev/null || true
+fi
+case "$prev_epoch:$prev_errors:$prev_drops:$prev_timeouts" in *[!0-9:]*|:*|*::*|*:) prev_epoch=0; prev_errors="$port_errors_total"; prev_drops="$port_drops_total"; prev_timeouts="$tx_timeouts_total" ;; esac
+port_errors=0; port_drops=0; tx_timeouts=0; port_interval_s=0
+if [ "$prev_epoch" -gt 0 ] 2>/dev/null && \
+   [ "$now_epoch" -ge "$prev_epoch" ] 2>/dev/null && \
+   [ "$port_errors_total" -ge "$prev_errors" ] 2>/dev/null && \
+   [ "$port_drops_total" -ge "$prev_drops" ] 2>/dev/null && \
+   [ "$tx_timeouts_total" -ge "$prev_timeouts" ] 2>/dev/null; then
+  port_interval_s=$((now_epoch - prev_epoch))
+  port_errors=$((port_errors_total - prev_errors))
+  port_drops=$((port_drops_total - prev_drops))
+  tx_timeouts=$((tx_timeouts_total - prev_timeouts))
+fi
+umask 077
+counter_tmp="$(cr6608_private_mktemp "$SELFTEST_RUNTIME_DIR" counters)" || exit 1
+printf '%s %s %s %s\n' "$now_epoch" "$port_errors_total" "$port_drops_total" "$tx_timeouts_total" >"$counter_tmp" 2>/dev/null || exit 1
+cr6608_private_publish_file "$counter_tmp" "$counter_state" || exit 1
+counter_tmp=""
+
+critical_missing=""
+for process in netifd uhttpd rpcd; do
+  # BusyBox pgrep -x compares some absolute argv[0] values literally on
+  # OpenWrt (for example /sbin/netifd), so healthy daemons can be reported as
+  # missing. pidof uses the kernel process name and is reliable for procd
+  # services on this target.
+  pidof "$process" >/dev/null 2>&1 || critical_missing="${critical_missing}${critical_missing:+,}$process"
+done
+# A live rpcd process is insufficient when its ubus object is wedged or has
+# disappeared.  Probe the read-only session object through both an ubus and an
+# outer process deadline; this never creates a session or needs a password.
+if ! run_limit 3 /bin/ubus -t 2 list session >/dev/null 2>&1; then
+  critical_missing="${critical_missing}${critical_missing:+,}ubus-session"
+fi
+if /etc/init.d/dropbear enabled >/dev/null 2>&1; then
+  pidof dropbear >/dev/null 2>&1 || critical_missing="${critical_missing}${critical_missing:+,}dropbear"
+fi
+hostapd_expected=0
+if ! wifi_schedule_off_now; then
+  for iface in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+    [ "$(uci -q get wireless."$iface".mode 2>/dev/null)" = "ap" ] || continue
+    [ "$(uci -q get wireless."$iface".disabled 2>/dev/null)" != "1" ] || continue
+    radio="$(uci -q get wireless."$iface".device 2>/dev/null)"
+    [ -n "$radio" ] && [ "$(uci -q get wireless."$radio".disabled 2>/dev/null)" != "1" ] || continue
+    hostapd_expected=1
+    break
+  done
+fi
+if [ "$hostapd_expected" = "1" ]; then
+  pidof hostapd >/dev/null 2>&1 || critical_missing="${critical_missing}${critical_missing:+,}hostapd"
+fi
+
+ov="$(df -k /overlay 2>/dev/null | awk 'NR==2{printf "%d", $3*100/$2}')"; ov="${ov:-0}"
+
+score=100; notes=""
+[ "$busy_max" -ge 85 ] 2>/dev/null && { score=$((score-10)); notes="$notes|القناة مزدحمة جداً ($busy_max%)"; }
+[ "${temp:--1}" -ge 82 ] 2>/dev/null && { score=$((score-20)); notes="$notes|الحرارة مرتفعة (${temp}°)"; }
+[ "$mem_pct" -ge 90 ] 2>/dev/null && { score=$((score-15)); notes="$notes|الذاكرة مضغوطة ($mem_pct%)"; }
+[ "$ov" -ge 90 ] 2>/dev/null && { score=$((score-10)); notes="$notes|التخزين شبه ممتلئ ($ov%)"; }
+[ "$port_errors" -ge 10 ] 2>/dev/null && { score=$((score-20)); notes="$notes|أخطاء منافذ DSA مرتفعة ($port_errors)"; }
+[ "$port_drops" -ge 1000 ] 2>/dev/null && { score=$((score-5)); notes="$notes|إسقاطات المنافذ مرتفعة ($port_drops)"; }
+[ "$tx_timeouts" -ge 1 ] 2>/dev/null && { score=$((score-30)); notes="$notes|توقف طابور إرسال MT7621 ($tx_timeouts)"; }
+[ -z "$critical_missing" ] || { score=$((score-30)); notes="$notes|عمليات أساسية مفقودة ($critical_missing)"; }
+[ "$score" -lt 0 ] && score=0
+[ -n "$notes" ] || notes="|لا ملاحظات — كل شيء سليم"
+
+jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+report_tmp="$(cr6608_private_mktemp "$SELFTEST_RUNTIME_DIR" report)" || exit 1
+printf '{"ok":true,"time":"%s","uptime_s":%s,"score":%s,"temp_c":%s,"mem_pct":%s,"busy_pct":%s,"clients":%s,"tx_errors":%s,"port_errors":%s,"port_drops":%s,"tx_timeouts":%s,"port_errors_total":%s,"port_drops_total":%s,"tx_timeouts_total":%s,"port_interval_s":%s,"critical_missing":"%s","overlay_pct":%s,"notes":"%s"}\n' \
+  "$(jesc "$ts")" "$up" "$score" "${temp:-null}" "$mem_pct" "$busy_max" "$clients" "$err_sum" "$port_errors" "$port_drops" "$tx_timeouts" "$port_errors_total" "$port_drops_total" "$tx_timeouts_total" "$port_interval_s" "$(jesc "$critical_missing")" "$ov" "$(jesc "${notes#|}")" \
+  >"$report_tmp" 2>/dev/null || exit 1
+cr6608_private_publish_file "$report_tmp" "$report_file" || exit 1
+report_tmp=""
+cat "$report_file"
+exit 0

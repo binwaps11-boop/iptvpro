@@ -1,0 +1,664 @@
+#!/bin/sh
+
+# Runtime capability report. "active" is used only for settings confirmed in
+# the generated hostapd configuration; multi-client scheduling remains
+# unverified until compatible stations are connected.
+
+set -u
+
+status=0
+support_manifest=/usr/share/cr6608/ax-feature-support
+ul_module_file="${CR6608_UL_MURU_MODULE_FILE:-/etc/modules.d/mt7915e}"
+ul_module_param="${CR6608_UL_MURU_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_ul_muru}"
+ul_mask_module_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
+ul_debug_root="${CR6608_UL_MURU_DEBUG_ROOT:-/sys/kernel/debug/ieee80211}"
+ul_guard_init="${CR6608_UL_MURU_GUARD_INIT:-/etc/init.d/cr6608-ul-muru-guard}"
+ul_guard_state_file="${CR6608_UL_MURU_GUARD_STATE_FILE:-/var/run/cr6608-private/ul-muru/state.json}"
+ul_guard_max_age="${CR6608_UL_MURU_GUARD_MAX_AGE:-60}"
+if [ -n "${CR6608_UL_MURU_ARTIFACT_PROFILE:-}" ]; then
+	ul_artifact_profile="$CR6608_UL_MURU_ARTIFACT_PROFILE"
+elif [ -f /rom/etc/cr6608-artifact-profile ] &&
+     [ ! -L /rom/etc/cr6608-artifact-profile ]; then
+	ul_artifact_profile=/rom/etc/cr6608-artifact-profile
+else
+	ul_artifact_profile=/etc/cr6608-artifact-profile
+fi
+
+result() {
+	printf '%-34s %s\n' "$1" "$2"
+}
+
+verify_support_manifest() {
+	local required
+
+	result "AX capability manifest" "${support_manifest}"
+	if [ ! -f "${support_manifest}" ]; then
+		result "AX capability manifest state" "missing"
+		status=1
+		return
+	fi
+	if [ "$(wc -l < "${support_manifest}" 2>/dev/null | tr -d '[:space:]')" != 26 ]; then
+		result "AX capability manifest state" "invalid: exact schema line count"
+		status=1
+		return
+	fi
+
+	for required in \
+		'format=1' \
+		'board=xiaomi,mi-router-cr6608' \
+		'wifi_stack=openwrt-upstream-mac80211-mt76-hostapd' \
+		'driver=mt7915e' \
+		'beamforming_su=enabled' \
+		'beamforming_dl_mu_mimo=enabled' \
+		'ofdma=dl-enabled-plus-mediatek-25.12-muru-bitmap-qualification-path' \
+		'ofdma_dl=enabled' \
+		'ofdma_ul=mask-bit-1-runtime-guarded-ram-or-forced-lab' \
+		'mu_mimo_dl=enabled' \
+		'mu_mimo_ul=mask-bit-3-runtime-guarded-ram-or-forced-lab' \
+		'ul_muru_policy=mediatek-25.12-mu-onoff-sta-rec-port' \
+		'ul_muru_default=stable-and-retail-mask-0' \
+		'ul_muru_qualification=ram-boot-only-mask-15' \
+		'ul_muru_forced_lab=persistent-mask-15-nonsale' \
+		'ul_muru_mcu_telemetry=attempted-response-ok-failed-timeout-not-apply-or-ota-proof' \
+		'ul_muru_fault_policy=kernel-attributed-latch-watchdog-or-sta-rec-plus-unattributed-disarm' \
+		'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-unattributed-strikes' \
+		'ul_muru_dl_floor=upstream-dl-ofdma-and-dl-mumimo-retained-through-fault' \
+		'ul_muru_global_mcu_commands=not-used' \
+		'dfs=enabled' \
+		'background_cac=enabled-driver-runtime-capability-gated' \
+		'easymesh=prplmesh-controller-agent-runtime-gated' \
+		'mesh_80211s=supported-by-wpad-openssl' \
+		'runtime_gate=immutable-profile-plus-read-only-module-mask-plus-kernel-fault-latch-plus-muru-debugfs' \
+		'ota_evidence=per-peer-he-tb-ppdu-wcid-attribution-plus-shared-ppdu-timestamp-grouping-not-an-rf-or-regulatory-measurement'; do
+		grep -Fqx "${required}" "${support_manifest}" || {
+			result "AX capability manifest state" "invalid: ${required}"
+			status=1
+			return
+		}
+	done
+
+	result "AX capability manifest state" "valid"
+	result "official Wi-Fi stack" "OpenWrt mac80211 + mt76/mt7915e + hostapd"
+	result "declared feature set" "SU beamforming, DL MU/OFDMA, MediaTek 25.12 UL RAM or persistent forced LAB path, background CAC"
+	result "UL MURU firmware policy" "MediaTek mu_onoff bits through MT7915 STA_REC_MURU; legacy global commands not used"
+	result "UL MURU profile policy" "stable LAB/RETAIL mask 0; RAM qualification or persistent forced LAB mask 15"
+	result "STA_REC response telemetry" "synchronous command response only; not Firmware apply or OTA proof"
+	result "hardware limits" "UL scheduling requests remain LAB-only and kernel/guard fail-closed"
+	result "runtime evidence boundary" "airtime scheduling requires compatible clients/capture"
+}
+
+ul_muru_guard_healthy() {
+	local data state heartbeat now age
+
+	[ -x "$ul_guard_init" ] && "$ul_guard_init" running >/dev/null 2>&1 ||
+		return 1
+	data="$(cat "$ul_guard_state_file" 2>/dev/null || true)"
+	state="$(printf '%s\n' "$data" |
+		sed -n 's/.*"state":"\([^"]*\)".*/\1/p')"
+	heartbeat="$(printf '%s\n' "$data" |
+		sed -n 's/.*"time":\([0-9][0-9]*\).*/\1/p')"
+	now="$(date +%s 2>/dev/null || true)"
+	case "$heartbeat:$now:$ul_guard_max_age" in
+		*[!0-9:]*|:*|*::*|*:) return 1 ;;
+	esac
+	[ "$state" = armed ] || return 1
+	age=$((now - heartbeat))
+	[ "$age" -ge 0 ] && [ "$age" -le "$ul_guard_max_age" ]
+}
+
+ul_profile_kind() {
+	[ -f "$ul_artifact_profile" ] && [ ! -L "$ul_artifact_profile" ] &&
+		[ "$(wc -l < "$ul_artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ] || {
+		printf 'unknown\n'
+		return
+	}
+	if grep -Fqx 'profile=ul-muru-ram-v1' "$ul_artifact_profile" &&
+	   grep -Fqx 'sale_ready=NO' "$ul_artifact_profile" &&
+	   grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$ul_artifact_profile"; then
+		printf 'ul-muru-ram-v1\n'
+	elif grep -Fqx 'profile=ul-muru-forced-lab-v1' "$ul_artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$ul_artifact_profile" &&
+	     grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$ul_artifact_profile"; then
+		printf 'ul-muru-forced-lab-v1\n'
+	elif grep -Fqx 'profile=lab-operator-v1' "$ul_artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$ul_artifact_profile" &&
+	     grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$ul_artifact_profile"; then
+		printf 'lab-operator-v1\n'
+	elif grep -Fqx 'profile=retail-v1' "$ul_artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$ul_artifact_profile" &&
+	     grep -Fqx 'radio_policy=retail-disabled' "$ul_artifact_profile"; then
+		printf 'retail-v1\n'
+	else
+		printf 'unknown\n'
+	fi
+}
+
+ul_module_token_value() {
+	awk -v key="$1" '
+		$1 == "mt7915e" {
+			lines++
+			for (i = 2; i <= NF; i++) {
+				prefix = key "="
+				if (index($i, prefix) == 1) {
+					count++
+					value = substr($i, length(prefix) + 1)
+				}
+			}
+		}
+		END {
+			if (lines == 1 && count == 1) print value
+			else exit 1
+		}' "$ul_module_file" 2>/dev/null
+}
+
+ul_state_contract() {
+	local expected="$1" allowed enabled bit node
+	ul_policy_nodes=0
+	ul_policy_ready=0
+	[ "$expected" = 15 ] && allowed=1 || allowed=0
+	[ "$expected" = 15 ] && enabled=1 || enabled=0
+	[ "$expected" = 15 ] && bit=1 || bit=0
+	for node in "$ul_debug_root"/phy*/mt76/cr6608_ul_muru_state; do
+		[ -f "$node" ] || continue
+		ul_policy_nodes=$((ul_policy_nodes + 1))
+		if awk -F= -v mask="$expected" -v allowed="$allowed" \
+		   -v enabled="$enabled" -v bit="$bit" '
+			NF >= 2 { key=$1; count[key]++; field[key]=substr($0, length(key)+2) }
+			END {
+				split("candidate_allowed candidate_ul_enabled candidate_mask candidate_dl_ofdma candidate_ul_ofdma candidate_dl_mumimo candidate_ul_mumimo fault_latched fault_latches policy sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", required, " ")
+				for (i in required) if (count[required[i]] != 1) exit 1
+				if (field["candidate_allowed"] != allowed ||
+				    field["candidate_ul_enabled"] != enabled ||
+				    field["candidate_mask"] != mask ||
+				    field["candidate_dl_ofdma"] != bit ||
+				    field["candidate_ul_ofdma"] != bit ||
+				    field["candidate_dl_mumimo"] != bit ||
+				    field["candidate_ul_mumimo"] != bit ||
+				    field["policy"] != "mediatek-25.12-mu-onoff-sta-rec-port") exit 1
+				split("fault_latched fault_latches sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", numeric, " ")
+				for (i in numeric) if (field[numeric[i]] !~ /^[0-9]+$/) exit 1
+				if (field["fault_latched"] != 0 || field["fault_latches"] != 0 ||
+				    field["sta_rec_failed"] != 0 || field["sta_rec_timeout"] != 0 ||
+				    field["sta_rec_response_ok"] > field["sta_rec_attempted"] ||
+				    field["he_sta_rec_updates"] != field["sta_rec_response_ok"] ||
+				    field["mimo_capable_updates"] > field["sta_rec_response_ok"]) exit 1
+				if (mask == 0 && (field["sta_rec_attempted"] != 0 ||
+				    field["sta_rec_response_ok"] != 0 || field["he_sta_rec_updates"] != 0 ||
+				    field["mimo_capable_updates"] != 0)) exit 1
+			}' "$node" 2>/dev/null; then
+			ul_policy_ready=$((ul_policy_ready + 1))
+		fi
+	done
+	[ "$ul_policy_nodes" -gt 0 ] && [ "$ul_policy_ready" -eq "$ul_policy_nodes" ]
+}
+
+ul_muru_runtime_state() {
+	local profile legacy_module mask_module uci_legacy uci_mask node
+	local mask_nodes=0 mask_active=0 legacy_nodes=0 legacy_active=0
+	local persistent_legacy persistent_mask guard_healthy=0 state_ok=0
+
+	profile="$(ul_profile_kind)"
+	legacy_module="$(cat "$ul_module_param" 2>/dev/null || true)"
+	mask_module="$(cat "$ul_mask_module_param" 2>/dev/null || true)"
+	uci_legacy="$(uci -q get smartap.experimental.ul_muru 2>/dev/null || true)"
+	uci_mask="$(uci -q get smartap.experimental.muru_mask 2>/dev/null || true)"
+	for node in "$ul_debug_root"/phy*/mt76/cr6608_muru_mask; do
+		[ -f "$node" ] || continue
+		mask_nodes=$((mask_nodes + 1))
+		case "$(cat "$node" 2>/dev/null)" in
+			15) mask_active=$((mask_active + 1)) ;;
+		esac
+	done
+	for node in "$ul_debug_root"/phy*/mt76/cr6608_ul_muru; do
+		[ -f "$node" ] || continue
+		legacy_nodes=$((legacy_nodes + 1))
+		[ "$(cat "$node" 2>/dev/null)" = 1 ] && legacy_active=$((legacy_active + 1))
+	done
+	persistent_legacy="$(ul_module_token_value cr6608_ul_muru || true)"
+	persistent_mask="$(ul_module_token_value cr6608_muru_mask || true)"
+	ul_muru_guard_healthy && guard_healthy=1
+
+	if [ "$profile" = ul-muru-ram-v1 ] || [ "$profile" = ul-muru-forced-lab-v1 ]; then
+		ul_state_contract 15 && state_ok=1
+	else
+		ul_state_contract 0 && state_ok=1
+	fi
+
+	if { [ "$profile" = ul-muru-ram-v1 ] || [ "$profile" = ul-muru-forced-lab-v1 ]; } &&
+	   { [ "$legacy_module" = N ] || [ "$legacy_module" = 0 ]; } &&
+	   [ "$mask_module" = 15 ] && [ "$uci_legacy" = 0 ] && [ "$uci_mask" = 15 ] &&
+	   [ "$mask_nodes" -gt 0 ] && [ "$mask_active" -eq "$mask_nodes" ] &&
+	   [ "$legacy_nodes" -eq "$mask_nodes" ] && [ "$legacy_active" -eq "$legacy_nodes" ] &&
+	   [ "$ul_policy_nodes" -eq "$mask_nodes" ] && [ "$state_ok" -eq 1 ] &&
+	   [ "$persistent_legacy" = 0 ] && [ "$persistent_mask" = 15 ] &&
+	   [ "$guard_healthy" -eq 1 ]; then
+		printf 'armed\n'
+	elif { [ "$profile" = lab-operator-v1 ] || [ "$profile" = retail-v1 ]; } &&
+	     { [ "$legacy_module" = N ] || [ "$legacy_module" = 0 ]; } &&
+	     [ "$mask_module" = 0 ] && [ "$uci_legacy" = 0 ] && [ "$uci_mask" = 0 ] &&
+	     [ "$mask_nodes" -gt 0 ] && [ "$mask_active" -eq 0 ] &&
+	     [ "$legacy_nodes" -eq "$mask_nodes" ] && [ "$legacy_active" -eq 0 ] &&
+	     [ "$ul_policy_nodes" -eq "$mask_nodes" ] && [ "$state_ok" -eq 1 ] &&
+	     [ "$persistent_legacy" = 0 ] && [ "$persistent_mask" = 0 ]; then
+		printf 'stable-disabled\n'
+	else
+		printf 'inconsistent\n'
+	fi
+}
+
+if [ "${1:-}" = --ul-muru-state-only ]; then
+	ul_state="$(ul_muru_runtime_state)"
+	printf '%s\n' "$ul_state"
+	[ "$ul_state" != inconsistent ]
+	exit $?
+fi
+
+radio_sections() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+radio_interfaces() {
+	local radio="$1"
+
+	ubus -S call network.wireless status 2>/dev/null |
+		jsonfilter -e "@.${radio}.interfaces[*].ifname" 2>/dev/null
+}
+
+radio_ap_interfaces() {
+	local radio="$1" iface type
+
+	for iface in $(radio_interfaces "$radio"); do
+		type="$(iw dev "$iface" info 2>/dev/null |
+			awk '$1 == "type" { print $2; exit }')"
+		[ "$type" = AP ] && printf '%s\n' "$iface"
+	done
+}
+
+interface_phy() {
+	local iface="$1" index
+
+	index="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "wiphy" { print $2; exit }')"
+	[ -n "$index" ] && printf 'phy%s\n' "$index"
+}
+
+find_hostapd_config() {
+	local iface="$1" candidate
+
+	for candidate in \
+		"/var/run/hostapd-${iface}.conf" \
+		/var/run/hostapd/*.conf \
+		/var/run/hostapd-*.conf; do
+		[ -f "${candidate}" ] || continue
+		if grep -qx "interface=${iface}" "${candidate}" 2>/dev/null; then
+			printf '%s\n' "${candidate}"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+capability_state() {
+	local info="$1" pattern="$2"
+
+	if printf '%s\n' "$info" | grep -Eq "$pattern"; then
+		printf 'supported\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+config_exact_state() {
+	local conf="$1" key="$2" expected="$3" count
+
+	[ -n "$conf" ] && [ -f "$conf" ] && [ ! -L "$conf" ] || {
+		printf 'not-advertised\n'
+		return
+	}
+	count="$(grep -Ec "^${key}=" "$conf" 2>/dev/null || true)"
+	if [ "$count" = 1 ] && grep -Fqx "${key}=${expected}" "$conf" 2>/dev/null; then
+		printf 'advertised\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+config_regex_state() {
+	local conf="$1" key="$2" expected="$3" count
+
+	[ -n "$conf" ] && [ -f "$conf" ] && [ ! -L "$conf" ] || {
+		printf 'not-advertised\n'
+		return
+	}
+	count="$(grep -Ec "^${key}=" "$conf" 2>/dev/null || true)"
+	if [ "$count" = 1 ] &&
+	   grep -Eq "^${key}=(${expected})$" "$conf" 2>/dev/null; then
+		printf 'advertised\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+config_mu_edca_state() {
+	local conf="$1" key total expected=0 valid=1
+
+	[ -n "$conf" ] && [ -f "$conf" ] && [ ! -L "$conf" ] || {
+		printf 'not-advertised\n'
+		return
+	}
+	for key in \
+		he_mu_edca_qos_info_param_count he_mu_edca_qos_info_q_ack \
+		he_mu_edca_qos_info_queue_request he_mu_edca_qos_info_txop_request \
+		he_mu_edca_ac_be_aifsn he_mu_edca_ac_be_aci he_mu_edca_ac_be_ecwmin \
+		he_mu_edca_ac_be_ecwmax he_mu_edca_ac_be_timer \
+		he_mu_edca_ac_bk_aifsn he_mu_edca_ac_bk_aci he_mu_edca_ac_bk_ecwmin \
+		he_mu_edca_ac_bk_ecwmax he_mu_edca_ac_bk_timer \
+		he_mu_edca_ac_vi_aifsn he_mu_edca_ac_vi_aci he_mu_edca_ac_vi_ecwmin \
+		he_mu_edca_ac_vi_ecwmax he_mu_edca_ac_vi_timer \
+		he_mu_edca_ac_vo_aifsn he_mu_edca_ac_vo_aci he_mu_edca_ac_vo_ecwmin \
+		he_mu_edca_ac_vo_ecwmax he_mu_edca_ac_vo_timer; do
+		expected=$((expected + 1))
+		[ "$(config_regex_state "$conf" "$key" '0|[1-9][0-9]*')" = advertised ] ||
+			valid=0
+	done
+	total="$(grep -Ec '^he_mu_edca_[A-Za-z0-9_]+=' "$conf" 2>/dev/null || true)"
+	if [ "$valid" = 1 ] && [ "$total" = "$expected" ]; then
+		printf 'advertised\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+config_spatial_reuse_state() {
+	local conf="$1" total
+
+	[ -n "$conf" ] && [ -f "$conf" ] && [ ! -L "$conf" ] || {
+		printf 'not-advertised\n'
+		return
+	}
+	total="$(grep -Ec '^he_spr_[A-Za-z0-9_]+=' "$conf" 2>/dev/null || true)"
+	if [ "$total" = 2 ] &&
+	   [ "$(config_regex_state "$conf" he_spr_non_srg_obss_pd_max_offset '0|[1-9][0-9]*')" = advertised ] &&
+	   [ "$(config_regex_state "$conf" he_spr_sr_control '[1-9][0-9]*')" = advertised ]; then
+		printf 'advertised\n'
+	else
+		printf 'not-advertised\n'
+	fi
+}
+
+if [ "${1:-}" = --hostapd-config-from-file ]; then
+	[ "$#" -eq 2 ] && [ -f "$2" ] && [ ! -L "$2" ] || exit 2
+	he_config="$(config_exact_state "$2" ieee80211ax 1)"
+	su_bfer_config="$(config_exact_state "$2" he_su_beamformer 1)"
+	su_bfee_config="$(config_exact_state "$2" he_su_beamformee 1)"
+	mu_bfer_config="$(config_exact_state "$2" he_mu_beamformer 1)"
+	bss_color_config="$(config_regex_state "$2" he_bss_color '[1-9]|[1-5][0-9]|6[0-3]')"
+	spatial_config="$(config_spatial_reuse_state "$2")"
+	mu_edca_config="$(config_mu_edca_state "$2")"
+	printf 'HOSTAPD_HE=%s SU_BFER=%s SU_BFEE=%s MU_BFER=%s BSS_COLOR=%s SPATIAL_REUSE=%s MU_EDCA=%s\n' \
+		"$he_config" "$su_bfer_config" "$su_bfee_config" "$mu_bfer_config" \
+		"$bss_color_config" "$spatial_config" "$mu_edca_config"
+	if [ "$he_config" = advertised ] && [ "$su_bfer_config" = advertised ] &&
+	   [ "$su_bfee_config" = advertised ] && [ "$mu_bfer_config" = advertised ] &&
+	   [ "$bss_color_config" = advertised ] && [ "$spatial_config" = advertised ] &&
+	   [ "$mu_edca_config" = advertised ]; then
+		printf 'HOSTAPD_HE_PROFILE=VALID\n'
+		exit 0
+	fi
+	printf 'HOSTAPD_HE_PROFILE=FAIL\n'
+	exit 1
+fi
+
+ap_he_capabilities() {
+	awk '
+		/^[[:space:]]*HE Iftypes:[[:space:]]*AP([[:space:]]|$)/ {
+			in_ap = 1
+			print
+			next
+		}
+		in_ap && /^[[:space:]]*HE Iftypes:/ { exit }
+		in_ap { print }
+	'
+}
+
+# Validate the complete <=80 MHz HE MCS/NSS map, not merely the presence of a
+# heading.  The CR6608/MT7915 radios are calibrated 2x2 devices: RX and TX must
+# advertise MCS 0-11 for NSS1/NSS2 and must explicitly reject NSS3-NSS8.
+he_mcs_nss_state() {
+	local direction="$1"
+
+	awk -v direction="$direction" '
+		function trim(value) {
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+			return value
+		}
+		/^[[:space:]]*HE (RX|TX) MCS and NSS set/ {
+			line = trim($0)
+			in_wanted = 0
+			if (line == "HE " direction " MCS and NSS set <= 80 MHz") {
+				headings++
+				in_wanted = 1
+			}
+			next
+		}
+		in_wanted && /^[[:space:]]*[1-8] streams:/ {
+			line = trim($0)
+			nss = line
+			sub(/ streams:.*/, "", nss)
+			value = line
+			sub(/^[0-9]+ streams:[[:space:]]*/, "", value)
+			if (nss !~ /^[1-8]$/ || seen[nss]++) {
+				bad = 1
+				next
+			}
+			rows++
+			expected = (nss <= 2) ? "MCS 0-11" : "not supported"
+			if (value != expected) bad = 1
+		}
+		END {
+			if (headings == 1 && rows == 8 && !bad)
+				print "nss2-mcs0-11"
+			else
+				print "invalid"
+		}'
+}
+
+# A bounded diagnostic used by source/runtime fixtures and field support.  It
+# only parses stdin and cannot bypass the normal no-argument verifier path.
+if [ "${1:-}" = --he-nss-from-stdin ]; then
+	[ "$#" -eq 1 ] || exit 2
+	ap_he_input="$(ap_he_capabilities)"
+	rx_nss="$(printf '%s\n' "$ap_he_input" | he_mcs_nss_state RX)"
+	tx_nss="$(printf '%s\n' "$ap_he_input" | he_mcs_nss_state TX)"
+	printf 'HE_RX_NSS_PROFILE=%s\n' "$rx_nss"
+	printf 'HE_TX_NSS_PROFILE=%s\n' "$tx_nss"
+	if [ "$rx_nss" = nss2-mcs0-11 ] && [ "$tx_nss" = nss2-mcs0-11 ]; then
+		printf 'HE_NSS_PROFILE=NSS2_MCS0_11\n'
+		exit 0
+	fi
+	printf 'HE_NSS_PROFILE=FAIL\n'
+	exit 1
+fi
+
+check_radio() {
+	local radio="$1" iface phy info conf requested runtime htmode band
+	local hostapd_raw hostapd_state
+	local ap_he_info runtime_width expected_width role_profile he_band_cap rx_nss tx_nss
+	local he_cap su_bfer su_bfee mu_bfer mu_bfee ru_cap ul_mu_cap ul_muru_state ul_policy_ok
+	local background_cac
+	local he_runtime mu_edca_runtime he_su_bfer_runtime he_su_bfee_runtime
+	local he_mu_bfer_runtime bss_color_runtime spatial_reuse_runtime
+
+	iface="$(radio_ap_interfaces "$radio" | head -n 1)"
+	phy=""
+	[ -z "$iface" ] || phy="$(interface_phy "$iface")"
+	requested="$(uci -q get "wireless.${radio}.txpower" 2>/dev/null || true)"
+	htmode="$(uci -q get "wireless.${radio}.htmode" 2>/dev/null || true)"
+	band="$(uci -q get "wireless.${radio}.band" 2>/dev/null || true)"
+
+	printf '\n[%s / %s]\n' "$radio" "${phy:-unmapped}"
+	result "interface" "${iface:-missing}"
+	result "configured_htmode" "${htmode:-missing}"
+	result "requested_power_dbm" "${requested:-missing}"
+
+	if [ -z "$phy" ] || [ -z "$iface" ]; then
+		result "runtime_state" "radio/interface unavailable"
+		status=1
+		return
+	fi
+
+	info="$(iw phy "$phy" info 2>/dev/null || true)"
+	ap_he_info="$(printf '%s\n' "$info" | ap_he_capabilities)"
+	conf="$(find_hostapd_config "$iface" 2>/dev/null || true)"
+	hostapd_raw="$(ubus -S call "hostapd.${iface}" get_status 2>/dev/null || true)"
+	hostapd_state="$(printf '%s\n' "$hostapd_raw" |
+		jsonfilter -e '@.status' 2>/dev/null)"
+	runtime="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "txpower" { print $2; exit }')"
+	runtime_width="$(iw dev "$iface" info 2>/dev/null |
+		sed -n 's/.*width: \([0-9][0-9]*\) MHz.*/\1/p' | head -n 1)"
+	role_profile=invalid
+	case "${radio}:${band}:${htmode}" in
+		radio0:2g:HE20)
+			expected_width=20
+			role_profile=cr6608-2g-he20
+			;;
+		radio1:5g:HE80)
+			expected_width=80
+			role_profile=cr6608-5g-he80
+			;;
+		*)
+			expected_width=invalid
+			status=1
+			;;
+	esac
+
+	result "CR6608 radio role profile" "$role_profile"
+	result "runtime_power_dbm" "${runtime:-unknown}"
+	result "runtime_channel_width_mhz" "${runtime_width:-unknown}"
+	result "hostapd_runtime_status" "${hostapd_state:-unavailable}"
+	result "hostapd_config" "${conf:-missing}"
+
+	he_cap="$(capability_state "$ap_he_info" 'HE Iftypes:[[:space:]]*AP')"
+	su_bfer="$(capability_state "$ap_he_info" 'SU Beamformer')"
+	su_bfee="$(capability_state "$ap_he_info" 'SU Beamformee')"
+	mu_bfer="$(capability_state "$ap_he_info" 'MU Beamformer')"
+	mu_bfee="$(capability_state "$ap_he_info" 'MU Beamformee')"
+	ru_cap="$(capability_state "$ap_he_info" '242 tone RUs|PPE Threshold Present|BSR')"
+	ul_mu_cap="$(capability_state "$ap_he_info" 'Full Bandwidth UL MU-MIMO')"
+	case "$band" in
+		2g) he_band_cap="$(capability_state "$ap_he_info" 'HE40/2\.4GHz')" ;;
+		5g) he_band_cap="$(capability_state "$ap_he_info" 'HE40/HE80/5GHz')" ;;
+		*) he_band_cap=not-advertised ;;
+	esac
+	rx_nss="$(printf '%s\n' "$ap_he_info" | he_mcs_nss_state RX)"
+	tx_nss="$(printf '%s\n' "$ap_he_info" | he_mcs_nss_state TX)"
+	ul_muru_state="$(ul_muru_runtime_state)"
+	ul_policy_ok=0
+	case "${ul_muru_state}:${ul_mu_cap}" in
+		armed:supported|stable-disabled:not-advertised) ul_policy_ok=1 ;;
+	esac
+
+	result "802.11n" "$(capability_state "$info" 'HT20|HT40|HT RX MCS|HT TX/RX MCS')"
+	result "802.11ac" "$(capability_state "$info" 'VHT Capabilities')"
+	result "802.11ax" "$he_cap"
+	result "HE band capability" "$he_band_cap"
+	result "HE20 capability hint" "$he_cap"
+	result "HE40 capability hint" "$he_cap"
+	case "$htmode" in
+		HE80) result "HE80" "$he_cap" ;;
+		*) result "HE80" "not-configured-on-this-radio" ;;
+	esac
+	result "SU Beamformer capability" "$su_bfer"
+	result "SU Beamformee capability" "$su_bfee"
+	result "MU Beamformer capability" "$mu_bfer"
+	result "MU Beamformee capability" "$mu_bfee"
+	result "OFDMA RU capability" "$ru_cap"
+	result "HE RX NSS/MCS profile" "$rx_nss"
+	result "HE TX NSS/MCS profile" "$tx_nss"
+	result "hardware spatial-stream limit" "NSS2 (2x2); NSS4 unsupported"
+	result "PPE Thresholds" "$(capability_state "$info" 'PPE Threshold')"
+	result "1024-QAM capability hint" "$(capability_state "$ap_he_info" '1024-QAM')"
+	result "TWT capability" "$(capability_state "$info" 'TWT Requester|TWT Responder')"
+
+	he_runtime="$(config_exact_state "$conf" ieee80211ax 1)"
+	mu_edca_runtime="$(config_mu_edca_state "$conf")"
+	he_su_bfer_runtime="$(config_exact_state "$conf" he_su_beamformer 1)"
+	he_su_bfee_runtime="$(config_exact_state "$conf" he_su_beamformee 1)"
+	he_mu_bfer_runtime="$(config_exact_state "$conf" he_mu_beamformer 1)"
+	bss_color_runtime="$(config_regex_state "$conf" he_bss_color '[1-9]|[1-5][0-9]|6[0-3]')"
+	spatial_reuse_runtime="$(config_spatial_reuse_state "$conf")"
+
+	result "802.11ax hostapd advertisement" "$he_runtime"
+	result "Beamforming SU advertisement" "beamformer=$he_su_bfer_runtime beamformee=$he_su_bfee_runtime"
+	result "Beamforming MU advertisement" "beamformer=$he_mu_bfer_runtime"
+	result "BSS Color advertisement" "$bss_color_runtime"
+	result "Spatial Reuse advertisement" "$spatial_reuse_runtime"
+	result "HE MU-EDCA advertisement" "$mu_edca_runtime"
+	result "DL OFDMA support gate" "capability_hint=$ru_cap hostapd=$mu_edca_runtime observed_airtime=not-measured"
+	result "UL OFDMA support gate" "vendor_sta_rec=$ul_muru_state aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
+	result "DL MU-MIMO support gate" "capability_hint=$mu_bfer hostapd=$he_mu_bfer_runtime observed_scheduling=not-measured"
+	result "UL MU-MIMO support gate" "capability=$ul_mu_cap vendor_sta_rec=$ul_muru_state aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
+	if [ "$band" = 5g ]; then
+		background_cac="$(capability_state "$info" 'Radar background support')"
+		result "Background CAC capability" "$background_cac"
+		[ "$background_cac" = supported ] || status=1
+	else
+		result "Background CAC capability" "not-applicable-on-${band:-unknown}"
+	fi
+
+	if [ "$hostapd_state" != ENABLED ] ||
+	   [ "$he_cap" != supported ] || [ "$he_runtime" != advertised ] ||
+	   [ "$he_band_cap" != supported ] ||
+	   [ "$rx_nss" != nss2-mcs0-11 ] || [ "$tx_nss" != nss2-mcs0-11 ] ||
+	   [ "$role_profile" = invalid ] ||
+	   [ "$su_bfer" != supported ] || [ "$su_bfee" != supported ] ||
+	   [ "$he_su_bfer_runtime" != advertised ] ||
+	   [ "$he_su_bfee_runtime" != advertised ] ||
+	   [ "$mu_bfer" != supported ] ||
+	   [ "$he_mu_bfer_runtime" != advertised ] ||
+	   [ "$bss_color_runtime" != advertised ] ||
+	   [ "$spatial_reuse_runtime" != advertised ] ||
+	   [ "$ru_cap" != supported ] ||
+	   [ "$ul_policy_ok" != 1 ] ||
+	   [ "$mu_edca_runtime" != advertised ] ||
+	   [ "$runtime_width" != "$expected_width" ]; then
+		status=1
+	fi
+}
+
+printf 'CR6608 AX feature verification\n'
+printf 'Capability and hostapd configuration are reported separately from over-air scheduling.\n'
+verify_support_manifest
+
+radios="$(radio_sections)"
+if [ -z "$radios" ]; then
+	printf 'No wifi-device sections found.\n' >&2
+	exit 1
+fi
+
+radio_count="$(printf '%s\n' "$radios" | awk 'NF { count++ } END { print count + 0 }')"
+radio0_count="$(printf '%s\n' "$radios" | grep -Fxc radio0 2>/dev/null || true)"
+radio1_count="$(printf '%s\n' "$radios" | grep -Fxc radio1 2>/dev/null || true)"
+result "CR6608 wifi-device topology" \
+	"count=${radio_count} radio0=${radio0_count} radio1=${radio1_count}"
+if [ "$radio_count" -ne 2 ] 2>/dev/null ||
+   [ "$radio0_count" -ne 1 ] 2>/dev/null ||
+   [ "$radio1_count" -ne 1 ] 2>/dev/null; then
+	status=1
+fi
+
+for radio in $radios; do
+	check_radio "$radio"
+done
+
+printf '\n'
+if [ "$status" -eq 0 ]; then
+	printf 'RESULT_AX_CONFIGURATION=DRIVER_GATE_PASS_AIRTIME_UNVERIFIED\n'
+	exit 0
+fi
+
+printf 'RESULT_AX_CONFIGURATION=FAIL\n'
+exit 1

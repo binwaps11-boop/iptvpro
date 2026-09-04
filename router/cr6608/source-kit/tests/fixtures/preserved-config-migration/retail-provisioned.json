@@ -1,0 +1,22 @@
+{
+  "board_name": "xiaomi,mi-router-cr6608",
+  "uci": {
+    "rpcd.@login[0]": "login",
+    "rpcd.@login[0].username": "root",
+    "rpcd.@login[0].password": "$6$uniqueweb$provisioned-web-hash-must-not-change",
+    "rpcd.@login[0].read": "*",
+    "rpcd.@login[0].write": "*",
+    "network.globals": "globals",
+    "network.globals.packet_steering": "2",
+    "smartap.quick": "quicksettings",
+    "smartap.quick.delete_previous": "1",
+    "cr6608quick.default": "quick",
+    "cr6608quick.default.clear_previous": "1",
+    "factory.calibration.sha256": "retail-calibration-must-not-change"
+  },
+  "files": {
+    "etc/cr6608-retail-provisioned": "profile=retail-v2\nmarket_country=SA\nprimary_ap_radio0=wifinet0\nprimary_ap_radio1=wifinet1\nsale_ready=NO\nradio_policy=LAB_ARTIFACT_BLOCKED\naudit_complete=YES\nprovisioned_utc=2026-08-22T00:00:00Z\n",
+    "etc/shadow": "root:$6$unitroot$provisioned-root-hash-must-not-change:20800:0:99999:7:::\n",
+    "factory.bin": "CR6608 RETAIL FACTORY SENTINEL\n"
+  }
+}

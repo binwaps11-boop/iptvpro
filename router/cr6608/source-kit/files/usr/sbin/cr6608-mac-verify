@@ -1,0 +1,45 @@
+#!/bin/sh
+
+set -u
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+LC_ALL=C
+export LC_ALL
+
+MAC_LIB="${CR6608_MAC_IDENTITY_LIB:-/usr/libexec/cr6608-mac-identity-lib}"
+[ -r "$MAC_LIB" ] || {
+	printf '%s\n' '{"ok":false,"status":"FAIL","reason":"identity_library_missing"}'
+	exit 1
+}
+# shellcheck source=/usr/libexec/cr6608-mac-identity-lib
+. "$MAC_LIB" || exit 1
+
+mode='runtime'
+case "${1:-}" in
+	''|--json) ;;
+	--factory-only) mode='factory' ;;
+	*) printf '%s\n' 'usage: cr6608-mac-verify [--json|--factory-only]' >&2; exit 2 ;;
+esac
+
+emit_fail() {
+	printf '{"ok":false,"status":"FAIL","reason":"%s","source":"Factory/NVMEM","policy":"cr6608-dsa-v1"}\n' "$1"
+	exit 1
+}
+
+cr6608_mac_board_supported || emit_fail unsupported_board
+cr6608_mac_factory_geometry_valid || emit_fail factory_geometry_invalid
+cr6608_mac_load_factory_roles || emit_fail factory_identity_invalid
+cr6608_mac_uci_overrides_present && emit_fail uci_mac_override_present
+
+if [ "$mode" = runtime ]; then
+	cr6608_mac_dsa_runtime_valid || emit_fail dsa_runtime_mismatch
+	cr6608_mac_match_runtime_role wan "$CR6608_MAC_FACTORY_WAN" || emit_fail wan_runtime_mismatch
+	cr6608_mac_match_runtime_role phy0-ap0 "$CR6608_MAC_FACTORY_WIFI24" || emit_fail wifi24_runtime_mismatch
+	cr6608_mac_match_runtime_role phy1-ap0 "$CR6608_MAC_FACTORY_WIFI5" || emit_fail wifi5_runtime_mismatch
+fi
+
+printf '{"ok":true,"status":"PASS","reason":"factory_and_runtime_match","source":"Factory/NVMEM","policy":"cr6608-dsa-v1","roles":{"lan":"%s","wan":"%s","wifi24":"%s","wifi5":"%s"},"dsa":{"shared_by_design":true,"base_mac":"%s","members":["eth0","br-lan","lan1","lan2","lan3"],"explanation":"DSA user ports inherit the GMAC0 bridge identity; this is not a collision"},"uci_overrides":false}\n' \
+	"$CR6608_MAC_FACTORY_LAN" "$CR6608_MAC_FACTORY_WAN" \
+	"$CR6608_MAC_FACTORY_WIFI24" "$CR6608_MAC_FACTORY_WIFI5" \
+	"$CR6608_MAC_FACTORY_LAN"
+exit 0

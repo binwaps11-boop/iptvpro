@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ar" dir="rtl" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <meta name="smartap-ui-version" content="cr6608-smartap-v86-live-design-27.0.0">
+  <meta name="smartap-stable-dom" content="pass">
+  <meta name="smartap-design-system" content="unified">
+  <meta name="referrer" content="no-referrer">
+  <meta name="application-name" content="Smart AP">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="msapplication-config" content="/luci-static/argon/icon/browserconfig.xml?v=smartap-v54">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; worker-src 'none'">
+  <link rel="icon" type="image/svg+xml" href="/luci-static/argon/icon/smart-ap.svg?v=smartap-v54">
+  <link rel="icon" type="image/x-icon" href="/luci-static/argon/favicon.ico?v=smartap-v54">
+  <link rel="icon" type="image/png" sizes="32x32" href="/luci-static/argon/icon/favicon-32x32.png?v=smartap-v54">
+  <link rel="apple-touch-icon" sizes="180x180" href="/luci-static/argon/icon/apple-icon-180x180.png?v=smartap-v54">
+  <link rel="manifest" href="/luci-static/argon/icon/manifest.json?v=smartap-v54" crossorigin="use-credentials">
+  <link rel="stylesheet" href="/dashboard.css?v=20260902-smartap-v86-live-design-v1">
+  <title>Smart AP</title>
+</head>
+<body>
+  <div class="login-screen" id="loginScreen">
+    <section class="login-card" aria-labelledby="loginTitle">
+      <div class="seg" role="group" aria-label="Language" style="width:max-content;margin-inline-start:auto;margin-bottom:14px">
+        <button id="loginLangAr" type="button" aria-pressed="true">AR</button>
+        <button id="loginLangEn" type="button" aria-pressed="false">EN</button>
+      </div>
+      <div class="login-logo">
+        <div class="mark" id="loginMark"></div>
+        <div>
+          <h1 id="loginTitle">Smart AP</h1>
+          <p id="loginSubtitle">تسجيل الدخول إلى لوحة الراوتر</p>
+        </div>
+      </div>
+      <form class="login-form" id="loginForm" autocomplete="off" autocapitalize="off" spellcheck="false" data-form-type="other">
+        <label for="loginUser"><span id="loginUserLabel">اسم المستخدم</span>
+          <input id="loginUser" name="smartap-user-once" autocomplete="off" inputmode="text" autocapitalize="none" spellcheck="false" dir="ltr" value="root" data-form-type="other" data-1p-ignore="true" data-lpignore="true" required>
+        </label>
+        <label for="loginPass"><span id="loginPassLabel">كلمة السر</span></label>
+        <div class="login-password">
+          <input id="loginPass" name="smartap-secret-once" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" dir="ltr" placeholder="كلمة مرور حساب root للراوتر" data-form-type="other" data-1p-ignore="true" data-lpignore="true" required>
+        </div>
+        <button class="btn primary" id="loginBtn" type="submit">دخول</button>
+        <div class="login-msg" id="loginMsg" role="status" aria-live="polite"></div>
+      </form>
+      <div class="login-meta"><span>CR6608</span><span id="loginLocalMeta">Local · No cloud</span></div>
+    </section>
+  </div>
+
+  <div class="app" id="appShell" hidden>
+    <aside class="side">
+      <div class="brand">
+        <div class="mark" id="brandMark"></div>
+        <div><h1>Smart AP</h1><p>Xiaomi CR6608</p></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="side-foot"><b id="sideTitle">Dashboard</b><br><span id="sideStatus">Loading data...</span></div>
+    </aside>
+
+    <main class="main">
+      <header class="hero">
+        <div class="hero-top">
+          <div>
+            <div class="chip ok" id="connectionChip"><span class="pulse" id="statusPulse"></span><span id="connectionState">Loading</span></div>
+            <h2>Smart AP</h2>
+            <p id="heroSubtitle">Smart AP dashboard. Live data, offline assets, no CDN.</p>
+          </div>
+          <div class="controls">
+            <div class="seg" role="group" aria-label="Language"><button id="langAr" type="button" aria-pressed="true">AR</button><button id="langEn" type="button" aria-pressed="false">EN</button></div>
+            <button class="btn" id="themeBtn" type="button">Theme</button>
+            <button class="btn" id="openWrtBtn" type="button">OpenWrt Settings</button>
+            <select id="intervalSelect" aria-label="Update interval">
+              <option value="5" selected>5s</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+              <option value="60">60s</option>
+            </select>
+            <button class="btn" id="logoutBtn" type="button">خروج</button>
+            <button class="btn primary" id="refreshBtn" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="snapshot-warning" id="snapshotWarning" role="status" aria-live="polite" hidden></div>
+        <div class="kpi-grid" id="kpiBar"></div>
+      </header>
+
+      <section class="section" id="overview"></section>
+      <section class="section" id="network" hidden></section>
+      <section class="section" id="devices" hidden></section>
+      <section class="section" id="wifi" hidden></section>
+      <section class="section" id="insights" hidden></section>
+      <section class="section" id="system" hidden></section>
+      <section class="section" id="quick" hidden></section>
+      <section class="section" id="isolation" hidden></section>
+      <section class="section" id="actions" hidden></section>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/smartap-zero-retention.js?v=20260826-exact-legacy-purge-v1" defer></script>
+  <script src="/dashboard.js?v=20260902-smartap-v86-live-design-v1" defer></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "board_name": "xiaomi,mi-router-cr6608",
+  "uci": {
+    "rpcd.@login[0]": "login",
+    "rpcd.@login[0].username": "readonly",
+    "rpcd.@login[0].password": "readonly-hash-must-not-change",
+    "rpcd.@login[1]": "login",
+    "rpcd.@login[1].username": "root",
+    "rpcd.@login[1].password": "$p$root",
+    "network.@device[0]": "device",
+    "network.@device[0].name": "guest-bridge",
+    "network.@device[0].stp": "1",
+    "network.@device[0].forward_delay": "9",
+    "network.@device[1]": "device",
+    "network.@device[1].name": "br-lan",
+    "network.@device[1].stp": "1",
+    "network.@device[1].forward_delay": "2",
+    "network.lan": "interface",
+    "network.lan.proto": "static",
+    "network.lan.ipaddr": "10.77.0.1",
+    "network.lan.netmask": "255.255.255.0",
+    "dhcp.lan": "dhcp",
+    "dhcp.lan.ignore": "0",
+    "dhcp.lan.start": "33",
+    "dhcp.lan.limit": "77",
+    "dropbear.@dropbear[0]": "dropbear",
+    "dropbear.@dropbear[0].Port": "2022",
+    "dropbear.@dropbear[0].PasswordAuth": "on",
+    "smartap.security": "smartap",
+    "smartap.security.loop_guard": "1",
+    "smartap.management": "smartap",
+    "smartap.management.ipaddr": "10.77.0.1",
+    "factory.calibration.sha256": "preserved-calibration-must-not-change"
+  },
+  "files": {
+    "etc/shadow": "root:$6$operator$custom-ssh-hash-must-not-change:20800:0:99999:7:::\n",
+    "etc/config/dropbear": "config dropbear\n\toption PasswordAuth 'on'\n\toption Port '2022'\n",
+    "etc/config/dhcp": "config dhcp 'lan'\n\toption ignore '0'\n\toption start '33'\n\toption limit '77'\n",
+    "factory.bin": "CR6608 PRESERVED FACTORY SENTINEL\n"
+  }
+}

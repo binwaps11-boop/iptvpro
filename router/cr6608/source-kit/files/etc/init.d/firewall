@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+
+START=19
+
+USE_PROCD=1
+QUIET=""
+
+service_triggers() {
+	procd_add_reload_trigger firewall
+	procd_add_reload_data_trigger firewall
+}
+
+restart() {
+	fw4 restart
+}
+
+start_service() {
+	fw4 ${QUIET} start
+}
+
+stop_service() {
+	# Upstream's init action uses `fw4 flush`, which deletes every nft table,
+	# including the Wi-Fi rescue boundary, SmartAP QoS and DHCP isolation.
+	# Delegate to the serialized product coordinator; it invokes `fw4 stop`
+	# (inet/fw4 only), proves the rescue endpoint dark during the transition,
+	# and restores its verified AP-only rules before returning.
+	/usr/sbin/cr6608-rescue-guard firewall-stop
+}
+
+reload_service() {
+	fw4 reload
+}
+
+boot() {
+	# Be silent on boot; firewall may already have been started by hotplug.
+	QUIET=-q
+	start
+}

@@ -1,0 +1,104 @@
+#!/bin/sh
+
+SESSION_AUTH_LIB="${CR6608_SESSION_AUTH_LIB:-/usr/libexec/cr6608-session-auth}"
+NEW_LUCI_SID=""
+SET_COOKIE=""
+CLEAR_COOKIE_ROOT=""
+CLEAR_COOKIE_LEGACY=""
+
+reply() {
+	status="$1"
+	payload="$2"
+	if command -v cr6608_luci_session_unlock >/dev/null 2>&1; then
+		cr6608_luci_session_unlock || true
+	fi
+	[ -n "$status" ] && printf 'Status: %s\r\n' "$status"
+	[ "$status" = "405 Method Not Allowed" ] && printf 'Allow: POST\r\n'
+	[ "$status" = "503 Service Unavailable" ] && printf 'Retry-After: 1\r\n'
+	printf 'Content-Type: application/json; charset=utf-8\r\n'
+	printf 'Cache-Control: no-store\r\n'
+	printf 'Pragma: no-cache\r\n'
+	printf 'X-Content-Type-Options: nosniff\r\n'
+	printf 'Referrer-Policy: no-referrer\r\n'
+	printf 'X-Frame-Options: SAMEORIGIN\r\n'
+	printf 'Content-Security-Policy: default-src '\''none'\''; frame-ancestors '\''none'\''\r\n'
+	[ -n "$CLEAR_COOKIE_ROOT" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_ROOT"
+	[ -n "$CLEAR_COOKIE_LEGACY" ] && printf 'Set-Cookie: %s\r\n' "$CLEAR_COOKIE_LEGACY"
+	[ -n "$SET_COOKIE" ] && printf 'Set-Cookie: %s\r\n' "$SET_COOKIE"
+	printf '\r\n%s\n' "$payload"
+	exit 0
+}
+
+set_luci_cookie() {
+	if [ "${HTTPS:-off}" = on ]; then
+		CLEAR_COOKIE_ROOT="sysauth_https=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+		CLEAR_COOKIE_LEGACY="sysauth_https=; Path=/cgi-bin/luci/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+		SET_COOKIE="sysauth_https=$NEW_LUCI_SID; Path=/cgi-bin/luci; Secure; HttpOnly; SameSite=Strict"
+	else
+		CLEAR_COOKIE_ROOT="sysauth_http=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+		CLEAR_COOKIE_LEGACY="sysauth_http=; Path=/cgi-bin/luci/; Max-Age=0; HttpOnly; SameSite=Strict"
+		SET_COOKIE="sysauth_http=$NEW_LUCI_SID; Path=/cgi-bin/luci; HttpOnly; SameSite=Strict"
+	fi
+}
+
+[ "${REQUEST_METHOD:-GET}" = POST ] || reply "405 Method Not Allowed" '{"ok":false,"error":"method"}'
+body_len="${CONTENT_LENGTH:-0}"
+case "$body_len" in ''|*[!0-9]*) reply "400 Bad Request" '{"ok":false,"error":"content_length"}' ;; esac
+[ "${#body_len}" -le 3 ] 2>/dev/null && [ "$body_len" -le 256 ] 2>/dev/null ||
+	reply "413 Payload Too Large" '{"ok":false,"error":"payload_too_large"}'
+[ "$body_len" -eq 0 ] 2>/dev/null || head -c "$body_len" >/dev/null 2>&1
+
+[ -r "$SESSION_AUTH_LIB" ] || reply "500 Internal Server Error" '{"ok":false,"error":"session_helper"}'
+. "$SESSION_AUTH_LIB" || reply "500 Internal Server Error" '{"ok":false,"error":"session_helper"}'
+
+# dashlogin already authenticated one rpcd/LuCI session, installed its CSRF
+# token, and atomically mapped it to this HttpOnly Smart AP session.  The bridge
+# must only publish that existing bearer as a path-scoped HttpOnly cookie.  It
+# must never create a blank rpcd session and grant a large ACL list here: that
+# slow fallback outlived the browser's deadline and repeated clicks could leave
+# enough CGI/ubus work behind to starve the management network.
+request_sid="$(cr6608_session_from_request)"
+cr6608_valid_hex32 "$request_sid" || reply "403 Forbidden" '{"ok":false,"error":"session_missing"}'
+cr6608_session_valid "$request_sid" || reply "403 Forbidden" '{"ok":false,"error":"session_expired"}'
+cr6608_luci_session_lock || reply "503 Service Unavailable" '{"ok":false,"error":"session_lock"}'
+cr6608_session_valid "$request_sid" || reply "403 Forbidden" '{"ok":false,"error":"session_expired"}'
+
+map_dir=/tmp/dashluci
+cr6608_map_storage_prepare || reply "500 Internal Server Error" '{"ok":false,"error":"session_storage"}'
+map_file="$map_dir/$request_sid"
+if [ -f "$map_file" ] && [ ! -L "$map_file" ] && cr6608_path_owned_by_root "$map_file"; then
+	read -r mapped_luci_sid extra < "$map_file" 2>/dev/null || true
+	if cr6608_valid_hex32 "$mapped_luci_sid" && [ -z "$extra" ]; then
+		# The map is only a private reference; rpcd remains authoritative.  A
+		# restart of rpcd invalidates all of its sessions but leaves this tmpfs
+		# map and the independent Smart AP session alive.  Never publish a stale
+		# sysauth cookie, otherwise LuCI redirects back to Smart AP in a loop.
+		cr6608_luci_session_state "$mapped_luci_sid"
+		mapped_rc=$?
+		case "$mapped_rc" in
+			0)
+				NEW_LUCI_SID="$mapped_luci_sid"
+				set_luci_cookie
+				reply "" '{"ok":true,"target":"/cgi-bin/luci/admin/network/wireless"}'
+				;;
+			1)
+				# A missing SID or an explicit luci-base denial is definitive.
+				# Remove only the dead rpcd map; keep the valid Smart AP session
+				# so the browser can ask for a fresh login without losing state.
+				rm -f "$map_file" 2>/dev/null ||
+					reply "503 Service Unavailable" '{"ok":false,"error":"session_storage"}'
+				reply "409 Conflict" '{"ok":false,"error":"luci_session_reauthentication_required"}'
+				;;
+			*)
+				# A timeout or rpcd/ubus outage is not proof that the session is
+				# gone.  Preserve the map and allow a bounded retry.
+				reply "503 Service Unavailable" '{"ok":false,"error":"luci_session_service_unavailable"}'
+				;;
+		esac
+	fi
+fi
+
+# A missing/corrupt map requires the operator's password again.  Fail quickly
+# and leave the existing Smart session intact; the dashboard can present the
+# normal re-login flow without triggering any privileged repair in a CGI.
+reply "409 Conflict" '{"ok":false,"error":"luci_session_reauthentication_required"}'

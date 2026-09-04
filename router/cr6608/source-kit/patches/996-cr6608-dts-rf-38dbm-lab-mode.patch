@@ -1,0 +1,26 @@
+diff --git a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+index 825435d0ba..583b0c5ddb 100644
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+@@ -6,3 +6,9 @@
+ 	compatible = "xiaomi,mi-router-cr6608", "mediatek,mt7621-soc";
+ 	model = "Xiaomi Mi Router CR6608";
+ };
++
++&pcie1 {
++	wifi@0,0 {
++		mediatek,cr6608-lab-txpower-38dbm;
++	};
++};
+diff --git a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
+index 3f3a4a8b57..bf645d8da2 100644
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
+@@ -155,7 +155,6 @@
+ 		reg = <0x0000 0 0 0 0>;
+ 		nvmem-cells = <&eeprom_factory_0>;
+ 		nvmem-cell-names = "eeprom";
+-		mediatek,disable-radar-background;
+ 	};
+ };
+ 

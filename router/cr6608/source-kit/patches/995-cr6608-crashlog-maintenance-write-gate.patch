@@ -1,0 +1,26 @@
+diff --git a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr660x.dtsi
+@@ -111,7 +111,7 @@
+ 			read-only;
+ 		};
+ 
+-		partition@1c0000 {
++		crash_log: partition@1c0000 {
+ 			label = "crash_log";
+ 			reg = <0x1c0000 0x40000>;
+ 			read-only;
+diff --git a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+--- a/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
++++ b/target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+@@ -8,6 +8,10 @@
+ 	model = "Xiaomi Mi Router CR6608";
+ };
+ 
++&crash_log {
++	/delete-property/ read-only;
++};
++
+ &pcie1 {
+ 	wifi@0,0 {
+ 		mediatek,cr6608-lab-txpower-38dbm;

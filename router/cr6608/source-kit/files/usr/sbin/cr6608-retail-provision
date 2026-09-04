@@ -1,0 +1,852 @@
+#!/bin/sh
+# One-device manufacturing provisioner. Secret arguments are deliberately not
+# accepted: pass root-only files so credentials do not appear in ps output or
+# shell history. A generic firmware image is not sale-ready until this succeeds.
+
+set -u
+umask 077
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+CR_CHAR="$(printf '\r')"
+NL_CHAR='
+'
+
+ROOT_PASSWORD_FILE=''
+WIFI_KEY_FILE=''
+WEB_PASSWORD_FILE=''
+MARKET_COUNTRY=''
+SSID24=''
+SSID5=''
+ARTIFACT_PROFILE='/rom/etc/cr6608-artifact-profile'
+COMMISSIONING_ARTIFACT_PROFILE='/etc/cr6608-artifact-profile'
+PROC_MOUNTS='/proc/self/mounts'
+EXPECTED_RADIO_POLICY=''
+MARKER='/etc/cr6608-retail-provisioned'
+PENDING_MARKER='/etc/cr6608-retail-provisioning-pending'
+SHADOW_PATH='/etc/shadow'
+WIRELESS_CONFIG='/etc/config/wireless'
+QUICK_CONFIG='/etc/config/cr6608quick'
+SMARTAP_CONFIG='/etc/config/smartap'
+UHTTPD_CONFIG='/etc/config/uhttpd'
+RPCD_CONFIG='/etc/config/rpcd'
+SYSTEM_CONFIG='/etc/config/system'
+PRPLMESH_CONFIG='/etc/config/prplmesh'
+DROPBEAR_CONFIG='/etc/config/dropbear'
+COMMISSIONING_MARKER='/etc/cr6608-retail-commissioning-ram'
+COMMISSIONING_AUTHORIZED_KEYS='/etc/dropbear/authorized_keys'
+UCI_BIN='/sbin/uci'
+PASSWD_BIN='/usr/bin/passwd'
+OPENSSL_BIN='/usr/bin/openssl'
+UHTTPD_INIT='/etc/init.d/uhttpd'
+RPCD_INIT='/etc/init.d/rpcd'
+WIFI_BIN='/sbin/wifi'
+AUDIT_BIN='/usr/sbin/cr6608-retail-audit'
+SYNC_BIN='/bin/sync'
+SLEEP_BIN='/bin/sleep'
+PRPLMESH_SYNC_BIN='/usr/sbin/cr6608-prplmesh-sync'
+CACHE_STATE_LIB='/usr/libexec/cr6608-dashboard-cache-state'
+APPLY_LOCK='/var/run/cr6608-apply.lock'
+AUDIT_READY_MAX_ATTEMPTS=16
+AUDIT_READY_INTERVAL_SECONDS=2
+
+usage() {
+	printf '%s\n' \
+		'usage: cr6608-retail-provision --root-password-file FILE --wifi-key-file FILE' \
+		'       --web-password-file FILE --market-country CC' \
+		'       [--ssid24 NAME] [--ssid5 NAME]'
+	exit "${1:-2}"
+}
+
+fail() {
+	printf 'retail_provision=FAIL reason=%s\n' "$1" >&2
+	exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--root-password-file) [ "$#" -ge 2 ] || usage; ROOT_PASSWORD_FILE="$2"; shift 2 ;;
+		--wifi-key-file) [ "$#" -ge 2 ] || usage; WIFI_KEY_FILE="$2"; shift 2 ;;
+		--web-password-file) [ "$#" -ge 2 ] || usage; WEB_PASSWORD_FILE="$2"; shift 2 ;;
+		--market-country) [ "$#" -ge 2 ] || usage; MARKET_COUNTRY="$2"; shift 2 ;;
+		--ssid24) [ "$#" -ge 2 ] || usage; SSID24="$2"; shift 2 ;;
+		--ssid5) [ "$#" -ge 2 ] || usage; SSID5="$2"; shift 2 ;;
+		-h|--help) usage 0 ;;
+		*) usage ;;
+	esac
+done
+
+[ "$(/usr/bin/id -u 2>/dev/null)" = 0 ] || fail must_run_as_root
+
+artifact_radio_policy() {
+	# Initramfs/legacy fixtures have no immutable /rom view and remain in the
+	# stricter LAB_ARTIFACT_BLOCKED class. A squashfs image must match one of
+	# the two exact build identities; writable overlay edits cannot promote it.
+	if [ ! -e "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ]; then
+		if [ -f "$COMMISSIONING_ARTIFACT_PROFILE" ] &&
+			[ ! -L "$COMMISSIONING_ARTIFACT_PROFILE" ] &&
+			[ -f "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] &&
+			[ -f "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+			[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+			[ -f "$PROC_MOUNTS" ] && [ ! -L "$PROC_MOUNTS" ] &&
+			[ "$(awk '$2 == "/" { type=$3; count++ } END { if (count != 1) exit 1; print type }' "$PROC_MOUNTS" 2>/dev/null)" = tmpfs ] &&
+			[ "$(wc -l < "$COMMISSIONING_ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+			grep -Fqx 'profile=retail-v1' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			grep -Fqx 'sale_ready=NO' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			grep -Fqx 'radio_policy=retail-disabled' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			[ "$(wc -l < "$COMMISSIONING_MARKER" 2>/dev/null | tr -d '[:space:]')" = 6 ] &&
+			grep -Fqx 'profile=retail-commissioning-ram-v1' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'sale_ready=NO' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'boot_policy=ram-only' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'password_auth=disabled' "$COMMISSIONING_MARKER" &&
+			grep -Eq '^factory_key_fingerprint=SHA256:[A-Za-z0-9+/]{43}$' "$COMMISSIONING_MARKER" &&
+			grep -Fqx "factory_key_sha256=$(sha256sum "$COMMISSIONING_AUTHORIZED_KEYS" | awk '{print $1}')" \
+				"$COMMISSIONING_MARKER"; then
+			printf 'retail-disabled-after-reboot\n'
+			return 0
+		fi
+		printf 'LAB_ARTIFACT_BLOCKED\n'
+		return 0
+	fi
+	[ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] || return 1
+	[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] || return 1
+	if grep -Fqx 'profile=retail-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=retail-disabled' "$ARTIFACT_PROFILE"; then
+		printf 'retail-disabled-after-reboot\n'
+		return 0
+	fi
+	if grep -Fqx 'profile=lab-operator-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$ARTIFACT_PROFILE"; then
+		printf 'LAB_ARTIFACT_BLOCKED\n'
+		return 0
+	fi
+	return 1
+}
+EXPECTED_RADIO_POLICY="$(artifact_radio_policy)" || fail unsupported_artifact_profile
+
+case "$MARKET_COUNTRY" in
+	[A-Z][A-Z]) [ "$MARKET_COUNTRY" != 00 ] || fail invalid_market_country ;;
+	*) fail invalid_market_country ;;
+esac
+COUNTRY_KEYS='wireless.radio0.country wireless.radio1.country
+smartap.quick.country24 smartap.quick.country5
+cr6608quick.default.country cr6608quick.default.country24 cr6608quick.default.country5'
+ALTERNATE_CREDENTIAL_OPTIONS='sae_password sae_password_file wpa_psk_file ppsk ppsk_file
+auth_server auth_port auth_secret auth_server2 auth_port2 auth_secret2
+acct_server acct_port acct_secret acct_server2 acct_port2 acct_secret2
+dae_client dae_port dae_secret dynamic_vlan vlan_file
+multi_ap_backhaul_ssid multi_ap_backhaul_key
+wps_pin wps_pushbutton wps_label ext_registrar wps_pbc_in_m1 wps_independent ap_pin
+hostapd_bss_options'
+
+secure_input() {
+	[ -n "$1" ] && [ -f "$1" ] && [ ! -L "$1" ] || return 1
+	[ "$(/bin/stat -c '%u' "$1" 2>/dev/null)" = 0 ] || return 1
+	mode="$(/bin/stat -c '%a' "$1" 2>/dev/null)"
+	case "$mode" in 600|400) ;; *) return 1 ;; esac
+	return 0
+}
+
+read_secret() {
+	# Exactly one non-empty line; reject CR/LF/NUL ambiguity and oversized input.
+	[ "$(wc -l < "$1" 2>/dev/null | tr -d ' ')" = 1 ] || return 1
+	[ "$(wc -c < "$1" 2>/dev/null | tr -d ' ')" -le "$2" ] 2>/dev/null || return 1
+	IFS= read -r value < "$1" || [ -n "${value:-}" ]
+	case "${value:-}" in *"$CR_CHAR"*|*"$NL_CHAR"*) return 1 ;; esac
+	printf %s "$value"
+}
+
+secure_input "$ROOT_PASSWORD_FILE" || fail insecure_root_password_file
+secure_input "$WIFI_KEY_FILE" || fail insecure_wifi_key_file
+secure_input "$WEB_PASSWORD_FILE" || fail insecure_web_password_file
+root_password="$(read_secret "$ROOT_PASSWORD_FILE" 81)" || fail invalid_root_password_file
+wifi_key="$(read_secret "$WIFI_KEY_FILE" 64)" || fail invalid_wifi_key_file
+web_password="$(read_secret "$WEB_PASSWORD_FILE" 81)" || fail invalid_web_password_file
+[ "${#root_password}" -ge 12 ] 2>/dev/null || fail root_password_too_short
+[ "${#wifi_key}" -ge 12 ] 2>/dev/null || fail wifi_key_too_short
+[ "${#web_password}" -ge 12 ] 2>/dev/null || fail web_password_too_short
+case "$wifi_key" in *[!A-Za-z0-9._~-]*) fail wifi_key_unsupported_character ;; esac
+# Smart AP intentionally removes mobile clipboard whitespace, zero-width and
+# bidi controls before login.  Keep the per-device web credential inside the
+# same explicit printable provisioning alphabet as Wi-Fi so the provisioner
+# can never create a valid rpcd password that the login UI cannot reproduce.
+case "$web_password" in *[!A-Za-z0-9._~-]*) fail web_password_unsupported_character ;; esac
+[ "$root_password" != "$wifi_key" ] && [ "$root_password" != "$web_password" ] && \
+	[ "$wifi_key" != "$web_password" ] || fail credentials_must_be_distinct
+
+# Block common or previously documented fleet credentials without embedding
+# plaintext values. SHA-256 is only a deny-list fingerprint, never a password
+# verifier or a source of a provisioned credential.
+is_forbidden_secret() {
+	fingerprint="$(printf %s "$1" | sha256sum | awk '{print $1}')"
+	case "$fingerprint" in
+		1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+		e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+		8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+		5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+		ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+		15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+		c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+		b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff) return 0 ;;
+	esac
+	return 1
+}
+is_forbidden_secret "$root_password" && fail forbidden_root_password
+is_forbidden_secret "$wifi_key" && fail forbidden_wifi_key
+is_forbidden_secret "$web_password" && fail forbidden_web_password
+
+for label in "$SSID24" "$SSID5"; do
+	[ "${#label}" -le 32 ] 2>/dev/null || fail ssid_too_long
+	case "$label" in *"$CR_CHAR"*|*"$NL_CHAR"*) fail invalid_ssid ;; esac
+done
+
+# Acquire the transaction-directory lock first, then the cache mutation flock,
+# exactly like Quick Settings/dashctl.  The common order prevents deadlock and
+# closes the audit-to-final-marker race without ever queueing a provisioner.
+apply_lock_held=0
+apply_lock_start=''
+apply_claim=''
+apply_claim_tmp=''
+mutation_lock_held=0
+process_start() {
+	awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+apply_lock_dir_secure() {
+	[ -d "$APPLY_LOCK" ] && [ ! -L "$APPLY_LOCK" ] || return 1
+	[ "$(/bin/stat -c '%u' "$APPLY_LOCK" 2>/dev/null)" = 0 ] || return 1
+	[ "$(/bin/stat -c '%a' "$APPLY_LOCK" 2>/dev/null)" = 700 ] || return 1
+}
+apply_lock_secure() {
+	apply_lock_dir_secure || return 1
+	[ -f "$APPLY_LOCK/owner" ] && [ ! -L "$APPLY_LOCK/owner" ] || return 1
+	[ "$(/bin/stat -c '%u' "$APPLY_LOCK/owner" 2>/dev/null)" = 0 ] || return 1
+	[ "$(/bin/stat -c '%a' "$APPLY_LOCK/owner" 2>/dev/null)" = 600 ] || return 1
+}
+apply_claim_secure() {
+	claim_path="$1"
+	[ -f "$claim_path" ] && [ ! -L "$claim_path" ] || return 1
+	[ "$(/bin/stat -c '%u' "$claim_path" 2>/dev/null)" = 0 ] || return 1
+	[ "$(/bin/stat -c '%a' "$claim_path" 2>/dev/null)" = 600 ] || return 1
+}
+owner_identity_valid() {
+	identity_file="$1"
+	identity_name_pid="${2:-}"
+	identity_pid=''; identity_start=''
+	read identity_pid identity_start < "$identity_file" 2>/dev/null || return 1
+	case "$identity_pid:$identity_start" in *[!0-9:]*|:|*:) return 1 ;; esac
+	[ -z "$identity_name_pid" ] || [ "$identity_pid" = "$identity_name_pid" ] || return 1
+}
+owner_identity_live() {
+	owner_identity_valid "$1" "${2:-}" || return 2
+	identity_live_start="$(process_start "$identity_pid")"
+	[ -n "$identity_live_start" ] && [ "$identity_live_start" = "$identity_start" ]
+}
+ownerless_lock_reclaimable() {
+	apply_lock_dir_secure || return 1
+	[ ! -e "$APPLY_LOCK/owner" ] && [ ! -L "$APPLY_LOCK/owner" ] || return 1
+	claim_parent="${APPLY_LOCK%/*}"
+	for claim_path in "$claim_parent"/.cr6608-apply.claim.*; do
+		[ -e "$claim_path" ] || [ -L "$claim_path" ] || continue
+		[ "$claim_path" != "$apply_claim" ] || continue
+		claim_name_pid="${claim_path##*/}"
+		claim_name_pid="${claim_name_pid#.cr6608-apply.claim.}"
+		case "$claim_name_pid" in ''|*[!0-9]*) return 1 ;; esac
+		apply_claim_secure "$claim_path" || return 1
+		owner_identity_live "$claim_path" "$claim_name_pid"
+		claim_live_rc=$?
+		case "$claim_live_rc" in
+			0) return 1 ;;
+			1) rm -f "$claim_path" 2>/dev/null || return 1 ;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+prune_stale_apply_claims() {
+	claim_parent="${APPLY_LOCK%/*}"
+	for claim_path in "$claim_parent"/.cr6608-apply.claim.*; do
+		[ -e "$claim_path" ] || [ -L "$claim_path" ] || continue
+		claim_name_pid="${claim_path##*/}"
+		claim_name_pid="${claim_name_pid#.cr6608-apply.claim.}"
+		case "$claim_name_pid" in ''|*[!0-9]*) return 1 ;; esac
+		apply_claim_secure "$claim_path" || return 1
+		owner_identity_live "$claim_path" "$claim_name_pid"
+		claim_live_rc=$?
+		case "$claim_live_rc" in
+			0) ;;
+			1) rm -f "$claim_path" 2>/dev/null || return 1 ;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+create_apply_claim() {
+	claim_parent="${APPLY_LOCK%/*}"
+	apply_claim="$claim_parent/.cr6608-apply.claim.$$"
+	apply_claim_tmp="$claim_parent/.cr6608-apply.claim-tmp.$$.$apply_lock_start"
+	printf '%s %s\n' "$$" "$apply_lock_start" > "$apply_claim_tmp" || return 1
+	chmod 0600 "$apply_claim_tmp" || return 1
+	# apply-lock-step: claim-temp-ready
+	mv -f "$apply_claim_tmp" "$apply_claim" || return 1
+	apply_claim_tmp=''
+	# apply-lock-step: claim-published
+	apply_claim_secure "$apply_claim" && owner_identity_valid "$apply_claim" "$$"
+}
+acquire_apply_lock() {
+	case "$APPLY_LOCK" in /*/cr6608-apply.lock) ;; *) return 1 ;; esac
+	apply_lock_start="$(process_start "$$")"
+	case "$apply_lock_start" in ''|*[!0-9]*) return 1 ;; esac
+	create_apply_claim || return 1
+	if ! mkdir "$APPLY_LOCK" 2>/dev/null; then
+		apply_lock_dir_secure || return 1
+		if [ -e "$APPLY_LOCK/owner" ] || [ -L "$APPLY_LOCK/owner" ]; then
+			apply_lock_secure || return 1
+			owner_identity_live "$APPLY_LOCK/owner"
+			owner_live_rc=$?
+			case "$owner_live_rc" in
+				0) return 1 ;;
+				1) rm -f "$APPLY_LOCK/owner" 2>/dev/null || return 1 ;;
+				*) return 1 ;;
+			esac
+		else
+			# The creator publishes a validated external PID/start claim before
+			# mkdir. A live claim protects its ownerless creation window; a dead
+			# claim (or a legacy ownerless directory) is safely reclaimable.
+			ownerless_lock_reclaimable || return 1
+		fi
+		rmdir "$APPLY_LOCK" 2>/dev/null || return 1
+		mkdir "$APPLY_LOCK" 2>/dev/null || return 1
+	fi
+	# apply-lock-step: directory-owned
+	apply_lock_held=1
+	apply_lock_dir_secure || return 1
+	mv -f "$apply_claim" "$APPLY_LOCK/owner" || return 1
+	apply_claim=''
+	# apply-lock-step: owner-published
+	apply_lock_secure && owner_identity_valid "$APPLY_LOCK/owner" "$$" &&
+		prune_stale_apply_claims
+}
+release_apply_lock() {
+	case "${apply_claim_tmp##*/}" in .cr6608-apply.claim-tmp."$$".*) rm -f "$apply_claim_tmp" 2>/dev/null || true ;; esac
+	if [ -n "$apply_claim" ] && apply_claim_secure "$apply_claim" &&
+		owner_identity_valid "$apply_claim" "$$"; then
+		rm -f "$apply_claim" 2>/dev/null || true
+	fi
+	apply_claim=''
+	apply_claim_tmp=''
+	[ "$apply_lock_held" = 1 ] || return 0
+	owner_pid=''; owner_start=''
+	read owner_pid owner_start < "$APPLY_LOCK/owner" 2>/dev/null || true
+	if [ "$owner_pid" = "$$" ] && [ "$owner_start" = "$apply_lock_start" ]; then
+		rm -f "$APPLY_LOCK/owner" 2>/dev/null || true
+		rmdir "$APPLY_LOCK" 2>/dev/null || true
+	elif [ ! -e "$APPLY_LOCK/owner" ] && [ ! -L "$APPLY_LOCK/owner" ] &&
+		apply_lock_dir_secure; then
+		rmdir "$APPLY_LOCK" 2>/dev/null || true
+	fi
+	apply_lock_held=0
+}
+release_mutation_lock() {
+	[ "$mutation_lock_held" = 1 ] || return 0
+	cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+	mutation_lock_held=0
+}
+release_transaction_locks() {
+	release_mutation_lock
+	release_apply_lock
+}
+trap release_transaction_locks EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+acquire_apply_lock || fail provisioning_busy
+[ -f "$CACHE_STATE_LIB" ] && [ ! -L "$CACHE_STATE_LIB" ] || fail mutation_lock_helper_missing
+. "$CACHE_STATE_LIB"
+command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 &&
+	command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 ||
+	fail mutation_lock_helper_invalid
+cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 || fail provisioning_busy
+mutation_lock_held=1
+
+run_without_mutation_fds() (
+	for child_fd in 4 5 6 7 8; do
+		eval "exec ${child_fd}>&-" 2>/dev/null || true
+	done
+	exec "$@"
+)
+
+stage_wifi_secret_values() {
+	# The narrowly validated factory key is safe in UCI batch single quotes.
+	# printf is an ash builtin and UCI reads stdin, so plaintext never appears
+	# in an external process argv or a reusable temporary file.
+	printf '%s\n' \
+		"set wireless.${ap24}.key='$wifi_key'" \
+		"set wireless.${ap5}.key='$wifi_key'" \
+		"set cr6608quick.default.wifi_key='$wifi_key'" |
+		run_without_mutation_fds "$UCI_BIN" -q batch
+}
+
+primary_ap_network_eligible() {
+	case "$1" in lan|cr6608_vlan) return 0 ;; esac
+	return 1
+}
+
+primary_ap_base_eligible() {
+	section="$1"
+	radio="$2"
+	case "$section" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+	[ "$($UCI_BIN -q get "wireless.${section}" 2>/dev/null)" = wifi-iface ] || return 1
+	[ "$($UCI_BIN -q get "wireless.${section}.device" 2>/dev/null)" = "$radio" ] || return 1
+	[ "$($UCI_BIN -q get "wireless.${section}.mode" 2>/dev/null)" = ap ] || return 1
+	network="$($UCI_BIN -q get "wireless.${section}.network" 2>/dev/null)"
+	primary_ap_network_eligible "$network"
+}
+
+primary_ap_fallback_eligible() {
+	primary_ap_base_eligible "$1" "$2" || return 1
+	[ "$($UCI_BIN -q get "wireless.${1}.wds" 2>/dev/null)" != 1 ] || return 1
+	case "$($UCI_BIN -q get "wireless.${1}.multi_ap" 2>/dev/null)" in ''|0) ;; *) return 1 ;; esac
+	return 0
+}
+
+primary_ap_canonical_eligible() {
+	primary_ap_base_eligible "$1" "$2" || return 1
+	# Quick Settings may have left the canonical client AP in WDS sender mode.
+	# That deterministic section can be converted back to a normal retail AP;
+	# Multi-AP remains a separate backhaul role and is never repurposed.
+	case "$($UCI_BIN -q get "wireless.${1}.multi_ap" 2>/dev/null)" in ''|0) ;; *) return 1 ;; esac
+	return 0
+}
+
+find_primary_ap() {
+	radio="$1"
+	preferred="$2"
+	selected=''
+	count=0
+	# A validated canonical section wins deterministically.  A canonical WDS
+	# sender is converted below; fallback candidates must already be plain APs.
+	if primary_ap_canonical_eligible "$preferred" "$radio"; then
+		printf '%s\n' "$preferred"
+		return 0
+	fi
+	for candidate in $($UCI_BIN -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+		[ "$candidate" != "$preferred" ] || continue
+		primary_ap_fallback_eligible "$candidate" "$radio" || continue
+		selected="$candidate"
+		count=$((count + 1))
+	done
+	[ "$count" -eq 1 ] || {
+		[ "$count" -eq 0 ] && return 1
+		return 2
+	}
+	printf '%s\n' "$selected"
+}
+
+find_rpcd_root_login() {
+	found=''
+	count=0
+	for candidate in $($UCI_BIN -q show rpcd 2>/dev/null |
+		sed -n 's/^rpcd\.\([^=]*\)=login$/\1/p'); do
+		[ "$($UCI_BIN -q get "rpcd.${candidate}.username" 2>/dev/null)" = root ] || continue
+		found="$candidate"
+		count=$((count + 1))
+	done
+	[ "$count" -eq 1 ] || return 1
+	printf '%s\n' "$found"
+}
+
+ap24="$(find_primary_ap radio0 wifinet0)"
+primary_rc=$?
+case "$primary_rc" in 0) ;; 1) fail radio0_primary_ap_missing ;; *) fail radio0_primary_ap_ambiguous ;; esac
+ap5="$(find_primary_ap radio1 wifinet1)"
+primary_rc=$?
+case "$primary_rc" in 0) ;; 1) fail radio1_primary_ap_missing ;; *) fail radio1_primary_ap_ambiguous ;; esac
+[ -n "$ap24" ] && [ -n "$ap5" ] && [ "$ap24" != "$ap5" ] || fail primary_ap_resolution
+
+for required_config in "$SHADOW_PATH" "$WIRELESS_CONFIG" "$QUICK_CONFIG" "$SMARTAP_CONFIG" \
+	"$UHTTPD_CONFIG" "$RPCD_CONFIG" "$SYSTEM_CONFIG" "$PRPLMESH_CONFIG" \
+	"$DROPBEAR_CONFIG"; do
+	[ -f "$required_config" ] && [ ! -L "$required_config" ] || fail required_config_missing
+done
+[ -x "$UHTTPD_INIT" ] && [ -x "$RPCD_INIT" ] && [ -x "$WIFI_BIN" ] && \
+	[ -x "$AUDIT_BIN" ] && [ -x "$OPENSSL_BIN" ] && [ -x "$SYNC_BIN" ] && \
+	[ -x "$SLEEP_BIN" ] && [ -x "$PRPLMESH_SYNC_BIN" ] || \
+	fail runtime_helper_missing
+rpcd_root_login="$(find_rpcd_root_login)" || fail rpcd_root_login_ambiguous
+
+# rpcd verifies standard crypt(3) hashes. OpenSSL reads the password from the
+# root-only file on stdin, so the plaintext never appears in a process argv.
+web_hash="$("$OPENSSL_BIN" passwd -6 -stdin < "$WEB_PASSWORD_FILE" 2>/dev/null)" || \
+	fail web_password_hash
+case "$web_hash" in
+	\$6\$*) ;;
+	*) fail web_password_hash_format ;;
+esac
+[ "${#web_hash}" -le 160 ] 2>/dev/null || fail web_password_hash_format
+
+backup="$(mktemp -d /tmp/cr6608-retail-provision.XXXXXX)" || fail backup_create
+chmod 0700 "$backup" || { rm -rf "$backup"; fail backup_mode; }
+transaction_started=0
+marker_existed=0
+pending_marker_existed=0
+commissioning_active=0
+uhttpd_was_running=0
+rpcd_was_running=0
+marker_tmp=''
+cleanup() {
+	root_password=''; wifi_key=''; web_password=''; web_hash=''
+	case "${marker_tmp##*/}" in .cr6608-retail-marker.*) rm -f "$marker_tmp" ;; esac
+	rm -rf "$backup"
+	release_transaction_locks
+}
+trap cleanup EXIT
+cp -p "$SHADOW_PATH" "$backup/shadow" || fail shadow_backup
+cp -p "$WIRELESS_CONFIG" "$backup/wireless" || fail wireless_backup
+cp -p "$QUICK_CONFIG" "$backup/cr6608quick" || fail quick_backup
+cp -p "$SMARTAP_CONFIG" "$backup/smartap" || fail smartap_backup
+cp -p "$UHTTPD_CONFIG" "$backup/uhttpd" || fail uhttpd_backup
+cp -p "$RPCD_CONFIG" "$backup/rpcd" || fail rpcd_backup
+cp -p "$SYSTEM_CONFIG" "$backup/system" || fail system_backup
+cp -p "$PRPLMESH_CONFIG" "$backup/prplmesh" || fail prplmesh_backup
+cp -p "$DROPBEAR_CONFIG" "$backup/dropbear" || fail dropbear_backup
+commissioning_marker_present=0
+commissioning_key_present=0
+[ ! -e "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] ||
+	commissioning_marker_present=1
+[ ! -e "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+	[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] || commissioning_key_present=1
+if [ "$commissioning_marker_present" = 1 ] || [ "$commissioning_key_present" = 1 ]; then
+	[ "$commissioning_marker_present" = 1 ] && [ "$commissioning_key_present" = 1 ] ||
+		fail commissioning_state_incomplete
+	[ -f "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] &&
+		[ "$(/bin/stat -c '%u' "$COMMISSIONING_MARKER" 2>/dev/null)" = 0 ] &&
+		[ "$(/bin/stat -c '%a' "$COMMISSIONING_MARKER" 2>/dev/null)" = 400 ] ||
+		fail commissioning_marker_invalid
+	[ -f "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+		[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+		[ "$(/bin/stat -c '%u' "$COMMISSIONING_AUTHORIZED_KEYS" 2>/dev/null)" = 0 ] &&
+		[ "$(/bin/stat -c '%a' "$COMMISSIONING_AUTHORIZED_KEYS" 2>/dev/null)" = 600 ] ||
+		fail commissioning_key_invalid
+	grep -Fqx 'profile=retail-commissioning-ram-v1' "$COMMISSIONING_MARKER" &&
+		grep -Fqx 'sale_ready=NO' "$COMMISSIONING_MARKER" &&
+		grep -Fqx 'boot_policy=ram-only' "$COMMISSIONING_MARKER" &&
+	grep -Fqx 'password_auth=disabled' "$COMMISSIONING_MARKER" ||
+		fail commissioning_marker_invalid
+	grep -Fqx "factory_key_sha256=$(sha256sum "$COMMISSIONING_AUTHORIZED_KEYS" | awk '{print $1}')" \
+		"$COMMISSIONING_MARKER" || fail commissioning_key_binding_invalid
+	cp -p "$COMMISSIONING_MARKER" "$backup/commissioning-marker" ||
+		fail commissioning_marker_backup
+	cp -p "$COMMISSIONING_AUTHORIZED_KEYS" "$backup/commissioning-authorized-keys" ||
+		fail commissioning_key_backup
+	commissioning_active=1
+fi
+if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+	[ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail invalid_existing_marker
+	cp -p "$MARKER" "$backup/marker" || fail marker_backup
+	marker_existed=1
+fi
+if [ -e "$PENDING_MARKER" ] || [ -L "$PENDING_MARKER" ]; then
+	[ -f "$PENDING_MARKER" ] && [ ! -L "$PENDING_MARKER" ] || fail invalid_existing_pending_marker
+	cp -p "$PENDING_MARKER" "$backup/pending-marker" || fail pending_marker_backup
+	pending_marker_existed=1
+fi
+"$UHTTPD_INIT" running >/dev/null 2>&1 && uhttpd_was_running=1
+"$RPCD_INIT" running >/dev/null 2>&1 && rpcd_was_running=1
+
+restore_configuration() {
+	restore_rc=0
+	cp -pf "$backup/shadow" "$SHADOW_PATH" || restore_rc=1
+	cp -pf "$backup/wireless" "$WIRELESS_CONFIG" || restore_rc=1
+	cp -pf "$backup/cr6608quick" "$QUICK_CONFIG" || restore_rc=1
+	cp -pf "$backup/smartap" "$SMARTAP_CONFIG" || restore_rc=1
+	cp -pf "$backup/uhttpd" "$UHTTPD_CONFIG" || restore_rc=1
+	cp -pf "$backup/rpcd" "$RPCD_CONFIG" || restore_rc=1
+	cp -pf "$backup/system" "$SYSTEM_CONFIG" || restore_rc=1
+	cp -pf "$backup/prplmesh" "$PRPLMESH_CONFIG" || restore_rc=1
+	cp -pf "$backup/dropbear" "$DROPBEAR_CONFIG" || restore_rc=1
+	for package in wireless cr6608quick smartap uhttpd rpcd system prplmesh dropbear; do
+		"$UCI_BIN" -q revert "$package" >/dev/null 2>&1 || restore_rc=1
+	done
+	return "$restore_rc"
+}
+
+restore_previous_markers() {
+	marker_restore_rc=0
+	if [ "$marker_existed" = 1 ]; then
+		cp -pf "$backup/marker" "$MARKER" || marker_restore_rc=1
+	else
+		rm -f "$MARKER" || marker_restore_rc=1
+		[ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || marker_restore_rc=1
+	fi
+	if [ "$pending_marker_existed" = 1 ]; then
+		cp -pf "$backup/pending-marker" "$PENDING_MARKER" || marker_restore_rc=1
+	else
+		rm -f "$PENDING_MARKER" || marker_restore_rc=1
+		[ ! -e "$PENDING_MARKER" ] && [ ! -L "$PENDING_MARKER" ] || marker_restore_rc=1
+	fi
+	if [ "$commissioning_active" = 1 ]; then
+		cp -pf "$backup/commissioning-marker" "$COMMISSIONING_MARKER" || marker_restore_rc=1
+		cp -pf "$backup/commissioning-authorized-keys" \
+			"$COMMISSIONING_AUTHORIZED_KEYS" || marker_restore_rc=1
+	fi
+	[ "$marker_restore_rc" = 0 ] && "$SYNC_BIN" >/dev/null 2>&1 || marker_restore_rc=1
+	return "$marker_restore_rc"
+}
+
+publish_marker() {
+	target="$1"
+	audit_complete="$2"
+	marker_dir="${target%/*}"
+	[ -n "$marker_dir" ] && [ "$marker_dir" != "$target" ] || return 1
+	marker_tmp="$(mktemp "${marker_dir}/.cr6608-retail-marker.XXXXXX")" || return 1
+	{
+		printf 'profile=retail-v2\n'
+		printf 'market_country=%s\n' "$MARKET_COUNTRY"
+		printf 'primary_ap_radio0=%s\n' "$ap24"
+		printf 'primary_ap_radio1=%s\n' "$ap5"
+		printf 'sale_ready=NO\n'
+		printf 'radio_policy=%s\n' "$EXPECTED_RADIO_POLICY"
+		printf 'audit_complete=%s\n' "$audit_complete"
+		printf 'provisioned_utc=%s\n' "$transaction_utc"
+	} > "$marker_tmp" || return 1
+	chmod 0400 "$marker_tmp" || return 1
+	mv -f "$marker_tmp" "$target" || return 1
+	marker_tmp=''
+	"$SYNC_BIN" >/dev/null 2>&1 || return 1
+}
+
+force_pending_state() {
+	# Never expose an old complete marker after an incomplete rollback. Publish
+	# and sync the pending journal first, then remove/sync the final marker. A
+	# normal audit gives the pending journal precedence even if final removal
+	# itself encounters a filesystem error.
+	fail_closed_rc=0
+	publish_marker "$PENDING_MARKER" NO || fail_closed_rc=1
+	rm -f "$MARKER" || fail_closed_rc=1
+	[ ! -e "$MARKER" ] && [ ! -L "$MARKER" ] || fail_closed_rc=1
+	"$SYNC_BIN" >/dev/null 2>&1 || fail_closed_rc=1
+	[ -f "$PENDING_MARKER" ] && [ ! -L "$PENDING_MARKER" ] || fail_closed_rc=1
+	return "$fail_closed_rc"
+}
+
+restore_runtime() {
+	runtime_rc=0
+	if [ "$rpcd_was_running" = 1 ]; then
+		run_without_mutation_fds "$RPCD_INIT" restart >/dev/null 2>&1 || runtime_rc=1
+	else
+		run_without_mutation_fds "$RPCD_INIT" stop >/dev/null 2>&1 || runtime_rc=1
+	fi
+	if [ "$uhttpd_was_running" = 1 ]; then
+		run_without_mutation_fds "$UHTTPD_INIT" restart >/dev/null 2>&1 || runtime_rc=1
+	else
+		run_without_mutation_fds "$UHTTPD_INIT" stop >/dev/null 2>&1 || runtime_rc=1
+	fi
+	run_without_mutation_fds "$WIFI_BIN" reload >/dev/null 2>&1 || runtime_rc=1
+	return "$runtime_rc"
+}
+
+rollback_transaction() {
+	restore_live="$1"
+	rollback_rc=0
+	restore_configuration || rollback_rc=1
+	[ "$restore_live" = 0 ] || restore_runtime || rollback_rc=1
+	if [ "$rollback_rc" = 0 ]; then
+		restore_previous_markers || {
+			rollback_rc=1
+			force_pending_state >/dev/null 2>&1 || true
+		}
+	else
+		force_pending_state >/dev/null 2>&1 || true
+	fi
+	return "$rollback_rc"
+}
+
+rollback_fail() {
+	reason="$1"
+	restore_live="${2:-0}"
+	rollback_rc=0
+	rollback_transaction "$restore_live" || rollback_rc=1
+	transaction_started=0
+	[ "$rollback_rc" = 0 ] || fail "${reason}_rollback_failed"
+	fail "$reason"
+}
+
+signal_exit() {
+	signal_rc="$1"
+	trap - HUP INT TERM
+	if [ "$transaction_started" = 1 ]; then
+		rollback_transaction 1 >/dev/null 2>&1 || true
+		transaction_started=0
+	fi
+	exit "$signal_rc"
+}
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+transaction_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || fail pending_marker_time
+transaction_started=1
+# This durable journal precedes every credential/UCI mutation.  It also takes
+# precedence over an older complete marker during a re-provision, so a power
+# loss can never make partially audited state look complete on the next boot.
+publish_marker "$PENDING_MARKER" NO || rollback_fail pending_marker_write 0
+
+# Device-wide raw hostapd directives are appended after normal UCI-derived
+# settings and can override per-BSS credentials/WPS.  Factory intent owns both
+# radios, so no opaque directive survives the provisioning boundary.
+for radio in radio0 radio1; do
+	if "$UCI_BIN" -q get "wireless.${radio}.hostapd_options" >/dev/null 2>&1; then
+		"$UCI_BIN" -q delete "wireless.${radio}.hostapd_options" || \
+			rollback_fail raw_hostapd_option_clear 0
+	fi
+done
+
+printf '%s\n%s\n' "$root_password" "$root_password" | \
+	run_without_mutation_fds "$PASSWD_BIN" -a sha512 root >/dev/null 2>&1 || \
+	rollback_fail root_password_update 0
+
+for section in "$ap24" "$ap5"; do
+	if "$UCI_BIN" -q get "wireless.${section}.wds" >/dev/null 2>&1; then
+		"$UCI_BIN" -q delete "wireless.${section}.wds" || \
+			rollback_fail wds_sender_clear 0
+	fi
+	for option in $ALTERNATE_CREDENTIAL_OPTIONS; do
+		if "$UCI_BIN" -q get "wireless.${section}.${option}" >/dev/null 2>&1; then
+			"$UCI_BIN" -q delete "wireless.${section}.${option}" || \
+				rollback_fail alternate_credential_clear 0
+		fi
+	done
+	"$UCI_BIN" set "wireless.${section}.encryption=sae-mixed" || rollback_fail wireless_stage 0
+	"$UCI_BIN" set "wireless.${section}.ieee80211w=1" || rollback_fail wireless_stage 0
+	"$UCI_BIN" set "wireless.${section}.disabled=0" || rollback_fail wireless_stage 0
+done
+stage_wifi_secret_values || rollback_fail wifi_secret_stage 0
+[ -z "$SSID24" ] || "$UCI_BIN" set "wireless.${ap24}.ssid=$SSID24" || rollback_fail ssid24_stage 0
+[ -z "$SSID5" ] || "$UCI_BIN" set "wireless.${ap5}.ssid=$SSID5" || rollback_fail ssid5_stage 0
+"$UCI_BIN" set wireless.radio0.disabled=0 || rollback_fail radio_stage 0
+"$UCI_BIN" set wireless.radio1.disabled=0 || rollback_fail radio_stage 0
+for country_key in $COUNTRY_KEYS; do
+	"$UCI_BIN" set "${country_key}=${MARKET_COUNTRY}" || rollback_fail country_stage 0
+done
+"$UCI_BIN" set cr6608quick.default.security=mixed || rollback_fail quick_stage 0
+"$UCI_BIN" set cr6608quick.default.radio0_enabled=1 || rollback_fail quick_stage 0
+"$UCI_BIN" set cr6608quick.default.radio1_enabled=1 || rollback_fail quick_stage 0
+"$UCI_BIN" set uhttpd.main.redirect_https=1 || rollback_fail https_stage 0
+"$UCI_BIN" set "rpcd.${rpcd_root_login}.password=$web_hash" || rollback_fail rpcd_stage 0
+"$UCI_BIN" set 'system.@system[0].ttylogin=1' || rollback_fail ttylogin_stage 0
+if [ "$commissioning_active" = 1 ]; then
+	"$UCI_BIN" set dropbear.main.PasswordAuth=on || rollback_fail dropbear_auth_stage 0
+	"$UCI_BIN" set dropbear.main.RootPasswordAuth=on || rollback_fail dropbear_auth_stage 0
+fi
+run_without_mutation_fds env PRPLMESH_UCI_BIN="$UCI_BIN" \
+	"$PRPLMESH_SYNC_BIN" --stage "$ap24" "$ap5" >/dev/null 2>&1 || \
+	rollback_fail prplmesh_credential_stage 0
+"$UCI_BIN" commit wireless && "$UCI_BIN" commit cr6608quick && \
+	"$UCI_BIN" commit smartap && "$UCI_BIN" commit uhttpd && "$UCI_BIN" commit rpcd && \
+	"$UCI_BIN" commit system && "$UCI_BIN" commit prplmesh && \
+	"$UCI_BIN" commit dropbear || rollback_fail uci_commit 0
+for country_key in $COUNTRY_KEYS; do
+	[ "$($UCI_BIN -q get "$country_key" 2>/dev/null)" = "$MARKET_COUNTRY" ] || \
+		rollback_fail country_verify 0
+done
+for section in "$ap24" "$ap5"; do
+	[ "$($UCI_BIN -q get "wireless.${section}.key" 2>/dev/null)" = "$wifi_key" ] || \
+		rollback_fail wifi_key_verify 0
+	if "$UCI_BIN" -q get "wireless.${section}.wds" >/dev/null 2>&1; then
+		rollback_fail wds_sender_verify 0
+	fi
+	for option in $ALTERNATE_CREDENTIAL_OPTIONS; do
+		if "$UCI_BIN" -q get "wireless.${section}.${option}" >/dev/null 2>&1; then
+			rollback_fail alternate_credential_verify 0
+		fi
+	done
+done
+for radio in radio0 radio1; do
+	if "$UCI_BIN" -q get "wireless.${radio}.hostapd_options" >/dev/null 2>&1; then
+		rollback_fail raw_hostapd_option_verify 0
+	fi
+done
+[ "$($UCI_BIN -q get "rpcd.${rpcd_root_login}.password" 2>/dev/null)" = "$web_hash" ] || \
+	rollback_fail rpcd_verify 0
+if [ "$commissioning_active" = 1 ]; then
+	[ "$($UCI_BIN -q get dropbear.main.PasswordAuth 2>/dev/null)" = on ] &&
+		[ "$($UCI_BIN -q get dropbear.main.RootPasswordAuth 2>/dev/null)" = on ] ||
+		rollback_fail dropbear_auth_verify 0
+fi
+
+# netifd and hostapd activate asynchronously after `wifi reload`. Re-run only
+# transient runtime-binding failures for sixteen attempts separated by two
+# seconds (a 30-second retry window). Transaction locks remain held, while each
+# child closes the shared flock fd so no helper can inherit or deadlock it.
+wait_post_provision_audit() {
+	audit_attempt=1
+	audit_log="$backup/post-provision-audit.log"
+	while [ "$audit_attempt" -le "$AUDIT_READY_MAX_ATTEMPTS" ]; do
+		: > "$audit_log" || return 1
+		if run_without_mutation_fds "$AUDIT_BIN" --provisioning-pending \
+			--root-password-file "$ROOT_PASSWORD_FILE" \
+			--wifi-key-file "$WIFI_KEY_FILE" --web-password-file "$WEB_PASSWORD_FILE" \
+			> "$audit_log" 2>&1; then
+			return 0
+		fi
+		audit_reason="$(sed -n 's/^retail_security=FAIL reason=//p' "$audit_log" | tail -n 1)"
+		case "$audit_reason" in
+			wireless_runtime_unavailable|radio0_runtime_not_ready|radio1_runtime_not_ready|\
+			*_runtime_missing|*_runtime_not_ap|*_hostapd_missing|\
+			*_hostapd_status|*_hostapd_not_enabled) ;;
+			*) sed -n '1,20p' "$audit_log" >&2; return 1 ;;
+		esac
+		if [ "$audit_attempt" -ge "$AUDIT_READY_MAX_ATTEMPTS" ]; then
+			sed -n '1,20p' "$audit_log" >&2
+			return 2
+		fi
+		run_without_mutation_fds "$SLEEP_BIN" "$AUDIT_READY_INTERVAL_SECONDS" || return 1
+		audit_attempt=$((audit_attempt + 1))
+	done
+	return 2
+}
+
+run_without_mutation_fds "$RPCD_INIT" restart >/dev/null 2>&1 || rollback_fail rpcd_restart 1
+run_without_mutation_fds "$UHTTPD_INIT" restart >/dev/null 2>&1 || rollback_fail uhttpd_restart 1
+run_without_mutation_fds "$WIFI_BIN" reload >/dev/null 2>&1 || rollback_fail wifi_reload 1
+run_without_mutation_fds env PRPLMESH_UCI_BIN="$UCI_BIN" \
+	"$PRPLMESH_SYNC_BIN" --verify "$ap24" "$ap5" >/dev/null 2>&1 || \
+	rollback_fail prplmesh_credential_verify 1
+wait_post_provision_audit
+post_audit_rc=$?
+case "$post_audit_rc" in
+	0) ;;
+	2) rollback_fail post_provision_runtime_timeout 1 ;;
+	*) rollback_fail post_provision_audit 1 ;;
+esac
+if [ "$commissioning_active" = 1 ]; then
+	rm -f "$COMMISSIONING_AUTHORIZED_KEYS" || rollback_fail commissioning_key_remove 1
+	rm -f "$COMMISSIONING_MARKER" || rollback_fail commissioning_marker_remove 1
+	[ ! -e "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+		[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] ||
+		rollback_fail commissioning_key_remove 1
+	[ ! -e "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] ||
+		rollback_fail commissioning_marker_remove 1
+	"$SYNC_BIN" >/dev/null 2>&1 || rollback_fail commissioning_sync 1
+fi
+publish_marker "$MARKER" YES || rollback_fail marker_write 1
+rm -f "$PENDING_MARKER" || rollback_fail pending_marker_remove 1
+[ ! -e "$PENDING_MARKER" ] && [ ! -L "$PENDING_MARKER" ] || \
+	rollback_fail pending_marker_remove 1
+"$SYNC_BIN" >/dev/null 2>&1 || rollback_fail pending_marker_sync 1
+root_password=''; wifi_key=''; web_password=''; web_hash=''
+transaction_started=0
+case "$EXPECTED_RADIO_POLICY" in
+	LAB_ARTIFACT_BLOCKED)
+		printf 'security_provision=PASS sale_ready=NO radio_policy=LAB_ARTIFACT_BLOCKED reboot_required=1\n'
+		;;
+	retail-disabled-after-reboot)
+		if [ "$commissioning_active" = 1 ]; then
+			printf 'security_provision=PASS sale_ready=NO radio_policy=retail-disabled-after-reboot reboot_required=1 commissioning_finalized=1\n'
+		else
+			printf 'security_provision=PASS sale_ready=NO radio_policy=retail-disabled-after-reboot reboot_required=1\n'
+		fi
+		;;
+	*) fail internal_artifact_policy ;;
+esac

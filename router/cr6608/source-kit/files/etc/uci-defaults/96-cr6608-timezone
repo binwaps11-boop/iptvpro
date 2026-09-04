@@ -1,0 +1,10 @@
+#!/bin/sh
+# Default the clock to Yemen (Asia/Aden, UTC+3) — only when still on factory UTC,
+# so a user-chosen timezone is never overridden on upgrades that keep settings.
+zn="$(uci -q get system.@system[0].zonename)"
+if [ -z "$zn" ] || [ "$zn" = "UTC" ]; then
+	uci set system.@system[0].zonename='Asia/Aden'
+	uci set system.@system[0].timezone='<+03>-3'
+	uci commit system
+fi
+exit 0

@@ -1,0 +1,147 @@
+#!/bin/sh
+
+if ! uci -q get smartap.experimental >/dev/null; then
+	uci -q set smartap.experimental='experimental' || exit 1
+fi
+
+if [ -n "${CR6608_UL_MURU_ARTIFACT_PROFILE:-}" ]; then
+	artifact_profile="$CR6608_UL_MURU_ARTIFACT_PROFILE"
+elif [ -f /rom/etc/cr6608-artifact-profile ] &&
+     [ ! -L /rom/etc/cr6608-artifact-profile ]; then
+	artifact_profile=/rom/etc/cr6608-artifact-profile
+else
+	artifact_profile=/etc/cr6608-artifact-profile
+fi
+
+profile_kind=unknown
+if [ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] &&
+   [ "$(wc -l < "$artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ]; then
+	if grep -Fqx 'profile=ul-muru-ram-v1' "$artifact_profile" &&
+	   grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+	   grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$artifact_profile"; then
+		profile_kind=ul-muru-ram-v1
+	elif grep -Fqx 'profile=ul-muru-forced-lab-v1' "$artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+	     grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$artifact_profile"; then
+		profile_kind=ul-muru-forced-lab-v1
+	elif grep -Fqx 'profile=lab-operator-v1' "$artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+	     grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$artifact_profile"; then
+		profile_kind=lab-operator-v1
+	elif grep -Fqx 'profile=retail-v1' "$artifact_profile" &&
+	     grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+	     grep -Fqx 'radio_policy=retail-disabled' "$artifact_profile"; then
+		profile_kind=retail-v1
+	fi
+fi
+
+ul_muru_state="$(uci -q get smartap.experimental.ul_muru_state 2>/dev/null || true)"
+fault_closed=0
+case "$ul_muru_state" in
+	disabled-by-guard|reboot-required|rebooting|reboot-failed|fault-latched|retail-disabled)
+		fault_closed=1
+		;;
+esac
+
+# The legacy boolean is never used by a new image. Only the dedicated RAM
+# qualification profile may request MediaTek's four-bit mu_onoff bitmap.
+uci -q set smartap.experimental.ul_muru='0' || exit 1
+target_mask=0
+case "$profile_kind" in
+	ul-muru-ram-v1|ul-muru-forced-lab-v1)
+		if [ "$fault_closed" = 1 ]; then
+			uci -q set smartap.experimental.muru_mask='0' || exit 1
+			uci -q set smartap.experimental.ul_muru_guard='0' || exit 1
+		else
+			target_mask=15
+			uci -q set smartap.experimental.muru_mask='15' || exit 1
+			uci -q set smartap.experimental.ul_muru_guard='1' || exit 1
+			uci -q set smartap.experimental.ul_muru_state='qualification-requested' || exit 1
+			if [ "$profile_kind" = ul-muru-forced-lab-v1 ]; then
+				uci -q set smartap.experimental.ul_muru_reason='forced-persistent-lab-profile' || exit 1
+			else
+				uci -q set smartap.experimental.ul_muru_reason='immutable-ul-muru-ram-profile' || exit 1
+			fi
+			ul_muru_state=qualification-requested
+		fi
+		;;
+	lab-operator-v1)
+		uci -q set smartap.experimental.muru_mask='0' || exit 1
+		if [ "$fault_closed" != 1 ]; then
+			uci -q set smartap.experimental.ul_muru_state='disabled-upstream-hang-risk' || exit 1
+			uci -q set smartap.experimental.ul_muru_reason='upstream-mt7915-firmware-hang-risk' || exit 1
+			ul_muru_state=disabled-upstream-hang-risk
+		fi
+		;;
+	retail-v1|unknown)
+		uci -q set smartap.experimental.muru_mask='0' || exit 1
+		uci -q set smartap.experimental.ul_muru_guard='0' || exit 1
+		uci -q set smartap.experimental.ul_muru_state='retail-disabled' || exit 1
+		uci -q set smartap.experimental.ul_muru_reason='immutable-retail-or-unknown-radio-policy' || exit 1
+		ul_muru_state=retail-disabled
+		;;
+esac
+
+# Normalize both module tokens to exactly one value. This handles preserved
+# overlays from the legacy bool-only images without allowing duplicate tokens
+# to override the intended next-boot bitmap.
+module_file="${CR6608_UL_MURU_MODULE_FILE:-/etc/modules.d/mt7915e}"
+[ -f "$module_file" ] && [ ! -L "$module_file" ] || exit 1
+module_tmp="${module_file}.muru-defaults.$$"
+cleanup() { rm -f -- "$module_tmp" 2>/dev/null || true; }
+trap cleanup EXIT HUP INT TERM
+if [ "$profile_kind" = retail-v1 ] || [ "$profile_kind" = unknown ]; then
+	printf 'mt7915e cr6608_rf_38dbm=0 cr6608_ul_muru=0 cr6608_muru_mask=0\n' >"$module_tmp" || exit 1
+else
+	awk -v mask="$target_mask" '
+		$1 == "mt7915e" {
+			lines++
+			out = $1
+			for (i = 2; i <= NF; i++)
+				if ($i !~ /^cr6608_ul_muru=/ &&
+				    $i !~ /^cr6608_muru_mask=/)
+					out = out " " $i
+			print out " cr6608_ul_muru=0 cr6608_muru_mask=" mask
+			next
+		}
+		{ print }
+		END { if (lines != 1) exit 1 }
+	' "$module_file" >"$module_tmp" || exit 1
+fi
+chmod 0644 "$module_tmp" || exit 1
+mv -f "$module_tmp" "$module_file" || exit 1
+module_tmp=''
+trap - EXIT HUP INT TERM
+
+[ "$(grep -Ec '(^|[[:space:]])cr6608_ul_muru=0([[:space:]]|$)' "$module_file")" = 1 ] || exit 1
+[ "$(grep -Ec '(^|[[:space:]])cr6608_muru_mask='"$target_mask"'([[:space:]]|$)' "$module_file")" = 1 ] || exit 1
+! grep -Eq '(^|[[:space:]])cr6608_ul_muru=1([[:space:]]|$)' "$module_file" || exit 1
+! grep -Eq '(^|[[:space:]])cr6608_muru_mask=([1-9][0-9]*|0[1-9][0-9]*)([[:space:]]|$)' "$module_file" ||
+	[ "$target_mask" = 15 ] || exit 1
+if [ "$profile_kind" = retail-v1 ] || [ "$profile_kind" = unknown ]; then
+	[ "$(sed -n '1p' "$module_file")" = \
+		'mt7915e cr6608_rf_38dbm=0 cr6608_ul_muru=0 cr6608_muru_mask=0' ] || exit 1
+fi
+
+ul_muru_guard="$(uci -q get smartap.experimental.ul_muru_guard 2>/dev/null || true)"
+if [ "$target_mask" = 15 ]; then
+	uci -q set smartap.experimental.ul_muru_guard='1' || exit 1
+	uci -q set smartap.experimental.ul_muru_reconcile='0' || exit 1
+	uci -q commit smartap || exit 1
+	/etc/init.d/cr6608-ul-muru-guard enable || exit 1
+elif [ "$profile_kind" = lab-operator-v1 ] && [ "$ul_muru_guard" != 0 ]; then
+	# Keep the LAB watchdog available even though its normal policy is mask 0.
+	uci -q set smartap.experimental.ul_muru_guard='1' || exit 1
+	uci -q set smartap.experimental.ul_muru_reconcile='0' || exit 1
+	uci -q commit smartap || exit 1
+	/etc/init.d/cr6608-ul-muru-guard enable || exit 1
+else
+	# A preserved active runtime may still advertise UL capabilities. The
+	# immutable late reconciler starts one guard pass to prove zero or reboot.
+	uci -q set smartap.experimental.ul_muru_guard='0' || exit 1
+	uci -q set smartap.experimental.ul_muru_reconcile='1' || exit 1
+	uci -q commit smartap || exit 1
+	/etc/init.d/cr6608-ul-muru-guard disable || exit 1
+fi
+
+exit 0

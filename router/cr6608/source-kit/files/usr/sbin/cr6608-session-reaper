@@ -1,0 +1,98 @@
+#!/bin/sh
+
+# Revoke LuCI children whose Smart AP parent expired and discard live-parent
+# maps whose rpcd session disappeared or lost its required LuCI permission.
+
+# cron command logging is intentionally quiet; retain an explicit fault record
+# without logging the successful one-minute runs. Always release fd 9 before
+# the process exits so a bounded helper cannot inherit the critical section.
+session_reaper_exit() {
+	rc=$?
+	trap - EXIT
+	if command -v cr6608_luci_session_unlock >/dev/null 2>&1; then
+		cr6608_luci_session_unlock || rc=1
+	fi
+	[ "$rc" -eq 0 ] || logger -t cr6608-session-reaper "session cleanup failed rc=$rc"
+	exit "$rc"
+}
+trap session_reaper_exit EXIT
+
+. /usr/libexec/cr6608-session-auth || exit 1
+cr6608_session_storage_prepare || exit 1
+cr6608_map_storage_prepare || exit 1
+cr6608_pending_revoke_storage_prepare || exit 1
+cr6608_luci_session_lock || exit 1
+
+# Explicit logout work is processed first.  A marker exists only when the CGI
+# could not acquire this lock or when rpcd destroy failed after the Smart parent
+# was invalidated.  Keep both marker and map on a transient destroy error.
+for pending_file in /tmp/dashrevoke/*; do
+	[ -e "$pending_file" ] || [ -L "$pending_file" ] || continue
+	sid="${pending_file##*/}"
+	if ! cr6608_valid_hex32 "$sid"; then
+		rm -f "$pending_file" || exit 1
+		continue
+	fi
+	if ! { [ -f "$pending_file" ] && [ ! -L "$pending_file" ] &&
+		cr6608_path_owned_by_root "$pending_file"; }; then
+		rm -f "$pending_file" || exit 1
+		continue
+	fi
+	read -r pending_sid extra <"$pending_file" 2>/dev/null || exit 1
+	if [ "$pending_sid" != "$sid" ] || [ -n "$extra" ]; then
+		rm -f "$pending_file" || exit 1
+		continue
+	fi
+	cr6608_revoke_session_unlocked "$sid" || exit 1
+	cr6608_clear_revoke_pending "$sid" || exit 1
+done
+
+for session_file in /tmp/dashsess/*; do
+	[ -f "$session_file" ] && [ ! -L "$session_file" ] || continue
+	sid="${session_file##*/}"
+	cr6608_valid_hex32 "$sid" || continue
+	cr6608_session_valid "$sid" >/dev/null 2>&1 || true
+done
+
+for map_file in /tmp/dashluci/*; do
+	[ -e "$map_file" ] || [ -L "$map_file" ] || continue
+	sid="${map_file##*/}"
+	if ! cr6608_valid_hex32 "$sid"; then
+		rm -f "$map_file" || exit 1
+		continue
+	fi
+	if ! { [ -f "/tmp/dashsess/$sid" ] && [ ! -L "/tmp/dashsess/$sid" ]; }; then
+		cr6608_revoke_session_unlocked "$sid" || exit 1
+		continue
+	fi
+
+	# A live Smart AP parent does not prove that rpcd retained its mapped LuCI
+	# child across a daemon restart.  Remove corrupt maps immediately.  For a
+	# valid SID, delete it only after rpcd definitively reports NOT_FOUND or
+	# denies luci-base; a timeout preserves the private reference for retry.
+	if ! { [ -f "$map_file" ] && [ ! -L "$map_file" ] && cr6608_path_owned_by_root "$map_file"; }; then
+		rm -f "$map_file" || exit 1
+		continue
+	fi
+	read -r mapped_luci_sid extra <"$map_file" 2>/dev/null || mapped_luci_sid=''
+	if ! cr6608_valid_hex32 "$mapped_luci_sid" || [ -n "$extra" ]; then
+		rm -f "$map_file" || exit 1
+		continue
+	fi
+	cr6608_luci_session_state "$mapped_luci_sid"
+	mapped_state=$?
+	case "$mapped_state" in
+		0) ;;
+		1)
+			cr6608_destroy_luci_session "$mapped_luci_sid" || exit 1
+			rm -f "$map_file" || exit 1
+			;;
+		*)
+			# rpcd/ubus or JSON parsing is temporarily unavailable.  Retain the
+			# only reference so a later run can validate or revoke it safely.
+			exit 1
+			;;
+	esac
+done
+
+exit 0

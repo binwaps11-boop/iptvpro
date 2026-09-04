@@ -1,0 +1,129 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -262,6 +262,42 @@ DEFINE_DEBUGFS_ATTRIBUTE(fops_muru_debug, mt7915_muru_debug_get,
+ DEFINE_DEBUGFS_ATTRIBUTE(fops_muru_debug, mt7915_muru_debug_get,
+ 			 mt7915_muru_debug_set, "%lld\n");
+ 
++static int mt7915_cr6608_ul_muru_get(void *data, u64 *val)
++{
++	struct mt7915_dev *dev = data;
++
++	*val = READ_ONCE(dev->cr6608_ul_muru);
++	return 0;
++}
++
++static int mt7915_cr6608_ul_muru_set(void *data, u64 val)
++{
++	struct mt7915_dev *dev = data;
++
++	/* This is deliberately a one-way runtime kill switch.  Advertising HE
++	 * capabilities is fixed when the wiphy is registered, so re-enabling
++	 * safely requires a fresh driver load.  Disabling here prevents new
++	 * STA_REC_MURU records from arming the firmware scheduler; userspace
++	 * follows it with a normal Wi-Fi reload to rebuild existing stations.
++	 */
++	if (val)
++		return -EPERM;
++	if (!dev->cr6608_ul_muru_allowed)
++		return -EOPNOTSUPP;
++
++	if (READ_ONCE(dev->cr6608_ul_muru)) {
++		WRITE_ONCE(dev->cr6608_ul_muru, false);
++		dev_warn(dev->mt76.dev,
++			 "CR6608 experimental UL MU-MIMO/OFDMA runtime kill switch engaged\n");
++	}
++
++	return 0;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(fops_cr6608_ul_muru,
++			 mt7915_cr6608_ul_muru_get,
++			 mt7915_cr6608_ul_muru_set, "%lld\n");
++
+ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ {
+ 	struct mt7915_phy *phy = file->private;
+@@ -1235,6 +1271,9 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 	if (!dir)
+ 		return -ENOMEM;
+ 	debugfs_create_file("muru_debug", 0600, dir, dev, &fops_muru_debug);
++	debugfs_create_file("cr6608_ul_muru", 0600, dir, dev,
++			    &fops_cr6608_ul_muru);
++
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+ 			    &mt7915_muru_stats_fops);
+ 	debugfs_create_file("hw-queues", 0400, dir, phy,
+diff --git a/mt7915/init.c b/mt7915/init.c
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -12,6 +12,11 @@
+ #include "coredump.h"
+ #include "eeprom.h"
+ 
++static bool cr6608_ul_muru;
++module_param(cr6608_ul_muru, bool, 0444);
++MODULE_PARM_DESC(cr6608_ul_muru,
++		 "Enable experimental CR6608 MT7915 UL MU-MIMO/OFDMA firmware scheduling");
++
+ static const struct ieee80211_iface_limit if_limits[] = {
+ 	{
+ 		.max = 1,
+@@ -926,7 +931,8 @@ static void mt7915_set_stream_he_txbf_caps(struct mt7915_phy *phy,
+ 	elem->phy_cap_info[7] &= ~IEEE80211_HE_PHY_CAP7_MAX_NC_MASK;
+ 
+ 	c = IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US;
+-	if (!is_mt7915(&dev->mt76))
++	if (!is_mt7915(&dev->mt76) ||
++	    READ_ONCE(dev->cr6608_ul_muru))
+ 		c |= IEEE80211_HE_PHY_CAP2_UL_MU_FULL_MU_MIMO;
+ 	elem->phy_cap_info[2] |= c;
+ 
+@@ -1228,6 +1234,19 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 	INIT_WORK(&dev->dump_work, mt7915_mac_dump_work);
+ 	mutex_init(&dev->dump_mutex);
+ 
++	dev->cr6608_ul_muru_allowed =
++		is_mt7915(&dev->mt76) && cr6608_ul_muru &&
++		dev->mt76.dev->of_node &&
++		of_property_read_bool(dev->mt76.dev->of_node,
++				      "mediatek,cr6608-experimental-ul-muru");
++	dev->cr6608_ul_muru = dev->cr6608_ul_muru_allowed;
++	if (dev->cr6608_ul_muru)
++		dev_warn(dev->mt76.dev,
++			 "CR6608 experimental UL MU-MIMO/OFDMA enabled: firmware MURU counters and hang guard are mandatory\n");
++	else if (cr6608_ul_muru && is_mt7915(&dev->mt76))
++		dev_warn(dev->mt76.dev,
++			 "CR6608 experimental UL MU-MIMO/OFDMA request rejected by missing DTS gate\n");
++
+ 	dev->dbdc_support = mt7915_band_config(dev);
+ 
+ 	phy2 = mt7915_alloc_ext_phy(dev);
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -926,8 +926,11 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	muru->cfg.mimo_dl_en = mvif->cap.he_mu_ebfer ||
+ 			       mvif->cap.vht_mu_ebfer ||
+ 			       mvif->cap.vht_mu_ebfee;
+-	if (!is_mt7915(&dev->mt76))
++	if (!is_mt7915(&dev->mt76) ||
++	    READ_ONCE(dev->cr6608_ul_muru)) {
++		muru->cfg.ofdma_ul_en = true;
+ 		muru->cfg.mimo_ul_en = true;
++	}
+ 	muru->cfg.ofdma_dl_en = true;
+ 
+ 	if (sta->deflink.vht_cap.vht_supported)
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -293,6 +293,8 @@ struct mt7915_dev {
+ 	bool dbdc_support;
+ 	bool flash_mode;
+ 	bool muru_debug;
++	bool cr6608_ul_muru_allowed;
++	bool cr6608_ul_muru;
+ 	bool ibf;
+ 
+ 	u8 monitor_mask;

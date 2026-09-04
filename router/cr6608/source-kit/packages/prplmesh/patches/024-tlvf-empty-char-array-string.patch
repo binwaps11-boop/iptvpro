@@ -1,0 +1,35 @@
+From 1ad4a31f3ac88d3c1426906abc40611cce3b2bb6 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 12 Aug 2026 04:00:00 +0300
+Subject: [PATCH] tlvf: accept empty variable-length character strings
+
+An open EasyMesh BSS legitimately carries an empty network key.  The generated
+string helper currently calls the raw array accessor even when the parsed array
+has zero elements.  That accessor intentionally rejects a zero-length raw
+pointer and logs an error, although the string helper then returns the correct
+empty string and the control plane reaches CONFIGURED.
+
+Return an empty std::string before requesting the raw pointer.  Keep the raw
+array accessor strict for callers that require writable or non-empty storage.
+This removes false WSC/TLVF errors without weakening bounds checks or changing
+the encoded message.
+---
+ framework/tlvf/tlvf.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/framework/tlvf/tlvf.py b/framework/tlvf/tlvf.py
+index 11892d2..b9ed515 100755
+--- a/framework/tlvf/tlvf.py
++++ b/framework/tlvf/tlvf.py
+@@ -1284,6 +1284,8 @@ class TlvF:
+                 # add function to get std::string
+                 lines_h.append("std::string %s_str();" % (param_name))
+                 lines_cpp.append("std::string %s::%s_str() {" % (obj_meta.name, param_name))
++                lines_cpp.append("%sif (m_%s_idx__ == 0) { return std::string(); }" %
++                                 (self.getIndentation(1), param_name))
+                 lines_cpp.append("%schar *%s_ = %s();" %
+                                  (self.getIndentation(1), param_name, param_name))
+                 lines_cpp.append("%sif (!%s_) { return std::string(); }" %
+-- 
+2.50.1
+

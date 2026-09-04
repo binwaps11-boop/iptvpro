@@ -1,0 +1,19 @@
+#!/bin/sh
+# Test-only Unix metadata model for MSYS/NTFS, which reports 0755/0644 after
+# chmod.  Linux and router tests must use the real stat command.
+set -eu
+
+[ "${1:-}" = -c ] && [ "$#" = 3 ] || exit 2
+format="$2"
+path="$3"
+[ -e "$path" ] || [ -L "$path" ] || exit 1
+if [ -d "$path" ] && [ ! -L "$path" ]; then
+	mode=700
+else
+	mode=600
+fi
+case "$format" in
+	'%u:%a') printf '%s:%s\n' "${CR6608_PRIVATE_EXPECTED_UID:?}" "$mode" ;;
+	'%u:%a:%h') printf '%s:%s:1\n' "${CR6608_PRIVATE_EXPECTED_UID:?}" "$mode" ;;
+	*) exit 2 ;;
+esac

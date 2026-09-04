@@ -1,0 +1,757 @@
+#!/bin/sh
+# Persistent, connectivity-confirmed rollback guard for network and Wi-Fi changes.
+
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+set -u
+
+# Every volatile Safe Apply marker is private to root.  Production callers use
+# the shared hardened runtime helper; tests may provide all five explicit paths
+# inside their own mode-0700 directory.
+umask 077
+
+STATE="${CR6608_SAFE_STATE:-/etc/smartap-pending-rollback}"
+SAFE_RUNTIME_DIR="${CR6608_SAFE_RUNTIME_DIR:-}"
+if [ -z "$SAFE_RUNTIME_DIR" ]; then
+	if [ -n "${CR6608_SAFE_POINTER:-}" ] && [ -n "${CR6608_SAFE_META:-}" ] &&
+	   [ -n "${CR6608_SAFE_ARMED:-}" ] && [ -n "${CR6608_SAFE_READY:-}" ] &&
+	   [ -n "${CR6608_SAFE_RETAINED_IP:-}" ]; then
+		SAFE_RUNTIME_DIR="${CR6608_SAFE_READY%/*}"
+	else
+		PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+		[ -r "$PRIVATE_RUNTIME_LIB" ] && . "$PRIVATE_RUNTIME_LIB" || exit 1
+		SAFE_RUNTIME_DIR="$(cr6608_private_runtime_dir safe-apply)" || exit 1
+	fi
+fi
+POINTER="${CR6608_SAFE_POINTER:-$SAFE_RUNTIME_DIR/backup}"
+META="${CR6608_SAFE_META:-$SAFE_RUNTIME_DIR/meta}"
+ARMED="${CR6608_SAFE_ARMED:-$SAFE_RUNTIME_DIR/armed}"
+READY="${CR6608_SAFE_READY:-$SAFE_RUNTIME_DIR/ready}"
+RETAINED_IP="${CR6608_SAFE_RETAINED_IP:-$SAFE_RUNTIME_DIR/retained-ip}"
+LOCK="${CR6608_SAFE_LOCK:-/var/run/cr6608-apply.lock}"
+SELF="${CR6608_SAFE_SELF:-/usr/sbin/cr6608-safe-apply}"
+UPTIME_FILE="${CR6608_SAFE_UPTIME_FILE:-/proc/uptime}"
+BOOT_ID_FILE="${CR6608_SAFE_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+TAG="cr6608-safe-apply"
+CACHE_STATE_LIB="${CR6608_DASHBOARD_CACHE_STATE_LIB:-/usr/libexec/cr6608-dashboard-cache-state}"
+[ -r "$CACHE_STATE_LIB" ] && . "$CACHE_STATE_LIB"
+SAFE_EFFECTIVE_UID="$(id -u 2>/dev/null)" || exit 1
+
+log() {
+	logger -t "$TAG" "$*" 2>/dev/null || true
+}
+
+safe_runtime_dir_secure() {
+	local path="$1" owner_mode
+	[ -d "$path" ] && [ ! -L "$path" ] || return 1
+	owner_mode="$(stat -c '%u:%a' "$path" 2>/dev/null)" || return 1
+	[ "$owner_mode" = "$SAFE_EFFECTIVE_UID:700" ]
+}
+
+safe_runtime_path_secure() {
+	local path="$1" parent owner_mode
+	case "$path" in /*) ;; *) return 1 ;; esac
+	parent="${path%/*}"
+	[ "$parent" = "$SAFE_RUNTIME_DIR" ] || return 1
+	if [ -e "$path" ] || [ -L "$path" ]; then
+		[ -f "$path" ] && [ ! -L "$path" ] || return 1
+		owner_mode="$(stat -c '%u:%a' "$path" 2>/dev/null)" || return 1
+		[ "$owner_mode" = "$SAFE_EFFECTIVE_UID:600" ] || return 1
+	fi
+	return 0
+}
+
+safe_runtime_layout_secure() {
+	local path
+	safe_runtime_dir_secure "$SAFE_RUNTIME_DIR" || return 1
+	for path in "$POINTER" "$META" "$ARMED" "$READY" "$RETAINED_IP"; do
+		safe_runtime_path_secure "$path" || return 1
+	done
+}
+
+safe_private_mktemp() {
+	local prefix="$1" tmp
+	safe_runtime_dir_secure "$SAFE_RUNTIME_DIR" || return 1
+	tmp="$(mktemp "$SAFE_RUNTIME_DIR/${prefix}.XXXXXX" 2>/dev/null)" || return 1
+	[ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+	chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 1; }
+	printf '%s\n' "$tmp"
+}
+
+safe_publish_marker() {
+	local target="$1" value="$2" tmp
+	safe_runtime_path_secure "$target" || return 1
+	tmp="$(safe_private_mktemp marker)" || return 1
+	printf '%s\n' "$value" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+	# The directory is mode 0700 and the random source is mode 0600.  Reject a
+	# hostile pre-existing target rather than following or overwriting it.
+	if [ -e "$target" ] || [ -L "$target" ]; then
+		[ -f "$target" ] && [ ! -L "$target" ] || { rm -f -- "$tmp"; return 1; }
+	fi
+	mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
+	safe_runtime_path_secure "$target"
+}
+
+safe_runtime_layout_secure || exit 1
+
+invalidate_dashboard() {
+	if command -v cr6608_dashboard_cache_invalidate >/dev/null 2>&1; then
+		cr6608_dashboard_cache_invalidate >/dev/null 2>&1 || true
+	elif [ -x /usr/sbin/cr6608-dashboard-invalidate ]; then
+		/usr/sbin/cr6608-dashboard-invalidate >/dev/null 2>&1 || true
+	fi
+}
+
+valid_bit() {
+	case "$1" in 0|1) return 0 ;; esac
+	return 1
+}
+
+valid_token() {
+	case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+	[ "${#1}" -eq 32 ] 2>/dev/null
+}
+
+valid_timeout() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 30 ] 2>/dev/null && [ "$1" -le 900 ] 2>/dev/null
+}
+
+valid_epoch() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "${#1}" -le 12 ] 2>/dev/null && [ "$1" -ge 0 ] 2>/dev/null
+}
+
+monotonic_seconds() {
+	[ -r "$UPTIME_FILE" ] && [ ! -L "$UPTIME_FILE" ] || return 1
+	awk 'NR == 1 && $1 ~ /^[0-9]+([.][0-9]+)?$/ {
+		split($1, parts, "."); print parts[1]; valid = 1
+	}
+	END { exit(valid ? 0 : 1) }' "$UPTIME_FILE" 2>/dev/null
+}
+
+valid_boot_id() {
+	[ "${#1}" -eq 36 ] 2>/dev/null || return 1
+	printf '%s\n' "$1" | grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+}
+
+current_boot_id() {
+	local value
+	[ -r "$BOOT_ID_FILE" ] && [ ! -L "$BOOT_ID_FILE" ] || return 1
+	IFS= read -r value <"$BOOT_ID_FILE" || return 1
+	valid_boot_id "$value" || return 1
+	printf '%s\n' "$value" | tr 'A-F' 'a-f'
+}
+
+valid_cleanup_delay() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 38 ] 2>/dev/null
+}
+
+valid_ipv4() {
+	[ -n "$1" ] && /bin/ipcalc.sh "$1" 255.255.255.255 >/dev/null 2>&1
+}
+
+valid_prefix() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 0 ] 2>/dev/null && [ "$1" -le 32 ] 2>/dev/null
+}
+
+valid_management_device() {
+	case "$1" in
+		br-lan) return 0 ;;
+		br-lan.*)
+			local vid="${1#br-lan.}"
+			case "$vid" in ''|*[!0-9]*) return 1 ;; esac
+			[ "$vid" -ge 1 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null
+			return $?
+			;;
+	esac
+	return 1
+}
+
+valid_backup() {
+	local path="$1" owner members
+	case "$path" in
+		/root/dashboard-backups/smartap-*.tar.gz|/root/cr6608-quicksettings-backups/config-before-*.tgz) ;;
+		*) return 1 ;;
+	esac
+	case "$path" in *..*|*[!A-Za-z0-9_./:-]*) return 1 ;; esac
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -s "$path" ] || return 1
+	owner="$(stat -c '%u' "$path" 2>/dev/null)"
+	[ "$owner" = "0" ] || return 1
+	members="$(safe_private_mktemp backup-members)" || return 1
+	if ! tar -tzf "$path" >"$members" 2>/dev/null; then
+		rm -f "$members"
+		return 1
+	fi
+	while IFS= read -r member; do
+		case "$member" in
+			etc|etc/|etc/config|etc/config/|etc/config/*|etc/crontabs|etc/crontabs/|etc/crontabs/root|etc/passwd|etc/shadow|etc/rc.button|etc/rc.button/|etc/rc.button/reset|etc/rc.button/reset.smartap-orig) ;;
+			*) rm -f "$members"; return 1 ;;
+		esac
+	done <"$members"
+	rm -f "$members"
+	return 0
+}
+
+state_value() {
+	sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n 1
+}
+
+load_state() {
+	[ -f "$STATE" ] && [ ! -L "$STATE" ] || return 1
+	version="$(state_value version)"
+	token="$(state_value token)"
+	backup="$(state_value backup)"
+	old_fw="$(state_value old_firewall)"
+	old_fw_runtime="$(state_value old_firewall_runtime)"
+	old_security="$(state_value old_security)"
+	old_security_runtime="$(state_value old_security_runtime)"
+	old_uhttpd="$(state_value old_uhttpd)"
+	old_uhttpd_runtime="$(state_value old_uhttpd_runtime)"
+	old_dropbear="$(state_value old_dropbear)"
+	old_dropbear_runtime="$(state_value old_dropbear_runtime)"
+	orig_existed="$(state_value reset_original_existed)"
+	smartap_existed="$(state_value smartap_existed)"
+	quick_existed="$(state_value quick_existed)"
+	reset_existed="$(state_value reset_existed)"
+	armed_epoch="$(state_value armed_epoch)"
+	armed_uptime="$(state_value armed_uptime)"
+	armed_boot_id="$(state_value armed_boot_id)"
+	timeout="$(state_value timeout)"
+	case "$version" in
+		1) [ -n "$old_security" ] || old_security=1; old_fw_runtime="$old_fw"; old_security_runtime="$old_security"; old_uhttpd=1; old_uhttpd_runtime=1; old_dropbear=1; old_dropbear_runtime=1 ;;
+		2) old_fw_runtime="$old_fw"; old_security_runtime="$old_security"; old_uhttpd=1; old_uhttpd_runtime=1; old_dropbear=1; old_dropbear_runtime=1 ;;
+		3) old_uhttpd=1; old_uhttpd_runtime=1; old_dropbear=1; old_dropbear_runtime=1 ;;
+		4|5|6) : ;;
+		*) return 1 ;;
+	esac
+	valid_token "$token" && valid_backup "$backup" || return 1
+	valid_bit "$old_fw" && valid_bit "$old_fw_runtime" && valid_bit "$orig_existed" && \
+		valid_bit "$smartap_existed" && valid_bit "$quick_existed" && valid_bit "$reset_existed" && \
+		valid_bit "$old_security" && valid_bit "$old_security_runtime" && \
+		valid_bit "$old_uhttpd" && valid_bit "$old_uhttpd_runtime" && \
+		valid_bit "$old_dropbear" && valid_bit "$old_dropbear_runtime"
+}
+
+state_remaining() {
+	local now elapsed boot_id
+	valid_timeout "$timeout" || return 1
+	timing_source=""
+	remaining=""
+	case "$version" in
+		6)
+			# Uptime alone can eventually exceed an anchor from an earlier boot.
+			# Bind the monotonic deadline to Linux's per-boot UUID as well.
+			valid_boot_id "$armed_boot_id" || return 1
+			boot_id="$(current_boot_id)" || return 1
+			[ "$boot_id" = "$armed_boot_id" ] || return 1
+			valid_epoch "$armed_uptime" || return 1
+			now="$(monotonic_seconds)" || return 1
+			valid_epoch "$now" && [ "$now" -ge "$armed_uptime" ] 2>/dev/null || return 1
+			elapsed=$((now - armed_uptime))
+			timing_source=monotonic
+			;;
+		5)
+			# Development v5 states had no boot identity. They remain valid rollback
+			# authority, but can never be confirmed safely after an unknown reboot.
+			return 1
+			;;
+		4)
+			# Legacy v4 states also lack boot identity. Wall time cannot prove that a
+			# confirmation belongs to the same boot, so confirmation fails closed.
+			return 1
+			;;
+		*) return 1 ;;
+	esac
+	if [ "$elapsed" -ge "$timeout" ] 2>/dev/null; then
+		remaining=0
+	else
+		remaining=$((timeout - elapsed))
+		# Both anchors have one-second resolution. Do not advertise a partially
+		# elapsed second as usable confirmation time.
+		[ "$remaining" -le 0 ] 2>/dev/null || remaining=$((remaining - 1))
+	fi
+	return 0
+}
+
+load_manual_pointer() {
+	local meta_backup
+	backup="$(sed -n '1p' "$POINTER" 2>/dev/null)"
+	[ -r "$META" ] || return 1
+	IFS='|' read -r meta_backup old_fw orig_existed smartap_existed quick_existed reset_existed old_security old_fw_runtime old_security_runtime old_uhttpd old_uhttpd_runtime old_dropbear old_dropbear_runtime <"$META" || return 1
+	[ -n "$old_security" ] || old_security=1
+	[ -n "$old_fw_runtime" ] || old_fw_runtime="$old_fw"
+	[ -n "$old_security_runtime" ] || old_security_runtime="$old_security"
+	[ -n "$old_uhttpd" ] || old_uhttpd=1
+	[ -n "$old_uhttpd_runtime" ] || old_uhttpd_runtime=1
+	[ -n "$old_dropbear" ] || old_dropbear=1
+	[ -n "$old_dropbear_runtime" ] || old_dropbear_runtime=1
+	[ "$backup" = "$meta_backup" ] && valid_backup "$backup" || return 1
+	valid_bit "$old_fw" && valid_bit "$old_fw_runtime" && valid_bit "$orig_existed" && \
+		valid_bit "$smartap_existed" && valid_bit "$quick_existed" && valid_bit "$reset_existed" && \
+		valid_bit "$old_security" && valid_bit "$old_security_runtime" && \
+		valid_bit "$old_uhttpd" && valid_bit "$old_uhttpd_runtime" && \
+		valid_bit "$old_dropbear" && valid_bit "$old_dropbear_runtime"
+}
+
+process_start() {
+	awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+
+lock_owned_by_ancestor() {
+	local owner_pid owner_start current current_start parent
+	[ -r "$LOCK/owner" ] || return 1
+	read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || return 1
+	case "$owner_pid:$owner_start" in *[!0-9:]*|:|*:) return 1 ;; esac
+	current="$$"
+	while [ "$current" -gt 1 ] 2>/dev/null; do
+		current_start="$(process_start "$current")"
+		[ "$current" = "$owner_pid" ] && [ "$current_start" = "$owner_start" ] && return 0
+		parent="$(awk '{print $4}' "/proc/$current/stat" 2>/dev/null)"
+		case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+		[ "$parent" != "$current" ] || return 1
+		current="$parent"
+	done
+	return 1
+}
+
+release_lock() {
+	command -v cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 &&
+		cr6608_dashboard_cache_mutation_finish >/dev/null 2>&1 || true
+	[ "${LOCK_OWNER:-0}" = "1" ] || return 0
+	read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || return 0
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "${LOCK_START:-}" ] || return 0
+	rm -f "$LOCK/owner" 2>/dev/null
+	rmdir "$LOCK" 2>/dev/null || true
+}
+
+safe_apply_signal_exit() {
+	safe_apply_signal_rc="$1"
+	trap - EXIT HUP INT TERM
+	release_lock
+	exit "$safe_apply_signal_rc"
+}
+
+acquire_lock() {
+	local n=0 ownerless=0 owner_pid owner_start live_start max_wait
+	max_wait="${CR6608_LOCK_WAIT_MAX:-5}"
+	case "$max_wait" in ''|*[!0-9]*) max_wait=5 ;; esac
+	[ "$max_wait" -ge 1 ] 2>/dev/null && [ "$max_wait" -le 900 ] 2>/dev/null || max_wait=5
+	LOCK_OWNER=0
+	lock_owned_by_ancestor && return 0
+	while ! mkdir "$LOCK" 2>/dev/null; do
+		read owner_pid owner_start <"$LOCK/owner" 2>/dev/null || {
+			ownerless=$((ownerless + 1))
+			n=$((n + 1))
+			if [ "$ownerless" -ge 3 ]; then
+				rm -f "$LOCK/pid" 2>/dev/null
+				rmdir "$LOCK" 2>/dev/null || true
+			fi
+			[ "$n" -le "$max_wait" ] || return 1
+			sleep 1
+			continue
+		}
+		case "$owner_pid:$owner_start" in
+			*[!0-9:]*|:|*:)
+				ownerless=$((ownerless + 1))
+				n=$((n + 1))
+				[ "$ownerless" -lt 3 ] || {
+					rm -f "$LOCK/owner" "$LOCK/pid" 2>/dev/null
+					rmdir "$LOCK" 2>/dev/null || true
+				}
+				[ "$n" -le "$max_wait" ] || return 1
+				sleep 1
+				continue
+				;;
+		esac
+		ownerless=0
+		live_start="$(process_start "$owner_pid")"
+		if [ -z "$live_start" ] || [ "$live_start" != "$owner_start" ]; then
+			rm -f "$LOCK/owner" "$LOCK/pid" 2>/dev/null
+			rmdir "$LOCK" 2>/dev/null || true
+			continue
+		fi
+		n=$((n + 1))
+		[ "$n" -le "$max_wait" ] || return 1
+		sleep 1
+	done
+	LOCK_START="$(process_start "$$")"
+	[ -n "$LOCK_START" ] || { rmdir "$LOCK" 2>/dev/null; return 1; }
+	printf '%s %s\n' "$$" "$LOCK_START" >"$LOCK/owner" || { rmdir "$LOCK" 2>/dev/null; return 1; }
+	LOCK_OWNER=1
+	trap release_lock EXIT
+	trap 'safe_apply_signal_exit 129' HUP
+	trap 'safe_apply_signal_exit 130' INT
+	trap 'safe_apply_signal_exit 143' TERM
+}
+
+clear_pending() {
+	rm -f "$STATE" "$ARMED" "$READY"
+}
+
+write_ready() {
+	local requested="$1"
+	valid_token "$requested" || return 2
+	safe_publish_marker "$READY" "$requested"
+}
+
+cleanup_retained_ip() {
+	local requested="${1:-}" marker_token="" retained_ip="" prefix="" device="" current="" address_text="" removed=0
+	[ -f "$RETAINED_IP" ] && [ ! -L "$RETAINED_IP" ] || return 0
+	IFS='|' read -r marker_token retained_ip prefix device <"$RETAINED_IP" || return 1
+	valid_token "$marker_token" && valid_ipv4 "$retained_ip" && valid_prefix "$prefix" && \
+		valid_management_device "$device" || return 1
+	[ -z "$requested" ] || [ "$requested" = "$marker_token" ] || return 2
+	current="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+	if [ "$current" != "$retained_ip" ] && ip link show dev "$device" >/dev/null 2>&1; then
+		address_text="$(ip -4 address show dev "$device" 2>/dev/null)" || return 1
+		if printf '%s\n' "$address_text" | awk -v address="$retained_ip/$prefix" \
+			'{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i + 1) == address) found = 1 } END { exit(found ? 0 : 1) }'; then
+			ip -4 address del "$retained_ip/$prefix" dev "$device" >/dev/null 2>&1 || return 1
+			removed=1
+			address_text="$(ip -4 address show dev "$device" 2>/dev/null)" || return 1
+			if printf '%s\n' "$address_text" | awk -v address="$retained_ip/$prefix" \
+				'{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i + 1) == address) found = 1 } END { exit(found ? 0 : 1) }'; then
+				return 1
+			fi
+		fi
+	fi
+	rm -f "$RETAINED_IP"
+	[ "$removed" = 0 ] || invalidate_dashboard
+	log "temporary management address removed"
+}
+
+spawn_alias_cleanup() {
+	local confirmed_token="$1"
+	[ -f "$RETAINED_IP" ] || return 0
+	command -v start-stop-daemon >/dev/null 2>&1 || return 1
+	start-stop-daemon -S -b -x "$SELF" -- cleanup-ip "$confirmed_token" 5 >/dev/null 2>&1
+}
+
+write_state() {
+	local tmp state_dir meta_value armed_now_epoch armed_now_uptime armed_now_boot_id
+	armed_now_boot_id="$(current_boot_id)" || return 1
+	valid_boot_id "$armed_now_boot_id" || return 1
+	armed_now_uptime="$(monotonic_seconds)" || return 1
+	valid_epoch "$armed_now_uptime" || return 1
+	armed_now_epoch="$(date +%s 2>/dev/null)" || armed_now_epoch=0
+	valid_epoch "$armed_now_epoch" || armed_now_epoch=0
+	state_dir="${STATE%/*}"
+	[ "$state_dir" != "$STATE" ] && [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+	tmp="$(mktemp "$state_dir/.cr6608-safe-state.XXXXXX" 2>/dev/null)" || return 1
+	chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+	{
+		printf 'version=6\n'
+		printf 'token=%s\n' "$token"
+		printf 'backup=%s\n' "$backup"
+		printf 'old_firewall=%s\n' "$old_fw"
+		printf 'old_firewall_runtime=%s\n' "$old_fw_runtime"
+		printf 'old_security=%s\n' "$old_security"
+		printf 'old_security_runtime=%s\n' "$old_security_runtime"
+		printf 'old_uhttpd=%s\n' "$old_uhttpd"
+		printf 'old_uhttpd_runtime=%s\n' "$old_uhttpd_runtime"
+		printf 'old_dropbear=%s\n' "$old_dropbear"
+		printf 'old_dropbear_runtime=%s\n' "$old_dropbear_runtime"
+		printf 'reset_original_existed=%s\n' "$orig_existed"
+		printf 'smartap_existed=%s\n' "$smartap_existed"
+		printf 'quick_existed=%s\n' "$quick_existed"
+		printf 'reset_existed=%s\n' "$reset_existed"
+		printf 'armed_epoch=%s\n' "$armed_now_epoch"
+		printf 'armed_uptime=%s\n' "$armed_now_uptime"
+		printf 'armed_boot_id=%s\n' "$armed_now_boot_id"
+		printf 'timeout=%s\n' "$timeout"
+	} >"$tmp" || { rm -f -- "$tmp"; return 1; }
+	if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+		rm -f -- "$tmp"
+		return 1
+	fi
+	mv -- "$tmp" "$STATE" || { rm -f -- "$tmp"; return 1; }
+	meta_value="$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
+		"$backup" "$old_fw" "$orig_existed" "$smartap_existed" "$quick_existed" "$reset_existed" \
+		"$old_security" "$old_fw_runtime" "$old_security_runtime" "$old_uhttpd" "$old_uhttpd_runtime" \
+		"$old_dropbear" "$old_dropbear_runtime")" || return 1
+	safe_publish_marker "$POINTER" "$backup" || return 1
+	safe_publish_marker "$META" "$meta_value" || return 1
+	safe_publish_marker "$ARMED" "$token" || return 1
+}
+
+spawn_watch() {
+	command -v start-stop-daemon >/dev/null 2>&1 || return 1
+	start-stop-daemon -S -b -x "$SELF" -- watch "$token" "$timeout" >/dev/null 2>&1
+}
+
+restore_loaded() {
+	local failed=0 pkg
+	for pkg in network wireless dhcp firewall smartap cr6608quick usteer prplmesh sqm system uhttpd dropbear; do
+		uci -q revert "$pkg" >/dev/null 2>&1 || true
+	done
+	tar -xzf "$backup" -C / >/dev/null 2>&1 || return 1
+	[ "$smartap_existed" = "1" ] || rm -f /etc/config/smartap
+	[ "$quick_existed" = "1" ] || rm -f /etc/config/cr6608quick
+	[ "$reset_existed" = "1" ] || rm -f /etc/rc.button/reset
+	[ "$orig_existed" = "1" ] || rm -f /etc/rc.button/reset.smartap-orig
+	/etc/init.d/network reload >/dev/null 2>&1 || failed=1
+	wifi reload >/dev/null 2>&1 || failed=1
+	if [ -x /etc/init.d/usteer ]; then
+		if [ "$(uci -q get usteer.main.enabled 2>/dev/null)" = "1" ]; then
+			/etc/init.d/usteer restart >/dev/null 2>&1 || failed=1
+		else
+			/etc/init.d/usteer stop >/dev/null 2>&1 || true
+		fi
+	elif [ "$(uci -q get usteer.main.enabled 2>/dev/null)" = "1" ]; then
+		failed=1
+	fi
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1 || failed=1
+	if [ -x /etc/init.d/odhcpd ]; then
+		/etc/init.d/odhcpd restart >/dev/null 2>&1 || failed=1
+	fi
+	if [ -x /etc/init.d/sqm ]; then
+		/etc/init.d/sqm restart >/dev/null 2>&1 || failed=1
+	fi
+	if [ "$old_security" = "1" ]; then
+		/etc/init.d/cr6608-security enable >/dev/null 2>&1 || failed=1
+		if [ -x /usr/sbin/cr6608-security-apply ]; then
+			if [ "$old_security_runtime" = "1" ]; then
+				/usr/sbin/cr6608-security-apply boot >/dev/null 2>&1 || failed=1
+			else
+				/usr/sbin/cr6608-security-apply clear-runtime >/dev/null 2>&1 || failed=1
+			fi
+		fi
+	else
+		/etc/init.d/cr6608-security disable >/dev/null 2>&1 || failed=1
+		if [ -x /usr/sbin/cr6608-security-apply ]; then /usr/sbin/cr6608-security-apply clear-runtime >/dev/null 2>&1 || failed=1; fi
+	fi
+	if [ "$old_fw" = "1" ]; then
+		/etc/init.d/firewall enable >/dev/null 2>&1 || failed=1
+		if [ "$old_fw_runtime" = "1" ]; then
+			/etc/init.d/firewall start >/dev/null 2>&1 || failed=1
+			/etc/init.d/firewall reload >/dev/null 2>&1 || failed=1
+		else
+			/usr/sbin/cr6608-rescue-guard firewall-stop >/dev/null 2>&1 || failed=1
+		fi
+	else
+		/etc/init.d/firewall disable >/dev/null 2>&1 || failed=1
+		/usr/sbin/cr6608-rescue-guard firewall-stop >/dev/null 2>&1 || failed=1
+	fi
+	# Firewall UCI rollback also changes dashboard CR6608-Block-* rules.  Replay
+	# the bridge-family policy before declaring restoration complete, otherwise
+	# bridged AP clients could remain blocked/unblocked in the post-change state.
+	if [ -x /usr/sbin/smartap-qos-apply ]; then
+		/usr/sbin/smartap-qos-apply >/dev/null 2>&1 || failed=1
+	else
+		failed=1
+	fi
+	# The neighbor daemon caches the advertised SmartAP identity.  Its procd
+	# service has a bounded term_timeout, so restart it after restoring smartap
+	# config rather than leaving the post-change identity live after rollback.
+	if [ -x /etc/init.d/cr6608-neighbor ]; then
+		/etc/init.d/cr6608-neighbor restart >/dev/null 2>&1 || failed=1
+	else
+		failed=1
+	fi
+	# Restore both boot enablement and live state. A rollback must not silently
+	# re-enable SSH or HTTP that the operator had intentionally disabled.
+	if [ "$old_uhttpd" = "1" ]; then /etc/init.d/uhttpd enable >/dev/null 2>&1 || failed=1; else /etc/init.d/uhttpd disable >/dev/null 2>&1 || failed=1; fi
+	if [ "$old_uhttpd_runtime" = "1" ]; then /etc/init.d/uhttpd restart >/dev/null 2>&1 || failed=1; else /etc/init.d/uhttpd stop >/dev/null 2>&1 || failed=1; fi
+	if [ "$old_dropbear" = "1" ]; then /etc/init.d/dropbear enable >/dev/null 2>&1 || failed=1; else /etc/init.d/dropbear disable >/dev/null 2>&1 || failed=1; fi
+	if [ "$old_dropbear_runtime" = "1" ]; then /etc/init.d/dropbear restart >/dev/null 2>&1 || failed=1; else /etc/init.d/dropbear stop >/dev/null 2>&1 || failed=1; fi
+	if [ -x /usr/sbin/cr6608-safe-wifi-reload ]; then
+		/usr/sbin/cr6608-safe-wifi-reload --verify-only 30 all >/dev/null 2>&1 || failed=1
+	else
+		failed=1
+	fi
+	[ "$failed" = "0" ]
+}
+
+do_arm() {
+	case "$#" in
+		8)
+			backup="$1"; old_fw="$2"; old_fw_runtime="$2"; orig_existed="$3"; smartap_existed="$4"
+			quick_existed="$5"; reset_existed="$6"; old_security="$7"; old_security_runtime="$7"; timeout="$8"
+			old_uhttpd=1; old_uhttpd_runtime=1; old_dropbear=1; old_dropbear_runtime=1
+			;;
+		10)
+			backup="$1"; old_fw="$2"; old_fw_runtime="$3"; orig_existed="$4"; smartap_existed="$5"
+			quick_existed="$6"; reset_existed="$7"; old_security="$8"; old_security_runtime="$9"; timeout="${10}"
+			old_uhttpd=1; old_uhttpd_runtime=1; old_dropbear=1; old_dropbear_runtime=1
+			;;
+		14)
+			backup="$1"; old_fw="$2"; old_fw_runtime="$3"; orig_existed="$4"; smartap_existed="$5"
+			quick_existed="$6"; reset_existed="$7"; old_security="$8"; old_security_runtime="$9"
+			old_uhttpd="${10}"; old_uhttpd_runtime="${11}"; old_dropbear="${12}"; old_dropbear_runtime="${13}"; timeout="${14}"
+			;;
+		*) return 2 ;;
+	esac
+	valid_backup "$backup" || return 2
+	valid_bit "$old_fw" && valid_bit "$old_fw_runtime" && valid_bit "$orig_existed" && \
+		valid_bit "$smartap_existed" && valid_bit "$quick_existed" && valid_bit "$reset_existed" && \
+		valid_bit "$old_security" && valid_bit "$old_security_runtime" && \
+		valid_bit "$old_uhttpd" && valid_bit "$old_uhttpd_runtime" && \
+		valid_bit "$old_dropbear" && valid_bit "$old_dropbear_runtime" && valid_timeout "$timeout" || return 2
+	token="$(hexdump -v -n 16 -e '1/1 "%02x"' /dev/urandom 2>/dev/null)"
+	valid_token "$token" || return 1
+	acquire_lock || return 1
+	# Never stack a new network transaction on top of an unconfirmed one. The
+	# original stable backup and token remain authoritative until confirm/rollback.
+	if [ -e "$STATE" ] || [ -L "$STATE" ] || [ -e "$ARMED" ] || [ -L "$ARMED" ]; then
+		log "refusing to replace an existing pending rollback transaction"
+		return 3
+	fi
+	rm -f "$READY" 2>/dev/null || return 1
+	if ! cleanup_retained_ip; then
+		log "refusing to arm while temporary management address cleanup is pending"
+		return 1
+	fi
+	write_state || { clear_pending; return 1; }
+	spawn_watch || { clear_pending; return 1; }
+	log "rollback armed for ${timeout}s token=$token"
+	printf '%s\n' "$token"
+}
+
+do_ready() {
+	local requested="${1:-}"
+	valid_token "$requested" || return 2
+	acquire_lock || return 1
+	load_state || return 1
+	[ "$requested" = "$token" ] || return 2
+	state_remaining || return 1
+	[ "$remaining" -gt 0 ] 2>/dev/null || return 3
+	write_ready "$requested" || return 1
+	log "guarded transaction marked ready for explicit confirmation"
+}
+
+do_confirm() {
+	local requested="${1:-}" confirmed_token
+	valid_token "$requested" || return 2
+	acquire_lock || return 1
+	[ -f "$STATE" ] || return 1
+	load_state || return 1
+	[ "$requested" = "$token" ] || return 2
+	state_remaining || return 1
+	if [ "$remaining" -le 0 ] 2>/dev/null; then
+		log "confirmation rejected after rollback deadline"
+		return 3
+	fi
+	confirmed_token="$token"
+	clear_pending
+	spawn_alias_cleanup "$confirmed_token" || cleanup_retained_ip "$confirmed_token" >/dev/null 2>&1 || true
+	log "pending rollback confirmed"
+}
+
+do_retain_ip() {
+	local retained_ip="${1:-}" netmask="${2:-}" device="${3:-}" prefix current marker
+	valid_ipv4 "$retained_ip" || return 2
+	valid_management_device "$device" || return 2
+	prefix="$(/bin/ipcalc.sh "$retained_ip" "$netmask" 2>/dev/null | sed -n 's/^PREFIX=//p' | head -n 1)"
+	valid_prefix "$prefix" || return 2
+	acquire_lock || return 1
+	load_state || return 1
+	current="$(uci -q get network.lan.ipaddr 2>/dev/null)"
+	if [ "$retained_ip" = "$current" ]; then
+		cleanup_retained_ip "$token" >/dev/null 2>&1 || true
+		return 0
+	fi
+	ip link show dev "$device" >/dev/null 2>&1 || return 1
+	ip -4 address replace "$retained_ip/$prefix" dev "$device" >/dev/null 2>&1 || return 1
+	marker="$token|$retained_ip|$prefix|$device"
+	safe_publish_marker "$RETAINED_IP" "$marker" || return 1
+	invalidate_dashboard
+	log "temporary management address retained until explicit confirmation"
+}
+
+do_rollback() {
+	local requested="${1:-}" from_state=0
+	acquire_lock || return 1
+	if [ "$LOCK_OWNER" = "1" ]; then
+		# Connectivity recovery is the primary safety invariant.  A missing or
+		# damaged dashboard cache helper must never prevent an armed rollback;
+		# continue the restore and leave an explicit diagnostic instead.
+		if ! command -v cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1 ||
+		   ! cr6608_dashboard_cache_mutation_begin >/dev/null 2>&1; then
+			log "dashboard cache mutation bracket unavailable; continuing safety rollback"
+		fi
+	fi
+	if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+		if ! load_state; then
+			log "pending rollback state is invalid; refusing to treat it as confirmation"
+			return 1
+		fi
+		from_state=1
+		[ -z "$requested" ] || [ "$requested" = "$token" ] || return 2
+	elif [ -e "$ARMED" ] || [ -L "$ARMED" ]; then
+		log "armed marker exists without a valid rollback state"
+		return 1
+	elif [ -n "$requested" ]; then
+		# A watcher always supplies its token. If the state is gone, the user
+		# already confirmed the change; never fall through to manual rollback.
+		log "expired rollback watcher ignored after confirmation"
+		return 0
+	elif ! load_manual_pointer; then
+		return 1
+	fi
+	# Once restoration starts the applied configuration is no longer a known
+	# completed-success state. Never allow Keep after a partial/failed rollback.
+	rm -f "$READY" 2>/dev/null || true
+	log "restoring rollback backup $backup"
+	if restore_loaded; then
+		cleanup_retained_ip "${token:-}" >/dev/null 2>&1 ||
+			log "temporary management address cleanup remains pending after rollback"
+		clear_pending
+		rm -f "$POINTER" "$META"
+		log "rollback completed"
+		return 0
+	fi
+	[ "$from_state" = "1" ] || safe_publish_marker "$POINTER" "$backup" >/dev/null 2>&1 || true
+	log "rollback did not complete cleanly"
+	return 1
+}
+
+case "${1:-status}" in
+	arm) shift; do_arm "$@" ;;
+	ready) do_ready "${2:-}" ;;
+	confirm) do_confirm "${2:-}" ;;
+	retain-ip) do_retain_ip "${2:-}" "${3:-}" "${4:-}" ;;
+	rollback) do_rollback "${2:-}" ;;
+	cleanup-ip)
+		valid_token "${2:-}" && valid_cleanup_delay "${3:-}" || exit 2
+		sleep "$3"
+		acquire_lock || exit 1
+		cleanup_retained_ip "$2"
+		;;
+	watch)
+		valid_token "${2:-}" && valid_timeout "${3:-}" || exit 2
+		sleep "$3"
+		# The request that armed this watcher can still hold the shared apply
+		# lock while netifd/hostapd finish. Wait long enough to obtain the lock
+		# instead of abandoning the only automatic rollback attempt.
+		CR6608_LOCK_WAIT_MAX="${CR6608_WATCH_LOCK_WAIT_MAX:-900}" do_rollback "$2"
+		;;
+	boot)
+		if [ -f "$STATE" ]; then
+			log "unconfirmed settings found at boot; rolling back"
+			do_rollback
+		fi
+		rm -f "$READY" 2>/dev/null || true
+		cleanup_retained_ip >/dev/null 2>&1 || log "temporary management address cleanup remains pending"
+		;;
+	status)
+		if load_state; then
+			if ! state_remaining; then
+				printf 'state=invalid\n'
+				exit 1
+			fi
+			printf 'state=armed\ntoken=%s\nbackup=%s\narmed_epoch=%s\narmed_uptime=%s\ntimeout=%s\nremaining=%s\ntiming_source=%s\n' \
+				"$token" "$backup" "$armed_epoch" "$armed_uptime" "$timeout" "$remaining" "$timing_source"
+		elif [ -e "$STATE" ] || [ -L "$STATE" ] || [ -e "$ARMED" ] || [ -L "$ARMED" ]; then
+			printf 'state=invalid\n'
+			exit 1
+		else
+			printf 'state=clean\n'
+		fi
+		;;
+	*) echo "usage: $0 {arm BACKUP FW FW_RUNTIME ORIG SMARTAP QUICK RESET SECURITY SECURITY_RUNTIME TIMEOUT|ready TOKEN|retain-ip OLD_IP NETMASK br-lan[.VID]|confirm TOKEN|rollback [TOKEN]|boot|status}" >&2; exit 2 ;;
+esac

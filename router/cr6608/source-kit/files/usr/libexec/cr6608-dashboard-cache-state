@@ -1,0 +1,793 @@
+#!/bin/sh
+# Shared, root-only coordination state for live Smart AP collection.
+#
+# The public CGIs run as root while /tmp is world writable.  Keep locks and
+# configuration generations below /var/run (which resolves to the root-owned
+# /tmp/run on OpenWrt) so predictable names cannot be replaced with hostile
+# symlinks. Dashboard telemetry is never published here for reuse; bounded
+# request-private files exist only while their collector owns collector.lock
+# and are recovered before the next collection after a crash.
+
+CR6608_DASHBOARD_CACHE_DIR="${CR6608_DASHBOARD_CACHE_DIR:-/var/run/cr6608-dashboard-cache}"
+CR6608_DASHBOARD_CACHE_EXPECT_UID="${CR6608_DASHBOARD_CACHE_EXPECT_UID:-0}"
+CR6608_DASHBOARD_FINGERPRINT_PATHS="${CR6608_DASHBOARD_FINGERPRINT_PATHS:-/etc/config/network /etc/config/wireless /etc/config/dhcp /etc/config/firewall /etc/config/system /etc/config/dropbear /etc/config/uhttpd /etc/config/smartap /etc/config/cr6608quick /etc/config/sqm /etc/config/usteer /etc/config/prplmesh /etc/crontabs/root}"
+CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+CR6608_DASHBOARD_CACHE_META_OWNER=0
+CR6608_DASHBOARD_CACHE_READER_OWNER=0
+CR6608_DASHBOARD_CACHE_PRUNED=0
+CR6608_DASHBOARD_CACHE_GUARDIAN_PID=""
+CR6608_DASHBOARD_CACHE_GUARDIAN_START=""
+CR6608_DASHBOARD_CACHE_GUARDIAN_CONTROL=""
+
+umask 077
+
+# Remove every shared telemetry artifact created by older firmware revisions.
+# Symlinks are unlinked without following their targets. Directories, sockets
+# and other unexpected objects fail closed instead of being removed recursively.
+cr6608_dashboard_legacy_telemetry_purge() {
+	_cache_dir="${1:-$CR6608_DASHBOARD_CACHE_DIR}"
+	[ -d "$_cache_dir" ] && [ ! -L "$_cache_dir" ] || return 1
+	set -- \
+		"$_cache_dir/response.json" \
+		"$_cache_dir/perf" \
+		"$_cache_dir/lite.cpu" \
+		"$_cache_dir/cpu" \
+		"$_cache_dir/traffic" \
+		"$_cache_dir/traffic.topology" \
+		"$_cache_dir"/iface.* \
+		"$_cache_dir"/sta.* \
+		"$_cache_dir"/survey.*
+	for _cache_telemetry_path in "$@"; do
+		[ -e "$_cache_telemetry_path" ] || [ -L "$_cache_telemetry_path" ] || continue
+		[ -f "$_cache_telemetry_path" ] || [ -L "$_cache_telemetry_path" ] || return 1
+		rm -f -- "$_cache_telemetry_path" 2>/dev/null || return 1
+	done
+	return 0
+}
+
+# Request-private files isolate bounded collectors from the CGI socket. They
+# are never reusable telemetry, but SIGKILL can bypass the normal trap. Purge
+# either every valid residue (no PID) or only one request's exact PID namespace.
+cr6608_dashboard_request_telemetry_purge() {
+	_cache_request_dir="${1:-$CR6608_DASHBOARD_CACHE_DIR}"
+	_cache_request_pid="${2:-}"
+	[ -d "$_cache_request_dir" ] && [ ! -L "$_cache_request_dir" ] || return 1
+	case "$_cache_request_pid" in
+		'')
+			set -- \
+				"$_cache_request_dir"/.dashcmd-out.*.* \
+				"$_cache_request_dir"/.dashcmd-err.*.* \
+				"$_cache_request_dir"/.linklog.*.* \
+				"$_cache_request_dir"/.devices.* \
+				"$_cache_request_dir"/.arp.* \
+				"$_cache_request_dir"/.fdb.* \
+				"$_cache_request_dir"/.lease.* \
+				"$_cache_request_dir"/.degraded.* \
+				"$_cache_request_dir"/.view.*.* \
+				"$_cache_request_dir"/.emit.*.* \
+				"$_cache_request_dir"/.publish.*.* \
+				"$_cache_request_dir"/.publish-final.*.* \
+				"$_cache_request_dir"/.perf.*.* \
+				"$_cache_request_dir"/.collect.*.*
+			;;
+		*[!0-9]*|0) return 1 ;;
+		*)
+			set -- \
+				"$_cache_request_dir/.dashcmd-out.$_cache_request_pid."* \
+				"$_cache_request_dir/.dashcmd-err.$_cache_request_pid."* \
+				"$_cache_request_dir/.linklog.$_cache_request_pid."* \
+				"$_cache_request_dir/.devices.$_cache_request_pid" \
+				"$_cache_request_dir/.arp.$_cache_request_pid" \
+				"$_cache_request_dir/.fdb.$_cache_request_pid" \
+				"$_cache_request_dir/.lease.$_cache_request_pid" \
+				"$_cache_request_dir/.degraded.$_cache_request_pid" \
+				"$_cache_request_dir/.view.$_cache_request_pid."* \
+				"$_cache_request_dir/.emit.$_cache_request_pid."* \
+				"$_cache_request_dir/.publish.$_cache_request_pid."* \
+				"$_cache_request_dir/.publish-final.$_cache_request_pid."* \
+				"$_cache_request_dir/.perf.$_cache_request_pid."* \
+				"$_cache_request_dir/.collect.$_cache_request_pid."*
+			;;
+	esac
+	for _cache_request_path in "$@"; do
+		[ -e "$_cache_request_path" ] || [ -L "$_cache_request_path" ] || continue
+		[ -f "$_cache_request_path" ] || [ -L "$_cache_request_path" ] || return 1
+		rm -f -- "$_cache_request_path" 2>/dev/null || return 1
+	done
+	return 0
+}
+
+# Recover request-private telemetry only while collector.lock proves that no
+# live request owns those files. A concurrent prepare therefore cannot unlink
+# output under an active collector. The FD8 guardian releases the kernel lock
+# after parent death, making the next prepare/acquire (and first boot) the
+# deterministic recovery boundary.
+cr6608_dashboard_request_telemetry_recover() (
+	_cache_recover_dir="${1:-$CR6608_DASHBOARD_CACHE_DIR}"
+	[ -d "$_cache_recover_dir" ] && [ ! -L "$_cache_recover_dir" ] || return 1
+	[ "${CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER:-0}" = 1 ] && return 0
+	[ ! -L "$_cache_recover_dir/collector.lock" ] || return 1
+	exec 9>>"$_cache_recover_dir/collector.lock" || return 1
+	chmod 0600 "$_cache_recover_dir/collector.lock" 2>/dev/null || { exec 9>&-; return 1; }
+	if ! flock -xn 9 2>/dev/null; then
+		exec 9>&-
+		return 0
+	fi
+	_cache_request_recover_rc=0
+	cr6608_dashboard_request_telemetry_purge "$_cache_recover_dir" || _cache_request_recover_rc=1
+	flock -u 9 2>/dev/null || _cache_request_recover_rc=1
+	exec 9>&-
+	return "$_cache_request_recover_rc"
+)
+
+# Public zero-retention migration/recovery gate. Coordination locks, mutation
+# markers, generation and configuration fingerprints are intentionally kept.
+cr6608_dashboard_telemetry_purge() {
+	_cache_purge_dir="${1:-$CR6608_DASHBOARD_CACHE_DIR}"
+	cr6608_dashboard_legacy_telemetry_purge "$_cache_purge_dir" || return 1
+	cr6608_dashboard_request_telemetry_recover "$_cache_purge_dir"
+}
+
+cr6608_dashboard_cache_prepare() {
+	_cache_dir="$CR6608_DASHBOARD_CACHE_DIR"
+	[ ! -L "$_cache_dir" ] || return 1
+	if [ -e "$_cache_dir" ]; then
+		[ -d "$_cache_dir" ] || return 1
+	else
+		# Two first requests may race between -e and mkdir.  If another root
+		# request won, validate the directory it created instead of failing.
+		mkdir -m 0700 "$_cache_dir" 2>/dev/null ||
+			{ [ -d "$_cache_dir" ] && [ ! -L "$_cache_dir" ]; } || return 1
+	fi
+	[ ! -L "$_cache_dir" ] || return 1
+	_cache_uid="$(stat -c %u "$_cache_dir" 2>/dev/null)"
+	[ "$_cache_uid" = "$CR6608_DASHBOARD_CACHE_EXPECT_UID" ] || return 1
+	chmod 0700 "$_cache_dir" 2>/dev/null || return 1
+	cr6608_dashboard_telemetry_purge "$_cache_dir" || return 1
+	if [ "$CR6608_DASHBOARD_CACHE_PRUNED" = 0 ]; then
+		# Request-private telemetry is recovered immediately above under
+		# collector.lock. This age-based pass is coordination metadata only.
+		find "$_cache_dir" -maxdepth 1 -type f \( \
+			-name '.generation.*.*' -o -name '.dirty.*.*' -o \
+			-name '.external.*.*' \) \
+			-mmin +10 -exec rm -f {} \; 2>/dev/null || true
+		CR6608_DASHBOARD_CACHE_PRUNED=1
+	fi
+	return 0
+}
+
+cr6608_dashboard_cache_cleanup_process() {
+	cr6608_dashboard_cache_prepare || return 0
+	cr6608_dashboard_request_telemetry_purge \
+		"$CR6608_DASHBOARD_CACHE_DIR" "$$" >/dev/null 2>&1 || true
+	find "$CR6608_DASHBOARD_CACHE_DIR" -maxdepth 1 -type f \( \
+		-name ".generation.$$.*" -o -name ".dirty.$$.*" -o \
+		-name ".external.$$.*" \) \
+		-exec rm -f {} \; 2>/dev/null || true
+}
+
+# The MT7621 image intentionally uses a minimal BusyBox build whose `sleep`
+# applet accepts whole seconds only. Keep the collector's short grace periods
+# quiet and bounded: use fractional sleep where supported, otherwise use the
+# ucode runtime that is part of this firmware. If neither mechanism exists,
+# return immediately rather than writing repeated applet errors to logread.
+cr6608_dashboard_cache_fast_grace() {
+	sleep 0.1 2>/dev/null && return 0
+	[ -x /usr/bin/ucode ] &&
+		/usr/bin/ucode -e 'sleep(100)' >/dev/null 2>&1 && return 0
+	return 0
+}
+
+# BusyBox flock has no -w timeout.  Poll its non-blocking form so a dead or
+# back-pressured CGI can delay an apply for only a bounded number of seconds.
+cr6608_dashboard_cache_flock_bounded() {
+	_cache_lock_mode="$1"; _cache_lock_fd="$2"; _cache_lock_attempts="$3"
+	case "$_cache_lock_attempts" in ''|*[!0-9]*|0) return 1 ;; esac
+	_cache_lock_try=0
+	while :; do
+		case "$_cache_lock_mode" in
+			x) flock -xn "$_cache_lock_fd" 2>/dev/null && return 0 ;;
+			s) flock -sn "$_cache_lock_fd" 2>/dev/null && return 0 ;;
+			*) return 1 ;;
+		esac
+		_cache_lock_try=$((_cache_lock_try + 1))
+		[ "$_cache_lock_try" -lt "$_cache_lock_attempts" ] || return 1
+		sleep 1
+	done
+}
+
+cr6608_dashboard_cache_external_fingerprint() {
+	_cache_fp_result="$({
+		# The path set is fixed by root-owned firmware data.  Build one argument
+		# vector so BusyBox runs one stat and one sha256sum process instead of
+		# two processes per UCI file on every full dashboard refresh.
+		set --
+		for _cache_fp_path in $CR6608_DASHBOARD_FINGERPRINT_PATHS; do
+			if [ -f "$_cache_fp_path" ] && [ ! -L "$_cache_fp_path" ]; then
+				set -- "$@" "$_cache_fp_path"
+			else
+				printf '%s:missing\n' "$_cache_fp_path"
+			fi
+		done
+		if [ "$#" -gt 0 ]; then
+			stat -c '%n:%Y:%s:%i' "$@" 2>/dev/null || printf '%s\n' 'batch:stat-error'
+			# Content closes the one-second mtime/same-size hole left by
+			# in-place SSH edits on BusyBox filesystems.
+			sha256sum "$@" 2>/dev/null || printf '%s\n' 'batch:checksum-error'
+		fi
+	} | sha256sum 2>/dev/null | awk '{print $1}')"
+	case "$_cache_fp_result" in ''|*[!0-9a-f]*) return 1 ;; esac
+	printf '%s\n' "$_cache_fp_result"
+}
+
+cr6608_dashboard_cache_write_external_fingerprint() {
+	_cache_fp_value="$1"
+	case "$_cache_fp_value" in ''|*[!0-9a-f]*) return 1 ;; esac
+	_cache_fp_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.external.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! printf '%s\n' "$_cache_fp_value" >"$_cache_fp_tmp" ||
+	   ! chmod 0600 "$_cache_fp_tmp" ||
+	   ! mv -f "$_cache_fp_tmp" "$CR6608_DASHBOARD_CACHE_DIR/external.fingerprint"; then
+		rm -f "$_cache_fp_tmp" 2>/dev/null
+		return 1
+	fi
+}
+
+# Detect UCI commits made through LuCI or SSH, not just Smart AP CGIs.  The
+# unchanged path is lock-free; a change is rechecked and invalidated under the
+# metadata lock so concurrent requests converge on one fingerprint/generation.
+cr6608_dashboard_cache_external_sync() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_fp_file="$CR6608_DASHBOARD_CACHE_DIR/external.fingerprint"
+	[ ! -L "$_cache_fp_file" ] || return 1
+	_cache_fp_now="$(cr6608_dashboard_cache_external_fingerprint)" || return 1
+	_cache_fp_old=""
+	if [ -f "$_cache_fp_file" ]; then
+		IFS= read -r _cache_fp_old <"$_cache_fp_file" 2>/dev/null || _cache_fp_old=""
+	fi
+	[ "$_cache_fp_now" != "$_cache_fp_old" ] || return 0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	_cache_fp_now="$(cr6608_dashboard_cache_external_fingerprint)" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	_cache_fp_old=""
+	if [ -f "$_cache_fp_file" ] && [ ! -L "$_cache_fp_file" ]; then
+		IFS= read -r _cache_fp_old <"$_cache_fp_file" 2>/dev/null || _cache_fp_old=""
+	fi
+	_cache_fp_rc=0
+	if [ -z "$_cache_fp_old" ]; then
+		cr6608_dashboard_cache_write_external_fingerprint "$_cache_fp_now" || _cache_fp_rc=1
+	elif [ "$_cache_fp_now" != "$_cache_fp_old" ]; then
+		cr6608_dashboard_cache_new_generation >/dev/null || _cache_fp_rc=1
+		cr6608_dashboard_cache_write_external_fingerprint "$_cache_fp_now" || _cache_fp_rc=1
+	fi
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_fp_rc"
+}
+
+cr6608_dashboard_cache_meta_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_META_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	exec 5>>"$CR6608_DASHBOARD_CACHE_DIR/meta.lock" || return 1
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/meta.lock" 2>/dev/null || { exec 5>&-; return 1; }
+	cr6608_dashboard_cache_flock_bounded x 5 5 || { exec 5>&-; return 1; }
+	CR6608_DASHBOARD_CACHE_META_OWNER=1
+}
+
+cr6608_dashboard_cache_meta_release() {
+	[ "$CR6608_DASHBOARD_CACHE_META_OWNER" = 1 ] || return 0
+	flock -u 5 2>/dev/null || true
+	exec 5>&-
+	CR6608_DASHBOARD_CACHE_META_OWNER=0
+}
+
+cr6608_dashboard_cache_reader_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_READER_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	exec 4>>"$CR6608_DASHBOARD_CACHE_DIR/meta.lock" || return 1
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/meta.lock" 2>/dev/null || { exec 4>&-; return 1; }
+	cr6608_dashboard_cache_flock_bounded s 4 3 || { exec 4>&-; return 1; }
+	CR6608_DASHBOARD_CACHE_READER_OWNER=1
+}
+
+cr6608_dashboard_cache_reader_release() {
+	[ "$CR6608_DASHBOARD_CACHE_READER_OWNER" = 1 ] || return 0
+	flock -u 4 2>/dev/null || true
+	exec 4>&-
+	CR6608_DASHBOARD_CACHE_READER_OWNER=0
+}
+
+cr6608_dashboard_cache_new_generation() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.generation.$$.XXXXXX" 2>/dev/null)" || return 1
+	_cache_suffix="${_cache_tmp##*.}"
+	_cache_uptime="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$_cache_uptime" in ''|*[!0-9]*) _cache_uptime=0 ;; esac
+	_cache_token="${_cache_suffix}.$$.$_cache_uptime"
+	if ! printf '%s\n' "$_cache_token" >"$_cache_tmp" ||
+	   ! chmod 0600 "$_cache_tmp" ||
+	   ! mv -f "$_cache_tmp" "$CR6608_DASHBOARD_CACHE_DIR/generation"; then
+		rm -f "$_cache_tmp" 2>/dev/null
+		return 1
+	fi
+	printf '%s\n' "$_cache_token"
+}
+
+cr6608_dashboard_cache_generation() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_generation_file="$CR6608_DASHBOARD_CACHE_DIR/generation"
+	_cache_token=""
+	if [ -f "$_cache_generation_file" ] && [ ! -L "$_cache_generation_file" ]; then
+		IFS= read -r _cache_token <"$_cache_generation_file" 2>/dev/null || _cache_token=""
+	fi
+	case "$_cache_token" in
+		''|*[!A-Za-z0-9._-]*) cr6608_dashboard_cache_new_generation ;;
+		*) printf '%s\n' "$_cache_token" ;;
+	esac
+}
+
+cr6608_dashboard_cache_invalidate() {
+	_cache_invalidate_rc=0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	cr6608_dashboard_cache_new_generation >/dev/null || _cache_invalidate_rc=1
+	cr6608_dashboard_telemetry_purge || _cache_invalidate_rc=1
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_invalidate_rc"
+}
+
+cr6608_dashboard_cache_clear() {
+	cr6608_dashboard_cache_invalidate
+}
+
+# Configuration CGIs bracket every potentially mutating action.  A generation
+# is written both before and after the action, while the flock tells readers
+# that even a matching intermediate generation must be treated as stale.
+cr6608_dashboard_cache_mutation_begin() {
+	[ "$CR6608_DASHBOARD_CACHE_MUTATION_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	cr6608_dashboard_cache_meta_acquire || return 1
+	exec 7>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || {
+		exec 7>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! flock -xn 7; then
+		exec 7>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	fi
+	CR6608_DASHBOARD_CACHE_MUTATION_OWNER=1
+	_cache_dirty_tmp="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.dirty.$$.XXXXXX" 2>/dev/null)" || {
+		flock -u 7 2>/dev/null || true
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! printf '%s\n' "$$" >"$_cache_dirty_tmp" ||
+	   ! chmod 0600 "$_cache_dirty_tmp" ||
+	   ! mv -f "$_cache_dirty_tmp" "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ||
+	   ! cr6608_dashboard_cache_new_generation >/dev/null ||
+	   ! cr6608_dashboard_telemetry_purge; then
+		rm -f "$_cache_dirty_tmp" "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" 2>/dev/null || true
+		flock -u 7 2>/dev/null || true
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		cr6608_dashboard_cache_meta_release
+		return 1
+	fi
+	cr6608_dashboard_cache_meta_release
+	return 0
+}
+
+cr6608_dashboard_cache_mutation_finish() {
+	[ "$CR6608_DASHBOARD_CACHE_MUTATION_OWNER" = 1 ] || return 0
+	_cache_finish_rc=0
+	_cache_finish_advanced=0
+	if cr6608_dashboard_cache_meta_acquire; then
+		# A bounded child may have transferred the inherited FD7 flock to an
+		# independently opened descriptor while preserving mutation.dirty.  The
+		# caller's old FD7 then no longer owns the lock: never let its cleanup
+		# clear the child's dirty marker or expose a final generation early.
+		if ! flock -xn 7 2>/dev/null; then
+			cr6608_dashboard_cache_meta_release
+			exec 7>&-
+			CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+			return 0
+		fi
+		if cr6608_dashboard_cache_new_generation >/dev/null; then
+			_cache_finish_advanced=1
+		else
+			_cache_finish_rc=1
+		fi
+		cr6608_dashboard_telemetry_purge || _cache_finish_rc=1
+		if [ "$_cache_finish_advanced" = 1 ]; then
+			rm -f "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" 2>/dev/null || _cache_finish_rc=1
+		fi
+		cr6608_dashboard_cache_meta_release
+	else
+		# Do not race a lock handoff by publishing without meta.lock.  Closing
+		# this descriptor without an explicit unlock preserves a still-inherited
+		# open-file-description lock; otherwise the surviving dirty marker makes
+		# the next reader advance generation through recover_dirty().
+		exec 7>&-
+		CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+		return 1
+	fi
+	flock -u 7 2>/dev/null || _cache_finish_rc=1
+	exec 7>&-
+	CR6608_DASHBOARD_CACHE_MUTATION_OWNER=0
+	return "$_cache_finish_rc"
+}
+
+cr6608_dashboard_cache_mutation_active() {
+	cr6608_dashboard_cache_prepare || return 0
+	# The dirty marker survives SIGKILL/power-loss between begin and finish.  It
+	# is deliberately fail-closed until a reader-side recovery advances the
+	# generation while proving that no mutation flock is still held.
+	[ ! -e "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ] &&
+		[ ! -L "$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty" ] || return 0
+	exec 6>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || return 0
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || { exec 6>&-; return 0; }
+	if flock -sn 6; then
+		flock -u 6 2>/dev/null || true
+		exec 6>&-
+		return 1
+	fi
+	exec 6>&-
+	return 0
+}
+
+# Recover a dirty marker left by a killed mutator.  Status 2 means a live
+# mutator still owns mutation.lock; status 1 is an actual recovery failure.
+cr6608_dashboard_cache_recover_dirty() {
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_dirty="$CR6608_DASHBOARD_CACHE_DIR/mutation.dirty"
+	[ ! -L "$_cache_dirty" ] || return 1
+	[ -f "$_cache_dirty" ] || return 0
+	cr6608_dashboard_cache_meta_acquire || return 1
+	if [ ! -f "$_cache_dirty" ] || [ -L "$_cache_dirty" ]; then
+		cr6608_dashboard_cache_meta_release
+		[ ! -L "$_cache_dirty" ]
+		return $?
+	fi
+	exec 6>>"$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" || {
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/mutation.lock" 2>/dev/null || {
+		exec 6>&-
+		cr6608_dashboard_cache_meta_release
+		return 1
+	}
+	if ! flock -xn 6; then
+		exec 6>&-
+		cr6608_dashboard_cache_meta_release
+		return 2
+	fi
+	_cache_recover_rc=0
+	if cr6608_dashboard_cache_new_generation >/dev/null; then
+		cr6608_dashboard_telemetry_purge || _cache_recover_rc=1
+		rm -f "$_cache_dirty" 2>/dev/null || _cache_recover_rc=1
+	else
+		rm -f "$CR6608_DASHBOARD_CACHE_DIR/generation" 2>/dev/null || true
+		cr6608_dashboard_telemetry_purge >/dev/null 2>&1 || true
+		_cache_recover_rc=1
+	fi
+	flock -u 6 2>/dev/null || _cache_recover_rc=1
+	exec 6>&-
+	cr6608_dashboard_cache_meta_release
+	return "$_cache_recover_rc"
+}
+
+# Parse state and starttime without trusting PID existence alone. Linux encloses
+# comm in parentheses and comm may contain spaces or ')', so split after the
+# final ") "; state is tail field 1 and starttime is tail field 20.
+cr6608_dashboard_cache_process_identity() {
+	_cache_identity_pid="${1:-}"
+	case "$_cache_identity_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+	awk '
+		{
+			line=$0; close_at=0
+			for (i=length(line)-1; i>0; i--)
+				if (substr(line,i,2)==") ") { close_at=i; break }
+			if (!close_at) exit 1
+			count=split(substr(line,close_at+2), field, " ")
+			if (count < 20) exit 1
+			print field[1] " " field[20]
+		}' "/proc/$_cache_identity_pid/stat" 2>/dev/null
+}
+
+cr6608_dashboard_cache_process_matches() {
+	_cache_match_pid="${1:-}"
+	_cache_match_start="${2:-}"
+	case "$_cache_match_pid:$_cache_match_start" in
+		*[!0-9:]*|:*|*:) return 1 ;;
+	esac
+	_cache_match_identity="$(cr6608_dashboard_cache_process_identity "$_cache_match_pid")" || return 1
+	_cache_match_state="${_cache_match_identity%% *}"
+	_cache_match_seen_start="${_cache_match_identity#* }"
+	[ "$_cache_match_state" != Z ] && [ "$_cache_match_seen_start" = "$_cache_match_start" ]
+}
+
+cr6608_dashboard_cache_guardian_alive() {
+	_cache_alive_pid="${1:-}"
+	_cache_alive_start="${2:-}"
+	case "$_cache_alive_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+	_cache_alive_identity="$(cr6608_dashboard_cache_process_identity "$_cache_alive_pid")" || return 1
+	_cache_alive_state="${_cache_alive_identity%% *}"
+	_cache_alive_seen_start="${_cache_alive_identity#* }"
+	[ "$_cache_alive_state" != Z ] || return 1
+	case "$_cache_alive_start" in
+		''|*[!0-9]*) return 0 ;;
+		*) [ "$_cache_alive_seen_start" = "$_cache_alive_start" ] ;;
+	esac
+}
+
+cr6608_dashboard_cache_guardian_control_valid() {
+	_cache_guard_control="${1:-}"
+	case "$_cache_guard_control" in
+		"$CR6608_DASHBOARD_CACHE_DIR"/.collector-control.*.*) ;;
+		*) return 1 ;;
+	esac
+	[ -f "$_cache_guard_control" ] && [ ! -L "$_cache_guard_control" ]
+}
+
+# This is the only process which retains FD8 after acquisition. All of its
+# external helpers run in subshells which close FD8 first, and its stdio is
+# redirected by the spawning parent. Thus no sampling child and no sleep/awk
+# descendant can prolong collector.lock after the CGI parent dies.
+cr6608_dashboard_cache_collector_guardian_loop() {
+	_cache_guard_parent_pid="$1"
+	_cache_guard_parent_start="$2"
+	_cache_guard_control="$3"
+	_cache_guard_stop=0
+	trap '_cache_guard_stop=1' HUP INT TERM
+	if ! cr6608_dashboard_cache_guardian_control_valid "$_cache_guard_control" ||
+	   ! printf 'ready\n' >"$_cache_guard_control"; then
+		exec 8>&-
+		return 1
+	fi
+	while [ "$_cache_guard_stop" = 0 ]; do
+		_cache_guard_command=""
+		if cr6608_dashboard_cache_guardian_control_valid "$_cache_guard_control"; then
+			IFS= read -r _cache_guard_command <"$_cache_guard_control" 2>/dev/null ||
+				_cache_guard_command=""
+		fi
+		[ "$_cache_guard_command" != release ] || break
+		[ -r "/proc/$_cache_guard_parent_pid/stat" ] || break
+		_cache_guard_parent_identity="$(
+			exec 8>&-
+			cr6608_dashboard_cache_process_identity "$_cache_guard_parent_pid"
+		)" || _cache_guard_parent_identity=""
+		[ -n "$_cache_guard_parent_identity" ] || break
+		_cache_guard_parent_state="${_cache_guard_parent_identity%% *}"
+		_cache_guard_seen_start="${_cache_guard_parent_identity#* }"
+		[ "$_cache_guard_parent_state" != Z ] || break
+		[ "$_cache_guard_seen_start" = "$_cache_guard_parent_start" ] || break
+		# The sleep child must not inherit the lock if the guardian is killed.
+		( exec 8>&-; sleep 1 ) || true
+	done
+	trap - HUP INT TERM
+	exec 8>&-
+	case "$_cache_guard_control" in
+		"$CR6608_DASHBOARD_CACHE_DIR"/.collector-control.*.*)
+			rm -f -- "$_cache_guard_control" 2>/dev/null || true
+			;;
+	esac
+	return 0
+}
+
+# Called only after the CGI parent has closed FD8. Request a clean exit, bound
+# the wait, and force termination if the guardian does not respond. Every
+# signal is PID+starttime-bound because shells may reap background children.
+cr6608_dashboard_cache_collector_guardian_stop() {
+	_cache_stop_pid="${1:-}"
+	_cache_stop_start="${2:-}"
+	_cache_stop_control="${3:-}"
+	_cache_stop_rc=0
+	_cache_stop_identity_owned=0
+	if cr6608_dashboard_cache_guardian_control_valid "$_cache_stop_control"; then
+		printf 'release\n' >"$_cache_stop_control" || _cache_stop_rc=1
+	else
+		_cache_stop_rc=1
+	fi
+	# A shell may reap a failed background guardian before explicit wait, after
+	# which Linux can reuse its PID. Bind every signal to the captured starttime
+	# so stale cleanup can never signal an unrelated process.
+	case "$_cache_stop_pid:$_cache_stop_start" in
+		*[!0-9:]*|:*|*:|0:*) _cache_stop_rc=1 ;;
+		*)
+			_cache_stop_identity="$(cr6608_dashboard_cache_process_identity "$_cache_stop_pid")" ||
+				_cache_stop_identity=""
+			if [ -z "$_cache_stop_identity" ]; then
+				# A vanished child can have a cached wait status. If the PID is
+				# still live but procfs identity is unreadable, neither signal nor
+				# wait: fail closed instead of risking the wrong process or a hang.
+				if kill -0 "$_cache_stop_pid" 2>/dev/null; then
+					_cache_stop_rc=1
+				else
+					_cache_stop_identity_owned=1
+				fi
+			elif [ "${_cache_stop_identity#* }" = "$_cache_stop_start" ]; then
+				_cache_stop_identity_owned=1
+			else
+				_cache_stop_rc=1
+			fi
+			;;
+	esac
+	# Wake the guardian promptly after the release write, but only while procfs
+	# still proves this PID is the captured child rather than a reused number.
+	if [ "$_cache_stop_identity_owned" = 1 ] &&
+	   cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start"; then
+		kill -TERM "$_cache_stop_pid" 2>/dev/null || true
+	fi
+	_cache_stop_try=0
+	while [ "$_cache_stop_identity_owned" = 1 ] &&
+	      cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start" &&
+	      [ "$_cache_stop_try" -lt 30 ]; do
+		cr6608_dashboard_cache_fast_grace
+		_cache_stop_try=$((_cache_stop_try + 1))
+	done
+	if [ "$_cache_stop_identity_owned" = 1 ] &&
+	   cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start"; then
+		kill -TERM "$_cache_stop_pid" 2>/dev/null || true
+		_cache_stop_term_try=0
+		while cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start" &&
+		      [ "$_cache_stop_term_try" -lt 10 ]; do
+			cr6608_dashboard_cache_fast_grace
+			_cache_stop_term_try=$((_cache_stop_term_try + 1))
+		done
+	fi
+	if [ "$_cache_stop_identity_owned" = 1 ] &&
+	   cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start"; then
+		kill -KILL "$_cache_stop_pid" 2>/dev/null || true
+		_cache_stop_rc=1
+		_cache_stop_kill_try=0
+		while cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start" &&
+		      [ "$_cache_stop_kill_try" -lt 10 ]; do
+			cr6608_dashboard_cache_fast_grace
+			_cache_stop_kill_try=$((_cache_stop_kill_try + 1))
+		done
+		if cr6608_dashboard_cache_process_matches "$_cache_stop_pid" "$_cache_stop_start"; then
+			# An uninterruptible task may retain the kernel lock, but must not
+			# turn release into an unbounded CGI wait. Later acquisition fails
+			# closed until the kernel task finally exits.
+			_cache_stop_identity_owned=0
+		fi
+	fi
+	case "$_cache_stop_identity_owned" in
+		1)
+			if wait "$_cache_stop_pid" 2>/dev/null; then
+				_cache_stop_wait_rc=0
+			else
+				_cache_stop_wait_rc=$?
+			fi
+			[ "$_cache_stop_wait_rc" -eq 0 ] || _cache_stop_rc=1
+			;;
+	esac
+	case "$_cache_stop_control" in
+		"$CR6608_DASHBOARD_CACHE_DIR"/.collector-control.*.*)
+			rm -f -- "$_cache_stop_control" 2>/dev/null || _cache_stop_rc=1
+			;;
+		*) _cache_stop_rc=1 ;;
+	esac
+	return "$_cache_stop_rc"
+}
+
+# The guardian, not the sampling CGI, owns the kernel lock for the collection
+# lifetime. The parent closes FD8 before returning, so arbitrary descendants
+# cannot inherit it. PID+starttime monitoring makes SIGKILL and PID reuse safe.
+cr6608_dashboard_cache_collector_acquire() {
+	[ "$CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER" = 0 ] || return 0
+	cr6608_dashboard_cache_prepare || return 1
+	_cache_collector_parent_identity="$(cr6608_dashboard_cache_process_identity "$$")" || return 1
+	_cache_collector_parent_state="${_cache_collector_parent_identity%% *}"
+	_cache_collector_parent_start="${_cache_collector_parent_identity#* }"
+	[ "$_cache_collector_parent_state" != Z ] || return 1
+	_cache_collector_control="$(mktemp "$CR6608_DASHBOARD_CACHE_DIR/.collector-control.$$.XXXXXX" 2>/dev/null)" || return 1
+	if ! chmod 0600 "$_cache_collector_control" 2>/dev/null ||
+	   ! printf 'starting\n' >"$_cache_collector_control"; then
+		rm -f -- "$_cache_collector_control" 2>/dev/null || true
+		return 1
+	fi
+	if ! exec 8>>"$CR6608_DASHBOARD_CACHE_DIR/collector.lock"; then
+		rm -f -- "$_cache_collector_control" 2>/dev/null || true
+		return 1
+	fi
+	if ! chmod 0600 "$CR6608_DASHBOARD_CACHE_DIR/collector.lock" 2>/dev/null; then
+		exec 8>&-
+		rm -f -- "$_cache_collector_control" 2>/dev/null || true
+		return 1
+	fi
+	if ! flock -xn 8; then
+		exec 8>&-
+		rm -f -- "$_cache_collector_control" 2>/dev/null || true
+		return 1
+	fi
+	# prepare() may have observed the previous owner while it was still alive,
+	# followed by that owner dying immediately before this flock succeeded. The
+	# lock handoff is therefore the final authoritative recovery boundary. Purge
+	# every request-private residue while FD8 proves that no live collector can
+	# own it; never publish ownership if cleanup fails.
+	if ! cr6608_dashboard_request_telemetry_purge "$CR6608_DASHBOARD_CACHE_DIR"; then
+		flock -u 8 2>/dev/null || true
+		exec 8>&-
+		rm -f -- "$_cache_collector_control" 2>/dev/null || true
+		CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+		return 1
+	fi
+	(
+		exec 0</dev/null 1>/dev/null 2>&1
+		exec 3>&- 4>&- 5>&- 6>&- 7>&- 9>&-
+		cr6608_dashboard_cache_collector_guardian_loop \
+			"$$" "$_cache_collector_parent_start" "$_cache_collector_control"
+	) &
+	_cache_collector_guardian_pid=$!
+	_cache_collector_ready=0
+	_cache_collector_ready_try=0
+	while [ "$_cache_collector_ready_try" -lt 30 ]; do
+		_cache_collector_control_state=""
+		if cr6608_dashboard_cache_guardian_control_valid "$_cache_collector_control"; then
+			IFS= read -r _cache_collector_control_state <"$_cache_collector_control" 2>/dev/null ||
+				_cache_collector_control_state=""
+		fi
+		if [ "$_cache_collector_control_state" = ready ]; then
+			_cache_collector_ready=1
+			break
+		fi
+		_cache_collector_guardian_probe="$(
+			exec 8>&-
+			cr6608_dashboard_cache_process_identity "$_cache_collector_guardian_pid"
+		)" || _cache_collector_guardian_probe=""
+		[ -n "$_cache_collector_guardian_probe" ] || break
+		[ "${_cache_collector_guardian_probe%% *}" != Z ] || break
+		( exec 8>&-; cr6608_dashboard_cache_fast_grace ) || true
+		_cache_collector_ready_try=$((_cache_collector_ready_try + 1))
+	done
+	_cache_collector_guardian_identity="$(
+		exec 8>&-
+		cr6608_dashboard_cache_process_identity "$_cache_collector_guardian_pid"
+	)" || _cache_collector_guardian_identity=""
+	_cache_collector_guardian_state="${_cache_collector_guardian_identity%% *}"
+	_cache_collector_guardian_start="${_cache_collector_guardian_identity#* }"
+	if [ "$_cache_collector_ready" != 1 ] ||
+	   [ -z "$_cache_collector_guardian_identity" ] ||
+	   [ "$_cache_collector_guardian_state" = Z ]; then
+		if cr6608_dashboard_cache_guardian_control_valid "$_cache_collector_control"; then
+			printf 'release\n' >"$_cache_collector_control" 2>/dev/null || true
+		fi
+		exec 8>&-
+		cr6608_dashboard_cache_collector_guardian_stop \
+			"$_cache_collector_guardian_pid" \
+			"$_cache_collector_guardian_start" \
+			"$_cache_collector_control" >/dev/null 2>&1 || true
+		CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+		return 1
+	fi
+	CR6608_DASHBOARD_CACHE_GUARDIAN_PID="$_cache_collector_guardian_pid"
+	CR6608_DASHBOARD_CACHE_GUARDIAN_START="$_cache_collector_guardian_start"
+	CR6608_DASHBOARD_CACHE_GUARDIAN_CONTROL="$_cache_collector_control"
+	exec 8>&-
+	CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=1
+	return 0
+}
+
+cr6608_dashboard_cache_collector_release() {
+	[ "$CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER" = 1 ] || return 0
+	_cache_collector_release_rc=0
+	cr6608_dashboard_cache_collector_guardian_stop \
+		"$CR6608_DASHBOARD_CACHE_GUARDIAN_PID" \
+		"$CR6608_DASHBOARD_CACHE_GUARDIAN_START" \
+		"$CR6608_DASHBOARD_CACHE_GUARDIAN_CONTROL" || _cache_collector_release_rc=1
+	CR6608_DASHBOARD_CACHE_COLLECTOR_OWNER=0
+	CR6608_DASHBOARD_CACHE_GUARDIAN_PID=""
+	CR6608_DASHBOARD_CACHE_GUARDIAN_START=""
+	CR6608_DASHBOARD_CACHE_GUARDIAN_CONTROL=""
+	return "$_cache_collector_release_rc"
+}

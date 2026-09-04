@@ -1,0 +1,32 @@
+From: Codex <codex@local>
+Subject: [PATCH] mtd: ubi: skip rootfs auto-attach for embedded initramfs
+
+An embedded initramfs already supplies the active root filesystem.
+Attaching the persistent partition named "ubi" during the late initcall is
+not needed in that boot mode. It can also start the UBI background thread
+before userspace can apply a RAM-boot safety policy.
+
+Keep the normal flash kernel behavior unchanged. OpenWrt's regular kernel
+has an empty CONFIG_INITRAMFS_SOURCE and continues through
+ubi_auto_attach(). The separately built initramfs kernel has a non-empty
+source list, so it leaves all persistent UBI partitions detached from the
+first userspace instruction.
+
+Signed-off-by: Codex <codex@local>
+---
+--- a/drivers/mtd/ubi/build.c
++++ b/drivers/mtd/ubi/build.c
+@@ -1279,6 +1279,13 @@ static void __init ubi_auto_attach(void)
+ 	size_t len;
+ 	char magic[4];
+ 
++#ifdef CONFIG_INITRAMFS_SOURCE
++	if (CONFIG_INITRAMFS_SOURCE[0] != '\0') {
++		pr_notice("UBI: skip auto-attach for embedded initramfs\n");
++		return;
++	}
++#endif
++
+ 	/* try attaching mtd device named "ubi" or "data" */
+ 	mtd = open_mtd_device("ubi");
+ 	if (IS_ERR(mtd))

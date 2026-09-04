@@ -1,0 +1,253 @@
+#!/bin/sh
+# Local management-plane watchdog.  It never reloads networking, Wi-Fi, or the
+# router: after three bounded loopback HTTP failures it may restart uhttpd only.
+
+for cr6608_close_fd in 4 5 6 7 8; do
+	eval "exec ${cr6608_close_fd}>&-" 2>/dev/null || true
+done
+
+URL="${CR6608_MGMT_URL:-http://127.0.0.1/}"
+HTTP_BIN="${CR6608_MGMT_HTTP_BIN:-}"
+UHTTPD_INIT="${CR6608_MGMT_UHTTPD_INIT:-/etc/init.d/uhttpd}"
+PGREP_BIN="${CR6608_MGMT_PGREP_BIN:-/usr/bin/pgrep}"
+LOGGER_BIN="${CR6608_MGMT_LOGGER_BIN:-/usr/bin/logger}"
+UPTIME_FILE="${CR6608_MGMT_UPTIME_FILE:-/proc/uptime}"
+APPLY_LOCK="${CR6608_APPLY_LOCK:-/var/run/cr6608-apply.lock}"
+PENDING_ROLLBACK="${CR6608_MGMT_PENDING_ROLLBACK:-/etc/smartap-pending-rollback}"
+ROLLBACK_ARMED="${CR6608_MGMT_ROLLBACK_ARMED:-/var/run/cr6608-private/safe-apply/armed}"
+INTERVAL="${CR6608_MGMT_INTERVAL:-20}"
+HTTP_TIMEOUT="${CR6608_MGMT_HTTP_TIMEOUT:-5}"
+COOLDOWN="${CR6608_MGMT_COOLDOWN:-300}"
+BOOT_GRACE="${CR6608_MGMT_BOOT_GRACE:-120}"
+ONESHOT="${CR6608_MGMT_ONESHOT:-0}"
+FAILURE_THRESHOLD=3
+LOCK_OWNER=0
+LOCK_START=""
+
+PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+[ -r "$PRIVATE_RUNTIME_LIB" ] || exit 1
+. "$PRIVATE_RUNTIME_LIB" || exit 1
+
+prepare_state_dir() {
+	if [ -n "${CR6608_MGMT_STATE_DIR:-}" ]; then
+		STATE_DIR="$CR6608_MGMT_STATE_DIR"
+		case "$STATE_DIR" in /*) ;; *) return 1 ;; esac
+		case "$STATE_DIR" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+		state_parent="${STATE_DIR%/*}"
+		state_name="${STATE_DIR##*/}"
+		cr6608_private_component_valid "$state_name" || return 1
+		cr6608_private_parent_secure "$state_parent" || return 1
+		if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
+			cr6608_private_dir_secure "$STATE_DIR" || return 1
+		else
+			mkdir -m 0700 "$STATE_DIR" 2>/dev/null || return 1
+			cr6608_private_dir_secure "$STATE_DIR" || return 1
+		fi
+	else
+		STATE_DIR="$(cr6608_private_runtime_dir management-guard)" || return 1
+	fi
+}
+
+prepare_state_dir || exit 1
+
+valid_uint() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+valid_uint "$INTERVAL" || INTERVAL=20
+valid_uint "$HTTP_TIMEOUT" || HTTP_TIMEOUT=5
+valid_uint "$COOLDOWN" || COOLDOWN=300
+valid_uint "$BOOT_GRACE" || BOOT_GRACE=120
+[ "$INTERVAL" -ge 5 ] 2>/dev/null || INTERVAL=5
+[ "$INTERVAL" -le 300 ] 2>/dev/null || INTERVAL=300
+[ "$HTTP_TIMEOUT" -ge 1 ] 2>/dev/null || HTTP_TIMEOUT=1
+[ "$HTTP_TIMEOUT" -le 15 ] 2>/dev/null || HTTP_TIMEOUT=15
+[ "$COOLDOWN" -ge 60 ] 2>/dev/null || COOLDOWN=60
+[ "$COOLDOWN" -le 3600 ] 2>/dev/null || COOLDOWN=3600
+[ "$BOOT_GRACE" -le 600 ] 2>/dev/null || BOOT_GRACE=600
+
+if [ -z "$HTTP_BIN" ]; then
+	HTTP_BIN="$(command -v uclient-fetch 2>/dev/null || true)"
+	[ -n "$HTTP_BIN" ] || HTTP_BIN="$(command -v wget 2>/dev/null || true)"
+fi
+
+log_message() {
+	[ -x "$LOGGER_BIN" ] || return 0
+	"$LOGGER_BIN" -t cr6608-management-guard "$*" 2>/dev/null || true
+}
+
+uptime_seconds() {
+	value="$(cut -d. -f1 "$UPTIME_FILE" 2>/dev/null)"
+	valid_uint "$value" || return 1
+	printf '%s\n' "$value"
+}
+
+read_state() {
+	name="$1"
+	file="$STATE_DIR/$name"
+	[ -f "$file" ] && [ ! -L "$file" ] || { printf '0\n'; return 0; }
+	IFS= read -r value <"$file" 2>/dev/null || value=0
+	valid_uint "$value" || value=0
+	printf '%s\n' "$value"
+}
+
+write_state() {
+	name="$1"
+	value="$2"
+	temporary="$(cr6608_private_mktemp "$STATE_DIR" state)" || return 1
+	if ! printf '%s\n' "$value" >"$temporary" 2>/dev/null ||
+	   ! cr6608_private_publish_file "$temporary" "$STATE_DIR/$name"; then
+		rm -f -- "$temporary" 2>/dev/null || true
+		return 1
+	fi
+}
+
+reset_failures() {
+	write_state failures 0 >/dev/null 2>&1 || true
+}
+
+run_bounded() {
+	limit="$1"
+	shift
+	"$@" & command_pid=$!
+	(
+		sleep "$limit"
+		kill "$command_pid" 2>/dev/null
+		sleep 1
+		kill -KILL "$command_pid" 2>/dev/null
+	) >/dev/null 2>&1 & guard_pid=$!
+	wait "$command_pid" 2>/dev/null
+	command_rc=$?
+	kill "$guard_pid" 2>/dev/null || true
+	wait "$guard_pid" 2>/dev/null || true
+	return "$command_rc"
+}
+
+probe_http() {
+	[ -n "$HTTP_BIN" ] && [ -x "$HTTP_BIN" ] || return 2
+	# redirect_https is enabled on retail images. Follow that local redirect but
+	# ignore the self-signed certificate while still requiring a valid response.
+	run_bounded $((HTTP_TIMEOUT + 2)) "$HTTP_BIN" --no-check-certificate \
+		-q -T "$HTTP_TIMEOUT" -O /dev/null "$URL"
+}
+
+marker_exists() {
+	[ -e "$1" ] || [ -L "$1" ]
+}
+
+mutation_process_active() {
+	[ -x "$PGREP_BIN" ] || return 1
+	"$PGREP_BIN" -f 'cr6608-quicksettings-apply' >/dev/null 2>&1 && return 0
+	"$PGREP_BIN" -f 'cr6608-safe-apply' >/dev/null 2>&1 && return 0
+	return 1
+}
+
+maintenance_active() { # $1=1 also checks the shared mutation lock
+	marker_exists "$PENDING_ROLLBACK" && return 0
+	marker_exists "$ROLLBACK_ARMED" && return 0
+	mutation_process_active && return 0
+	[ "$1" = 1 ] && marker_exists "$APPLY_LOCK" && return 0
+	return 1
+}
+
+process_start() {
+	awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+
+release_apply_lock() {
+	[ "$LOCK_OWNER" = 1 ] || return 0
+	owner_pid=""; owner_start=""
+	read -r owner_pid owner_start <"$APPLY_LOCK/owner" 2>/dev/null || return 0
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "$LOCK_START" ] || return 0
+	rm -f "$APPLY_LOCK/owner" 2>/dev/null
+	rmdir "$APPLY_LOCK" 2>/dev/null || true
+	LOCK_OWNER=0
+}
+
+acquire_apply_lock() {
+	mkdir "$APPLY_LOCK" 2>/dev/null || return 1
+	LOCK_START="$(process_start "$$")"
+	[ -n "$LOCK_START" ] || { rmdir "$APPLY_LOCK" 2>/dev/null; return 1; }
+	printf '%s %s\n' "$$" "$LOCK_START" >"$APPLY_LOCK/owner" 2>/dev/null || {
+		rmdir "$APPLY_LOCK" 2>/dev/null
+		return 1
+	}
+	LOCK_OWNER=1
+	return 0
+}
+
+cooldown_active() {
+	now="$1"
+	last="$(read_state last_restart)"
+	[ "$last" -le "$now" ] 2>/dev/null || return 0
+	[ $((now - last)) -lt "$COOLDOWN" ]
+}
+
+check_once() {
+	now="$(uptime_seconds 2>/dev/null)" || return 0
+	[ "$now" -ge "$BOOT_GRACE" ] 2>/dev/null || { reset_failures; return 0; }
+	[ -x "$UHTTPD_INIT" ] || { reset_failures; return 0; }
+	"$UHTTPD_INIT" enabled >/dev/null 2>&1 || { reset_failures; return 0; }
+	maintenance_active 1 && { reset_failures; return 0; }
+
+	probe_http
+	probe_rc=$?
+	[ "$probe_rc" -ne 2 ] || { reset_failures; return 0; }
+	[ "$probe_rc" -ne 0 ] || { reset_failures; return 0; }
+
+	failures="$(read_state failures)"
+	failures=$((failures + 1))
+	write_state failures "$failures" >/dev/null 2>&1 || return 0
+	[ "$failures" -ge "$FAILURE_THRESHOLD" ] || return 0
+	cooldown_active "$now" && return 0
+
+	# Serialize the only recovery mutation with Quick Settings and recheck all
+	# guards plus HTTP after locking, closing the check/restart race.
+	acquire_apply_lock || return 0
+	if maintenance_active 0 || ! "$UHTTPD_INIT" enabled >/dev/null 2>&1; then
+		reset_failures
+		release_apply_lock
+		return 0
+	fi
+	if probe_http; then
+		reset_failures
+		release_apply_lock
+		return 0
+	fi
+	now="$(uptime_seconds 2>/dev/null)" || {
+		release_apply_lock
+		return 0
+	}
+	if cooldown_active "$now"; then
+		release_apply_lock
+		return 0
+	fi
+
+	# Record the attempt before invoking the init script so a failing restart
+	# cannot create a tight restart loop. This is the sole recovery action.
+	write_state last_restart "$now" >/dev/null 2>&1 || {
+		release_apply_lock
+		return 0
+	}
+	reset_failures
+	if "$UHTTPD_INIT" restart >/dev/null 2>&1; then
+		log_message "loopback HTTP failed three consecutive checks; restarted uhttpd only"
+	else
+		log_message "loopback HTTP failed three consecutive checks; uhttpd-only restart failed and cooldown is active"
+	fi
+	release_apply_lock
+}
+
+umask 077
+trap 'release_apply_lock; exit 0' HUP INT TERM
+
+if [ "$ONESHOT" = 1 ]; then
+	check_once
+	exit 0
+fi
+
+while :; do
+	check_once
+	sleep "$INTERVAL"
+done

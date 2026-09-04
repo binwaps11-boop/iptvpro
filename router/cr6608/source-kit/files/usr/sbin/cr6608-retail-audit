@@ -1,0 +1,588 @@
+#!/bin/sh
+# Fail-closed sale gate. This command contains no secret and is safe to retain
+# on the unit so factory QA can rerun it immediately before shipment.
+
+set -u
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+LC_ALL=C
+export LC_ALL
+CR_CHAR="$(printf '\r')"
+NL_CHAR='
+'
+
+ROOT_PASSWORD_FILE=''
+WEB_PASSWORD_FILE=''
+WIFI_KEY_FILE=''
+AUDIT_PENDING=0
+ARTIFACT_PROFILE='/rom/etc/cr6608-artifact-profile'
+COMMISSIONING_ARTIFACT_PROFILE='/etc/cr6608-artifact-profile'
+PROC_MOUNTS='/proc/self/mounts'
+EXPECTED_RADIO_POLICY=''
+MARKER='/etc/cr6608-retail-provisioned'
+PENDING_MARKER='/etc/cr6608-retail-provisioning-pending'
+COMMISSIONING_MARKER='/etc/cr6608-retail-commissioning-ram'
+COMMISSIONING_AUTHORIZED_KEYS='/etc/dropbear/authorized_keys'
+SHADOW='/etc/shadow'
+UCI_BIN='/sbin/uci'
+OPENSSL_BIN='/usr/bin/openssl'
+TLS_PROBE_BIN='/bin/uclient-fetch'
+TLS_PROBE_URL='https://127.0.0.1/'
+PROC_NET_TCP='/proc/net/tcp'
+IPV4_ONLY_BIN='/usr/sbin/cr6608-ipv4-only'
+UBUS_BIN='/bin/ubus'
+JSONFILTER_BIN='/usr/bin/jsonfilter'
+IW_BIN='/usr/sbin/iw'
+
+fail() {
+	printf 'retail_security=FAIL reason=%s\n' "$1" >&2
+	exit 1
+}
+
+usage() {
+	printf '%s\n' \
+		'usage: cr6608-retail-audit --root-password-file FILE --wifi-key-file FILE' \
+		'       --web-password-file FILE' \
+		'       [--provisioning-pending]' >&2
+	exit "${1:-2}"
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--root-password-file) [ "$#" -ge 2 ] || usage; ROOT_PASSWORD_FILE="$2"; shift 2 ;;
+		--web-password-file) [ "$#" -ge 2 ] || usage; WEB_PASSWORD_FILE="$2"; shift 2 ;;
+		--wifi-key-file) [ "$#" -ge 2 ] || usage; WIFI_KEY_FILE="$2"; shift 2 ;;
+		--provisioning-pending) AUDIT_PENDING=1; shift ;;
+		-h|--help) usage 0 ;;
+		*) usage ;;
+	esac
+done
+
+artifact_radio_policy() {
+	# No /rom means a legacy/initramfs context and can never gain Retail-v1
+	# status. On squashfs, bind the security result to the immutable identity.
+	if [ ! -e "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ]; then
+		if [ -f "$COMMISSIONING_ARTIFACT_PROFILE" ] &&
+			[ ! -L "$COMMISSIONING_ARTIFACT_PROFILE" ] &&
+			[ -f "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] &&
+			[ -f "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+			[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+			[ -f "$PROC_MOUNTS" ] && [ ! -L "$PROC_MOUNTS" ] &&
+			[ "$(awk '$2 == "/" { type=$3; count++ } END { if (count != 1) exit 1; print type }' "$PROC_MOUNTS" 2>/dev/null)" = tmpfs ] &&
+			[ "$(wc -l < "$COMMISSIONING_ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+			grep -Fqx 'profile=retail-v1' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			grep -Fqx 'sale_ready=NO' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			grep -Fqx 'radio_policy=retail-disabled' "$COMMISSIONING_ARTIFACT_PROFILE" &&
+			[ "$(wc -l < "$COMMISSIONING_MARKER" 2>/dev/null | tr -d '[:space:]')" = 6 ] &&
+			grep -Fqx 'profile=retail-commissioning-ram-v1' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'sale_ready=NO' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'boot_policy=ram-only' "$COMMISSIONING_MARKER" &&
+			grep -Fqx 'password_auth=disabled' "$COMMISSIONING_MARKER" &&
+			grep -Eq '^factory_key_fingerprint=SHA256:[A-Za-z0-9+/]{43}$' "$COMMISSIONING_MARKER" &&
+			grep -Fqx "factory_key_sha256=$(sha256sum "$COMMISSIONING_AUTHORIZED_KEYS" | awk '{print $1}')" \
+				"$COMMISSIONING_MARKER"; then
+			printf 'retail-disabled-after-reboot\n'
+			return 0
+		fi
+		printf 'LAB_ARTIFACT_BLOCKED\n'
+		return 0
+	fi
+	[ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] || return 1
+	[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] || return 1
+	if grep -Fqx 'profile=retail-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=retail-disabled' "$ARTIFACT_PROFILE"; then
+		printf 'retail-disabled-after-reboot\n'
+		return 0
+	fi
+	if grep -Fqx 'profile=lab-operator-v1' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+		grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$ARTIFACT_PROFILE"; then
+		printf 'LAB_ARTIFACT_BLOCKED\n'
+		return 0
+	fi
+	return 1
+}
+EXPECTED_RADIO_POLICY="$(artifact_radio_policy)" || fail unsupported_artifact_profile
+
+commissioning_marker_present=0
+commissioning_key_present=0
+[ ! -e "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] ||
+	commissioning_marker_present=1
+[ ! -e "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+	[ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] || commissioning_key_present=1
+if [ "$commissioning_marker_present" = 1 ] || [ "$commissioning_key_present" = 1 ]; then
+	[ "$commissioning_marker_present" = 1 ] && [ "$commissioning_key_present" = 1 ] ||
+		fail factory_commissioning_state_incomplete
+	[ -f "$COMMISSIONING_MARKER" ] && [ ! -L "$COMMISSIONING_MARKER" ] &&
+		[ "$(/bin/stat -c '%u' "$COMMISSIONING_MARKER" 2>/dev/null)" = 0 ] &&
+		[ "$(/bin/stat -c '%a' "$COMMISSIONING_MARKER" 2>/dev/null)" = 400 ] ||
+		fail factory_commissioning_marker_invalid
+	[ -f "$COMMISSIONING_AUTHORIZED_KEYS" ] && [ ! -L "$COMMISSIONING_AUTHORIZED_KEYS" ] &&
+		[ "$(/bin/stat -c '%u' "$COMMISSIONING_AUTHORIZED_KEYS" 2>/dev/null)" = 0 ] &&
+		[ "$(/bin/stat -c '%a' "$COMMISSIONING_AUTHORIZED_KEYS" 2>/dev/null)" = 600 ] ||
+		fail factory_commissioning_key_invalid
+	grep -Fqx 'profile=retail-commissioning-ram-v1' "$COMMISSIONING_MARKER" &&
+		grep -Fqx 'sale_ready=NO' "$COMMISSIONING_MARKER" &&
+		grep -Fqx 'boot_policy=ram-only' "$COMMISSIONING_MARKER" &&
+	grep -Fqx 'password_auth=disabled' "$COMMISSIONING_MARKER" ||
+		fail factory_commissioning_marker_invalid
+	grep -Fqx "factory_key_sha256=$(sha256sum "$COMMISSIONING_AUTHORIZED_KEYS" | awk '{print $1}')" \
+		"$COMMISSIONING_MARKER" || fail factory_commissioning_key_binding_invalid
+	[ "$AUDIT_PENDING" = 1 ] || fail factory_commissioning_access_present
+fi
+
+secure_input() {
+	[ -n "$1" ] && [ -f "$1" ] && [ ! -L "$1" ] || return 1
+	[ "$(/bin/stat -c '%u' "$1" 2>/dev/null)" = 0 ] || return 1
+	mode="$(/bin/stat -c '%a' "$1" 2>/dev/null)"
+	case "$mode" in 600|400) ;; *) return 1 ;; esac
+	return 0
+}
+
+read_secret() {
+	[ "$(wc -l < "$1" 2>/dev/null | tr -d ' ')" = 1 ] || return 1
+	[ "$(wc -c < "$1" 2>/dev/null | tr -d ' ')" -le "$2" ] 2>/dev/null || return 1
+	IFS= read -r value < "$1" || [ -n "${value:-}" ]
+	case "${value:-}" in *"$CR_CHAR"*|*"$NL_CHAR"*) return 1 ;; esac
+	printf %s "$value"
+}
+
+[ "$(/usr/bin/id -u 2>/dev/null)" = 0 ] || fail must_run_as_root
+secure_input "$ROOT_PASSWORD_FILE" || fail insecure_root_password_file
+secure_input "$WEB_PASSWORD_FILE" || fail insecure_web_password_file
+secure_input "$WIFI_KEY_FILE" || fail insecure_wifi_key_file
+root_password="$(read_secret "$ROOT_PASSWORD_FILE" 81)" || fail invalid_root_password_file
+web_password="$(read_secret "$WEB_PASSWORD_FILE" 81)" || fail invalid_web_password_file
+wifi_key="$(read_secret "$WIFI_KEY_FILE" 64)" || fail invalid_wifi_key_file
+[ "${#root_password}" -ge 12 ] 2>/dev/null || fail root_password_too_short
+[ "${#web_password}" -ge 12 ] 2>/dev/null || fail web_password_too_short
+[ "${#wifi_key}" -ge 12 ] 2>/dev/null && [ "${#wifi_key}" -le 63 ] 2>/dev/null || \
+	fail wifi_key_length
+case "$wifi_key" in *[![:print:]]*) fail wifi_key_not_printable_ascii ;; esac
+case "$root_password$web_password" in *[![:print:]]*) fail password_not_printable_ascii ;; esac
+[ "$root_password" != "$wifi_key" ] && [ "$root_password" != "$web_password" ] && \
+	[ "$wifi_key" != "$web_password" ] || fail credentials_must_be_distinct
+[ -x "$OPENSSL_BIN" ] || fail openssl_missing
+
+if [ "$AUDIT_PENDING" = 1 ]; then
+	ACTIVE_MARKER="$PENDING_MARKER"
+	EXPECTED_AUDIT_COMPLETE=NO
+else
+	[ ! -e "$PENDING_MARKER" ] && [ ! -L "$PENDING_MARKER" ] || fail provisioning_pending
+	ACTIVE_MARKER="$MARKER"
+	EXPECTED_AUDIT_COMPLETE=YES
+fi
+[ -f "$ACTIVE_MARKER" ] && [ ! -L "$ACTIVE_MARKER" ] || fail provisioning_marker_missing
+[ "$(/bin/stat -c '%u' "$ACTIVE_MARKER" 2>/dev/null)" = 0 ] || fail provisioning_marker_owner
+marker_mode="$(/bin/stat -c '%a' "$ACTIVE_MARKER" 2>/dev/null)"
+case "$marker_mode" in 600|400) ;; *) fail provisioning_marker_mode ;; esac
+[ "$(wc -l < "$ACTIVE_MARKER" 2>/dev/null | tr -d '[:space:]')" = 8 ] || \
+	fail provisioning_marker_schema
+marker_value() {
+	marker_key="$1"
+	[ "$(grep -c "^${marker_key}=" "$ACTIVE_MARKER" 2>/dev/null)" -eq 1 ] 2>/dev/null || \
+		fail "provisioning_marker_${marker_key}_count"
+	sed -n "s/^${marker_key}=//p" "$ACTIVE_MARKER"
+}
+[ "$(marker_value profile)" = retail-v2 ] || fail provisioning_marker_profile
+MARKET_COUNTRY="$(marker_value market_country)"
+case "$MARKET_COUNTRY" in [A-Z][A-Z]) [ "$MARKET_COUNTRY" != 00 ] || fail provisioning_marker_country ;; *) fail provisioning_marker_country ;; esac
+MARKER_AP24="$(marker_value primary_ap_radio0)"
+MARKER_AP5="$(marker_value primary_ap_radio1)"
+case "$MARKER_AP24" in ''|*[!A-Za-z0-9_]*) fail provisioning_marker_primary_ap ;; esac
+case "$MARKER_AP5" in ''|*[!A-Za-z0-9_]*) fail provisioning_marker_primary_ap ;; esac
+[ -n "$MARKER_AP24" ] && [ -n "$MARKER_AP5" ] && [ "$MARKER_AP24" != "$MARKER_AP5" ] || \
+	fail provisioning_marker_primary_ap
+[ "$(marker_value sale_ready)" = NO ] || fail provisioning_marker_sale_boundary
+[ "$(marker_value radio_policy)" = "$EXPECTED_RADIO_POLICY" ] || fail provisioning_marker_sale_boundary
+[ "$(marker_value audit_complete)" = "$EXPECTED_AUDIT_COMPLETE" ] || \
+	fail provisioning_marker_audit_state
+case "$(marker_value provisioned_utc)" in
+	????-??-??T??:??:??Z) ;;
+	*) fail provisioning_marker_timestamp ;;
+esac
+
+root_hash="$(awk -F: '$1 == "root" { print $2; exit }' "$SHADOW" 2>/dev/null)"
+case "$root_hash" in
+	''|'!'|'*'|'x'|'!'*) fail root_account_locked ;;
+esac
+case "$root_hash" in
+	\$1\$*) fail root_hash_md5 ;;
+	\$6\$*) ;;
+	*) fail root_hash_format ;;
+esac
+root_fingerprint="$(printf %s "$root_hash" | sha256sum | awk '{print $1}')"
+case "$root_fingerprint" in
+	086f9f99e700f9d639639e9a3ea28a0bdf4838d0ddec68c9752641ab9be2779b|\
+	b627c9b421c1f1c4fa119b1c5c532928024843ced55fe09dd25d6e1c548ad573|\
+	b6139c45d43bc9a0262c02a42d8784da248e498eda9434e3cb673dbd4cf40ebe)
+		fail retired_shared_root_credential
+		;;
+esac
+root_hash_tail="${root_hash#\$6\$}"
+root_salt="${root_hash_tail%%\$*}"
+root_body="${root_hash_tail#*\$}"
+[ "$root_hash_tail" != "$root_salt" ] && [ "${#root_salt}" -ge 8 ] 2>/dev/null && \
+	[ "${#root_salt}" -le 16 ] 2>/dev/null && [ "${#root_body}" -eq 86 ] 2>/dev/null || \
+	fail root_hash_format
+case "$root_salt$root_body" in *[!A-Za-z0-9./]*) fail root_hash_format ;; esac
+verified_root_hash="$("$OPENSSL_BIN" passwd -6 -salt "$root_salt" -stdin \
+	< "$ROOT_PASSWORD_FILE" 2>/dev/null)" || fail root_password_verify
+[ "$verified_root_hash" = "$root_hash" ] || fail root_password_mismatch
+root_secret_fingerprint="$(printf %s "$root_password" | sha256sum | awk '{print $1}')"
+case "$root_secret_fingerprint" in
+	1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+	e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+	8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+	5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+	ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+	15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+	c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+	b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff)
+		fail forbidden_root_password
+		;;
+esac
+
+command -v "$UCI_BIN" >/dev/null 2>&1 || fail uci_missing
+
+rpcd_root_login=''
+rpcd_root_count=0
+for section in $($UCI_BIN -q show rpcd 2>/dev/null |
+	sed -n 's/^rpcd\.\([^=]*\)=login$/\1/p'); do
+	[ "$($UCI_BIN -q get "rpcd.${section}.username" 2>/dev/null)" = root ] || continue
+	rpcd_root_login="$section"
+	rpcd_root_count=$((rpcd_root_count + 1))
+done
+[ "$rpcd_root_count" -eq 1 ] || fail rpcd_root_login_ambiguous
+[ "$($UCI_BIN -q get "rpcd.${rpcd_root_login}.read" 2>/dev/null)" = '*' ] || \
+	fail rpcd_root_read_acl
+[ "$($UCI_BIN -q get "rpcd.${rpcd_root_login}.write" 2>/dev/null)" = '*' ] || \
+	fail rpcd_root_write_acl
+web_hash="$($UCI_BIN -q get "rpcd.${rpcd_root_login}.password" 2>/dev/null)"
+case "$web_hash" in
+	\$6\$*) ;;
+	*) fail web_hash_format ;;
+esac
+[ "$web_hash" != "$root_hash" ] || fail web_root_hash_reuse
+web_hash_fingerprint="$(printf %s "$web_hash" | sha256sum | awk '{print $1}')"
+case "$web_hash_fingerprint" in
+	937a9ed53288a50d9fec5fea6a94ab7445e1e440f752356068c249c1f9bc1fd3)
+		fail retired_shared_web_credential
+		;;
+esac
+web_hash_tail="${web_hash#\$6\$}"
+web_salt="${web_hash_tail%%\$*}"
+web_body="${web_hash_tail#*\$}"
+[ "$web_hash_tail" != "$web_salt" ] && [ "${#web_salt}" -ge 8 ] 2>/dev/null && \
+	[ "${#web_salt}" -le 16 ] 2>/dev/null && [ "${#web_body}" -eq 86 ] 2>/dev/null || \
+	fail web_hash_format
+case "$web_salt$web_body" in *[!A-Za-z0-9./]*) fail web_hash_format ;; esac
+verified_web_hash="$("$OPENSSL_BIN" passwd -6 -salt "$web_salt" -stdin \
+	< "$WEB_PASSWORD_FILE" 2>/dev/null)" || fail web_password_verify
+[ "$verified_web_hash" = "$web_hash" ] || fail web_password_mismatch
+
+web_secret_fingerprint="$(printf %s "$web_password" | sha256sum | awk '{print $1}')"
+case "$web_secret_fingerprint" in
+	1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+	e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+	8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+	5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+	ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+	15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+	c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+	b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff)
+		fail forbidden_web_password
+		;;
+esac
+
+[ "$($UCI_BIN -q get 'system.@system[0].ttylogin' 2>/dev/null)" = 1 ] || \
+	fail console_password_login_disabled
+redirect="$($UCI_BIN -q get uhttpd.main.redirect_https 2>/dev/null)"
+[ "$redirect" = 1 ] || fail https_redirect_disabled
+https_endpoints="$($UCI_BIN -q get uhttpd.main.listen_https 2>/dev/null)"
+endpoint_v4=0
+endpoint_count=0
+for endpoint in $https_endpoints; do
+	endpoint_count=$((endpoint_count + 1))
+	case "$endpoint" in
+		0.0.0.0:443) [ "$endpoint_v4" = 0 ] || fail https_listener_duplicate; endpoint_v4=1 ;;
+		*) fail https_listener_unexpected ;;
+	esac
+done
+[ "$endpoint_count" -eq 1 ] && [ "$endpoint_v4" = 1 ] || \
+	fail https_listener_set_incomplete
+
+cert_file="$($UCI_BIN -q get uhttpd.main.cert 2>/dev/null)"
+key_file="$($UCI_BIN -q get uhttpd.main.key 2>/dev/null)"
+case "$cert_file" in /*) ;; *) fail https_cert_config_invalid ;; esac
+case "$key_file" in /*) ;; *) fail https_key_config_invalid ;; esac
+[ -s "$cert_file" ] && [ -f "$cert_file" ] && [ ! -L "$cert_file" ] || \
+	fail https_cert_file_invalid
+[ -s "$key_file" ] && [ -f "$key_file" ] && [ ! -L "$key_file" ] || \
+	fail https_key_file_invalid
+[ "$(/bin/stat -c '%u' "$cert_file" 2>/dev/null)" = 0 ] || fail https_cert_owner
+[ "$(/bin/stat -c '%u' "$key_file" 2>/dev/null)" = 0 ] || fail https_key_owner
+cert_mode="$(/bin/stat -c '%a' "$cert_file" 2>/dev/null)"
+key_mode="$(/bin/stat -c '%a' "$key_file" 2>/dev/null)"
+case "$cert_mode" in 400|440|444|600|640|644) ;; *) fail https_cert_mode ;; esac
+case "$key_mode" in 400|600) ;; *) fail https_key_mode ;; esac
+"$OPENSSL_BIN" x509 -in "$cert_file" -noout -checkend 0 \
+	>/dev/null 2>&1 || fail https_cert_parse_or_expired
+"$OPENSSL_BIN" pkey -in "$key_file" -check -noout \
+	>/dev/null 2>&1 || fail https_key_invalid
+cert_public_key="$("$OPENSSL_BIN" x509 -in "$cert_file" -pubkey -noout 2>/dev/null)" || \
+	fail https_cert_public_key_invalid
+key_public_key="$("$OPENSSL_BIN" pkey -in "$key_file" -pubout 2>/dev/null)" || \
+	fail https_key_public_key_invalid
+[ -n "$cert_public_key" ] && [ "$cert_public_key" = "$key_public_key" ] || \
+	fail https_cert_key_mismatch
+cert_public_key=''; key_public_key=''
+
+has_listen_443() {
+	awk 'NR > 1 {
+		n = split($2, local, ":")
+		if (toupper(local[n]) == "01BB" && toupper($4) == "0A") found=1
+	} END { exit(found ? 0 : 1) }' "$1" 2>/dev/null
+}
+[ -r "$PROC_NET_TCP" ] && has_listen_443 "$PROC_NET_TCP" || fail https_ipv4_runtime_missing
+
+# The product policy is IPv4-only. Requiring an IPv6 TLS listener here made
+# the sale gate logically impossible to satisfy: the same image disables IPv6
+# on every interface and rejects every IPv6 socket. Reuse the shipped,
+# fail-closed runtime verifier so HTTPS is required on IPv4 while IPv6 must be
+# absent end to end (addresses, TCP listeners and UDP listeners).
+[ -x "$IPV4_ONLY_BIN" ] || fail ipv6_policy_probe_missing
+ipv4_only_state="$($IPV4_ONLY_BIN --json 2>/dev/null)" || \
+	fail ipv6_policy_runtime_failed
+[ "$ipv4_only_state" = '{"ok":true,"ipv6_disabled":true,"all_interfaces":true}' ] || \
+	fail ipv6_policy_runtime_invalid
+ipv4_only_state=''
+
+[ -x "$TLS_PROBE_BIN" ] || fail https_tls_probe_missing
+"$TLS_PROBE_BIN" --no-check-certificate -q -T 5 -O /dev/null "$TLS_PROBE_URL" \
+	>/dev/null 2>&1 || fail https_tls_handshake_failed
+
+ALTERNATE_CREDENTIAL_OPTIONS='sae_password sae_password_file wpa_psk_file ppsk ppsk_file
+auth_server auth_port auth_secret auth_server2 auth_port2 auth_secret2
+acct_server acct_port acct_secret acct_server2 acct_port2 acct_secret2
+dae_client dae_port dae_secret dynamic_vlan vlan_file
+multi_ap_backhaul_ssid multi_ap_backhaul_key wps_pin ap_pin'
+WPS_ENABLE_OPTIONS='wps_pushbutton wps_label ext_registrar wps_pbc_in_m1 wps_independent'
+
+primary_ap_network_eligible() {
+	case "$1" in lan|cr6608_vlan) return 0 ;; esac
+	return 1
+}
+primary_ap_base_eligible() {
+	pa_section="$1"; pa_radio="$2"
+	case "$pa_section" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+	[ "$($UCI_BIN -q get "wireless.${pa_section}" 2>/dev/null)" = wifi-iface ] || return 1
+	[ "$($UCI_BIN -q get "wireless.${pa_section}.device" 2>/dev/null)" = "$pa_radio" ] || return 1
+	[ "$($UCI_BIN -q get "wireless.${pa_section}.mode" 2>/dev/null)" = ap ] || return 1
+	primary_ap_network_eligible "$($UCI_BIN -q get "wireless.${pa_section}.network" 2>/dev/null)"
+}
+primary_ap_fallback_eligible() {
+	# Resolve identity from topology only. Unsupported WDS/Multi-AP roles are
+	# rejected later with a precise per-section reason instead of being hidden
+	# behind the generic primary-AP-resolution error.
+	primary_ap_base_eligible "$1" "$2"
+}
+primary_ap_canonical_eligible() {
+	primary_ap_base_eligible "$1" "$2"
+}
+find_primary_ap() {
+	pa_radio="$1"; pa_preferred="$2"; pa_selected=''; pa_count=0
+	if primary_ap_canonical_eligible "$pa_preferred" "$pa_radio"; then
+		printf '%s\n' "$pa_preferred"
+		return 0
+	fi
+	for pa_candidate in $($UCI_BIN -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+		[ "$pa_candidate" != "$pa_preferred" ] || continue
+		primary_ap_fallback_eligible "$pa_candidate" "$pa_radio" || continue
+		pa_selected="$pa_candidate"; pa_count=$((pa_count + 1))
+	done
+	[ "$pa_count" -eq 1 ] || return 1
+	printf '%s\n' "$pa_selected"
+}
+
+validate_personal_key() {
+	vpk_section="$1"
+	vpk_key="$($UCI_BIN -q get "wireless.${vpk_section}.key" 2>/dev/null)"
+	[ "${#vpk_key}" -ge 12 ] 2>/dev/null && [ "${#vpk_key}" -le 63 ] 2>/dev/null || \
+		fail "${vpk_section}_key_length"
+	case "$vpk_key" in *[![:print:]]*) fail "${vpk_section}_key_not_printable_ascii" ;; esac
+	[ "$vpk_key" != "$root_password" ] || fail "${vpk_section}_root_key_reuse"
+	[ "$vpk_key" != "$web_password" ] || fail "${vpk_section}_web_key_reuse"
+	vpk_fingerprint="$(printf %s "$vpk_key" | sha256sum | awk '{print $1}')"
+	case "$vpk_fingerprint" in
+		1547630f6c54adf483da52a5c711244a1bf0f72f640a3eb523d78b85e630adb2|\
+		e14cb9e5c0eeee0ea313a4e04fbd10aa17ac17aa33a3cad4bdfe74b87ca18ef8|\
+		8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918|\
+		5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8|\
+		ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f|\
+		15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225|\
+		c0a7a37a49b0b6d5108289ebfe007e4c549014fc977fcb18fb847783061395ec|\
+		b667cbfdf83b01483f695bc543142c3a5d0b61c4d5d843730ede5282e7d8f3ff)
+			fail "${vpk_section}_forbidden_shared_key"
+			;;
+	esac
+}
+
+resolved_ap24="$(find_primary_ap radio0 wifinet0)" || fail radio0_primary_ap_resolution
+resolved_ap5="$(find_primary_ap radio1 wifinet1)" || fail radio1_primary_ap_resolution
+[ "$resolved_ap24" = "$MARKER_AP24" ] && [ "$resolved_ap5" = "$MARKER_AP5" ] || \
+	fail provisioning_marker_primary_ap_mismatch
+
+for radio in radio0 radio1; do
+	[ "$($UCI_BIN -q get "wireless.${radio}.disabled" 2>/dev/null)" != 1 ] || \
+		fail "${radio}_disabled"
+	if "$UCI_BIN" -q get "wireless.${radio}.hostapd_options" >/dev/null 2>&1; then
+		fail "${radio}_raw_hostapd_options"
+	fi
+done
+protected_ap_radio0=0
+protected_ap_radio1=0
+for section in $($UCI_BIN -q show wireless 2>/dev/null |
+	sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+	[ "$($UCI_BIN -q get "wireless.${section}.disabled" 2>/dev/null)" != 1 ] || continue
+	radio="$($UCI_BIN -q get "wireless.${section}.device" 2>/dev/null)"
+	case "$radio" in radio0|radio1) ;; *) fail "${section}_unsupported_radio" ;; esac
+	mode="$($UCI_BIN -q get "wireless.${section}.mode" 2>/dev/null)"
+	if "$UCI_BIN" -q get "wireless.${section}.hostapd_bss_options" >/dev/null 2>&1; then
+		fail "${section}_raw_hostapd_bss_options"
+	fi
+	for option in $ALTERNATE_CREDENTIAL_OPTIONS; do
+		if "$UCI_BIN" -q get "wireless.${section}.${option}" >/dev/null 2>&1; then
+			fail "${section}_alternate_credential_${option}"
+		fi
+	done
+	for option in $WPS_ENABLE_OPTIONS; do
+		wps_value="$($UCI_BIN -q get "wireless.${section}.${option}" 2>/dev/null)"
+		case "$wps_value" in ''|0|off|false|no|disabled) ;; *) fail "${section}_wps_enabled_${option}" ;; esac
+	done
+	encryption="$($UCI_BIN -q get "wireless.${section}.encryption" 2>/dev/null)"
+	case "$mode" in
+		ap)
+			case "$($UCI_BIN -q get "wireless.${section}.wds" 2>/dev/null)" in
+				''|0) ;;
+				*) fail "${section}_wds_ap_role_not_allowlisted" ;;
+			esac
+			case "$($UCI_BIN -q get "wireless.${section}.multi_ap" 2>/dev/null)" in
+				''|0) ;;
+				*) fail "${section}_multi_ap_role_not_allowlisted" ;;
+			esac
+			case "$encryption" in psk2|psk2+ccmp|sae|sae-mixed) ;; *) fail "${section}_open_or_unsupported_encryption" ;; esac
+			pmf="$($UCI_BIN -q get "wireless.${section}.ieee80211w" 2>/dev/null)"
+			case "$pmf" in 1|2) ;; *) fail "${section}_pmf_disabled" ;; esac
+			validate_personal_key "$section"
+			case "$radio" in
+				radio0) protected_ap_radio0=$((protected_ap_radio0 + 1)) ;;
+				radio1) protected_ap_radio1=$((protected_ap_radio1 + 1)) ;;
+			esac
+			;;
+		mesh)
+			# Supported 802.11s roles are owned by the two Quick Settings engines.
+			# prplMesh/EasyMesh remains unaffected: it uses the normal APs and its
+			# separately gated wired-backhaul controller/agent runtime.
+			case "$section" in smartap_mesh|cr6608_mesh) ;; *) fail "${section}_wireless_role_not_allowlisted" ;; esac
+			primary_ap_network_eligible "$($UCI_BIN -q get "wireless.${section}.network" 2>/dev/null)" || \
+				fail "${section}_wireless_network_not_allowlisted"
+			[ -n "$($UCI_BIN -q get "wireless.${section}.mesh_id" 2>/dev/null)" ] || fail "${section}_mesh_id_missing"
+			[ "$($UCI_BIN -q get "wireless.${section}.mesh_fwding" 2>/dev/null)" = 1 ] || fail "${section}_mesh_forwarding_disabled"
+			[ "$encryption" = sae ] || fail "${section}_open_or_unsupported_encryption"
+			[ "$($UCI_BIN -q get "wireless.${section}.ieee80211w" 2>/dev/null)" = 2 ] || fail "${section}_pmf_disabled"
+			validate_personal_key "$section"
+			;;
+		sta)
+			case "$section" in smartap_wds|cr6608_wds) ;; *) fail "${section}_wireless_role_not_allowlisted" ;; esac
+			[ "$($UCI_BIN -q get "wireless.${section}.wds" 2>/dev/null)" = 1 ] || fail "${section}_wds_role_invalid"
+			primary_ap_network_eligible "$($UCI_BIN -q get "wireless.${section}.network" 2>/dev/null)" || \
+				fail "${section}_wireless_network_not_allowlisted"
+			case "$encryption" in psk2|psk2+ccmp|sae|sae-mixed) ;; *) fail "${section}_open_or_unsupported_encryption" ;; esac
+			pmf="$($UCI_BIN -q get "wireless.${section}.ieee80211w" 2>/dev/null)"
+			case "$pmf" in 1|2) ;; *) fail "${section}_pmf_disabled" ;; esac
+			validate_personal_key "$section"
+			;;
+		*) fail "${section}_wireless_mode_not_allowlisted" ;;
+	esac
+done
+[ "$protected_ap_radio0" -ge 1 ] || fail radio0_protected_ap_missing
+[ "$protected_ap_radio1" -ge 1 ] || fail radio1_protected_ap_missing
+
+for primary_section in "$MARKER_AP24" "$MARKER_AP5"; do
+	[ "$($UCI_BIN -q get "wireless.${primary_section}.key" 2>/dev/null)" = "$wifi_key" ] || \
+		fail "${primary_section}_provisioned_wifi_key_mismatch"
+done
+
+# A successful wifi reload is asynchronous.  Bind each marker primary section
+# to netifd's live interface, the expected AP type, and an ENABLED hostapd
+# object so a healthy secondary BSS cannot mask a failed sale AP.
+[ -x "$UBUS_BIN" ] || fail ubus_missing
+[ -x "$JSONFILTER_BIN" ] || fail jsonfilter_missing
+[ -x "$IW_BIN" ] || fail iw_missing
+wireless_runtime="$($UBUS_BIN -S -t 5 call network.wireless status 2>/dev/null)" || \
+	fail wireless_runtime_unavailable
+runtime_value() {
+	printf '%s\n' "$wireless_runtime" | "$JSONFILTER_BIN" -e "$1" 2>/dev/null
+}
+runtime_primary_ifname() {
+	rpi_radio="$1"; rpi_section="$2"; rpi_index=0
+	while [ "$rpi_index" -lt 32 ]; do
+		rpi_status_section="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].section")"
+		[ -n "$rpi_status_section" ] || return 1
+		if [ "$rpi_status_section" = "$rpi_section" ]; then
+			rpi_ifname="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].ifname")"
+			rpi_mode="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].config.mode")"
+			case "$rpi_ifname" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+			[ "$rpi_mode" = ap ] || return 1
+			printf '%s\n' "$rpi_ifname"
+			return 0
+		fi
+		rpi_index=$((rpi_index + 1))
+	done
+	return 1
+}
+for runtime_binding in "radio0:$MARKER_AP24" "radio1:$MARKER_AP5"; do
+	runtime_radio="${runtime_binding%%:*}"
+	runtime_section="${runtime_binding#*:}"
+	[ "$(runtime_value "@.${runtime_radio}.up")" = true ] &&
+		[ "$(runtime_value "@.${runtime_radio}.disabled")" != true ] &&
+		[ "$(runtime_value "@.${runtime_radio}.pending")" != true ] ||
+		fail "${runtime_radio}_runtime_not_ready"
+	runtime_ifname="$(runtime_primary_ifname "$runtime_radio" "$runtime_section")" ||
+		fail "${runtime_section}_runtime_missing"
+	"$IW_BIN" dev "$runtime_ifname" info 2>/dev/null | awk '
+		$1 == "type" && $2 == "AP" { found=1 }
+		END { exit(found ? 0 : 1) }' || fail "${runtime_section}_runtime_not_ap"
+	"$UBUS_BIN" -S list "hostapd.${runtime_ifname}" 2>/dev/null |
+		grep -Fqx "hostapd.${runtime_ifname}" || fail "${runtime_section}_hostapd_missing"
+	hostapd_runtime="$($UBUS_BIN -S -t 5 call "hostapd.${runtime_ifname}" get_status 2>/dev/null)" ||
+		fail "${runtime_section}_hostapd_status"
+	[ "$(printf '%s\n' "$hostapd_runtime" | "$JSONFILTER_BIN" -e '@.status' 2>/dev/null)" = ENABLED ] ||
+		fail "${runtime_section}_hostapd_not_enabled"
+done
+
+root_password=''; web_password=''; wifi_key=''; verified_root_hash=''; verified_web_hash=''
+if [ "$AUDIT_PENDING" = 1 ]; then
+	case "$EXPECTED_RADIO_POLICY" in
+		LAB_ARTIFACT_BLOCKED)
+			printf 'retail_security=PENDING_PASS sale_ready=NO radio_policy=LAB_ARTIFACT_BLOCKED\n'
+			;;
+		retail-disabled-after-reboot)
+			printf 'retail_security=PENDING_PASS sale_ready=NO radio_policy=retail-disabled-after-reboot\n'
+			;;
+		*) fail internal_artifact_policy ;;
+	esac
+else
+	case "$EXPECTED_RADIO_POLICY" in
+		LAB_ARTIFACT_BLOCKED)
+			printf 'retail_security=PASS sale_ready=NO radio_policy=LAB_ARTIFACT_BLOCKED\n'
+			;;
+		retail-disabled-after-reboot)
+			printf 'retail_security=PASS sale_ready=NO radio_policy=retail-disabled-after-reboot\n'
+			;;
+		*) fail internal_artifact_policy ;;
+	esac
+fi

@@ -1,0 +1,27 @@
+{
+  "board_name": "xiaomi,cr6606",
+  "uci": {
+    "rpcd.@login[0]": "login",
+    "rpcd.@login[0].username": "root",
+    "rpcd.@login[0].password": "$p$root",
+    "network.@device[0]": "device",
+    "network.@device[0].name": "br-lan",
+    "network.@device[0].stp": "1",
+    "network.@device[0].forward_delay": "2",
+    "network.lan": "interface",
+    "network.lan.ipaddr": "172.20.8.1",
+    "dhcp.lan": "dhcp",
+    "dhcp.lan.ignore": "0",
+    "dropbear.@dropbear[0]": "dropbear",
+    "dropbear.@dropbear[0].Port": "2222",
+    "smartap.security": "smartap",
+    "smartap.security.loop_guard": "1",
+    "factory.calibration.sha256": "wrong-board-calibration-must-not-change"
+  },
+  "files": {
+    "etc/shadow": "root:$6$otherboard$ssh-hash-must-not-change:20800:0:99999:7:::\n",
+    "etc/config/dropbear": "config dropbear\n\toption Port '2222'\n",
+    "etc/config/dhcp": "config dhcp 'lan'\n\toption ignore '0'\n",
+    "factory.bin": "NON-CR6608 FACTORY SENTINEL\n"
+  }
+}

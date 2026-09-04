@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# all/default may be applied before the MT7621 conduit or a virtual interface
+# is created. Enforce the fixed IPv4-only policy at device creation.
+device="${INTERFACE:-${DEVICE:-}}"
+case "$device" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
+[ -w "/proc/sys/net/ipv6/conf/$device/disable_ipv6" ] || exit 0
+/usr/sbin/cr6608-ipv4-only interface "$device" >/dev/null 2>&1 ||
+	logger -t cr6608-ipv4-only "failed to disable IPv6 on $device"
+exit 0

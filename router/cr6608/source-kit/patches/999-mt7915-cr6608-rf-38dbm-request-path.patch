@@ -1,0 +1,2441 @@
+diff --git a/mac80211.c b/mac80211.c
+index 084d9cc..4cd6d36 100644
+--- a/mac80211.c
++++ b/mac80211.c
+@@ -1029,6 +1029,35 @@ void mt76_update_survey(struct mt76_phy *phy)
+ }
+ EXPORT_SYMBOL_GPL(mt76_update_survey);
+ 
++static bool mt76_channel_reset_commit(struct mt76_dev *dev,
++				       struct mt76_phy *phy)
++{
++	unsigned long old, new;
++
++	/* Recovery owns MCU_RESET on the primary PHY.  Clear this channel's
++	 * RESET bit only with a compare/exchange, then verify the cross-PHY MCU
++	 * hand-off again.  A concurrent producer either makes the cmpxchg retry
++	 * or restores RESET before the worker is unparked.
++	 */
++	do {
++		if (test_bit(MT76_MCU_RESET, &dev->phy.state))
++			return false;
++
++		old = READ_ONCE(phy->state);
++		if (old & BIT(MT76_MCU_RESET))
++			return false;
++		new = old & ~BIT(MT76_RESET);
++	} while (cmpxchg(&phy->state, old, new) != old);
++
++	smp_mb__after_atomic();
++	if (test_bit(MT76_MCU_RESET, &dev->phy.state)) {
++		set_bit(MT76_RESET, &phy->state);
++		return false;
++	}
++
++	return true;
++}
++
+ int __mt76_set_channel(struct mt76_phy *phy, struct cfg80211_chan_def *chandef,
+ 		       bool offchannel)
+ {
+@@ -1059,7 +1088,12 @@ int __mt76_set_channel(struct mt76_phy *phy, struct cfg80211_chan_def *chandef,
+ 
+ 	ret = dev->drv->set_channel(phy);
+ 
+-	clear_bit(MT76_RESET, &phy->state);
++	/* A driver that escalated a channel/SKU failure to MCU recovery owns
++	 * the paused state.  Do not undo that fail-closed hand-off here.
++	 */
++	if (!mt76_channel_reset_commit(dev, phy))
++		return ret ? ret : -EBUSY;
++
+ 	mt76_worker_enable(&dev->tx_worker);
+ 	mt76_worker_schedule(&dev->tx_worker);
+ 
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index e80d154..e61dbf2 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -105,8 +105,8 @@ mt7915_sys_recovery_set(struct file *file, const char __user *user_buf,
+ 		if (ret)
+ 			return ret;
+ 
+-		dev->recovery.state |= MT_MCU_CMD_WDT_MASK;
+-		mt7915_reset(dev);
++		mt7915_reset(dev, READ_ONCE(dev->recovery.state) |
++			     MT_MCU_CMD_WDT_MASK);
+ 		break;
+ 
+ 	/* WARNING: trigger firmware crash */
+@@ -1082,6 +1082,9 @@ mt7915_rate_txpower_set(struct file *file, const char __user *user_buf,
+ 	char buf[100];
+ 	enum mac80211_rx_encoding mode;
+ 	u32 offs = 0, len = 0;
++
++	if (mt7915_cr6608_rf_request_armed(dev))
++		return -EPERM;
+ 
+ 	if (count >= sizeof(buf))
+ 		return -EINVAL;
+diff --git a/mt7915/init.c b/mt7915/init.c
+index 04788db..7f3981d 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -145,7 +145,7 @@ mt7915_thermal_set_cur_throttle_state(struct thermal_cooling_device *cdev,
+ {
+ 	struct mt7915_phy *phy = cdev->devdata;
+ 	u8 throttling = MT7915_THERMAL_THROTTLE_MAX - state;
+-	int ret;
++	int ret = 0;
+ 
+ 	if (state > MT7915_CDEV_THROTTLE_MAX) {
+ 		dev_err(phy->dev->mt76.dev,
+@@ -314,9 +314,14 @@ static void __mt7915_init_txpower(struct mt7915_phy *phy,
+ 
+ 		target_power += path_delta;
+ 		target_power = DIV_ROUND_UP(target_power, 2);
+-		chan->max_power = min_t(int, chan->max_reg_power,
+-					target_power);
+-		chan->orig_mpwr = target_power;
++		if (mt7915_cr6608_rf_request_enabled(dev)) {
++			chan->max_power = min_t(int, target_power, 38);
++			chan->orig_mpwr = min_t(int, target_power, 38);
++		} else {
++			chan->max_power = min_t(int, chan->max_reg_power,
++						target_power);
++			chan->orig_mpwr = target_power;
++		}
+ 	}
+ }
+ 
+@@ -325,6 +330,10 @@ void mt7915_init_txpower(struct mt7915_phy *phy)
+ 	if (!phy)
+ 		return;
+ 
++	if (mt7915_cr6608_rf_request_enabled(phy->dev))
++		dev_info_once(phy->dev->mt76.dev,
++			      "CR6608-RF-38DBM LAB enabled: audited volatile 38 dBm targets cover all eight 5 GHz EEPROM channel groups and the shared 2.4 GHz group; persisted Factory identity remains read-only telemetry; every channel change requires MCU SKU readback; the channel ceiling is capped at 38 dBm; DFS, SAR, per-rate and thermal protection remain active\n");
++
+ 	if (phy->mt76->cap.has_2ghz)
+ 		__mt7915_init_txpower(phy, &phy->mt76->sband_2g.sband);
+ 	if (phy->mt76->cap.has_5ghz)
+@@ -341,17 +350,93 @@ mt7915_regd_notifier(struct wiphy *wiphy,
+ 	struct mt7915_dev *dev = mt7915_hw_dev(hw);
+ 	struct mt76_phy *mphy = hw->priv;
+ 	struct mt7915_phy *phy = mphy->priv;
++	unsigned long flags;
++	bool pause_owned = false;
++	bool experiment_active;
++	bool reconfig_pending;
++	int ret = 0;
+ 
+ 	memcpy(dev->mt76.alpha2, request->alpha2, sizeof(dev->mt76.alpha2));
+ 	dev->mt76.region = request->dfs_region;
++	experiment_active = mt7915_cr6608_rf_request_enabled(dev) &&
++			    hw->conf.power_level >= 0 &&
++			    hw->conf.power_level <= 38 &&
++			    test_bit(MT76_STATE_RUNNING, &mphy->state);
++	if (!experiment_active) {
++		if (dev->mt76.region == NL80211_DFS_UNSET)
++			mt7915_mcu_rdd_background_enable(phy, NULL);
++
++		mt7915_init_txpower(phy);
++
++		mphy->dfs_state = MT_DFS_STATE_UNKNOWN;
++		mt7915_dfs_init_radar_detector(phy);
++		return;
++	}
++
++	/* A regulatory update can make the active scan channel stricter while a
++	 * verified high SKU table is live.  Publish the new limits and refresh
++	 * the firmware table as one paused transaction.
++	 */
++	mutex_lock(&dev->mt76.mutex);
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	reconfig_pending = dev->recovery.reconfig_pending &
++			   BIT(mphy->band_idx);
++	if (reconfig_pending) {
++		/* Invalidate a witness produced against the previous regulatory
++		 * limits before config can consume it.  MCU_RESET is the atomic
++		 * fail-closed hand-off to full recovery below.
++		 */
++		dev->recovery.reconfig_verified_generation[
++			mphy->band_idx] = 0;
++		set_bit(MT76_MCU_RESET, &dev->mphy.state);
++		set_bit(MT76_RESET, &mphy->state);
++		ieee80211_stop_queues(hw);
++	}
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (reconfig_pending) {
++		/* Publish the new software limits while TX is held, then replay the
++		 * complete firmware/channel/SKU handshake under a fresh recovery.
++		 */
++		mt7915_init_txpower(phy);
++		mphy->dfs_state = MT_DFS_STATE_UNKNOWN;
++		mt7915_mcu_schedule_full_recovery(dev);
++		mutex_unlock(&dev->mt76.mutex);
++		return;
++	}
++
++	ret = mt7915_mcu_txpower_pause(phy, &pause_owned);
++	if (ret)
++		goto recovery;
+ 
+ 	if (dev->mt76.region == NL80211_DFS_UNSET)
+-		mt7915_mcu_rdd_background_enable(phy, NULL);
++		ret = mt7915_mcu_rdd_background_enable(phy, NULL);
++	if (ret)
++		goto recovery;
+ 
+ 	mt7915_init_txpower(phy);
+ 
+ 	mphy->dfs_state = MT_DFS_STATE_UNKNOWN;
+-	mt7915_dfs_init_radar_detector(phy);
++	ret = mt7915_dfs_init_radar_detector(phy);
++	if (ret)
++		goto recovery;
++
++	ret = mt7915_mcu_set_txpower_sku(phy, true, false, true, false);
++	if (ret)
++		goto recovery;
++
++	if (pause_owned && !mt7915_mcu_txpower_resume(phy)) {
++		ret = -EBUSY;
++		goto recovery;
++	}
++	mutex_unlock(&dev->mt76.mutex);
++	return;
++
++recovery:
++	dev_err(dev->mt76.dev,
++		"CR6608-RF regulatory SKU refresh failed (%d); TX remains paused for full recovery\n",
++		ret);
++	mt7915_mcu_schedule_full_recovery(dev);
++	mutex_unlock(&dev->mt76.mutex);
+ }
+ 
+ static void
+@@ -1220,9 +1305,24 @@ static void mt7915_stop_hardware(struct mt7915_dev *dev)
+ 		mt7986_wmac_disable(dev);
+ }
+ 
++static void mt7915_quiesce_recovery(struct mt7915_dev *dev)
++{
++	unsigned long flags;
++
++	/* Block every producer before draining dump_work: dump_work itself queues
++	 * reset_work at completion, so reset_work must be cancelled second.
++	 */
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	dev->recovery.hw_init_done = false;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	cancel_work_sync(&dev->dump_work);
++	cancel_work_sync(&dev->reset_work);
++}
++
+ int mt7915_register_device(struct mt7915_dev *dev)
+ {
+ 	struct mt7915_phy *phy2;
++	unsigned long flags;
+ 	int ret;
+ 
+ 	dev->phy.dev = dev;
+@@ -1234,6 +1334,7 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 	INIT_LIST_HEAD(&dev->twt_list);
+ 
+ 	init_waitqueue_head(&dev->reset_wait);
++	spin_lock_init(&dev->recovery_tx_lock);
+ 	INIT_WORK(&dev->reset_work, mt7915_mac_reset_work);
+ 	INIT_WORK(&dev->dump_work, mt7915_mac_dump_work);
+ 	mutex_init(&dev->dump_mutex);
+@@ -1269,9 +1370,11 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 			goto unreg_thermal;
+ 	}
+ 
+-	ieee80211_queue_work(mt76_hw(dev), &dev->init_work);
+-
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
+ 	dev->recovery.hw_init_done = true;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++
++	ieee80211_queue_work(mt76_hw(dev), &dev->init_work);
+ 
+ 	ret = mt7915_init_debugfs(&dev->phy);
+ 	if (ret)
+@@ -1284,6 +1387,7 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 	return 0;
+ 
+ unreg_thermal:
++	mt7915_quiesce_recovery(dev);
+ 	mt7915_unregister_thermal(&dev->phy);
+ unreg_dev:
+ 	mt76_unregister_device(&dev->mt76);
+@@ -1297,7 +1401,7 @@ free_phy2:
+ 
+ void mt7915_unregister_device(struct mt7915_dev *dev)
+ {
+-	cancel_work_sync(&dev->dump_work);
++	mt7915_quiesce_recovery(dev);
+ 	mt7915_unregister_ext_phy(dev);
+ 	mt7915_coredump_unregister(dev);
+ 	mt7915_unregister_thermal(&dev->phy);
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index b581d8f..aa9a641 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1287,7 +1287,7 @@ mt7915_update_beacons(struct mt7915_dev *dev)
+ }
+ 
+ static int
+-mt7915_mac_restart(struct mt7915_dev *dev)
++mt7915_mac_restart(struct mt7915_dev *dev, bool run_main, bool run_ext)
+ {
+ 	struct mt7915_phy *phy2;
+ 	struct mt76_phy *ext_phy;
+@@ -1296,6 +1296,9 @@ mt7915_mac_restart(struct mt7915_dev *dev)
+ 
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
++	clear_bit(MT76_STATE_RUNNING, &dev->mphy.state);
++	if (ext_phy)
++		clear_bit(MT76_STATE_RUNNING, &ext_phy->state);
+ 
+ 	if (dev->hif2) {
+ 		mt76_wr(dev, MT_INT1_MASK_CSR, 0x0);
+@@ -1386,25 +1389,26 @@ mt7915_mac_restart(struct mt7915_dev *dev)
+ 	mt7915_init_txpower(&dev->phy);
+ 	mt7915_init_txpower(phy2);
+ 	ret = mt7915_txbf_init(dev);
++	if (ret)
++		goto out;
+ 
+-	if (test_bit(MT76_STATE_RUNNING, &dev->mphy.state)) {
++	if (run_main) {
+ 		ret = mt7915_run(dev->mphy.hw);
+ 		if (ret)
+ 			goto out;
+ 	}
+ 
+-	if (ext_phy && test_bit(MT76_STATE_RUNNING, &ext_phy->state)) {
++	if (ext_phy && run_ext) {
+ 		ret = mt7915_run(ext_phy->hw);
+ 		if (ret)
+ 			goto out;
+ 	}
+ 
+ out:
+-	/* reset done */
+-	clear_bit(MT76_RESET, &dev->mphy.state);
+-	if (phy2)
+-		clear_bit(MT76_RESET, &phy2->mt76->state);
+-
++	/* Keep RESET owned by mt7915_mac_reset_work until it atomically commits
++	 * this full-recovery generation.  NAPI/worker are normalized here so a
++	 * retry can disable them again without double-disable warnings.
++	 */
+ 	napi_enable(&dev->mt76.tx_napi);
+ 
+ 	local_bh_disable();
+@@ -1416,23 +1420,36 @@ out:
+ 	return ret;
+ }
+ 
+-static void
+-mt7915_mac_full_reset(struct mt7915_dev *dev)
++static bool
++mt7915_mac_full_reset(struct mt7915_dev *dev, u8 *reconfig_mask)
+ {
+ 	struct mt76_phy *ext_phy;
+ 	struct mt7915_phy *phy2;
++	unsigned long flags;
++	bool run_main, run_ext;
+ 	int i;
+ 
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
++	/* Keep every existing PHY fail-closed across the asynchronous mac80211
++	 * replay.  An inactive PHY can be started after this snapshot; its first
++	 * set_channel will release the hand-off only after an SKU witness.
++	 */
++	*reconfig_mask = BIT(dev->mphy.band_idx);
++	if (ext_phy)
++		*reconfig_mask |= BIT(ext_phy->band_idx);
+ 
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
+ 	dev->recovery.hw_full_reset = true;
+-
+ 	set_bit(MT76_MCU_RESET, &dev->mphy.state);
+-	wake_up(&dev->mt76.mcu.wait);
++	set_bit(MT76_RESET, &dev->mphy.state);
+ 	ieee80211_stop_queues(mt76_hw(dev));
+-	if (ext_phy)
++	if (ext_phy) {
++		set_bit(MT76_RESET, &ext_phy->state);
+ 		ieee80211_stop_queues(ext_phy->hw);
++	}
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	wake_up(&dev->mt76.mcu.wait);
+ 
+ 	cancel_delayed_work_sync(&dev->mphy.mac_work);
+ 	if (ext_phy)
+@@ -1441,13 +1458,32 @@ mt7915_mac_full_reset(struct mt7915_dev *dev)
+ 	mt76_abort_scan(&dev->mt76);
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	run_main = test_bit(MT76_STATE_RUNNING, &dev->mphy.state);
++	run_ext = ext_phy && test_bit(MT76_STATE_RUNNING, &ext_phy->state);
+ 	for (i = 0; i < 10; i++) {
+-		if (!mt7915_mac_restart(dev))
++		if (!mt7915_mac_restart(dev, run_main, run_ext))
+ 			break;
+ 	}
+ 
+-	if (i == 10)
++	if (i == 10) {
+ 		dev_err(dev->mt76.dev, "chip full reset failed\n");
++		spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++		set_bit(MT76_MCU_RESET, &dev->mphy.state);
++		set_bit(MT76_RESET, &dev->mphy.state);
++		ieee80211_stop_queues(mt76_hw(dev));
++		if (ext_phy) {
++			set_bit(MT76_RESET, &ext_phy->state);
++			ieee80211_stop_queues(ext_phy->hw);
++		}
++		dev->recovery.hw_full_reset = false;
++		clear_bit(MT76_STATE_RUNNING, &dev->mphy.state);
++		if (ext_phy)
++			clear_bit(MT76_STATE_RUNNING, &ext_phy->state);
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		mt76_worker_disable(&dev->mt76.tx_worker);
++		mutex_unlock(&dev->mt76.mutex);
++		return false;
++	}
+ 
+ 	dev->phy.omac_mask = 0;
+ 	if (phy2)
+@@ -1460,13 +1496,24 @@ mt7915_mac_full_reset(struct mt7915_dev *dev)
+ 
+ 	i = mt76_wcid_alloc(dev->mt76.wcid_mask, MT7915_WTBL_STA);
+ 	dev->mt76.global_wcid.idx = i;
+-	dev->recovery.hw_full_reset = false;
++	/* Firmware loading temporarily clears MCU_RESET so MCU commands can run.
++	 * Restore the fail-closed ownership before dropping the device mutex;
++	 * only the generation commit in reset_work may release it.
++	 */
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	set_bit(MT76_MCU_RESET, &dev->mphy.state);
++	set_bit(MT76_RESET, &dev->mphy.state);
++	ieee80211_stop_queues(mt76_hw(dev));
++	if (ext_phy) {
++		set_bit(MT76_RESET, &ext_phy->state);
++		ieee80211_stop_queues(ext_phy->hw);
++	}
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	wake_up(&dev->mt76.mcu.wait);
+ 
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+-	ieee80211_restart_hw(mt76_hw(dev));
+-	if (ext_phy)
+-		ieee80211_restart_hw(ext_phy->hw);
++	return true;
+ }
+ 
+ /* system error recovery */
+@@ -1475,24 +1522,43 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 	struct mt7915_phy *phy2;
+ 	struct mt76_phy *ext_phy;
+ 	struct mt7915_dev *dev;
++	unsigned long flags;
++	u32 recovery_generation;
++	u8 reconfig_mask;
++	bool partial_claimed;
++	bool partial_ok;
++	bool request_pending;
++	bool promote;
++	bool retry;
+ 	int i;
+ 
+ 	dev = container_of(work, struct mt7915_dev, reset_work);
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+ 
++restart_check:
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	promote = dev->recovery.restart;
++	recovery_generation = dev->recovery.generation;
++	request_pending = recovery_generation !=
++			  dev->recovery.completed_generation;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (!promote && !request_pending)
++		return;
++
+ 	/* chip full reset */
+-	if (dev->recovery.restart) {
++	if (promote) {
+ 		/* disable WA/WM WDT */
+ 		mt76_clear(dev, MT_WFDMA0_MCU_HOST_INT_ENA,
+ 			   MT_MCU_CMD_WDT_MASK);
+ 
+ 		if (READ_ONCE(dev->recovery.state) & MT_MCU_CMD_WA_WDT)
+ 			dev->recovery.wa_reset_count++;
+-		else
++		else if (READ_ONCE(dev->recovery.state) & MT_MCU_CMD_WDT_MASK)
+ 			dev->recovery.wm_reset_count++;
+ 
+-		mt7915_mac_full_reset(dev);
++		if (!mt7915_mac_full_reset(dev, &reconfig_mask))
++			return;
+ 
+ 		/* enable mcu irq */
+ 		mt7915_irq_enable(dev, MT_INT_MCU_CMD);
+@@ -1501,29 +1567,107 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 		/* enable WA/WM WDT */
+ 		mt76_set(dev, MT_WFDMA0_MCU_HOST_INT_ENA, MT_MCU_CMD_WDT_MASK);
+ 
+-		dev->recovery.state = MT_MCU_CMD_NORMAL_STATE;
+-		dev->recovery.restart = false;
+-		return;
+-	}
++		spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++		retry = dev->recovery.generation != recovery_generation;
++		dev->recovery.hw_full_reset = false;
++		if (!retry) {
++			dev->recovery.completed_generation = recovery_generation;
++			dev->recovery.reconfig_pending = reconfig_mask;
++			dev->recovery.reconfig_generation[dev->mphy.band_idx] =
++				recovery_generation;
++			dev->recovery.reconfig_verified_generation[
++				dev->mphy.band_idx] = 0;
++			if (ext_phy) {
++				dev->recovery.reconfig_generation[
++					ext_phy->band_idx] = recovery_generation;
++				dev->recovery.reconfig_verified_generation[
++					ext_phy->band_idx] = 0;
++			}
++			WRITE_ONCE(dev->recovery.state,
++				   MT_MCU_CMD_NORMAL_STATE);
++			dev->recovery.restart = false;
++			clear_bit(MT76_MCU_RESET, &dev->mphy.state);
++			/* Firmware/EEPROM have just been reloaded.  Keep RESET and the
++			 * mac80211 queues held until restart_hw replays set_channel and
++			 * that callback verifies the active SKU table from the MCU.
++			 */
++		}
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		if (retry)
++			goto restart_check;
++		wake_up(&dev->mt76.mcu.wait);
+ 
+-	/* chip partial reset */
+-	if (!(READ_ONCE(dev->recovery.state) & MT_MCU_CMD_STOP_DMA))
++		ieee80211_restart_hw(mt76_hw(dev));
++		if (ext_phy)
++			ieee80211_restart_hw(ext_phy->hw);
+ 		return;
++	}
+ 
+-	ieee80211_stop_queues(mt76_hw(dev));
+-	if (ext_phy)
+-		ieee80211_stop_queues(ext_phy->hw);
++	/* Serialize the partial-reset ownership claim with the CR6608 SKU
++	 * transaction.  Once this mutex is released, MT76_MCU_RESET is the
++	 * fail-closed hand-off that prevents that transaction from waking TX.
++	 */
++	mutex_lock(&dev->mt76.mutex);
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	promote = dev->recovery.restart;
++	partial_claimed = false;
++	if (!promote &&
++	    dev->recovery.generation !=
++	    dev->recovery.completed_generation) {
++		recovery_generation = dev->recovery.generation;
++		ieee80211_stop_queues(mt76_hw(dev));
++		if (ext_phy)
++			ieee80211_stop_queues(ext_phy->hw);
++
++		set_bit(MT76_RESET, &dev->mphy.state);
++		set_bit(MT76_MCU_RESET, &dev->mphy.state);
++		if (ext_phy)
++			set_bit(MT76_RESET, &ext_phy->state);
++		partial_claimed = true;
++	}
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (promote) {
++		mutex_unlock(&dev->mt76.mutex);
++		goto restart_check;
++	}
++	if (!partial_claimed) {
++		mutex_unlock(&dev->mt76.mutex);
+ 
+-	set_bit(MT76_RESET, &dev->mphy.state);
+-	set_bit(MT76_MCU_RESET, &dev->mphy.state);
++		/* Recheck after dropping the mutex.  A producer racing the first
++		 * ownership test either becomes visible here or queues a fresh run
++		 * after this worker stops executing.
++		 */
++		spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++		promote = dev->recovery.restart;
++		retry = !promote &&
++			dev->recovery.generation !=
++			dev->recovery.completed_generation;
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		if (promote || retry)
++			goto restart_check;
++		return;
++	}
+ 	wake_up(&dev->mt76.mcu.wait);
++	mutex_unlock(&dev->mt76.mutex);
++
+ 	cancel_delayed_work_sync(&dev->mphy.mac_work);
+ 	if (phy2) {
+-		set_bit(MT76_RESET, &phy2->mt76->state);
+ 		cancel_delayed_work_sync(&phy2->mt76->mac_work);
+ 	}
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	/* A full-reset request can arrive while cancel_delayed_work_sync()
++	 * waits.  Promote it here so the partial path cannot clear RESET,
++	 * wake queues, and lose the only queued full-recovery request.
++	 */
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	promote = dev->recovery.restart;
++	retry = dev->recovery.generation != recovery_generation;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (promote || retry) {
++		mutex_unlock(&dev->mt76.mutex);
++		goto restart_check;
++	}
+ 
+ 	mt76_worker_disable(&dev->mt76.tx_worker);
+ 	mt76_for_each_q_rx(&dev->mt76, i)
+@@ -1536,26 +1680,58 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 
+ 	mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_DMA_STOPPED);
+ 
+-	if (mt7915_wait_reset_state(dev, MT_MCU_CMD_RESET_DONE)) {
+-		mt7915_dma_reset(dev, false);
++	partial_ok = mt7915_wait_reset_state(dev, MT_MCU_CMD_RESET_DONE);
++	if (partial_ok) {
++		partial_ok = !mt7915_dma_reset(dev, false);
+ 
+-		mt76_connac2_tx_token_put(&dev->mt76);
+-		idr_init(&dev->mt76.token);
++		if (partial_ok) {
++			mt76_connac2_tx_token_put(&dev->mt76);
++			idr_init(&dev->mt76.token);
+ 
+-		mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_DMA_INIT);
+-		mt7915_wait_reset_state(dev, MT_MCU_CMD_RECOVERY_DONE);
++			mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_DMA_INIT);
++			partial_ok = mt7915_wait_reset_state(
++				dev, MT_MCU_CMD_RECOVERY_DONE);
++		}
+ 	}
+ 
+-	mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_RESET_DONE);
+-	mt7915_wait_reset_state(dev, MT_MCU_CMD_NORMAL_STATE);
++	if (partial_ok) {
++		mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_RESET_DONE);
++		partial_ok = mt7915_wait_reset_state(
++			dev, MT_MCU_CMD_NORMAL_STATE);
++	}
+ 
+ 	/* enable DMA Tx/Rx and interrupt */
+-	mt7915_dma_start(dev, false, false);
++	if (partial_ok && mt7915_dma_start(dev, false, false))
++		partial_ok = false;
++	if (!partial_ok) {
++		dev_err(dev->mt76.dev,
++			"partial reset did not reach verified NORMAL state; forcing full recovery\n");
++		mt7915_mcu_schedule_full_recovery(dev);
++	}
+ 
+-	clear_bit(MT76_MCU_RESET, &dev->mphy.state);
+-	clear_bit(MT76_RESET, &dev->mphy.state);
+-	if (phy2)
+-		clear_bit(MT76_RESET, &phy2->mt76->state);
++	/* Commit reset completion atomically against a new recovery producer.
++	 * If one arrived during the partial reset, retain RESET/queue stops and
++	 * normalize NAPI/worker state before entering the full-reset path.
++	 */
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	promote = dev->recovery.restart ||
++		  dev->recovery.generation != recovery_generation;
++	if (!promote) {
++		dev->recovery.completed_generation = recovery_generation;
++		clear_bit(MT76_MCU_RESET, &dev->mphy.state);
++		if (!(dev->recovery.reconfig_pending &
++		      BIT(dev->mphy.band_idx))) {
++			clear_bit(MT76_RESET, &dev->mphy.state);
++			ieee80211_wake_queues(mt76_hw(dev));
++		}
++		if (ext_phy &&
++		    !(dev->recovery.reconfig_pending &
++		      BIT(ext_phy->band_idx))) {
++			clear_bit(MT76_RESET, &ext_phy->state);
++			ieee80211_wake_queues(ext_phy->hw);
++		}
++	}
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 
+ 	mt76_for_each_q_rx(&dev->mt76, i) {
+ 		napi_enable(&dev->mt76.napi[i]);
+@@ -1576,9 +1752,10 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 	napi_schedule(&dev->mt76.tx_napi);
+ 	local_bh_enable();
+ 
+-	ieee80211_wake_queues(mt76_hw(dev));
+-	if (ext_phy)
+-		ieee80211_wake_queues(ext_phy->hw);
++	if (promote) {
++		mutex_unlock(&dev->mt76.mutex);
++		goto restart_check;
++	}
+ 
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+@@ -1662,32 +1839,58 @@ skip_coredump:
+ 	queue_work(dev->mt76.wq, &dev->reset_work);
+ }
+ 
+-void mt7915_reset(struct mt7915_dev *dev)
++void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ {
+-	if (!dev->recovery.hw_init_done)
+-		return;
++	struct mt76_phy *ext_phy;
++	unsigned long flags;
++	bool claim_tx;
+ 
+-	if (dev->recovery.hw_full_reset)
++	ext_phy = dev->mt76.phys[MT_BAND1];
++	claim_tx = state & (MT_MCU_CMD_STOP_DMA_FW_RELOAD |
++			    MT_MCU_CMD_STOP_DMA | MT_MCU_CMD_WDT_MASK);
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	if (!dev->recovery.hw_init_done) {
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		return;
++	}
++	WRITE_ONCE(dev->recovery.state, state);
++	if (claim_tx) {
++		dev->recovery.generation++;
++		if (state & (MT_MCU_CMD_STOP_DMA_FW_RELOAD |
++			     MT_MCU_CMD_WDT_MASK))
++			dev->recovery.restart = true;
++		set_bit(MT76_MCU_RESET, &dev->mphy.state);
++		set_bit(MT76_RESET, &dev->mphy.state);
++		ieee80211_stop_queues(mt76_hw(dev));
++		if (ext_phy) {
++			set_bit(MT76_RESET, &ext_phy->state);
++			ieee80211_stop_queues(ext_phy->hw);
++		}
++	}
++	if (dev->recovery.hw_full_reset) {
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		if (claim_tx)
++			wake_up(&dev->mt76.mcu.wait);
+ 		return;
++	}
++	if (state & MT_MCU_CMD_WDT_MASK)
++		queue_work(dev->mt76.wq, &dev->dump_work);
++	else
++		queue_work(dev->mt76.wq, &dev->reset_work);
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (claim_tx)
++		wake_up(&dev->mt76.mcu.wait);
+ 
+ 	/* wm/wa exception: do full recovery */
+-	if (READ_ONCE(dev->recovery.state) & MT_MCU_CMD_WDT_MASK) {
+-		dev->recovery.restart = true;
++	if (state & MT_MCU_CMD_WDT_MASK) {
+ 		dev_info(dev->mt76.dev,
+ 			 "%s indicated firmware crash, attempting recovery\n",
+ 			 wiphy_name(dev->mt76.hw->wiphy));
+ 
+ 		mt7915_irq_disable(dev, MT_INT_MCU_CMD);
+-		queue_work(dev->mt76.wq, &dev->dump_work);
+ 		return;
+ 	}
+ 
+-	if ((READ_ONCE(dev->recovery.state) & MT_MCU_CMD_STOP_DMA)) {
+-		set_bit(MT76_MCU_RESET, &dev->mphy.state);
+-		wake_up(&dev->mt76.mcu.wait);
+-	}
+-
+-	queue_work(dev->mt76.wq, &dev->reset_work);
+ 	wake_up(&dev->reset_wait);
+ }
+ 
+diff --git a/mt7915/main.c b/mt7915/main.c
+index 8eca65e..1606201 100644
+--- a/mt7915/main.c
++++ b/mt7915/main.c
+@@ -320,12 +320,117 @@ static void mt7915_remove_interface(struct ieee80211_hw *hw,
+ 	mt76_wcid_cleanup(&dev->mt76, &msta->wcid);
+ }
+ 
++enum mt7915_reconfig_tx_state {
++	MT7915_RECONFIG_TX_READY,
++	MT7915_RECONFIG_TX_RELEASED,
++	MT7915_RECONFIG_TX_WAITING,
++	MT7915_RECONFIG_TX_RECOVERY,
++};
++
++static bool mt7915_recovery_pending(struct mt7915_dev *dev)
++{
++	unsigned long flags;
++	bool pending;
++
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	pending = test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
++		  dev->recovery.restart ||
++		  dev->recovery.generation !=
++		  dev->recovery.completed_generation;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++
++	return pending;
++}
++
++static void mt7915_reconfig_mark_verified(struct mt7915_phy *phy)
++{
++	struct mt7915_dev *dev = phy->dev;
++	u8 band = phy->mt76->band_idx;
++	u8 bit = BIT(band);
++	unsigned long flags;
++	u32 generation;
++
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	generation = dev->recovery.reconfig_generation[band];
++	if ((dev->recovery.reconfig_pending & bit) &&
++	    !test_bit(MT76_MCU_RESET, &dev->mphy.state) &&
++	    !dev->recovery.restart &&
++	    generation == dev->recovery.completed_generation &&
++	    dev->recovery.generation == generation)
++		dev->recovery.reconfig_verified_generation[band] =
++			generation;
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++}
++
++static enum mt7915_reconfig_tx_state
++mt7915_reconfig_tx_release(struct mt7915_phy *phy, bool allow_release,
++			   bool wake_when_ready)
++{
++	struct mt7915_dev *dev = phy->dev;
++	u8 band = phy->mt76->band_idx;
++	u8 bit = BIT(band);
++	unsigned long flags;
++	enum mt7915_reconfig_tx_state state;
++	bool recovery_pending;
++	u32 generation;
++
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	generation = dev->recovery.reconfig_generation[band];
++	recovery_pending = test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
++			   dev->recovery.restart ||
++			   dev->recovery.generation !=
++			   dev->recovery.completed_generation;
++	if (recovery_pending) {
++		state = MT7915_RECONFIG_TX_RECOVERY;
++	} else if (dev->recovery.reconfig_pending & bit) {
++		if (!allow_release ||
++		    generation != dev->recovery.completed_generation ||
++		    dev->recovery.reconfig_verified_generation[band] !=
++		    generation) {
++			state = MT7915_RECONFIG_TX_WAITING;
++		} else {
++			clear_bit(MT76_RESET, &phy->mt76->state);
++			dev->recovery.reconfig_pending &= ~bit;
++			dev->recovery.reconfig_verified_generation[band] = 0;
++			state = MT7915_RECONFIG_TX_RELEASED;
++		}
++	} else if (test_bit(MT76_RESET, &phy->mt76->state)) {
++		state = MT7915_RECONFIG_TX_WAITING;
++	} else {
++		state = MT7915_RECONFIG_TX_READY;
++	}
++	/* Pair the final wake with every recovery producer's queue stop under
++	 * the same lock.  A producer can therefore only run wholly before this
++	 * commit (and make it refuse) or wholly after it (and stop queues again).
++	 */
++	if (state == MT7915_RECONFIG_TX_RELEASED ||
++	    (state == MT7915_RECONFIG_TX_READY && wake_when_ready))
++		ieee80211_wake_queues(phy->mt76->hw);
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++
++	return state;
++}
++
+ int mt7915_set_channel(struct mt76_phy *mphy)
+ {
+ 	struct mt7915_phy *phy = mphy->priv;
+ 	struct mt7915_dev *dev = phy->dev;
++	bool gated_power = mt7915_cr6608_rf_request_enabled(dev) &&
++			   mphy->hw->conf.power_level >= 0 &&
++			   mphy->hw->conf.power_level <= 38;
+ 	int ret;
+ 
++	/* The host TX worker is already parked by __mt76_set_channel(), but the
++	 * firmware can still own autonomous frames.  Install and read back the
++	 * destination channel's conservative table before asking firmware to
++	 * switch channels; only the post-switch transaction may raise it.
++	 */
++	if (gated_power) {
++		ret = mt7915_mcu_set_txpower_sku(phy, true, false, true, true);
++		if (ret)
++			goto out;
++	}
++
+ 	if (dev->cal) {
+ 		ret = mt7915_mcu_apply_tx_dpd(phy);
+ 		if (ret)
+@@ -342,8 +447,24 @@ int mt7915_set_channel(struct mt76_phy *mphy)
+ 
+ 	mt7915_mac_reset_counters(phy);
+ 	phy->noise = 0;
++	if (ret)
++		goto out;
++
++	/* __mt76_set_channel() still owns MT76_RESET and the TX worker is
++	 * parked here.  Refresh the SKU table before that core path can resume
++	 * traffic, so a scan channel never inherits the verified 38 dBm table.
++	 */
++	ret = mt7915_mcu_set_txpower_sku(phy, true, false, true, false);
++	if (!ret)
++		mt7915_reconfig_mark_verified(phy);
+ 
+ out:
++	if (ret && mt7915_cr6608_rf_request_enabled(dev) &&
++	    mphy->hw->conf.power_level >= 0 &&
++	    mphy->hw->conf.power_level <= 38 &&
++	    !mt7915_recovery_pending(dev))
++		mt7915_mcu_schedule_full_recovery(dev);
++
+ 	if (!mt76_testmode_enabled(phy->mt76))
+ 		ieee80211_queue_delayed_work(phy->mt76->hw,
+ 					     &phy->mt76->mac_work,
+@@ -438,11 +559,7 @@ static int mt7915_set_sar_specs(struct ieee80211_hw *hw,
+ 	if (!cfg80211_chandef_valid(&phy->mt76->chandef))
+ 		goto out;
+ 
+-	err = mt76_init_sar_power(hw, sar);
+-	if (err)
+-		goto out;
+-
+-	err = mt7915_mcu_set_txpower_sku(phy);
++	err = mt7915_mcu_set_sar_power_sku(phy, sar);
+ out:
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+@@ -467,11 +584,29 @@ static int mt7915_config(struct ieee80211_hw *hw, int radio_idx,
+ 		ret = mt76_update_channel(phy->mt76);
+ 		if (ret)
+ 			return ret;
++
++		switch (mt7915_reconfig_tx_release(phy, true, false)) {
++		case MT7915_RECONFIG_TX_RELEASED:
++			break;
++		case MT7915_RECONFIG_TX_WAITING:
++			mt7915_mcu_schedule_full_recovery(dev);
++			return -EIO;
++		case MT7915_RECONFIG_TX_RECOVERY:
++			return -EBUSY;
++		case MT7915_RECONFIG_TX_READY:
++			break;
++		}
+ 	}
+ 
+-	if (changed & (IEEE80211_CONF_CHANGE_POWER |
+-		       IEEE80211_CONF_CHANGE_CHANNEL)) {
+-		ret = mt7915_mcu_set_txpower_sku(phy);
++	/* Channel changes refresh SKU inside mt7915_set_channel() while TX is
++	 * still paused.  Only a standalone power change belongs here.
++	 */
++	if ((changed & IEEE80211_CONF_CHANGE_POWER) &&
++	    !(changed & IEEE80211_CONF_CHANGE_CHANNEL)) {
++		mutex_lock(&dev->mt76.mutex);
++		ret = mt7915_mcu_set_txpower_sku(phy, false, false, false,
++						 false);
++		mutex_unlock(&dev->mt76.mutex);
+ 		if (ret)
+ 			return ret;
+ 	}
+@@ -1801,8 +1936,26 @@ mt7915_reconfig_complete(struct ieee80211_hw *hw,
+ 			 enum ieee80211_reconfig_type reconfig_type)
+ {
+ 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
++	struct mt7915_dev *dev = phy->dev;
++	enum mt7915_reconfig_tx_state state;
++
++	/* A failed channel/SKU replay hands RESET to recovery.  Serialize the
++	 * final queue wake with that producer so reconfig_complete cannot undo
++	 * the fail-closed hand-off.
++	 */
++	state = mt7915_reconfig_tx_release(
++		phy, reconfig_type == IEEE80211_RECONFIG_TYPE_RESTART, true);
++	if (state == MT7915_RECONFIG_TX_RECOVERY) {
++		dev_err_ratelimited(dev->mt76.dev,
++			"reconfiguration completed without a verified SKU table; queues remain stopped\n");
++		return;
++	}
++	if (state == MT7915_RECONFIG_TX_WAITING) {
++		dev_info_ratelimited(dev->mt76.dev,
++			"reconfiguration has no active channel witness yet; queues remain stopped until set_channel verifies the SKU table\n");
++		return;
++	}
+ 
+-	ieee80211_wake_queues(hw);
+ 	ieee80211_queue_delayed_work(hw, &phy->mt76->mac_work,
+ 				     MT7915_WATCHDOG_TIME);
+ }
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index c9567aa..350267e 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -2,6 +2,10 @@
+ /* Copyright (C) 2020 MediaTek Inc. */
+ 
+ #include <linux/fs.h>
++#include <linux/delay.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/spinlock.h>
+ #include "mt7915.h"
+ #include "mcu.h"
+ #include "mac.h"
+@@ -39,6 +43,305 @@ static bool sr_scene_detect = true;
+ module_param(sr_scene_detect, bool, 0644);
+ MODULE_PARM_DESC(sr_scene_detect, "Enable firmware scene detection algorithm");
+ 
++static bool cr6608_rf_38dbm;
++module_param(cr6608_rf_38dbm, bool, 0444);
++MODULE_PARM_DESC(cr6608_rf_38dbm,
++		 "CR6608 LAB ONLY: enable the DTS-gated volatile 38 dBm SKU override across all eight 5 GHz EEPROM channel groups and the shared 2.4 GHz group; persisted Factory identity remains read-only telemetry; every channel change requires MCU SKU readback; 38 dBm channel ceiling; SAR, rate and thermal backoffs remain active");
++
++static bool cr6608_rf_38dbm_active;
++
++static int
++mt7915_cr6608_readonly_set(const char *val, const struct kernel_param *kp)
++{
++	(void)val;
++	(void)kp;
++	return -EPERM;
++}
++
++static int
++mt7915_cr6608_active_get(char *buffer, const struct kernel_param *kp)
++{
++	return param_get_bool(buffer, kp);
++}
++
++static const struct kernel_param_ops mt7915_cr6608_active_ops = {
++	.set = mt7915_cr6608_readonly_set,
++	.get = mt7915_cr6608_active_get,
++};
++
++module_param_cb(cr6608_rf_38dbm_active, &mt7915_cr6608_active_ops,
++		&cr6608_rf_38dbm_active, 0444);
++MODULE_PARM_DESC(cr6608_rf_38dbm_active,
++		 "CR6608: read-only proof that the module parameter and device-tree 38 dBm override gate are active");
++
++struct mt7915_cr6608_rf_band_state {
++	int requested_dbm;
++	int kernel_dbm;
++	int regulatory_dbm;
++	int frequency_mhz;
++	int channel;
++	int path_delta_half_dbm;
++	int sar_bounded_per_path_half_dbm;
++	int rate_limited_per_path_half_dbm;
++	int eeprom_target_per_path_half_dbm;
++	int sku_applied_per_path_half_dbm;
++	int override_active;
++	unsigned int generation;
++	int mcu_generation;
++	int channel_ready;
++	int mcu_result;
++};
++
++#define CR6608_RF_BAND_INITIALIZER					\
++	{								\
++		.requested_dbm = INT_MIN,				\
++		.kernel_dbm = -1,					\
++		.regulatory_dbm = -1,					\
++		.frequency_mhz = -1,					\
++		.channel = -1,						\
++		.path_delta_half_dbm = -1,				\
++		.sar_bounded_per_path_half_dbm = -1,			\
++		.rate_limited_per_path_half_dbm = -1,			\
++		.eeprom_target_per_path_half_dbm = -1,			\
++		.sku_applied_per_path_half_dbm = -1,			\
++		.override_active = 0,					\
++		.mcu_generation = -1,					\
++		.channel_ready = 0,					\
++		.mcu_result = -EAGAIN,					\
++	}
++
++static struct mt7915_cr6608_rf_band_state cr6608_rf_bands[2] = {
++	[0] = CR6608_RF_BAND_INITIALIZER,
++	[1] = CR6608_RF_BAND_INITIALIZER,
++};
++static bool cr6608_rf_failure_latched[2];
++static DEFINE_SPINLOCK(cr6608_rf_telemetry_lock);
++
++static int
++mt7915_cr6608_telemetry_int_get(char *buffer,
++				const struct kernel_param *kp)
++{
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&cr6608_rf_telemetry_lock, flags);
++	ret = param_get_int(buffer, kp);
++	spin_unlock_irqrestore(&cr6608_rf_telemetry_lock, flags);
++
++	return ret;
++}
++
++static int
++mt7915_cr6608_telemetry_uint_get(char *buffer,
++				 const struct kernel_param *kp)
++{
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&cr6608_rf_telemetry_lock, flags);
++	ret = param_get_uint(buffer, kp);
++	spin_unlock_irqrestore(&cr6608_rf_telemetry_lock, flags);
++
++	return ret;
++}
++
++static const struct kernel_param_ops mt7915_cr6608_telemetry_int_ops = {
++	.set = mt7915_cr6608_readonly_set,
++	.get = mt7915_cr6608_telemetry_int_get,
++};
++
++static const struct kernel_param_ops mt7915_cr6608_telemetry_uint_ops = {
++	.set = mt7915_cr6608_readonly_set,
++	.get = mt7915_cr6608_telemetry_uint_get,
++};
++
++#define MT7915_CR6608_RF_BAND_PARAMS(_band)				\
++	module_param_cb(cr6608_rf_band##_band##_requested_dbm,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].requested_dbm, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_kernel_dbm,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].kernel_dbm, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_regulatory_dbm,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].regulatory_dbm, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_frequency_mhz,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].frequency_mhz, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_channel,			\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].channel, 0444);		\
++	module_param_cb(cr6608_rf_band##_band##_path_delta_half_dbm,	\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].path_delta_half_dbm, 0444); \
++	module_param_cb(cr6608_rf_band##_band##_sar_bounded_per_path_half_dbm,\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].sar_bounded_per_path_half_dbm,\
++			0444);						\
++	module_param_cb(cr6608_rf_band##_band##_rate_limited_per_path_half_dbm,\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].rate_limited_per_path_half_dbm,\
++			0444);						\
++	module_param_cb(cr6608_rf_band##_band##_eeprom_target_per_path_half_dbm,\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].eeprom_target_per_path_half_dbm,\
++			0444);						\
++	module_param_cb(cr6608_rf_band##_band##_sku_applied_per_path_half_dbm,\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].sku_applied_per_path_half_dbm,\
++			0444);						\
++	module_param_cb(cr6608_rf_band##_band##_override_active,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].override_active, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_generation,		\
++			&mt7915_cr6608_telemetry_uint_ops,		\
++			&cr6608_rf_bands[_band].generation, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_mcu_generation,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].mcu_generation, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_channel_ready,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].channel_ready, 0444);	\
++	module_param_cb(cr6608_rf_band##_band##_mcu_result,		\
++			&mt7915_cr6608_telemetry_int_ops,		\
++			&cr6608_rf_bands[_band].mcu_result, 0444)
++
++MT7915_CR6608_RF_BAND_PARAMS(0);
++MT7915_CR6608_RF_BAND_PARAMS(1);
++
++static bool mt7915_is_cr6608(struct mt7915_dev *dev)
++{
++	return dev &&
++	       is_mt7915(&dev->mt76) &&
++	       of_machine_is_compatible("xiaomi,mi-router-cr6608");
++}
++
++bool mt7915_cr6608_rf_request_armed(struct mt7915_dev *dev) {
++	return mt7915_is_cr6608(dev) &&
++		  device_property_read_bool(dev->mt76.dev,
++					    "mediatek,cr6608-lab-txpower-38dbm") &&
++		  cr6608_rf_38dbm;
++}
++bool mt7915_cr6608_rf_request_enabled(struct mt7915_dev *dev)
++{
++	bool enabled = mt7915_cr6608_rf_request_armed(dev);
++	mt7915_cr6608_factory38_raw_match(dev);
++	WRITE_ONCE(cr6608_rf_38dbm_active, enabled);
++	return enabled;
++}
++
++static bool mt7915_cr6608_channel_ready(struct mt76_phy *mphy)
++{
++	return !mphy->offchannel &&
++	       mphy->chandef.chan &&
++	       mphy->main_chandef.chan &&
++	       cfg80211_chandef_valid(&mphy->chandef) &&
++	       cfg80211_chandef_valid(&mphy->main_chandef) &&
++	       cfg80211_chandef_identical(&mphy->chandef,
++					 &mphy->main_chandef);
++}
++
++static bool mt7915_cr6608_active_channel_valid(struct mt76_phy *mphy)
++{
++	return mphy->chandef.chan &&
++	       cfg80211_chandef_valid(&mphy->chandef);
++}
++
++static unsigned int
++mt7915_cr6608_rf_record_start(struct mt7915_phy *phy, int requested_dbm,
++			      int kernel_dbm, int regulatory_dbm,
++			      int path_delta_half_dbm,
++			      int sar_bounded_per_path_half_dbm,
++			      int rate_limited_per_path_half_dbm,
++			      int eeprom_target_per_path_half_dbm,
++			      bool override_active)
++{
++	struct mt7915_cr6608_rf_band_state *state;
++	struct ieee80211_channel *chan = phy->mt76->chandef.chan;
++	unsigned long flags;
++	unsigned int generation;
++	u8 band = phy->mt76->band_idx;
++
++	if (!mt7915_cr6608_rf_request_enabled(phy->dev) ||
++	    band >= ARRAY_SIZE(cr6608_rf_bands))
++		return 0;
++
++	state = &cr6608_rf_bands[band];
++	spin_lock_irqsave(&cr6608_rf_telemetry_lock, flags);
++	state->generation++;
++	if (!(state->generation & 1))
++		state->generation++;
++	smp_wmb();
++	state->requested_dbm = requested_dbm;
++	state->kernel_dbm = kernel_dbm;
++	state->regulatory_dbm = regulatory_dbm;
++	state->frequency_mhz = chan ? chan->center_freq : -1;
++	state->channel = chan ? chan->hw_value : -1;
++	state->path_delta_half_dbm = path_delta_half_dbm;
++	state->sar_bounded_per_path_half_dbm =
++		sar_bounded_per_path_half_dbm;
++	state->rate_limited_per_path_half_dbm =
++		rate_limited_per_path_half_dbm;
++	state->eeprom_target_per_path_half_dbm =
++		eeprom_target_per_path_half_dbm;
++	state->sku_applied_per_path_half_dbm = -1;
++	state->override_active = override_active;
++	state->mcu_generation = -1;
++	state->channel_ready = mt7915_cr6608_channel_ready(phy->mt76);
++	state->mcu_result = -EINPROGRESS;
++	smp_wmb();
++	state->generation++;
++	generation = state->generation;
++	spin_unlock_irqrestore(&cr6608_rf_telemetry_lock, flags);
++
++	dev_info_ratelimited(phy->dev->mt76.dev,
++			     "CR6608-RF MCU/SKU path band=%u generation=%u request=%d dBm kernel=%d dBm regulatory=%d dBm frequency=%d MHz channel=%d path_delta=%d half-dBm sar=%d half-dBm rate=%d half-dBm eeprom_observed=%d half-dBm override=%d\n",
++			     band, generation, requested_dbm, kernel_dbm,
++			     regulatory_dbm, chan ? chan->center_freq : -1,
++			     chan ? chan->hw_value : -1, path_delta_half_dbm,
++			     sar_bounded_per_path_half_dbm,
++			     rate_limited_per_path_half_dbm,
++			     eeprom_target_per_path_half_dbm,
++			     override_active);
++
++	return generation;
++}
++
++static void
++mt7915_cr6608_rf_record_mcu_result(struct mt7915_phy *phy,
++				   unsigned int generation, int result,
++				   int sku_applied_per_path_half_dbm)
++{
++	struct mt7915_cr6608_rf_band_state *state;
++	unsigned long flags;
++	bool recorded = false;
++	u8 band = phy->mt76->band_idx;
++
++	if (!generation || band >= ARRAY_SIZE(cr6608_rf_bands))
++		return;
++
++	state = &cr6608_rf_bands[band];
++	spin_lock_irqsave(&cr6608_rf_telemetry_lock, flags);
++	if (state->generation == generation && !(generation & 1)) {
++		state->generation++;
++		smp_wmb();
++		state->sku_applied_per_path_half_dbm =
++			result ? -1 : sku_applied_per_path_half_dbm;
++		state->mcu_result = result;
++		state->mcu_generation = generation + 2;
++		smp_wmb();
++		state->generation++;
++		generation = state->generation;
++		recorded = true;
++	}
++	spin_unlock_irqrestore(&cr6608_rf_telemetry_lock, flags);
++
++	if (recorded)
++		dev_info_ratelimited(phy->dev->mt76.dev,
++				     "CR6608-RF MCU/SKU result band=%u generation=%u result=%d\n",
++				     band, generation, result);
++}
++
+ static u8
+ mt7915_mcu_get_sta_nss(u16 mcs_map)
+ {
+@@ -165,12 +468,7 @@ mt7915_mcu_parse_response(struct mt76_dev *mdev, int cmd,
+ 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
+ 			cmd, seq);
+ 
+-		if (!test_and_set_bit(MT76_MCU_RESET, &dev->mphy.state)) {
+-			dev->recovery.restart = true;
+-			wake_up(&dev->mt76.mcu.wait);
+-			queue_work(dev->mt76.wq, &dev->reset_work);
+-			wake_up(&dev->reset_wait);
+-		}
++		mt7915_mcu_schedule_full_recovery(dev);
+ 
+ 		return -ETIMEDOUT;
+ 	}
+@@ -3419,14 +3717,449 @@ mt7915_update_txpower(struct mt7915_phy *phy, int tx_power)
+ 		mphy->txpower_cur = e2p_power_limit;
+ }
+ 
+-int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
++static int
++mt7915_cr6608_calculate_txpower_cur(struct mt7915_phy *phy, int tx_power,
++				    bool runtime_override,
++				    int *e2p_power_limit_out)
+ {
++	struct mt76_phy *mphy = phy->mt76;
++	struct ieee80211_channel *chan = mphy->chandef.chan;
++	int chain_idx, val, e2p_power_limit = 0;
++
++	if (!chan) {
++		*e2p_power_limit_out = -1;
++		return tx_power;
++	}
++
++	for (chain_idx = 0; chain_idx < hweight16(mphy->chainmask); chain_idx++) {
++		val = mt7915_eeprom_get_target_power(phy->dev, chan, chain_idx);
++		val += mt7915_eeprom_get_power_delta(phy->dev, chan->band);
++
++		e2p_power_limit = max_t(int, e2p_power_limit, val);
++	}
++
++	*e2p_power_limit_out = e2p_power_limit;
++	if (runtime_override)
++		return tx_power;
++	if (phy->sku_limit_en)
++		return min_t(int, e2p_power_limit, tx_power);
++
++	return e2p_power_limit;
++}
++
+ #define TX_POWER_LIMIT_TABLE_RATE	0
+ #define TX_POWER_LIMIT_TABLE_PATH	1
++
++struct mt7915_cr6608_sku_transaction {
++	struct mt76_power_limits limits;
++	s8 rate_table[MT7915_SKU_RATE_NUM];
++	s8 previous_rate_table[MT7915_SKU_RATE_NUM];
++	s8 rate_readback[MT7915_SKU_RATE_NUM];
++	s8 path_table[MT7915_SKU_PATH_NUM];
++	s8 previous_path_table[MT7915_SKU_PATH_NUM];
++	s8 path_readback[MT7915_SKU_PATH_NUM];
++};
++
++static int
++mt7915_sku_table_append(s8 *table, size_t table_len, size_t *offset,
++			const void *data, size_t data_len)
++{
++	if (*offset > table_len || data_len > table_len - *offset)
++		return -EOVERFLOW;
++
++	memcpy(table + *offset, data, data_len);
++	*offset += data_len;
++
++	return 0;
++}
++
++static int
++mt7915_sku_table_append_zero(s8 *table, size_t table_len, size_t *offset,
++			     size_t data_len)
++{
++	if (*offset > table_len || data_len > table_len - *offset)
++		return -EOVERFLOW;
++
++	memset(table + *offset, 0, data_len);
++	*offset += data_len;
++
++	return 0;
++}
++
++static int
++mt7915_serialize_rate_sku(const struct mt76_power_limits *la, s8 *table,
++			  size_t table_len)
++{
++	const u8 *len = mt7915_sku_group_len;
++	size_t offset = 0;
++	int i, ret;
++
++	if (table_len != MT7915_SKU_RATE_NUM)
++		return -EINVAL;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset, &la->cck,
++				     len[SKU_CCK] + len[SKU_OFDM]);
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset, &la->mcs[0],
++				     len[SKU_HT_BW20]);
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset, &la->mcs[1],
++				     len[SKU_HT_BW40]);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < 4; i++) {
++		ret = mt7915_sku_table_append(table, table_len, &offset,
++					     &la->mcs[i],
++					     sizeof(la->mcs[i]));
++		if (ret)
++			return ret;
++
++		ret = mt7915_sku_table_append_zero(table, table_len, &offset, 2);
++		if (ret)
++			return ret;
++	}
++
++	ret = mt7915_sku_table_append(table, table_len, &offset, &la->ru[0],
++				     sizeof(la->ru));
++	if (ret)
++		return ret;
++
++	return offset == table_len ? 0 : -EINVAL;
++}
++
++static int
++mt7915_serialize_path_sku(const struct mt76_power_limits *la, s8 *table,
++			  size_t table_len)
++{
++	size_t offset = 0;
++	int i, ret;
++
++	if (table_len != MT7915_SKU_PATH_NUM)
++		return -EINVAL;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset, &la->path.cck,
++				     sizeof(la->path.cck));
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ofdm, sizeof(la->path.ofdm));
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ofdm_bf[1],
++				     sizeof(la->path.ofdm_bf) - 1);
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ru[3],
++				     sizeof(la->path.ru[3]));
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ru_bf[3][1],
++				     sizeof(la->path.ru_bf[3]) - 1);
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ru[4],
++				     sizeof(la->path.ru[4]));
++	if (ret)
++		return ret;
++
++	ret = mt7915_sku_table_append(table, table_len, &offset,
++				     &la->path.ru_bf[4][1],
++				     sizeof(la->path.ru_bf[4]) - 1);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < 8; i++) {
++		bool bf = i % 2;
++		u8 idx = (i + 6) / 2;
++		const s8 *buf = bf ? la->path.ru_bf[idx] : la->path.ru[idx];
++
++		ret = mt7915_sku_table_append(table, table_len, &offset,
++					     bf ? buf + 1 : buf,
++					     bf ? 9 : 10);
++		if (ret)
++			return ret;
++	}
++
++	for (i = 0; i < 6; i++) {
++		bool bf = i % 2;
++		u8 idx = i / 2;
++		const s8 *buf = bf ? la->path.ru_bf[idx] : la->path.ru[idx];
++
++		ret = mt7915_sku_table_append(table, table_len, &offset,
++					     buf, 10);
++		if (ret)
++			return ret;
++	}
++
++	return offset == table_len ? 0 : -EINVAL;
++}
++
++#define MT7915_CR6608_READBACK_ATTEMPTS	6
++
++static int
++mt7915_cr6608_validate_sku_readback(const s8 *actual, const s8 *cap,
++				    size_t table_len, int required_peak,
++				    int *observed_peak, int *first_violation)
++{
++	int peak = S8_MIN;
++	int violation = -1;
++	size_t i;
++
++	for (i = 0; i < table_len; i++) {
++		peak = max_t(int, peak, actual[i]);
++		if (violation < 0 && actual[i] > cap[i])
++			violation = i;
++	}
++
++	if (observed_peak)
++		*observed_peak = peak;
++	if (first_violation)
++		*first_violation = violation;
++	if (violation >= 0)
++		return -ERANGE;
++	if (required_peak >= 0 && peak != required_peak)
++		return -EREMOTEIO;
++
++	return 0;
++}
++
++static int
++mt7915_cr6608_poll_sku_readback(struct mt7915_phy *phy, u8 category,
++				const s8 *cap, s8 *actual,
++				size_t table_len, int required_peak,
++				int *observed_peak, int *attempts,
++				int *first_violation)
++{
++	int attempt, ret = -ETIMEDOUT;
++
++	for (attempt = 1; attempt <= MT7915_CR6608_READBACK_ATTEMPTS;
++	     attempt++) {
++		ret = mt7915_mcu_get_txpower_sku(phy, actual, table_len,
++						  category);
++		if (!ret)
++			ret = mt7915_cr6608_validate_sku_readback(
++				actual, cap, table_len, required_peak,
++				observed_peak, first_violation);
++		if (!ret)
++			break;
++		if (attempt < MT7915_CR6608_READBACK_ATTEMPTS)
++			usleep_range(10000, 20000);
++	}
++
++	if (attempts)
++		*attempts = min(attempt, MT7915_CR6608_READBACK_ATTEMPTS);
++
++	return ret;
++}
++
++static void
++mt7915_sku_table_merge_conservative(s8 *rollback, const s8 *target,
++				    size_t table_len)
++{
++	size_t i;
++
++	for (i = 0; i < table_len; i++)
++		rollback[i] = min(rollback[i], target[i]);
++}
++
++static int mt7915_cr6608_pause_tx(struct mt7915_phy *phy,
++				  bool tx_already_paused,
++				  bool *pause_owned)
++{
++	struct mt76_phy *mphy = phy->mt76;
++	struct mt76_dev *mdev = mphy->dev;
++	unsigned long flags;
++	bool recovery_pending;
++
++	lockdep_assert_held(&mdev->mutex);
++	*pause_owned = false;
++	spin_lock_irqsave(&phy->dev->recovery_tx_lock, flags);
++	recovery_pending =
++		test_bit(MT76_MCU_RESET, &phy->dev->mphy.state) ||
++		phy->dev->recovery.restart ||
++		phy->dev->recovery.generation !=
++		phy->dev->recovery.completed_generation;
++	if (recovery_pending ||
++	    (tx_already_paused && !test_bit(MT76_RESET, &mphy->state)) ||
++	    (!tx_already_paused &&
++	     test_and_set_bit(MT76_RESET, &mphy->state))) {
++		spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++		return -EBUSY;
++	}
++	if (tx_already_paused) {
++		spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++		return 0;
++	}
++	*pause_owned = true;
++
++	ieee80211_stop_queues(mphy->hw);
++	spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++	mt76_worker_disable(&mdev->tx_worker);
++
++	if (!wait_event_timeout(mdev->tx_wait, !mt76_has_tx_pending(mphy),
++				HZ / 5)) {
++		dev_err(phy->dev->mt76.dev,
++			"CR6608-RF timed out while draining TX before SKU update\n");
++		return -ETIMEDOUT;
++	}
++
++	spin_lock_irqsave(&phy->dev->recovery_tx_lock, flags);
++	recovery_pending =
++		test_bit(MT76_MCU_RESET, &phy->dev->mphy.state) ||
++		phy->dev->recovery.restart ||
++		phy->dev->recovery.generation !=
++		phy->dev->recovery.completed_generation;
++	spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++	if (recovery_pending)
++		return -EBUSY;
++
++	return 0;
++}
++
++static bool mt7915_cr6608_resume_tx(struct mt7915_phy *phy)
++{
++	struct mt76_phy *mphy = phy->mt76;
++	struct mt76_dev *mdev = mphy->dev;
++	unsigned long flags;
++	bool recovery_pending;
++
++	/* Keep MT76_RESET asserted while unparking the worker.  A recovery
++	 * producer can then claim RESET at any point without a later worker
++	 * enable escaping its stop.  The final clear/wake is the atomic commit.
++	 */
++	mt76_worker_enable(&mdev->tx_worker);
++	mt76_worker_schedule(&mdev->tx_worker);
++
++	spin_lock_irqsave(&phy->dev->recovery_tx_lock, flags);
++	recovery_pending =
++		test_bit(MT76_MCU_RESET, &phy->dev->mphy.state) ||
++		phy->dev->recovery.restart ||
++		phy->dev->recovery.generation !=
++		phy->dev->recovery.completed_generation;
++	if (recovery_pending) {
++		spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++		return false;
++	}
++	clear_bit(MT76_RESET, &mphy->state);
++	ieee80211_wake_queues(mphy->hw);
++	spin_unlock_irqrestore(&phy->dev->recovery_tx_lock, flags);
++
++	return true;
++}
++
++int mt7915_mcu_txpower_pause(struct mt7915_phy *phy, bool *pause_owned)
++{
++	return mt7915_cr6608_pause_tx(phy, false, pause_owned);
++}
++
++bool mt7915_mcu_txpower_resume(struct mt7915_phy *phy)
++{
++	return mt7915_cr6608_resume_tx(phy);
++}
++
++void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
++{
++	struct mt76_phy *ext_phy = dev->mt76.phys[MT_BAND1];
++	unsigned long flags;
++	bool full_in_progress;
++
++	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
++	/* Probe-time MCU errors are returned to the caller and unwind device
++	 * registration synchronously.  reset_work must never run against an
++	 * ieee80211_hw that has not completed registration.
++	 */
++	if (!dev->recovery.hw_init_done) {
++		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		return;
++	}
++	/* Calls from a failing transaction and its outer channel/config path can
++	 * describe the same fault.  Promote an outstanding partial request, but
++	 * allocate a new generation only when no recovery is already pending.
++	 * Independent firmware fault notifications increment generation in
++	 * mt7915_reset(), so they are not coalesced here.
++	 */
++	if (dev->recovery.hw_full_reset ||
++	    dev->recovery.generation ==
++	    dev->recovery.completed_generation)
++		dev->recovery.generation++;
++	dev->recovery.restart = true;
++	set_bit(MT76_MCU_RESET, &dev->mphy.state);
++	set_bit(MT76_RESET, &dev->mphy.state);
++	ieee80211_stop_queues(mt76_hw(dev));
++	if (ext_phy) {
++		set_bit(MT76_RESET, &ext_phy->state);
++		ieee80211_stop_queues(ext_phy->hw);
++	}
++	full_in_progress = dev->recovery.hw_full_reset;
++	if (!full_in_progress)
++		queue_work(dev->mt76.wq, &dev->reset_work);
++	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++
++	wake_up(&dev->mt76.mcu.wait);
++	wake_up(&dev->reset_wait);
++}
++
++static void mt7915_cr6608_schedule_recovery(struct mt7915_phy *phy)
++{
++	mt7915_mcu_schedule_full_recovery(phy->dev);
++}
++
++static int
++mt7915_mcu_send_txpower_sku_table(struct mt7915_phy *phy, u8 limit_type,
++				  const s8 *table, size_t table_len)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct {
++		u8 format_id;
++		u8 limit_type;
++		u8 band_idx;
++	} __packed hdr = {
++		.format_id = TX_POWER_LIMIT_TABLE,
++		.limit_type = limit_type,
++		.band_idx = phy->mt76->band_idx,
++	};
++	struct sk_buff *skb;
++
++	if ((limit_type == TX_POWER_LIMIT_TABLE_RATE &&
++	     table_len != MT7915_SKU_RATE_NUM) ||
++	    (limit_type == TX_POWER_LIMIT_TABLE_PATH &&
++	     table_len != MT7915_SKU_PATH_NUM) ||
++	    (limit_type != TX_POWER_LIMIT_TABLE_RATE &&
++	     limit_type != TX_POWER_LIMIT_TABLE_PATH))
++		return -EINVAL;
++
++	skb = mt76_mcu_msg_alloc(&dev->mt76, NULL, sizeof(hdr) + table_len);
++	if (!skb)
++		return -ENOMEM;
++
++	skb_put_data(skb, &hdr, sizeof(hdr));
++	skb_put_data(skb, table, table_len);
++
++	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
++				     MCU_EXT_CMD(TX_POWER_FEATURE_CTRL), true);
++}
++
++static int
++mt7915_mcu_set_txpower_sku_default(struct mt7915_phy *phy)
++{
+ 	struct mt7915_dev *dev = phy->dev;
+ 	struct mt76_phy *mphy = phy->mt76;
+ 	struct ieee80211_hw *hw = mphy->hw;
+-	struct mt7915_sku_val {
++	struct {
+ 		u8 format_id;
+ 		u8 limit_type;
+ 		u8 band_idx;
+@@ -3460,20 +4193,17 @@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ 	skb_put_data(skb, &la.mcs[0], len[SKU_HT_BW20]);
+ 	skb_put_data(skb, &la.mcs[1], len[SKU_HT_BW40]);
+ 
+-	/* vht */
+ 	for (i = 0; i < 4; i++) {
+ 		skb_put_data(skb, &la.mcs[i], sizeof(la.mcs[i]));
+-		skb_put_zero(skb, 2);  /* padding */
++		skb_put_zero(skb, 2);
+ 	}
+ 
+-	/* he */
+ 	skb_put_data(skb, &la.ru[0], sizeof(la.ru));
+ 	ret = mt76_mcu_skb_send_msg(&dev->mt76, skb,
+ 				    MCU_EXT_CMD(TX_POWER_FEATURE_CTRL), true);
+ 	if (ret)
+ 		return ret;
+ 
+-	/* only set per-path power table when it's configured */
+ 	if (!phy->sku_path_en)
+ 		return 0;
+ 
+@@ -3487,23 +4217,16 @@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ 	skb_put_data(skb, &la.path.cck, sizeof(la.path.cck));
+ 	skb_put_data(skb, &la.path.ofdm, sizeof(la.path.ofdm));
+ 	skb_put_data(skb, &la.path.ofdm_bf[1], sizeof(la.path.ofdm_bf) - 1);
+-
+-	/* HT20 and HT40 */
+ 	skb_put_data(skb, &la.path.ru[3], sizeof(la.path.ru[3]));
+ 	skb_put_data(skb, &la.path.ru_bf[3][1], sizeof(la.path.ru_bf[3]) - 1);
+ 	skb_put_data(skb, &la.path.ru[4], sizeof(la.path.ru[4]));
+ 	skb_put_data(skb, &la.path.ru_bf[4][1], sizeof(la.path.ru_bf[4]) - 1);
+ 
+-	/* start from non-bf and bf fields of
+-	 * BW20/RU242, BW40/RU484, BW80/RU996, BW160/RU2x996,
+-	 * RU26, RU52, and RU106
+-	 */
+-
+ 	for (i = 0; i < 8; i++) {
+ 		bool bf = i % 2;
+ 		u8 idx = (i + 6) / 2;
+ 		s8 *buf = bf ? la.path.ru_bf[idx] : la.path.ru[idx];
+-		/* The non-bf fields of RU26 to RU106 are special cases */
++
+ 		if (bf)
+ 			skb_put_data(skb, buf + 1, 9);
+ 		else
+@@ -3522,10 +4245,487 @@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ 				     MCU_EXT_CMD(TX_POWER_FEATURE_CTRL), true);
+ }
+ 
++static int
++mt7915_cr6608_rf_rollback_sku(struct mt7915_phy *phy,
++			      const s8 *rate_table, bool have_rate,
++			      const s8 *path_table, bool have_path)
++{
++	s8 verify_rate[MT7915_SKU_RATE_NUM];
++	s8 verify_path[MT7915_SKU_PATH_NUM];
++	int rate_peak = -1, path_peak = -1;
++	int rate_attempts = 0, path_attempts = 0;
++	int rate_violation = -1, path_violation = -1;
++	int rate_ret = 0, path_ret = 0;
++
++	if (have_path) {
++		path_ret = mt7915_mcu_send_txpower_sku_table(
++			phy, TX_POWER_LIMIT_TABLE_PATH, path_table,
++			sizeof(verify_path));
++		if (!path_ret)
++			path_ret = mt7915_cr6608_poll_sku_readback(
++				phy, TX_POWER_INFO_PATH, path_table,
++				verify_path, sizeof(verify_path), -1,
++				&path_peak, &path_attempts, &path_violation);
++	}
++
++	if (have_rate) {
++		rate_ret = mt7915_mcu_send_txpower_sku_table(
++			phy, TX_POWER_LIMIT_TABLE_RATE, rate_table,
++			sizeof(verify_rate));
++		if (!rate_ret)
++			rate_ret = mt7915_cr6608_poll_sku_readback(
++				phy, TX_POWER_INFO_RATE, rate_table,
++				verify_rate, sizeof(verify_rate), -1,
++				&rate_peak, &rate_attempts, &rate_violation);
++	}
++
++	if (rate_ret || path_ret)
++		dev_err(phy->dev->mt76.dev,
++			"CR6608-RF SKU rollback verification failed: rate=%d rate_peak=%d rate_attempts=%d rate_violation=%d path=%d path_peak=%d path_attempts=%d path_violation=%d; forcing radio recovery\n",
++			rate_ret, rate_peak, rate_attempts, rate_violation,
++			path_ret, path_peak, path_attempts, path_violation);
++	else
++		dev_warn_ratelimited(phy->dev->mt76.dev,
++				     "CR6608-RF SKU transaction rolled back to conservative firmware caps (rate_peak=%d attempts=%d path=%s)\n",
++				     rate_peak, rate_attempts,
++				     have_path ? "verified" : "disabled");
++
++	return rate_ret ? rate_ret : path_ret;
++}
++
++static int
++mt7915_cr6608_mcu_set_txpower_sku(struct mt7915_phy *phy,
++				  int requested_power, int kernel_power,
++				  bool allow_raise,
++				  bool tx_already_paused,
++				  bool *safe_cap_applied)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt76_phy *mphy = phy->mt76;
++	struct ieee80211_channel *chan = mphy->chandef.chan;
++	struct mt7915_cr6608_sku_transaction *transaction;
++	int accepted_txpower_cur, readback_peak = -1;
++	int required_rate_peak, rate_attempts = 0, rate_violation = -1;
++	int path_peak = -1, path_attempts = 0, path_violation = -1;
++	int bounded_power, ret, tx_power, sar_power, e2p_power_limit;
++	int previous_txpower_cur = mphy->txpower_cur;
++	int regulatory_power = chan ? chan->max_reg_power : -1;
++	int path_delta = mt76_tx_power_path_delta(hweight16(mphy->chainmask));
++	unsigned int telemetry_generation;
++	bool runtime_override;
++	bool have_previous_rate = false;
++	bool have_previous_path = false;
++	bool sku_write_attempted = false;
++	bool pause_owned = false;
++	bool tx_resume_safe = true;
++	bool high_power_preflight_ok;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	if (safe_cap_applied)
++		*safe_cap_applied = false;
++	transaction = kzalloc(sizeof(*transaction), GFP_KERNEL);
++	if (!transaction) {
++		bool emergency_pause_owned = false;
++
++		mt7915_cr6608_pause_tx(phy, tx_already_paused,
++				       &emergency_pause_owned);
++		mt7915_cr6608_schedule_recovery(phy);
++		return -ENOMEM;
++	}
++
++	bounded_power = chan ? min(kernel_power, chan->max_power) : kernel_power;
++	/* The 38 dBm lab gate intentionally raises chan->max_power on the main
++	 * channel.  A lowering-only/off-channel refresh must instead retain the
++	 * kernel regulatory ceiling for the active scan channel.
++	 */
++	if (chan && !allow_raise)
++		bounded_power = min(bounded_power, chan->max_reg_power);
++	tx_power = mt76_get_power_bound(mphy, bounded_power);
++	sar_power = tx_power;
++	runtime_override = allow_raise &&
++			   requested_power >= 1 && requested_power <= 38 &&
++			   kernel_power == requested_power &&
++			   chan && chan->max_power >= requested_power &&
++			   mt7915_cr6608_channel_ready(mphy) &&
++			   sar_power + path_delta >= requested_power * 2;
++	if (phy->sku_limit_en) {
++		tx_power = mt76_get_rate_power_limits(mphy, mphy->chandef.chan,
++						      &transaction->limits,
++						      tx_power);
++		runtime_override = runtime_override &&
++				   tx_power + path_delta >= requested_power * 2;
++	} else {
++		accepted_txpower_cur =
++			mt7915_cr6608_calculate_txpower_cur(
++				phy, tx_power, false, &e2p_power_limit);
++		telemetry_generation =
++			mt7915_cr6608_rf_record_start(phy, requested_power,
++						     kernel_power,
++						     regulatory_power,
++						     path_delta, sar_power,
++						     tx_power,
++						     e2p_power_limit,
++						     runtime_override);
++		/*
++		 * The CR6608 test path is valid only when the firmware SKU
++		 * transaction can be read back and validated.  Do not publish a
++		 * software-only accepted value when SKU enforcement is absent.
++		 */
++		ret = -EOPNOTSUPP;
++		mt7915_cr6608_rf_record_mcu_result(phy, telemetry_generation,
++					  ret, -1);
++		mt7915_cr6608_schedule_recovery(phy);
++		kfree(transaction);
++		return ret;
++	}
++
++	accepted_txpower_cur = mt7915_cr6608_calculate_txpower_cur(
++		phy, tx_power, runtime_override, &e2p_power_limit);
++	required_rate_peak = requested_power * 2 - path_delta;
++	telemetry_generation =
++		mt7915_cr6608_rf_record_start(phy, requested_power,
++					     kernel_power, regulatory_power,
++					     path_delta, sar_power, tx_power,
++					     e2p_power_limit,
++					     runtime_override);
++	high_power_preflight_ok = runtime_override &&
++				  accepted_txpower_cur == required_rate_peak;
++
++	ret = mt7915_cr6608_pause_tx(phy, tx_already_paused, &pause_owned);
++	if (ret) {
++		if (pause_owned || tx_already_paused) {
++			tx_resume_safe = false;
++			mt7915_cr6608_schedule_recovery(phy);
++		}
++		goto out;
++	}
++
++	ret = mt7915_serialize_rate_sku(&transaction->limits,
++					transaction->rate_table,
++					sizeof(transaction->rate_table));
++	if (ret)
++		goto recovery_without_snapshot;
++
++	if (phy->sku_path_en) {
++		ret = mt7915_serialize_path_sku(
++			&transaction->limits, transaction->path_table,
++			sizeof(transaction->path_table));
++		if (ret)
++			goto recovery_without_snapshot;
++	}
++
++	ret = mt7915_mcu_get_txpower_sku(
++		phy, transaction->previous_rate_table,
++		sizeof(transaction->previous_rate_table),
++		TX_POWER_INFO_RATE);
++	if (ret)
++		goto recovery_without_snapshot;
++	have_previous_rate = true;
++
++	if (phy->sku_path_en) {
++		ret = mt7915_mcu_get_txpower_sku(
++			phy, transaction->previous_path_table,
++			sizeof(transaction->previous_path_table),
++			TX_POWER_INFO_PATH);
++		if (ret)
++			goto recovery_without_snapshot;
++		have_previous_path = true;
++	}
++
++	/* A safety refresh after a latched failure is lowering-only.  Likewise,
++	 * a rejected high-power preflight must never raise an SKU entry.
++	 */
++	if (!high_power_preflight_ok) {
++		mt7915_sku_table_merge_conservative(
++			transaction->rate_table,
++			transaction->previous_rate_table,
++			sizeof(transaction->rate_table));
++		if (phy->sku_path_en)
++			mt7915_sku_table_merge_conservative(
++				transaction->path_table,
++				transaction->previous_path_table,
++				sizeof(transaction->path_table));
++	}
++
++	/* A failed lower-power transition must never restore a higher table. */
++	mt7915_sku_table_merge_conservative(
++		transaction->previous_rate_table,
++		transaction->rate_table,
++		sizeof(transaction->previous_rate_table));
++	if (phy->sku_path_en)
++		mt7915_sku_table_merge_conservative(
++			transaction->previous_path_table,
++			transaction->path_table,
++			sizeof(transaction->previous_path_table));
++
++	sku_write_attempted = true;
++	ret = mt7915_mcu_send_txpower_sku_table(
++		phy, TX_POWER_LIMIT_TABLE_RATE, transaction->rate_table,
++		sizeof(transaction->rate_table));
++	if (ret)
++		goto rollback;
++
++	if (phy->sku_path_en) {
++		ret = mt7915_mcu_send_txpower_sku_table(
++			phy, TX_POWER_LIMIT_TABLE_PATH,
++			transaction->path_table,
++			sizeof(transaction->path_table));
++		if (ret)
++			goto rollback;
++	}
++
++	ret = mt7915_cr6608_poll_sku_readback(
++		phy, TX_POWER_INFO_RATE, transaction->rate_table,
++		transaction->rate_readback,
++		sizeof(transaction->rate_readback),
++		high_power_preflight_ok ? required_rate_peak : -1,
++		&readback_peak, &rate_attempts, &rate_violation);
++	if (ret) {
++		dev_err_ratelimited(dev->mt76.dev,
++			"CR6608-RF firmware rate-SKU verification failed: ret=%d peak=%d required=%d attempts=%d first_cap_violation=%d\n",
++			ret, readback_peak, required_rate_peak,
++			rate_attempts, rate_violation);
++		goto rollback;
++	}
++
++	if (phy->sku_path_en) {
++		ret = mt7915_cr6608_poll_sku_readback(
++			phy, TX_POWER_INFO_PATH, transaction->path_table,
++			transaction->path_readback,
++			sizeof(transaction->path_readback), -1,
++			&path_peak, &path_attempts, &path_violation);
++		if (ret) {
++			dev_err_ratelimited(dev->mt76.dev,
++				"CR6608-RF firmware path-SKU cap verification failed: ret=%d peak=%d attempts=%d first_cap_violation=%d\n",
++				ret, path_peak, path_attempts, path_violation);
++			goto rollback;
++		}
++	}
++
++	if (!high_power_preflight_ok) {
++		/*
++		 * A previous verified high table may still be active when SAR,
++		 * regulatory or per-rate constraints become stricter.  The table
++		 * sent above contains those current safe caps.  Verify the lowering
++		 * before rejecting the requested value so the old table can
++		 * never remain effective merely because preflight stopped passing.
++		 */
++		mphy->txpower_cur = readback_peak;
++		if (safe_cap_applied)
++			*safe_cap_applied = true;
++		ret = -ERANGE;
++		dev_warn_ratelimited(dev->mt76.dev,
++			"CR6608-RF %d dBm preflight rejected after verified safe-cap update: override=%d applied_peak=%d half-dBm requested_peak=%d\n",
++			requested_power, runtime_override, readback_peak,
++			required_rate_peak);
++		goto out;
++	}
++
++	dev_info_ratelimited(dev->mt76.dev,
++			     "CR6608-RF %d dBm rate-SKU MCU witness verified: band=%u rate_peak=%d half-dBm required=%d attempts=%d path=%s\n",
++			     requested_power, mphy->band_idx, readback_peak,
++			     required_rate_peak, rate_attempts,
++			     phy->sku_path_en ? "cap-verified" : "disabled-not-verified");
++
++	mphy->txpower_cur = accepted_txpower_cur;
++
++	ret = 0;
++	goto out;
++
++rollback:
++	mphy->txpower_cur = min(previous_txpower_cur, accepted_txpower_cur);
++	readback_peak = -1;
++	if (sku_write_attempted) {
++		int rollback_ret;
++
++		rollback_ret = mt7915_cr6608_rf_rollback_sku(
++			phy, transaction->previous_rate_table,
++			have_previous_rate,
++			transaction->previous_path_table,
++			have_previous_path);
++		if (rollback_ret) {
++			tx_resume_safe = false;
++			ret = rollback_ret;
++			dev_err(dev->mt76.dev,
++				"CR6608-RF TX remains paused because SKU rollback could not be verified; scheduling firmware recovery\n");
++			mt7915_cr6608_schedule_recovery(phy);
++		} else if (!high_power_preflight_ok && safe_cap_applied) {
++			/* previous_* was conservatively merged with the lowering
++			 * target before rollback, so a verified rollback is also a
++			 * verified safe-cap transition.
++			 */
++			*safe_cap_applied = true;
++		}
++	}
++	goto out;
++
++recovery_without_snapshot:
++	/* Without a complete snapshot there is no trustworthy rollback source.
++	 * TX is already paused; keep it paused and force firmware recovery rather
++	 * than risk resuming with an older 70-half-dBm table.
++	 */
++	tx_resume_safe = false;
++	dev_err(dev->mt76.dev,
++		"CR6608-RF could not establish a complete SKU snapshot (%d); TX stays paused and firmware recovery is scheduled\n",
++		ret);
++	mt7915_cr6608_schedule_recovery(phy);
++out:
++	if (pause_owned && tx_resume_safe &&
++	    !mt7915_cr6608_resume_tx(phy) && !ret)
++		ret = -EBUSY;
++	mt7915_cr6608_rf_record_mcu_result(phy, telemetry_generation, ret,
++					  readback_peak);
++	kfree(transaction);
++
++	return ret;
++}
++
++int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy,
++			       bool channel_changed, bool sar_update,
++			       bool tx_already_paused, bool force_lowering)
++{
++	struct ieee80211_hw *hw = phy->mt76->hw;
++	int requested_power = hw->conf.power_level;
++	bool gate_enabled = mt7915_cr6608_rf_request_enabled(phy->dev);
++	bool channel_ready;
++	bool failure_latched;
++
++	if (!gate_enabled) {
++		if (mt7915_is_cr6608(phy->dev) && requested_power == 38) {
++			dev_warn_ratelimited(phy->dev->mt76.dev,
++				"CR6608-RF 38 dBm request rejected: CR6608 DTS property and cr6608_rf_38dbm=1 are both required\n");
++			if (tx_already_paused)
++				mt7915_mcu_schedule_full_recovery(phy->dev);
++			return -EPERM;
++		}
++
++		return mt7915_mcu_set_txpower_sku_default(phy);
++	}
++
++	/* The companion path supplies audited volatile 38 dBm Factory targets, so
++	 * every valid 0..38 request must use the paused/read-back transaction.
++	 * This proves 30 dBm as an exact 54-half-dBm rate peak (with two paths)
++	 * and prevents a failed default write from leaving a higher table active.
++	 */
++	if (phy->mt76->band_idx >= ARRAY_SIZE(cr6608_rf_failure_latched))
++		return -EINVAL;
++	failure_latched = cr6608_rf_failure_latched[phy->mt76->band_idx];
++	if (requested_power < 0 || requested_power > 38)
++		return requested_power > 38 ? -ERANGE : mt7915_mcu_set_txpower_sku_default(phy);
++	if (hweight16(phy->mt76->chainmask) != 2) {
++		bool pause_owned = false;
++		int pause_ret;
++
++		dev_err_ratelimited(phy->dev->mt76.dev,
++			"CR6608-RF requires exactly two active TX chains for exact 30/38 dBm accounting; keeping TX paused and forcing recovery\n");
++		pause_ret = mt7915_cr6608_pause_tx(phy, tx_already_paused,
++						 &pause_owned);
++		mt7915_cr6608_schedule_recovery(phy);
++		cr6608_rf_failure_latched[phy->mt76->band_idx] = true;
++		return pause_ret ? pause_ret : -EOPNOTSUPP;
++	}
++
++	channel_ready = mt7915_cr6608_channel_ready(phy->mt76);
++	if (requested_power == 38 && failure_latched &&
++	    !channel_changed && !sar_update &&
++	    channel_ready) {
++		dev_err_ratelimited(phy->dev->mt76.dev,
++			"CR6608-RF band=%u 38 dBm transaction is failure-latched until module reload/reboot\n",
++			phy->mt76->band_idx);
++		return -EREMOTEIO;
++	}
++	if (!mt7915_cr6608_active_channel_valid(phy->mt76)) {
++		bool pause_owned = false;
++		int pause_ret;
++
++		dev_err_ratelimited(phy->dev->mt76.dev,
++			"CR6608-RF has no valid active channel for a safe SKU refresh; keeping TX paused and forcing recovery\n");
++		pause_ret = mt7915_cr6608_pause_tx(phy, tx_already_paused,
++						 &pause_owned);
++		mt7915_cr6608_schedule_recovery(phy);
++		cr6608_rf_failure_latched[phy->mt76->band_idx] = true;
++		return pause_ret ? pause_ret : -EINVAL;
++	}
++
++	{
++		int ret;
++		bool safe_cap_applied = false;
++
++		ret = mt7915_cr6608_mcu_set_txpower_sku(
++			phy, requested_power, hw->conf.power_level,
++			!force_lowering && channel_ready &&
++			(!failure_latched || requested_power < 38),
++			tx_already_paused,
++			&safe_cap_applied);
++		/* Off-channel scans must replace a previously verified high table
++		 * with an MCU-read-back safe table for the active channel, but that
++		 * expected lowering is transient and must not permanently latch the
++		 * experiment.  A previously latched band may likewise complete a
++		 * channel transition after a verified lowering without being raised.
++		 */
++		if (ret == -ERANGE && safe_cap_applied &&
++		    (force_lowering || requested_power == 0 || !channel_ready ||
++		     (channel_changed && failure_latched && !sar_update))) {
++			dev_info_ratelimited(phy->dev->mt76.dev,
++				"CR6608-RF verified lowering-only SKU refresh for band=%u channel_ready=%d failure_latched=%d\n",
++				phy->mt76->band_idx, channel_ready,
++				failure_latched);
++			return 0;
++		}
++		if (ret)
++			dev_err_ratelimited(phy->dev->mt76.dev,
++				"CR6608-RF %d dBm request failed verified MCU transaction (%d); refusing to hide the failure behind a default-path success\n",
++				requested_power, ret);
++		cr6608_rf_failure_latched[phy->mt76->band_idx] =
++			failure_latched || !!ret;
++		return ret;
++	}
++}
++
++int mt7915_mcu_set_sar_power_sku(struct mt7915_phy *phy,
++				 const struct cfg80211_sar_specs *sar)
++{
++	struct ieee80211_hw *hw = phy->mt76->hw;
++	bool experiment_active;
++	bool pause_owned = false;
++	int ret;
++
++	lockdep_assert_held(&phy->dev->mt76.mutex);
++	experiment_active = mt7915_cr6608_rf_request_enabled(phy->dev) &&
++			    hw->conf.power_level >= 0 &&
++			    hw->conf.power_level <= 38;
++	if (!experiment_active) {
++		ret = mt76_init_sar_power(hw, sar);
++		if (ret)
++			return ret;
++
++		return mt7915_mcu_set_txpower_sku(phy, false, true, false,
++						 false);
++	}
++
++	/* Quiesce TX before publishing stricter SAR state.  Otherwise the old
++	 * verified 38 dBm MCU table could remain active for a short interval
++	 * between the software SAR update and the lowering transaction.
++	 */
++	ret = mt7915_cr6608_pause_tx(phy, false, &pause_owned);
++	if (ret)
++		goto out;
++
++	ret = mt76_init_sar_power(hw, sar);
++	if (ret)
++		goto out;
++
++	ret = mt7915_mcu_set_txpower_sku(phy, false, true, true, false);
++out:
++	if (pause_owned && !mt7915_cr6608_resume_tx(phy) && !ret)
++		ret = -EBUSY;
++
++	return ret;
++}
++
+ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+ 			       u8 category)
+ {
+-#define RATE_POWER_INFO	2
+ 	struct mt7915_dev *dev = phy->dev;
+ 	struct {
+ 		u8 format_id;
+@@ -3538,14 +4738,41 @@ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+ 		.band_idx = phy->mt76->band_idx,
+ 	};
+ 	struct sk_buff *skb;
++	size_t required_len;
+ 	int ret, i;
+ 
++	if (!txpower || len < 0 || req.band_idx >= 2)
++		return -EINVAL;
++
++	switch (category) {
++	case TX_POWER_INFO_RATE:
++		if (len > MT7915_SKU_RATE_NUM)
++			return -EINVAL;
++		required_len = 4 + MT7915_SKU_RATE_NUM * 2;
++		break;
++	case TX_POWER_INFO_PATH:
++		if (len > MT7915_SKU_PATH_NUM)
++			return -EINVAL;
++		required_len = 4 + len;
++		break;
++	default:
++		return -EINVAL;
++	}
++
+ 	ret = mt76_mcu_send_and_get_msg(&dev->mt76,
+ 					MCU_EXT_CMD(TX_POWER_FEATURE_CTRL),
+ 					&req, sizeof(req), true, &skb);
+ 	if (ret)
+ 		return ret;
+ 
++	/* The first four firmware bytes are opaque. Validate the documented
++	 * category-specific payload shape, then verify the complete SKU payload.
++	 */
++	if (skb->len < required_len) {
++		ret = -EMSGSIZE;
++		goto out;
++	}
++
+ 	if (category == TX_POWER_INFO_RATE) {
+ 		s8 res[MT7915_SKU_RATE_NUM][2];
+ 
+@@ -3556,9 +4783,11 @@ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+ 		memcpy(txpower, skb->data + 4, len);
+ 	}
+ 
++	ret = 0;
++out:
+ 	dev_kfree_skb(skb);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ int mt7915_mcu_set_test_param(struct mt7915_dev *dev, u8 param, bool test_mode,
+diff --git a/mt7915/mmio.c b/mt7915/mmio.c
+index 2708b15..65f0dea 100644
+--- a/mt7915/mmio.c
++++ b/mt7915/mmio.c
+@@ -886,10 +886,8 @@ static void mt7915_irq_tasklet(struct tasklet_struct *t)
+ 		u32 val = mt76_rr(dev, MT_MCU_CMD);
+ 
+ 		mt76_wr(dev, MT_MCU_CMD, val);
+-		if (val & (MT_MCU_CMD_ERROR_MASK | MT_MCU_CMD_WDT_MASK)) {
+-			dev->recovery.state = val;
+-			mt7915_reset(dev);
+-		}
++		if (val & (MT_MCU_CMD_ERROR_MASK | MT_MCU_CMD_WDT_MASK))
++			mt7915_reset(dev, val);
+ 	}
+ }
+ 
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index b2fc713..9bea776 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -275,12 +275,18 @@ struct mt7915_dev {
+ 
+ 	struct {
+ 		u32 state;
++		u32 generation;
++		u32 completed_generation;
+ 		u32 wa_reset_count;
+ 		u32 wm_reset_count;
++		u32 reconfig_generation[2];
++		u32 reconfig_verified_generation[2];
++		u8 reconfig_pending;
+ 		bool hw_full_reset:1;
+ 		bool hw_init_done:1;
+ 		bool restart:1;
+ 	} recovery;
++	spinlock_t recovery_tx_lock;
+ 
+ 	/* protects coredump data */
+ 	struct mutex dump_mutex;
+@@ -437,6 +443,7 @@ void mt7915_unregister_device(struct mt7915_dev *dev);
+ int mt7915_eeprom_init(struct mt7915_dev *dev);
+ void mt7915_eeprom_parse_hw_cap(struct mt7915_dev *dev,
+ 				struct mt7915_phy *phy);
++bool mt7915_cr6608_rf_request_enabled(struct mt7915_dev *dev);
+ int mt7915_eeprom_get_target_power(struct mt7915_dev *dev,
+ 				   struct ieee80211_channel *chan,
+ 				   u8 chain_idx);
+@@ -449,7 +456,7 @@ int mt7915_dma_reset(struct mt7915_dev *dev, bool force);
+ int mt7915_dma_start(struct mt7915_dev *dev, bool reset, bool wed_reset);
+ int mt7915_txbf_init(struct mt7915_dev *dev);
+ void mt7915_init_txpower(struct mt7915_phy *phy);
+-void mt7915_reset(struct mt7915_dev *dev);
++void mt7915_reset(struct mt7915_dev *dev, u32 state);
+ int mt7915_run(struct ieee80211_hw *hw);
+ int mt7915_mcu_init(struct mt7915_dev *dev);
+ int mt7915_mcu_init_firmware(struct mt7915_dev *dev);
+@@ -510,7 +517,14 @@ int mt7915_mcu_set_test_param(struct mt7915_dev *dev, u8 param, bool test_mode,
+ 			      u8 en);
+ int mt7915_mcu_set_ser(struct mt7915_dev *dev, u8 action, u8 set, u8 band);
+ int mt7915_mcu_set_sku_en(struct mt7915_phy *phy);
+-int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy);
++int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy,
++			       bool channel_changed, bool sar_update,
++			       bool tx_already_paused, bool force_lowering);
++int mt7915_mcu_set_sar_power_sku(struct mt7915_phy *phy,
++				 const struct cfg80211_sar_specs *sar);
++int mt7915_mcu_txpower_pause(struct mt7915_phy *phy, bool *pause_owned);
++bool mt7915_mcu_txpower_resume(struct mt7915_phy *phy);
++void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev);
+ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+ 			       u8 category);
+ int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower);

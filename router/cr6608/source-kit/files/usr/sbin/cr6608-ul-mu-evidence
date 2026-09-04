@@ -1,0 +1,117 @@
+#!/bin/sh
+#
+# Read-only report of client-attributed uplink MU evidence.
+#
+# Every number below comes from RX descriptors the driver already receives.
+# A HE trigger-based (TB) PPDU exists only as a response to a Trigger frame
+# this AP transmitted, and the descriptor carries the transmitting peer's
+# WCID, so a per-peer TB count is direct evidence that the firmware MU-RU
+# scheduler solicited uplink airtime from that exact client.
+#
+# This is host-observed scheduling evidence. It is not an RF measurement, not
+# a throughput claim, and not a regulatory or sale approval.
+
+set -eu
+
+debug_root="${CR6608_UL_MURU_DEBUG_ROOT:-/sys/kernel/debug/ieee80211}"
+mask_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
+
+verdict=UNKNOWN
+radios=0
+mumimo_total=0
+ofdma_total=0
+tb_total=0
+peers_with_tb=0
+peers_with_mumimo=0
+
+read_field() {
+	# $1 file, $2 key -> value, empty when absent or malformed
+	[ -r "$1" ] || return 0
+	awk -F= -v key="$2" '$1 == key { print $2; found = 1; exit } END { if (!found) exit 0 }' "$1" 2>/dev/null
+}
+
+is_uint() {
+	case "${1:-}" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+printf 'schema=cr6608-ul-mu-evidence-v1\n'
+
+if [ -r "$mask_param" ]; then
+	printf 'module_mask=%s\n' "$(cat "$mask_param" 2>/dev/null || printf 'unreadable')"
+else
+	printf 'module_mask=unavailable\n'
+fi
+
+for node in "$debug_root"/phy*/mt76/cr6608_ul_attribution; do
+	[ -f "$node" ] || continue
+	radios=$((radios + 1))
+	phy="$(printf '%s\n' "$node" | sed -n 's|.*/\(phy[0-9]*\)/mt76/.*|\1|p')"
+	band="$(read_field "$node" band)"
+	armed="$(read_field "$node" armed_mask)"
+	tb="$(read_field "$node" he_tb_ppdu)"
+	ofdma_ru="$(read_field "$node" he_tb_ul_ofdma_ru)"
+	full_bw="$(read_field "$node" he_tb_full_bw)"
+	ofdma_groups="$(read_field "$node" ul_ofdma_multi_user_ppdus)"
+	mumimo_groups="$(read_field "$node" ul_mumimo_multi_user_ppdus)"
+	max_peers="$(read_field "$node" max_peers_in_one_ppdu)"
+
+	for v in "$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers"; do
+		is_uint "$v" || { printf 'radio=%s status=malformed\n' "${phy:-unknown}"; continue 2; }
+	done
+
+	tb_total=$((tb_total + tb))
+	ofdma_total=$((ofdma_total + ofdma_groups))
+	mumimo_total=$((mumimo_total + mumimo_groups))
+
+	printf 'radio=%s band=%s armed_mask=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s max_peers_in_one_ppdu=%s\n' \
+		"${phy:-unknown}" "${band:-?}" "${armed:-?}" "$tb" "$ofdma_ru" \
+		"$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers"
+done
+
+for sta in "$debug_root"/phy*/netdev:*/stations/*/cr6608_ul_attribution; do
+	[ -f "$sta" ] || continue
+	mac="$(printf '%s\n' "$sta" | sed -n 's|.*/stations/\([^/]*\)/.*|\1|p')"
+	wcid="$(read_field "$sta" wcid)"
+	tb="$(read_field "$sta" he_tb_ppdu)"
+	ofdma_ru="$(read_field "$sta" he_tb_ul_ofdma_ru)"
+	full_bw="$(read_field "$sta" he_tb_full_bw)"
+	shared="$(read_field "$sta" he_tb_ul_mumimo_shared)"
+
+	for v in "$tb" "$ofdma_ru" "$full_bw" "$shared"; do
+		is_uint "$v" || { printf 'peer=%s status=malformed\n' "${mac:-unknown}"; continue 2; }
+	done
+
+	[ "$tb" -gt 0 ] && peers_with_tb=$((peers_with_tb + 1))
+	[ "$shared" -gt 0 ] && peers_with_mumimo=$((peers_with_mumimo + 1))
+
+	printf 'peer=%s wcid=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_mumimo_shared=%s\n' \
+		"${mac:-unknown}" "${wcid:-?}" "$tb" "$ofdma_ru" "$full_bw" "$shared"
+done
+
+printf 'radios=%s peers_with_trigger_response=%s peers_with_ul_mumimo=%s\n' \
+	"$radios" "$peers_with_tb" "$peers_with_mumimo"
+printf 'totals he_tb_ppdu=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s\n' \
+	"$tb_total" "$ofdma_total" "$mumimo_total"
+
+if [ "$radios" -eq 0 ]; then
+	verdict=NO_ATTRIBUTION_NODES
+	printf 'reason=driver-lacks-the-uplink-attribution-patch-or-no-uplink-bit-is-armed\n'
+elif [ "$mumimo_total" -gt 0 ] && [ "$peers_with_mumimo" -ge 2 ]; then
+	# Two or more distinct peers each carried a full-bandwidth TB PPDU that
+	# shared its PHY start time with another peer.
+	verdict=UL_MUMIMO_CLIENT_ATTRIBUTED
+elif [ "$ofdma_total" -gt 0 ] && [ "$peers_with_tb" -ge 2 ]; then
+	verdict=UL_OFDMA_CLIENT_ATTRIBUTED
+elif [ "$tb_total" -gt 0 ]; then
+	verdict=TRIGGER_RESPONSE_ONLY_NO_MULTI_USER_PPDU_YET
+	printf 'reason=peers-answer-triggers-but-no-two-peers-shared-one-uplink-ppdu\n'
+else
+	verdict=NO_TRIGGER_RESPONSE_OBSERVED
+	printf 'reason=no-he-tb-ppdu-seen-run-simultaneous-uploads-from-two-he-clients\n'
+fi
+
+printf 'verdict=%s\n' "$verdict"
+printf 'evidence_boundary=host-observed-scheduling-evidence-not-an-rf-regulatory-or-throughput-measurement\n'

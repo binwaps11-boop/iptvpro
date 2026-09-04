@@ -1,0 +1,112 @@
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 37809fa..d44e2f8 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -244,6 +244,17 @@ struct mt7915_phy {
+ #endif
+ };
+ 
++/* Keep the bit assignment identical to MediaTek's downstream mu_onoff ABI:
++ * bit 0 DL OFDMA, bit 1 UL OFDMA, bit 2 DL MU-MIMO, bit 3 UL MU-MIMO.
++ */
++#define CR6608_MURU_OFDMA_DL	BIT(0)
++#define CR6608_MURU_OFDMA_UL	BIT(1)
++#define CR6608_MURU_MUMIMO_DL	BIT(2)
++#define CR6608_MURU_MUMIMO_UL	BIT(3)
++#define CR6608_MURU_MASK		GENMASK(3, 0)
++#define CR6608_MURU_UL_MASK	(CR6608_MURU_OFDMA_UL | \
++				 CR6608_MURU_MUMIMO_UL)
++
+ struct mt7915_dev {
+ 	union { /* must be first */
+ 		struct mt76_dev mt76;
+@@ -300,8 +311,14 @@ struct mt7915_dev {
+ 	bool flash_mode;
+ 	bool muru_debug;
+ 	bool cr6608_ul_muru_allowed;
+-	bool cr6608_ul_muru;
+-	atomic_t cr6608_ul_muru_sta_rec_updates;
++	atomic_t cr6608_muru_mask;
++	spinlock_t cr6608_muru_telemetry_lock;
++	atomic_t cr6608_muru_fault_latched;
++	atomic_t cr6608_muru_fault_latches;
++	atomic_t cr6608_ul_muru_sta_rec_attempted;
++	atomic_t cr6608_ul_muru_sta_rec_response_ok;
++	atomic_t cr6608_ul_muru_sta_rec_failed;
++	atomic_t cr6608_ul_muru_sta_rec_timeout;
+ 	atomic_t cr6608_ul_muru_he_sta_rec_updates;
+ 	atomic_t cr6608_ul_muru_mimo_capable_updates;
+ 	bool ibf;
+@@ -333,6 +350,72 @@ struct mt7915_dev {
+ 	void __iomem *sku;
+ };
+ 
++static inline u8 mt7915_cr6608_muru_mask(struct mt7915_dev *dev)
++{
++	return atomic_read(&dev->cr6608_muru_mask) & CR6608_MURU_MASK;
++}
++
++/* This lock covers only short telemetry groups.  Never hold it across an MCU
++ * send, recovery_tx_lock, recovery scheduling, or any sleeping operation.
++ */
++static inline void
++mt7915_cr6608_muru_sta_rec_attempt(struct mt7915_dev *dev)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&dev->cr6608_muru_telemetry_lock, flags);
++	atomic_inc(&dev->cr6608_ul_muru_sta_rec_attempted);
++	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
++}
++
++static inline void
++mt7915_cr6608_muru_sta_rec_response(struct mt7915_dev *dev, bool mimo_capable)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&dev->cr6608_muru_telemetry_lock, flags);
++	atomic_inc(&dev->cr6608_ul_muru_sta_rec_response_ok);
++	atomic_inc(&dev->cr6608_ul_muru_he_sta_rec_updates);
++	if (mimo_capable)
++		atomic_inc(&dev->cr6608_ul_muru_mimo_capable_updates);
++	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
++}
++
++static inline void
++mt7915_cr6608_muru_sta_rec_failure(struct mt7915_dev *dev, bool timed_out)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&dev->cr6608_muru_telemetry_lock, flags);
++	atomic_inc(&dev->cr6608_ul_muru_sta_rec_failed);
++	if (timed_out)
++		atomic_inc(&dev->cr6608_ul_muru_sta_rec_timeout);
++	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
++}
++
++/* Clear every scheduler bit before firmware recovery.  The fault flag, not
++ * the previous mask value, is the one-way arbitration point so a concurrent
++ * kill-switch clear cannot hide the first real fault.  Flag and latch count
++ * form one snapshot group under the telemetry lock.
++ */
++static inline bool mt7915_cr6608_muru_fault_latch(struct mt7915_dev *dev)
++{
++	unsigned long flags;
++	bool latched;
++
++	if (!dev->cr6608_ul_muru_allowed)
++		return false;
++
++	atomic_xchg(&dev->cr6608_muru_mask, 0);
++	spin_lock_irqsave(&dev->cr6608_muru_telemetry_lock, flags);
++	latched = !atomic_xchg(&dev->cr6608_muru_fault_latched, 1);
++	if (latched)
++		atomic_inc(&dev->cr6608_muru_fault_latches);
++	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
++
++	return latched;
++}
++
+ enum {
+ 	WFDMA0 = 0x0,
+ 	WFDMA1,

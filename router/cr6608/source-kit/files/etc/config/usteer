@@ -1,0 +1,20 @@
+config usteer 'main'
+	option enabled '0'
+	option network 'lan'
+	option syslog '1'
+	option debug_level '1'
+	option local_mode '1'
+	option ipv6 '0'
+
+	# Smart Connect owns the SSID list and interval when explicitly enabled.
+	# Association/probe rejection and every forced-kick policy remain disabled.
+	option assoc_steering '0'
+	option aggressiveness '1'
+	option min_connect_snr '0'
+	option min_snr '0'
+	option signal_diff_threshold '0'
+	option load_balancing_threshold '0'
+	option load_kick_enabled '0'
+	option band_steering_interval '0'
+	option band_steering_min_snr '-60'
+	option link_measurement_interval '0'

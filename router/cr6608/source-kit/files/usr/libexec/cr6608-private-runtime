@@ -1,0 +1,138 @@
+#!/bin/sh
+# Root-only volatile storage helpers.  Callers must fail closed if preparation
+# fails; never fall back to a world-writable directory.
+
+CR6608_PRIVATE_RUNTIME_ROOT="${CR6608_PRIVATE_RUNTIME_ROOT:-/var/run/cr6608-private}"
+CR6608_PRIVATE_EXPECTED_UID="${CR6608_PRIVATE_EXPECTED_UID:-$(id -u 2>/dev/null)}"
+CR6608_PRIVATE_STAT_BIN="${CR6608_PRIVATE_STAT_BIN:-stat}"
+
+# The command override exists solely so the contract can model Unix modes on
+# filesystems (notably MSYS/NTFS) that cannot represent them.  Keep the
+# injection deliberately narrow: no shell fragments, PATH lookups other than
+# the production default, or eval.
+cr6608_private_stat() {
+	case "$CR6608_PRIVATE_STAT_BIN" in
+		stat) command stat "$@" ;;
+		/*)
+			[ -f "$CR6608_PRIVATE_STAT_BIN" ] &&
+				[ ! -L "$CR6608_PRIVATE_STAT_BIN" ] &&
+				[ -x "$CR6608_PRIVATE_STAT_BIN" ] || return 1
+			"$CR6608_PRIVATE_STAT_BIN" "$@"
+			;;
+		*) return 1 ;;
+	esac
+}
+
+cr6608_private_component_valid() {
+	case "${1:-}" in .|..) return 1 ;; esac
+	case "${1:-}" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	return 0
+}
+
+cr6608_private_dir_secure() {
+	_private_dir="$1"
+	[ -d "$_private_dir" ] && [ ! -L "$_private_dir" ] || return 1
+	[ "$(cr6608_private_stat -c '%u:%a' "$_private_dir" 2>/dev/null)" = \
+		"$CR6608_PRIVATE_EXPECTED_UID:700" ]
+}
+
+cr6608_private_parent_secure() {
+	_private_parent="$1"
+	_private_parent_resolved="$(readlink -f "$_private_parent" 2>/dev/null)" || return 1
+	[ -d "$_private_parent_resolved" ] && [ ! -L "$_private_parent_resolved" ] || return 1
+	_private_parent_stat="$(cr6608_private_stat -c '%u:%a' "$_private_parent_resolved" 2>/dev/null)" || return 1
+	_private_parent_uid="${_private_parent_stat%%:*}"
+	_private_parent_mode="${_private_parent_stat#*:}"
+	[ "$_private_parent_uid" = "$CR6608_PRIVATE_EXPECTED_UID" ] || return 1
+	case "$_private_parent_mode" in
+		[0-7][0145][0145]) return 0 ;;
+	esac
+	return 1
+}
+
+cr6608_private_runtime_root() {
+	umask 077
+	case "$CR6608_PRIVATE_EXPECTED_UID" in ''|*[!0-9]*) return 1 ;; esac
+	case "$CR6608_PRIVATE_RUNTIME_ROOT" in
+		/*) ;;
+		*) return 1 ;;
+	esac
+	[ "$(printf '%s' "$CR6608_PRIVATE_RUNTIME_ROOT" | tr -d '\r\n')" = \
+		"$CR6608_PRIVATE_RUNTIME_ROOT" ] || return 1
+	# Appending one slash makes terminal /.., /., and / detectable too.
+	case "$CR6608_PRIVATE_RUNTIME_ROOT/" in
+		*'/../'*|*'/./'*|*'//'*) return 1 ;;
+	esac
+	_private_root_parent="${CR6608_PRIVATE_RUNTIME_ROOT%/*}"
+	cr6608_private_parent_secure "$_private_root_parent" || return 1
+	if [ -e "$CR6608_PRIVATE_RUNTIME_ROOT" ] ||
+	   [ -L "$CR6608_PRIVATE_RUNTIME_ROOT" ]; then
+		cr6608_private_dir_secure "$CR6608_PRIVATE_RUNTIME_ROOT" || return 1
+	else
+		# Some compatibility layers create the directory but return failure while
+		# applying its mode.  Accept only the object that survives the same exact
+		# owner/mode/non-symlink validation used for a pre-existing directory.
+		mkdir -m 0700 "$CR6608_PRIVATE_RUNTIME_ROOT" 2>/dev/null ||
+			[ -d "$CR6608_PRIVATE_RUNTIME_ROOT" ] || return 1
+		cr6608_private_dir_secure "$CR6608_PRIVATE_RUNTIME_ROOT" || return 1
+	fi
+	printf '%s\n' "$CR6608_PRIVATE_RUNTIME_ROOT"
+}
+
+cr6608_private_runtime_dir() {
+	_private_component="$1"
+	cr6608_private_component_valid "$_private_component" || return 1
+	_private_root="$(cr6608_private_runtime_root)" || return 1
+	_private_path="$_private_root/$_private_component"
+	if [ -e "$_private_path" ] || [ -L "$_private_path" ]; then
+		cr6608_private_dir_secure "$_private_path" || return 1
+	else
+		mkdir -m 0700 "$_private_path" 2>/dev/null ||
+			[ -d "$_private_path" ] || return 1
+		cr6608_private_dir_secure "$_private_path" || return 1
+	fi
+	printf '%s\n' "$_private_path"
+}
+
+cr6608_private_mktemp() {
+	_private_dir="$1"
+	_private_prefix="$2"
+	cr6608_private_dir_secure "$_private_dir" || return 1
+	cr6608_private_component_valid "$_private_prefix" || return 1
+	_private_tmp="$(mktemp "$_private_dir/${_private_prefix}.XXXXXX" 2>/dev/null)" || return 1
+	[ -f "$_private_tmp" ] && [ ! -L "$_private_tmp" ] || {
+		rm -f -- "$_private_tmp" 2>/dev/null || true
+		return 1
+	}
+	chmod 0600 "$_private_tmp" 2>/dev/null || true
+	[ "$(cr6608_private_stat -c '%u:%a:%h' "$_private_tmp" 2>/dev/null)" = \
+		"$CR6608_PRIVATE_EXPECTED_UID:600:1" ] || {
+		rm -f -- "$_private_tmp" 2>/dev/null || true
+		return 1
+	}
+	printf '%s\n' "$_private_tmp"
+}
+
+cr6608_private_publish_file() {
+	_private_source="$1"
+	_private_target="$2"
+	_private_parent="${_private_target%/*}"
+	[ -f "$_private_source" ] && [ ! -L "$_private_source" ] || return 1
+	[ "$(cr6608_private_stat -c '%u:%a:%h' "$_private_source" 2>/dev/null)" = \
+		"$CR6608_PRIVATE_EXPECTED_UID:600:1" ] || return 1
+	cr6608_private_dir_secure "$_private_parent" || return 1
+	_private_target_name="${_private_target##*/}"
+	cr6608_private_component_valid "$_private_target_name" || return 1
+	[ ! -d "$_private_target" ] || return 1
+	chmod 0600 "$_private_source" 2>/dev/null ||
+		[ "$(cr6608_private_stat -c '%u:%a:%h' "$_private_source" 2>/dev/null)" = \
+			"$CR6608_PRIVATE_EXPECTED_UID:600:1" ] || return 1
+	mv -f -- "$_private_source" "$_private_target" 2>/dev/null || return 1
+	if [ -f "$_private_target" ] && [ ! -L "$_private_target" ] &&
+		[ "$(cr6608_private_stat -c '%u:%a:%h' "$_private_target" 2>/dev/null)" = \
+		"$CR6608_PRIVATE_EXPECTED_UID:600:1" ]; then
+		return 0
+	fi
+	rm -f -- "$_private_target" 2>/dev/null || true
+	return 1
+}

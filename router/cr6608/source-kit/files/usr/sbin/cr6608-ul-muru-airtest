@@ -1,0 +1,365 @@
+#!/bin/sh
+
+set -u
+
+duration="${1:-60}"
+debugfs_root="${CR6608_DEBUGFS_ROOT:-/sys/kernel/debug/ieee80211}"
+tmp_root="${CR6608_TMP_ROOT:-/tmp}"
+legacy_module_param="${CR6608_UL_MURU_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_ul_muru}"
+mask_module_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
+guard_init="${CR6608_UL_MURU_GUARD_INIT:-/etc/init.d/cr6608-ul-muru-guard}"
+guard_state_file="${CR6608_UL_MURU_GUARD_STATE_FILE:-/var/run/cr6608-private/ul-muru/state.json}"
+guard_max_age="${CR6608_UL_MURU_GUARD_MAX_AGE:-60}"
+if [ -n "${CR6608_UL_MURU_ARTIFACT_PROFILE:-}" ]; then
+	artifact_profile="$CR6608_UL_MURU_ARTIFACT_PROFILE"
+elif [ -f /rom/etc/cr6608-artifact-profile ] &&
+     [ ! -L /rom/etc/cr6608-artifact-profile ]; then
+	artifact_profile=/rom/etc/cr6608-artifact-profile
+else
+	artifact_profile=/etc/cr6608-artifact-profile
+fi
+case "$duration" in
+	''|*[!0-9]*)
+		echo 'usage: cr6608-ul-muru-airtest [10-600 seconds]' >&2
+		exit 64
+		;;
+esac
+if [ "$duration" -lt 10 ] || [ "$duration" -gt 600 ]; then
+	echo 'usage: cr6608-ul-muru-airtest [10-600 seconds]' >&2
+	exit 64
+fi
+
+tmpdir="$(mktemp -d "${tmp_root%/}/cr6608-ul-muru-airtest.XXXXXX")" || exit 1
+muru_debug_node=""
+muru_debug_original=""
+cleanup() {
+	if [ -n "$muru_debug_node" ] && [ -n "$muru_debug_original" ]; then
+		printf '%s\n' "$muru_debug_original" > "$muru_debug_node" 2>/dev/null || true
+	fi
+	rm -rf -- "$tmpdir"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+collect_stations() {
+	output="$1"
+	: > "$output"
+	iw dev "$target_iface" station dump 2>/dev/null |
+		awk -v iface="$target_iface" -v clients="$capable_clients_file" '
+		BEGIN {
+			while ((getline client < clients) > 0)
+				capable[tolower(client)] = 1
+			close(clients)
+		}
+		/^Station / { mac=tolower($2) }
+		/^[[:space:]]*rx bytes:/ && (mac in capable) {
+			print mac, $3, iface
+		}
+	' >> "$output"
+}
+
+collect_stats() {
+	mumimo=0
+	ofdma=0
+	count=0
+	stats="$debugfs_root/$target_phy/mt76/muru_stats"
+	[ -f "$stats" ] || { printf '0 0 0\n'; return; }
+	data="$(cat "$stats" 2>/dev/null)"
+	printf '%s\n' "$data" | grep -q '^Uplink$' || {
+		printf '0 0 0\n'
+		return
+	}
+	count=1
+	for value in $(printf '%s\n' "$data" | sed -n \
+		's/.*Total HE MU-MIMO UL TB PPDU count: \([0-9][0-9]*\).*/\1/p'); do
+		mumimo=$((mumimo + value))
+	done
+	for value in $(printf '%s\n' "$data" | sed -n \
+		's/.*Total HE OFDMA UL TB PPDU count: \([0-9][0-9]*\).*/\1/p'); do
+		ofdma=$((ofdma + value))
+	done
+	printf '%s %s %s\n' "$mumimo" "$ofdma" "$count"
+}
+
+list_full_ul_mumimo_clients() {
+	iface="$1"
+	for capability in "$debugfs_root"/phy*/netdev:"$iface"/stations/*/cr6608_muru_capabilities; do
+		[ -f "$capability" ] || continue
+		# Correlate only a window with full-bandwidth UL MU-MIMO peers.
+		# This peer filter still cannot attribute aggregate radio counters.
+		grep -qx 'he=1' "$capability" 2>/dev/null || continue
+		grep -qx 'ul_mumimo_full=1' "$capability" 2>/dev/null || continue
+		grep -qx 'ul_mumimo_capable=1' "$capability" 2>/dev/null || continue
+		station_dir="${capability%/cr6608_muru_capabilities}"
+		basename "$station_dir" | tr 'A-F' 'a-f'
+	done
+}
+
+count_full_ul_mumimo_clients() {
+	list_full_ul_mumimo_clients "$1" | sort -u | awk 'END { print NR + 0 }'
+}
+
+qualification_profile_armed() {
+	[ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] &&
+		[ "$(wc -l < "$artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ] || return 1
+	grep -Fqx 'sale_ready=NO' "$artifact_profile" || return 1
+	if grep -Fqx 'profile=ul-muru-ram-v1' "$artifact_profile" &&
+	   grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$artifact_profile"; then
+		return 0
+	fi
+	grep -Fqx 'profile=ul-muru-forced-lab-v1' "$artifact_profile" &&
+		grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$artifact_profile"
+}
+
+qualification_guard_armed() {
+	[ -x "$guard_init" ] && "$guard_init" running >/dev/null 2>&1 || return 1
+	[ -f "$guard_state_file" ] && [ ! -L "$guard_state_file" ] || return 1
+	guard_state="$(cat "$guard_state_file" 2>/dev/null)" || return 1
+	printf '%s\n' "$guard_state" | grep -Fq '"state":"armed"' || return 1
+	printf '%s\n' "$guard_state" |
+		grep -Eq '"profile":"(ul-muru-ram-v1|ul-muru-forced-lab-v1)"' || return 1
+	guard_heartbeat="$(printf '%s\n' "$guard_state" |
+		sed -n 's/.*"time":\([0-9][0-9]*\).*/\1/p')"
+	guard_now="$(date +%s 2>/dev/null)" || return 1
+	case "$guard_heartbeat:$guard_now:$guard_max_age" in
+		*[!0-9:]*|:*|*::*|*:) return 1 ;;
+	esac
+	guard_age=$((guard_now - guard_heartbeat))
+	[ "$guard_age" -ge 0 ] && [ "$guard_age" -le "$guard_max_age" ]
+}
+
+qualification_driver_armed() {
+	[ "$(cat "$legacy_module_param" 2>/dev/null)" = N ] ||
+		[ "$(cat "$legacy_module_param" 2>/dev/null)" = 0 ] || return 1
+	[ "$(cat "$mask_module_param" 2>/dev/null)" = 15 ] || return 1
+	state_count=0
+	for state_node in "$debugfs_root"/phy*/mt76/cr6608_ul_muru_state; do
+		[ -f "$state_node" ] || continue
+		state_count=$((state_count + 1))
+		state_dir="${state_node%/cr6608_ul_muru_state}"
+		[ "$(cat "$state_dir/cr6608_muru_mask" 2>/dev/null)" = 15 ] ||
+			return 1
+		[ "$(cat "$state_dir/cr6608_ul_muru" 2>/dev/null)" = 1 ] ||
+			return 1
+		awk -F= '
+			NF >= 2 {
+				key=$1
+				count[key]++
+				field[key]=substr($0, length(key)+2)
+			}
+			END {
+				split("candidate_allowed candidate_ul_enabled candidate_mask candidate_dl_ofdma candidate_ul_ofdma candidate_dl_mumimo candidate_ul_mumimo fault_latched fault_latches policy sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", required, " ")
+				for (i in required)
+					if (count[required[i]] != 1) exit 1
+				split("fault_latched fault_latches sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", numeric, " ")
+				for (i in numeric)
+					if (field[numeric[i]] !~ /^[0-9]+$/) exit 1
+				if (field["candidate_allowed"] != 1 ||
+				    field["candidate_ul_enabled"] != 1 ||
+				    field["candidate_mask"] != 15 ||
+				    field["candidate_dl_ofdma"] != 1 ||
+				    field["candidate_ul_ofdma"] != 1 ||
+				    field["candidate_dl_mumimo"] != 1 ||
+				    field["candidate_ul_mumimo"] != 1 ||
+				    field["policy"] != "mediatek-25.12-mu-onoff-sta-rec-port" ||
+				    field["fault_latched"] != 0 ||
+				    field["fault_latches"] != 0 ||
+				    field["sta_rec_failed"] != 0 ||
+				    field["sta_rec_timeout"] != 0 ||
+				    field["sta_rec_response_ok"] > field["sta_rec_attempted"] ||
+				    field["he_sta_rec_updates"] != field["sta_rec_response_ok"] ||
+				    field["mimo_capable_updates"] > field["sta_rec_response_ok"])
+					exit 1
+			}
+		' "$state_node" || return 1
+	done
+	[ "$state_count" -gt 0 ]
+}
+
+qualification_gate_armed() {
+	qualification_profile_armed &&
+		qualification_guard_armed &&
+		qualification_driver_armed
+}
+
+if ! qualification_gate_armed; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_QUALIFICATION_GATE_NOT_ARMED_BEFORE' >&2
+	exit 1
+fi
+
+target_iface=""
+station_count=0
+he_station_count=0
+full_ul_mumimo_station_count=0
+for object in $(ubus list 'hostapd.*' 2>/dev/null); do
+	iface="${object#hostapd.}"
+	client_data="$(ubus call "$object" get_clients 2>/dev/null || true)"
+	iface_stations="$(iw dev "$iface" station dump 2>/dev/null | grep -c '^Station ' || true)"
+	iface_he="$(printf '%s\n' "$client_data" | grep -c '"he":[[:space:]]*true' || true)"
+	iface_full_ul_mumimo="$(count_full_ul_mumimo_clients "$iface")"
+	if [ "$iface_stations" -ge 2 ] && [ "$iface_he" -ge 2 ] &&
+	   [ -z "$target_iface" ]; then
+		target_iface="$iface"
+		station_count="$iface_stations"
+		he_station_count="$iface_he"
+		full_ul_mumimo_station_count="$iface_full_ul_mumimo"
+	fi
+	if [ "$iface_stations" -ge 2 ] && [ "$iface_he" -ge 2 ] &&
+	   [ "$iface_full_ul_mumimo" -ge 2 ]; then
+		target_iface="$iface"
+		station_count="$iface_stations"
+		he_station_count="$iface_he"
+		full_ul_mumimo_station_count="$iface_full_ul_mumimo"
+		break
+	fi
+done
+
+if [ -z "$target_iface" ]; then
+	target_iface=none
+fi
+
+printf 'CR6608 controlled UL MURU radio-counter correlation test\n'
+printf '%-38s %s\n' 'test duration seconds' "$duration"
+printf '%-38s %s\n' 'selected AP interface' "$target_iface"
+printf '%-38s %s\n' 'associated AP stations same radio' "$station_count"
+printf '%-38s %s\n' 'associated HE stations same radio' "$he_station_count"
+printf '%-38s %s\n' 'full-bandwidth UL MU-MIMO clients' "$full_ul_mumimo_station_count"
+
+if [ "$station_count" -lt 2 ] || [ "$he_station_count" -lt 2 ]; then
+	echo 'Connect at least two Wi-Fi 6 clients to the same Smart AP band, then run simultaneous uploads.'
+	echo 'RESULT_UL_MURU_AIRTEST=PREREQUISITE_MISSING_TWO_HE_CLIENTS'
+	exit 2
+fi
+if [ "$full_ul_mumimo_station_count" -lt 2 ]; then
+	echo 'Connect two clients that advertise full-bandwidth UL MU-MIMO to the selected Smart AP band.'
+	echo 'RESULT_UL_MURU_AIRTEST=PREREQUISITE_MISSING_TWO_FULL_BW_UL_MUMIMO_CLIENTS'
+	exit 2
+fi
+
+capable_clients_file="$tmpdir/full-ul-mumimo-clients"
+list_full_ul_mumimo_clients "$target_iface" | sort -u > "$capable_clients_file"
+full_ul_mumimo_station_count="$(awk 'END { print NR + 0 }' "$capable_clients_file")"
+if [ "$full_ul_mumimo_station_count" -lt 2 ]; then
+	echo 'Client capability set changed before the correlation window; retry with two full-bandwidth clients.'
+	echo 'RESULT_UL_MURU_AIRTEST=PREREQUISITE_MISSING_TWO_FULL_BW_UL_MUMIMO_CLIENTS'
+	exit 2
+fi
+
+target_wiphy="$(iw dev "$target_iface" info 2>/dev/null |
+	awk '$1 == "wiphy" { print $2; exit }')"
+case "$target_wiphy" in
+	''|*[!0-9]*)
+		echo 'RESULT_UL_MURU_AIRTEST=ERROR_CANNOT_MAP_INTERFACE_TO_PHY' >&2
+		exit 1
+		;;
+esac
+target_phy="phy${target_wiphy}"
+muru_debug_node="$debugfs_root/$target_phy/mt76/muru_debug"
+if [ ! -f "$muru_debug_node" ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_NO_FIRMWARE_STATS' >&2
+	exit 1
+fi
+muru_debug_original="$(cat "$muru_debug_node" 2>/dev/null || printf 'error')"
+if [ "$muru_debug_original" = error ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_NO_FIRMWARE_STATS' >&2
+	exit 1
+fi
+printf '1\n' > "$muru_debug_node" 2>/dev/null || true
+if [ "$(cat "$muru_debug_node" 2>/dev/null)" != 1 ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_CANNOT_ENABLE_FIRMWARE_STATS' >&2
+	exit 1
+fi
+
+set -- $(collect_stats)
+before_mumimo="$1"
+before_ofdma="$2"
+stats_radios="$3"
+printf '%-38s %s\n' 'selected firmware stats phy' "$target_phy"
+printf '%-38s %s\n' 'firmware MURU stats target radio' "$stats_radios"
+if [ "$stats_radios" -ne 1 ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_INCOMPLETE_FIRMWARE_STATS'
+	exit 1
+fi
+
+collect_stations "$tmpdir/before-stations"
+
+echo "Start simultaneous upload traffic from both clients now; sampling for ${duration} seconds."
+cp "$tmpdir/before-stations" "$tmpdir/previous-stations"
+remaining="$duration"
+overlap_samples=0
+while [ "$remaining" -gt 0 ]; do
+	interval=2
+	[ "$remaining" -ge "$interval" ] || interval="$remaining"
+	sleep "$interval"
+	collect_stations "$tmpdir/current-stations"
+	interval_uploaders="$(awk '
+		NR == FNR { before[$1]=$2; next }
+		($1 in before) && $2 > before[$1] { active++ }
+		END { print active + 0 }
+	' "$tmpdir/previous-stations" "$tmpdir/current-stations")"
+	[ "$interval_uploaders" -lt 2 ] || overlap_samples=$((overlap_samples + 1))
+	cp "$tmpdir/current-stations" "$tmpdir/previous-stations"
+	remaining=$((remaining - interval))
+done
+
+cp "$tmpdir/previous-stations" "$tmpdir/after-stations"
+set -- $(collect_stats)
+after_mumimo="$1"
+after_ofdma="$2"
+after_stats_radios="$3"
+
+if ! qualification_gate_armed; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_QUALIFICATION_GATE_NOT_ARMED_AFTER' >&2
+	exit 1
+fi
+
+delta_mumimo=$((after_mumimo - before_mumimo))
+delta_ofdma=$((after_ofdma - before_ofdma))
+[ "$delta_mumimo" -ge 0 ] || delta_mumimo=0
+[ "$delta_ofdma" -ge 0 ] || delta_ofdma=0
+
+active_uploaders="$(awk '
+	NR == FNR { before[$1]=$2; next }
+	($1 in before) && $2 > before[$1] { active++ }
+	END { print active + 0 }
+' "$tmpdir/before-stations" "$tmpdir/after-stations")"
+
+printf '%-38s %s\n' 'clients with uplink byte growth' "$active_uploaders"
+printf '%-38s %s\n' 'two-client overlapping 2s samples' "$overlap_samples"
+printf '%-38s %s\n' 'UL MU-MIMO TB PPDU delta' "$delta_mumimo"
+printf '%-38s %s\n' 'UL OFDMA TB PPDU delta' "$delta_ofdma"
+printf '%-38s %s\n' 'firmware MURU target phy after' "$after_stats_radios"
+
+if [ "$after_stats_radios" -ne 1 ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=ERROR_INCOMPLETE_FIRMWARE_STATS'
+	exit 1
+fi
+
+if [ "$active_uploaders" -lt 2 ] || [ "$overlap_samples" -lt 1 ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=INVALID_NOT_TWO_SIMULTANEOUS_UPLOADERS'
+	exit 3
+fi
+
+if [ "$delta_mumimo" -gt 0 ]; then
+	echo 'RESULT_UL_MUMIMO_RADIO_COUNTER_CORRELATION=OBSERVED_IN_WINDOW'
+else
+	echo 'RESULT_UL_MUMIMO_RADIO_COUNTER_CORRELATION=NOT_OBSERVED_IN_WINDOW'
+fi
+if [ "$delta_ofdma" -gt 0 ]; then
+	echo 'RESULT_UL_OFDMA_RADIO_COUNTER_CORRELATION=OBSERVED_IN_WINDOW'
+else
+	echo 'RESULT_UL_OFDMA_RADIO_COUNTER_CORRELATION=NOT_OBSERVED_IN_WINDOW'
+fi
+
+echo 'EVIDENCE_SCOPE=AGGREGATE_SAME_RADIO_COUNTER_CORRELATION_NOT_CLIENT_ATTRIBUTION'
+echo 'CLIENT_ATTRIBUTED_OTA_PROOF=REQUIRES_PER_PEER_SCHEDULER_TELEMETRY_OR_PACKET_CAPTURE_HARDWARE'
+
+if [ "$delta_mumimo" -gt 0 ] && [ "$delta_ofdma" -gt 0 ]; then
+	echo 'RESULT_UL_MURU_AIRTEST=BOTH_RADIO_COUNTERS_CORRELATED_NOT_CLIENT_ATTRIBUTED'
+	exit 0
+fi
+
+echo 'RESULT_UL_MURU_AIRTEST=INCOMPLETE_RADIO_COUNTER_CORRELATION'
+exit 4

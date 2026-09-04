@@ -1,0 +1,444 @@
+#!/bin/sh
+# Manually gated CR6608 Factory-38 writer/restorer.
+# Nothing is written unless the exact subcommand, confirmation token, board,
+# partition geometry, current hash and candidate hash all match.
+
+set -eu
+
+ORIGINAL_SHA256='aca3a3b012d96972466e7492e150bb2e00ba24f9f43201912db0223a32c98439'
+FACTORY38_SHA256='b6a775087df306c21c70c29520c27fd5ea3e62dcfb8a945b340304895b038eb0'
+FACTORY_SIZE='524288'
+ERASEBLOCK_SIZE='131072'
+ORIGINAL_BLOCK0_SHA256='b72eca62ecbaff9a93176ec5e9912e2ee9d6404c1c9f6005f4e8b66bc9bde224'
+FACTORY38_BLOCK0_SHA256='950b682023077bab5e2e35212e77b7e8d6bcf00f2249f922d38bdad0bed66aab'
+CONFIRM_TOKEN='CR6608_FACTORY38_I_ACCEPT_NAND_AND_RF_RISK'
+PERSISTENT_BACKUP='/root/cr6608-factory-original-aca3a3b0.bin'
+PERSISTENT_BLOCK0='/root/cr6608-factory-original-block0-b72eca62.bin'
+RECOVERY_ATTESTATION='/root/cr6608-com8-pbboot-recovery-verified.txt'
+RECOVERY_ATTESTATION_TEXT='CR6608_COM8_PBBOOT_RECOVERY_PATH_VERIFIED original_sha256=aca3a3b012d96972466e7492e150bb2e00ba24f9f43201912db0223a32c98439 original_crc32=963cdfeb'
+MAINTENANCE_MARKER='/etc/cr6608-factory38-writegate.marker'
+MAINTENANCE_MARKER_SHA256='f6d3659a2151a14a652ef043e6886d6b2c9882cef7be9dd808da6d7d5b6cb441'
+LOCK_FILE='/var/lock/cr6608-factory38-stage.lock'
+STAGED_BLOCK=''
+
+die() {
+	echo "REFUSED: $*" >&2
+	exit 1
+}
+
+factory_mtd() {
+	awk -F: '$2 ~ /"Factory"/ { print $1; exit }' /proc/mtd
+}
+
+hash_file() {
+	sha256sum "$1" | awk '{ print $1 }'
+}
+
+hash_live_block0() {
+	dd if="$MTD_DEV" bs="$ERASEBLOCK_SIZE" count=1 2>/dev/null |
+		sha256sum | awk '{ print $1 }'
+}
+
+size_file() {
+	wc -c < "$1" | tr -d ' '
+}
+
+acquire_lock() {
+	command -v flock >/dev/null 2>&1 || die 'flock utility is missing'
+	mkdir -p "$(dirname "$LOCK_FILE")"
+	exec 9>"$LOCK_FILE" || die 'cannot open the transaction lock'
+	flock -n 9 || die 'another Factory transaction is already running'
+}
+
+require_board_and_geometry() {
+	board="$(cat /tmp/sysinfo/board_name 2>/dev/null || true)"
+	[ "$board" = 'xiaomi,mi-router-cr6608' ] ||
+		die "board is '$board', expected xiaomi,mi-router-cr6608"
+
+	MTD_NAME="$(factory_mtd)"
+	[ -n "$MTD_NAME" ] || die 'Factory partition was not found'
+	MTD_DEV="/dev/$MTD_NAME"
+	SYS_MTD="/sys/class/mtd/$MTD_NAME"
+	[ -c "$MTD_DEV" ] || die "$MTD_DEV is not an MTD character device"
+	[ "$(cat "$SYS_MTD/name")" = 'Factory' ] || die 'MTD label mismatch'
+	[ "$(cat "$SYS_MTD/size")" = "$FACTORY_SIZE" ] || die 'Factory size mismatch'
+	[ "$(cat "$SYS_MTD/erasesize")" = "$ERASEBLOCK_SIZE" ] || die 'Factory erase size mismatch'
+	[ "$(cat "$SYS_MTD/type")" = 'nand' ] || die 'Factory is not NAND'
+	[ "$(cat "$SYS_MTD/writesize")" = '2048' ] || die 'Factory NAND page size mismatch'
+
+}
+
+require_write_tools() {
+	command -v flash_erase >/dev/null 2>&1 || die 'flash_erase utility is missing'
+	command -v nandwrite >/dev/null 2>&1 || die 'nandwrite utility is missing'
+}
+
+require_maintenance_image() {
+	[ -f "$MAINTENANCE_MARKER" ] ||
+		die 'Factory-38 maintenance-image marker is missing'
+	[ "$(hash_file "$MAINTENANCE_MARKER")" = "$MAINTENANCE_MARKER_SHA256" ] ||
+		die 'Factory-38 maintenance-image marker hash mismatch'
+}
+
+require_writable() {
+	flags="$(cat "$SYS_MTD/flags")"
+	printf '%s\n' "$flags" | grep -Eq '^0x[0-9a-fA-F]+$' ||
+		die "invalid MTD flags value: $flags"
+	[ $((flags & 0x400)) -ne 0 ] ||
+		die 'Factory is kernel read-only; boot the write-gated image first'
+}
+
+require_nand_health() {
+	bad_blocks="$(cat "$SYS_MTD/bad_blocks")"
+	ecc_failures="$(cat "$SYS_MTD/ecc_failures")"
+	corrected_bits="$(cat "$SYS_MTD/corrected_bits")"
+	for counter in "$bad_blocks" "$ecc_failures" "$corrected_bits"; do
+		printf '%s\n' "$counter" | grep -Eq '^[0-9]+$' ||
+			die 'invalid NAND health counter'
+	done
+	[ "$bad_blocks" = 0 ] || die "Factory NAND has $bad_blocks bad block(s)"
+	[ "$ecc_failures" = 0 ] || die "Factory NAND has $ecc_failures uncorrectable ECC failure(s)"
+	[ "$corrected_bits" = 0 ] || die "Factory NAND has $corrected_bits corrected bit(s); inspect NAND before writing"
+}
+
+require_recovery_attestation() {
+	[ -f "$RECOVERY_ATTESTATION" ] ||
+		die 'COM8/PB-Boot recovery attestation is missing'
+	[ "$(cat "$RECOVERY_ATTESTATION")" = "$RECOVERY_ATTESTATION_TEXT" ] ||
+		die 'COM8/PB-Boot recovery attestation content mismatch'
+}
+
+ensure_sysupgrade_preservation() {
+	preserve_file='/etc/sysupgrade.conf'
+	touch "$preserve_file" || die 'cannot update sysupgrade preservation list'
+	for preserve_path in "$PERSISTENT_BACKUP" "$PERSISTENT_BLOCK0" "$RECOVERY_ATTESTATION"; do
+		grep -Fqx "$preserve_path" "$preserve_file" 2>/dev/null ||
+			printf '%s\n' "$preserve_path" >>"$preserve_file" ||
+			die 'cannot record a recovery artifact in sysupgrade.conf'
+	done
+	sync
+}
+
+require_wired_management() {
+	[ -n "${SSH_CONNECTION:-}" ] ||
+		die 'this transaction requires a live SSH management session'
+	set -- $SSH_CONNECTION
+	ssh_peer="${1:-}"
+	case "$ssh_peer" in
+		*.*) ;;
+		*) die 'SSH peer is not an IPv4 LAN address' ;;
+	esac
+	neighbor="$(ip neigh show "$ssh_peer" dev br-lan 2>/dev/null || true)"
+	ssh_mac="$(printf '%s\n' "$neighbor" | awk '{ for (i = 1; i <= NF; i++) if ($i == "lladdr") { print tolower($(i + 1)); exit } }')"
+	[ -n "$ssh_mac" ] || die "SSH peer $ssh_peer has no br-lan neighbor entry"
+	ssh_port="$(bridge fdb show br br-lan 2>/dev/null |
+		awk -v mac="$ssh_mac" 'tolower($1) == mac && $2 == "dev" && $3 ~ /^lan[123]$/ { print $3; exit }')"
+	case "$ssh_port" in
+		lan1|lan2|lan3) ;;
+		*) die "SSH peer $ssh_peer is not learned on a physical LAN port" ;;
+	esac
+	ip -o link show "$ssh_port" 2>/dev/null | grep -q 'LOWER_UP' ||
+		die "SSH LAN port $ssh_port has no carrier"
+}
+
+stop_and_verify_wifi() {
+	wifi down || die 'wifi down failed'
+	sleep 3
+	wireless_status="$(ubus call network.wireless status 2>/dev/null)" ||
+		die 'cannot read network.wireless status after wifi down'
+	printf '%s\n' "$wireless_status" | jsonfilter -e '@' >/dev/null 2>&1 ||
+		die 'network.wireless returned invalid JSON'
+	if printf '%s\n' "$wireless_status" | grep -q '"up":[[:space:]]*true'; then
+		die 'a wireless radio is still up'
+	fi
+	if ip -o link show 2>/dev/null |
+		grep -E ' phy[0-9]+-[^:]+:.*<[^>]*UP' >/dev/null; then
+		die 'a wireless netdevice is still administratively up'
+	fi
+	if iw dev 2>/dev/null | grep -q '^[[:space:]]*Interface '; then
+		die 'a wireless interface still exists after wifi down'
+	fi
+	require_wired_management
+}
+
+make_persistent_backup() {
+	current_hash="$(hash_file "$MTD_DEV")"
+	[ "$current_hash" = "$ORIGINAL_SHA256" ] ||
+		die "live Factory is not the preserved original ($current_hash)"
+	[ "$(hash_live_block0)" = "$ORIGINAL_BLOCK0_SHA256" ] ||
+		die 'live Factory eraseblock 0 does not match the preserved original'
+
+	if [ -e "$PERSISTENT_BACKUP" ]; then
+		[ "$(hash_file "$PERSISTENT_BACKUP")" = "$ORIGINAL_SHA256" ] ||
+			die 'existing persistent backup has the wrong hash'
+	else
+		dd if="$MTD_DEV" of="$PERSISTENT_BACKUP" bs=131072 2>/dev/null
+		chmod 0400 "$PERSISTENT_BACKUP"
+	fi
+	if [ -e "$PERSISTENT_BLOCK0" ]; then
+		[ "$(hash_file "$PERSISTENT_BLOCK0")" = "$ORIGINAL_BLOCK0_SHA256" ] ||
+			die 'existing persistent eraseblock-0 backup has the wrong hash'
+	else
+		dd if="$MTD_DEV" of="$PERSISTENT_BLOCK0" bs="$ERASEBLOCK_SIZE" count=1 2>/dev/null
+		chmod 0400 "$PERSISTENT_BLOCK0"
+	fi
+	sync
+	[ "$(size_file "$PERSISTENT_BACKUP")" = "$FACTORY_SIZE" ] ||
+		die 'persistent backup size verification failed'
+	[ "$(hash_file "$PERSISTENT_BACKUP")" = "$ORIGINAL_SHA256" ] ||
+		die 'persistent backup hash verification failed'
+	[ "$(size_file "$PERSISTENT_BLOCK0")" = "$ERASEBLOCK_SIZE" ] ||
+		die 'persistent eraseblock-0 backup size verification failed'
+	[ "$(hash_file "$PERSISTENT_BLOCK0")" = "$ORIGINAL_BLOCK0_SHA256" ] ||
+		die 'persistent eraseblock-0 backup hash verification failed'
+	ensure_sysupgrade_preservation
+}
+
+verify_block_file() {
+	block_file="$1"
+	expected_hash="$2"
+	[ -f "$block_file" ] || return 1
+	[ "$(size_file "$block_file")" = "$ERASEBLOCK_SIZE" ] || return 1
+	[ "$(hash_file "$block_file")" = "$expected_hash" ] || return 1
+}
+
+stage_block_file() {
+	source_file="$1"
+	expected_hash="$2"
+	verify_block_file "$source_file" "$expected_hash" ||
+		die 'input eraseblock file failed size/hash verification'
+	STAGED_BLOCK="/tmp/cr6608-factory38-block0.$$"
+	umask 077
+	cp "$source_file" "$STAGED_BLOCK" || die 'cannot stage eraseblock input'
+	chmod 0400 "$STAGED_BLOCK"
+	verify_block_file "$STAGED_BLOCK" "$expected_hash" ||
+		die 'staged eraseblock failed readback verification'
+}
+
+remove_staged_block() {
+	case "${STAGED_BLOCK:-}" in
+		/tmp/cr6608-factory38-block0.[0-9]*) rm -f "$STAGED_BLOCK" ;;
+		'') ;;
+		*) echo "FATAL: refusing to remove unexpected staged path: $STAGED_BLOCK" >&2 ;;
+	esac
+	STAGED_BLOCK=''
+}
+
+raw_write_block0() {
+	source_file="$1"
+	expected_hash="$2"
+	verify_block_file "$source_file" "$expected_hash" || return 1
+	echo 'NAND: erasing Factory eraseblock 0 without bad-block skipping' >&2
+	flash_erase -N "$MTD_DEV" 0 1 || return 1
+	echo 'NAND: writing Factory eraseblock 0 without bad-block skipping' >&2
+	nandwrite -N --input-size="$ERASEBLOCK_SIZE" "$MTD_DEV" "$source_file" ||
+		return 1
+	sync
+}
+
+write_original_now() {
+	source_file="$1"
+	echo 'RESTORE: writing preserved original Factory' >&2
+	if ! raw_write_block0 "$source_file" "$ORIGINAL_BLOCK0_SHA256"; then
+		echo 'RESTORE-FAILED: erase/write of original Factory block 0 failed' >&2
+		return 1
+	fi
+	if [ "$(hash_file "$MTD_DEV")" != "$ORIGINAL_SHA256" ]; then
+		echo 'RESTORE-FAILED: original Factory readback hash mismatch' >&2
+		return 1
+	fi
+	if [ "$(hash_live_block0)" != "$ORIGINAL_BLOCK0_SHA256" ]; then
+		echo 'RESTORE-FAILED: original Factory block-0 readback mismatch' >&2
+		return 1
+	fi
+	echo 'RESTORE: original Factory hash verified' >&2
+}
+
+apply_exit_guard() {
+	rc=$?
+	trap - EXIT
+	# Do not allow a second signal to interrupt an emergency restoration.
+	trap '' HUP INT TERM
+	if [ "${write_started:-0}" = 1 ] &&
+	   [ "${candidate_committed:-0}" != 1 ]; then
+		live="$(hash_file "$MTD_DEV" 2>/dev/null || true)"
+		if [ "$live" != "$ORIGINAL_SHA256" ]; then
+			if ! write_original_now "$PERSISTENT_BLOCK0"; then
+				echo 'FATAL: automatic original-Factory restoration failed' >&2
+				rc=1
+			fi
+		fi
+	fi
+	remove_staged_block
+	exit "$rc"
+}
+
+restore_exit_guard() {
+	rc=$?
+	trap - EXIT
+	trap '' HUP INT TERM
+	if [ "${restore_started:-0}" = 1 ]; then
+		live="$(hash_file "$MTD_DEV" 2>/dev/null || true)"
+		if [ "$live" != "$ORIGINAL_SHA256" ]; then
+			if ! write_original_now "$RESTORE_SOURCE"; then
+				echo 'FATAL: retry of original-Factory restoration failed' >&2
+				rc=1
+			fi
+		fi
+	fi
+	remove_staged_block
+	exit "$rc"
+}
+
+status() {
+	require_board_and_geometry
+	echo "board=xiaomi,mi-router-cr6608"
+	echo "device=$MTD_DEV"
+	echo "size=$(cat "$SYS_MTD/size")"
+	echo "erasesize=$(cat "$SYS_MTD/erasesize")"
+	echo "writesize=$(cat "$SYS_MTD/writesize")"
+	echo "type=$(cat "$SYS_MTD/type")"
+	echo "flags=$(cat "$SYS_MTD/flags")"
+	echo "bad_blocks=$(cat "$SYS_MTD/bad_blocks")"
+	echo "ecc_failures=$(cat "$SYS_MTD/ecc_failures")"
+	echo "corrected_bits=$(cat "$SYS_MTD/corrected_bits")"
+	echo "live_sha256=$(hash_file "$MTD_DEV")"
+	echo "live_block0_sha256=$(hash_live_block0)"
+	if [ -e "$PERSISTENT_BACKUP" ]; then
+		echo "backup_sha256=$(hash_file "$PERSISTENT_BACKUP")"
+	else
+		echo 'backup_sha256=missing'
+	fi
+	if [ -e "$PERSISTENT_BLOCK0" ]; then
+		echo "backup_block0_sha256=$(hash_file "$PERSISTENT_BLOCK0")"
+	else
+		echo 'backup_block0_sha256=missing'
+	fi
+	if [ -f "$RECOVERY_ATTESTATION" ] &&
+	   [ "$(cat "$RECOVERY_ATTESTATION")" = "$RECOVERY_ATTESTATION_TEXT" ]; then
+		echo 'recovery_attestation=valid'
+	else
+		echo 'recovery_attestation=missing_or_invalid'
+	fi
+}
+
+apply_factory38() {
+	candidate="$1"
+	confirm="$2"
+	[ "$confirm" = "$CONFIRM_TOKEN" ] || die 'confirmation token mismatch'
+	acquire_lock
+	require_board_and_geometry
+	require_maintenance_image
+	require_writable
+	require_write_tools
+	require_nand_health
+	require_wired_management
+	require_recovery_attestation
+	stage_block_file "$candidate" "$FACTORY38_BLOCK0_SHA256"
+	make_persistent_backup
+	require_nand_health
+	stop_and_verify_wifi
+	require_nand_health
+
+	candidate_committed=0
+	write_started=1
+	trap apply_exit_guard EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	raw_write_block0 "$STAGED_BLOCK" "$FACTORY38_BLOCK0_SHA256" ||
+		die 'Factory-38 eraseblock-0 write failed'
+	[ "$(hash_file "$MTD_DEV")" = "$FACTORY38_SHA256" ] ||
+		die 'Factory-38 readback hash mismatch'
+	[ "$(hash_live_block0)" = "$FACTORY38_BLOCK0_SHA256" ] ||
+		die 'Factory-38 eraseblock-0 readback hash mismatch'
+	require_nand_health
+	candidate_committed=1
+	write_started=0
+	trap - EXIT HUP INT TERM
+	remove_staged_block
+	echo 'FACTORY38_WRITE=PASS'
+	echo "live_sha256=$FACTORY38_SHA256"
+	echo "live_block0_sha256=$FACTORY38_BLOCK0_SHA256"
+	echo 'wifi_state=down'
+	echo 'reboot_performed=0'
+	echo 'MANDATORY_NEXT_STEP=reboot_into_a_read-only-Factory_image_before_enabling_wifi'
+}
+
+restore_factory() {
+	backup="$1"
+	confirm="$2"
+	[ "$confirm" = "$CONFIRM_TOKEN" ] || die 'confirmation token mismatch'
+	acquire_lock
+	require_board_and_geometry
+	require_maintenance_image
+	require_writable
+	require_write_tools
+	require_nand_health
+	require_wired_management
+	require_recovery_attestation
+	stage_block_file "$backup" "$ORIGINAL_BLOCK0_SHA256"
+	live_before="$(hash_file "$MTD_DEV")"
+	case "$live_before" in
+		"$ORIGINAL_SHA256")
+			remove_staged_block
+			echo 'FACTORY_RESTORE=PASS'
+			echo "live_sha256=$ORIGINAL_SHA256"
+			echo 'already_original=1'
+			echo 'reboot_performed=0'
+			return 0
+			;;
+		"$FACTORY38_SHA256") ;;
+		*) die "live Factory has an unexpected hash ($live_before)" ;;
+	esac
+	stop_and_verify_wifi
+	require_nand_health
+	RESTORE_SOURCE="$STAGED_BLOCK"
+	restore_started=1
+	trap restore_exit_guard EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	raw_write_block0 "$RESTORE_SOURCE" "$ORIGINAL_BLOCK0_SHA256" ||
+		die 'original Factory eraseblock-0 restore failed'
+	[ "$(hash_file "$MTD_DEV")" = "$ORIGINAL_SHA256" ] ||
+		die 'restored Factory readback hash mismatch'
+	[ "$(hash_live_block0)" = "$ORIGINAL_BLOCK0_SHA256" ] ||
+		die 'restored Factory eraseblock-0 readback hash mismatch'
+	require_nand_health
+	restore_started=0
+	trap - EXIT HUP INT TERM
+	remove_staged_block
+	echo 'FACTORY_RESTORE=PASS'
+	echo "live_sha256=$ORIGINAL_SHA256"
+	echo "live_block0_sha256=$ORIGINAL_BLOCK0_SHA256"
+	echo 'wifi_state=down'
+	echo 'reboot_performed=0'
+	echo 'MANDATORY_NEXT_STEP=reboot_into_a_read-only-Factory_image_before_enabling_wifi'
+}
+
+usage() {
+	echo "usage: $0 status" >&2
+	echo "       $0 apply FACTORY38_BLOCK0 $CONFIRM_TOKEN" >&2
+	echo "       $0 restore ORIGINAL_BLOCK0 $CONFIRM_TOKEN" >&2
+	exit 2
+}
+
+case "${1:-}" in
+	status)
+		[ "$#" -eq 1 ] || usage
+		status
+		;;
+	apply)
+		[ "$#" -eq 3 ] || usage
+		apply_factory38 "$2" "$3"
+		;;
+	restore)
+		[ "$#" -eq 3 ] || usage
+		restore_factory "$2" "$3"
+		;;
+	*)
+		usage
+		;;
+esac

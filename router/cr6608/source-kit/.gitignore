@@ -1,0 +1,5 @@
+.mobile-layout/
+.router-mobile-ui/
+release-evidence/
+__pycache__/
+*.pyc

@@ -1,0 +1,152 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index e3ba537..7f14ac6 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -266,7 +266,7 @@ static int mt7915_cr6608_ul_muru_get(void *data, u64 *val)
+ {
+ 	struct mt7915_dev *dev = data;
+ 
+-	*val = READ_ONCE(dev->cr6608_ul_muru);
++	*val = !!(mt7915_cr6608_muru_mask(dev) & CR6608_MURU_UL_MASK);
+ 	return 0;
+ }
+ 
+@@ -285,10 +285,9 @@ static int mt7915_cr6608_ul_muru_set(void *data, u64 val)
+ 	if (!dev->cr6608_ul_muru_allowed)
+ 		return -EOPNOTSUPP;
+ 
+-	if (READ_ONCE(dev->cr6608_ul_muru)) {
+-		WRITE_ONCE(dev->cr6608_ul_muru, false);
++	if (atomic_xchg(&dev->cr6608_muru_mask, 0)) {
+ 		dev_warn(dev->mt76.dev,
+-			 "CR6608 experimental UL MU-MIMO/OFDMA runtime kill switch engaged\n");
++			 "CR6608 MURU runtime kill switch cleared every scheduler bit\n");
+ 	}
+ 
+ 	return 0;
+@@ -298,20 +297,99 @@ DEFINE_DEBUGFS_ATTRIBUTE(fops_cr6608_ul_muru,
+ 			 mt7915_cr6608_ul_muru_get,
+ 			 mt7915_cr6608_ul_muru_set, "%lld\n");
+ 
++static int mt7915_cr6608_muru_mask_get(void *data, u64 *val)
++{
++	struct mt7915_dev *dev = data;
++
++	*val = mt7915_cr6608_muru_mask(dev);
++	return 0;
++}
++
++static int mt7915_cr6608_muru_mask_set(void *data, u64 val)
++{
++	struct mt7915_dev *dev = data;
++	int observed;
++	u8 old;
++
++	if (val & ~CR6608_MURU_MASK)
++		return -EINVAL;
++	if (!dev->cr6608_ul_muru_allowed)
++		return -EOPNOTSUPP;
++	/* Runtime writes may only clear bits. Re-advertising a capability needs
++	 * a fresh driver load, so never allow a bit that was already off.  The
++	 * cmpxchg loop also makes concurrent writers and the fault latch strictly
++	 * monotonic: no stale read may restore a bit cleared by another CPU.
++	 */
++	for (;;) {
++		if (atomic_read(&dev->cr6608_muru_fault_latched))
++			return -EPERM;
++		old = mt7915_cr6608_muru_mask(dev);
++		if (val & ~old)
++			return -EPERM;
++		observed = atomic_cmpxchg(&dev->cr6608_muru_mask, old,
++					  (int)val);
++		if (observed == old)
++			break;
++	}
++	if (val != old)
++		dev_warn(dev->mt76.dev,
++			 "CR6608 MURU mask reduced from 0x%x to 0x%llx\n",
++			 old, val);
++	return 0;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(fops_cr6608_muru_mask,
++			 mt7915_cr6608_muru_mask_get,
++			 mt7915_cr6608_muru_mask_set, "%lld\n");
++
+ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 					     void *data)
+ {
+ 	struct mt7915_dev *dev = file->private;
++	unsigned long flags;
++	u8 mask = mt7915_cr6608_muru_mask(dev);
++	int fault_latched, fault_latches;
++	int attempted, response_ok, failed, timeout;
++	int he_updates, mimo_updates;
++
++	/* Every related writer uses this dedicated, non-nested lock, so debugfs
++	 * exposes one real cross-counter snapshot even on weakly ordered CPUs.
++	 */
++	spin_lock_irqsave(&dev->cr6608_muru_telemetry_lock, flags);
++	fault_latches = atomic_read(&dev->cr6608_muru_fault_latches);
++	fault_latched = atomic_read(&dev->cr6608_muru_fault_latched);
++	timeout = atomic_read(&dev->cr6608_ul_muru_sta_rec_timeout);
++	mimo_updates = atomic_read(&dev->cr6608_ul_muru_mimo_capable_updates);
++	he_updates = atomic_read(&dev->cr6608_ul_muru_he_sta_rec_updates);
++	response_ok = atomic_read(&dev->cr6608_ul_muru_sta_rec_response_ok);
++	failed = atomic_read(&dev->cr6608_ul_muru_sta_rec_failed);
++	attempted = atomic_read(&dev->cr6608_ul_muru_sta_rec_attempted);
++	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
+ 
+-	seq_printf(file, "allowed=%u\n", dev->cr6608_ul_muru_allowed);
+-	seq_printf(file, "enabled=%u\n", READ_ONCE(dev->cr6608_ul_muru));
+-	seq_puts(file, "policy=mediatek-vendor-sta-rec-muru\n");
+-	seq_printf(file, "sta_rec_updates=%d\n",
+-		   atomic_read(&dev->cr6608_ul_muru_sta_rec_updates));
++	seq_printf(file, "candidate_allowed=%u\n",
++		   dev->cr6608_ul_muru_allowed);
++	seq_printf(file, "candidate_ul_enabled=%u\n",
++		   !!(mask & CR6608_MURU_UL_MASK));
++	seq_printf(file, "candidate_mask=%u\n", mask);
++	seq_printf(file, "candidate_dl_ofdma=%u\n",
++		   !!(mask & CR6608_MURU_OFDMA_DL));
++	seq_printf(file, "candidate_ul_ofdma=%u\n",
++		   !!(mask & CR6608_MURU_OFDMA_UL));
++	seq_printf(file, "candidate_dl_mumimo=%u\n",
++		   !!(mask & CR6608_MURU_MUMIMO_DL));
++	seq_printf(file, "candidate_ul_mumimo=%u\n",
++		   !!(mask & CR6608_MURU_MUMIMO_UL));
++	seq_printf(file, "fault_latched=%d\n", fault_latched);
++	seq_printf(file, "fault_latches=%d\n", fault_latches);
++	seq_puts(file, "policy=mediatek-25.12-mu-onoff-sta-rec-port\n");
++	seq_printf(file, "sta_rec_attempted=%d\n", attempted);
++	seq_printf(file, "sta_rec_response_ok=%d\n", response_ok);
++	seq_printf(file, "sta_rec_failed=%d\n", failed);
++	seq_printf(file, "sta_rec_timeout=%d\n", timeout);
+-	seq_printf(file, "he_sta_rec_updates=%d\n",
+-		   atomic_read(&dev->cr6608_ul_muru_he_sta_rec_updates));
++	seq_printf(file, "he_sta_rec_updates=%d\n",
++		   he_updates);
+ 	seq_printf(file, "mimo_capable_updates=%d\n",
+-		   atomic_read(&dev->cr6608_ul_muru_mimo_capable_updates));
++		   mimo_updates);
+ 
+ 	return 0;
+ }
+@@ -1360,6 +1438,8 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 	debugfs_create_file("muru_debug", 0600, dir, dev, &fops_muru_debug);
+ 	debugfs_create_file("cr6608_ul_muru", 0600, dir, dev,
+ 			    &fops_cr6608_ul_muru);
++	debugfs_create_file("cr6608_muru_mask", 0600, dir, dev,
++			    &fops_cr6608_muru_mask);
+ 	debugfs_create_file("cr6608_ul_muru_state", 0400, dir, dev,
+ 			    &mt7915_cr6608_ul_muru_state_fops);
+ 
+@@ -1576,7 +1656,7 @@ void mt7915_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 
+ 	debugfs_create_file("fixed_rate", 0600, dir, sta, &fops_fixed_rate);
+ 	debugfs_create_file("hw-queues", 0400, dir, sta, &mt7915_queues_fops);
+-	if (READ_ONCE(dev->cr6608_ul_muru))
++	if (mt7915_cr6608_muru_mask(dev) & CR6608_MURU_UL_MASK)
+ 		debugfs_create_file("cr6608_muru_capabilities", 0400, dir, sta,
+ 				    &mt7915_cr6608_sta_muru_fops);
+ }

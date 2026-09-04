@@ -1,0 +1,110 @@
+#!/bin/sh
+
+# Read-only CR6608 factory identity verification.  The three LAN user ports
+# are Linux DSA switch ports behind GMAC0, so they intentionally inherit the
+# same vendor identity.  Only the four product roles below must be unique.
+
+CR6608_MAC_BOARD_FILE="${CR6608_MAC_BOARD_FILE:-/tmp/sysinfo/board_name}"
+CR6608_MAC_PROC_MTD="${CR6608_MAC_PROC_MTD:-/proc/mtd}"
+CR6608_MAC_SYSTEM_LIB="${CR6608_MAC_SYSTEM_LIB:-/lib/functions/system.sh}"
+CR6608_MAC_SYS_NET="${CR6608_MAC_SYS_NET:-/sys/class/net}"
+CR6608_MAC_UCI_BIN="${CR6608_MAC_UCI_BIN:-/sbin/uci}"
+
+cr6608_mac_normalize() {
+	printf '%s' "$1" | tr 'A-F' 'a-f'
+}
+
+cr6608_mac_valid_vendor_unicast() {
+	cmv_mac="$(cr6608_mac_normalize "$1")"
+	case "$cmv_mac" in
+		[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+		*) return 1 ;;
+	esac
+	[ "$cmv_mac" != '00:00:00:00:00:00' ] || return 1
+	[ "$cmv_mac" != 'ff:ff:ff:ff:ff:ff' ] || return 1
+	cmv_first="${cmv_mac%%:*}"
+	cmv_value=$((0x$cmv_first))
+	# Bit 0 means multicast and bit 1 means locally administered.  Product
+	# identities must be globally administered unicast addresses.
+	[ $((cmv_value & 3)) -eq 0 ]
+}
+
+cr6608_mac_factory_read() {
+	cmf_offset="$1"
+	[ -r "$CR6608_MAC_SYSTEM_LIB" ] || return 1
+	# OpenWrt's /lib/functions.sh is sourced by system.sh and dereferences
+	# IPKG_INSTROOT directly.  The runtime verifier intentionally uses `set -u`,
+	# so initialize the standard package-root variable when procd did not set it.
+	# An explicit caller value is preserved unchanged.
+	: "${IPKG_INSTROOT:=}"
+	# shellcheck source=/lib/functions/system.sh
+	. "$CR6608_MAC_SYSTEM_LIB" || return 1
+	type mtd_get_mac_binary >/dev/null 2>&1 || return 1
+	mtd_get_mac_binary Factory "$cmf_offset" 2>/dev/null | tr 'A-F' 'a-f'
+}
+
+cr6608_mac_runtime_read() {
+	cmr_ifname="$1"
+	case "$cmr_ifname" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	[ -r "$CR6608_MAC_SYS_NET/$cmr_ifname/address" ] || return 1
+	tr 'A-F' 'a-f' < "$CR6608_MAC_SYS_NET/$cmr_ifname/address"
+}
+
+cr6608_mac_board_supported() {
+	[ -r "$CR6608_MAC_BOARD_FILE" ] || return 1
+	[ "$(sed -n '1p' "$CR6608_MAC_BOARD_FILE" 2>/dev/null)" = 'xiaomi,mi-router-cr6608' ]
+}
+
+cr6608_mac_factory_geometry_valid() {
+	[ -r "$CR6608_MAC_PROC_MTD" ] || return 1
+	[ "$(grep -Ec '^mtd[0-9]+:[[:space:]]+00080000[[:space:]]+00020000[[:space:]]+"Factory"$' "$CR6608_MAC_PROC_MTD" 2>/dev/null)" = 1 ]
+}
+
+cr6608_mac_uci_overrides_present() {
+	[ -x "$CR6608_MAC_UCI_BIN" ] || return 0
+	# UCI accepts exactly one package after `show`.  Query the packages
+	# independently so an override in wireless cannot be hidden by an invalid
+	# multi-package invocation.  An unreadable configuration is unsafe here:
+	# fail closed and let the verifier block release.
+	cmu_network="$("$CR6608_MAC_UCI_BIN" -q show network 2>/dev/null)" || return 0
+	cmu_wireless="$("$CR6608_MAC_UCI_BIN" -q show wireless 2>/dev/null)" || return 0
+	printf '%s\n%s\n' "$cmu_network" "$cmu_wireless" |
+		grep -Eq '^(network|wireless)\.[^.=]+\.(macaddr|macaddress|bssid)='
+}
+
+cr6608_mac_roles_pairwise_unique() {
+	[ "$1" != "$2" ] && [ "$1" != "$3" ] && [ "$1" != "$4" ] &&
+		[ "$2" != "$3" ] && [ "$2" != "$4" ] && [ "$3" != "$4" ]
+}
+
+cr6608_mac_load_factory_roles() {
+	CR6608_MAC_FACTORY_WIFI24="$(cr6608_mac_factory_read 4)" || return 1
+	CR6608_MAC_FACTORY_WIFI5="$(cr6608_mac_factory_read 10)" || return 1
+	CR6608_MAC_FACTORY_LAN="$(cr6608_mac_factory_read 262132)" || return 1
+	CR6608_MAC_FACTORY_WAN="$(cr6608_mac_factory_read 262138)" || return 1
+	for cml_mac in "$CR6608_MAC_FACTORY_LAN" "$CR6608_MAC_FACTORY_WAN" \
+		"$CR6608_MAC_FACTORY_WIFI24" "$CR6608_MAC_FACTORY_WIFI5"; do
+		cr6608_mac_valid_vendor_unicast "$cml_mac" || return 1
+	done
+	cr6608_mac_roles_pairwise_unique "$CR6608_MAC_FACTORY_LAN" "$CR6608_MAC_FACTORY_WAN" \
+		"$CR6608_MAC_FACTORY_WIFI24" "$CR6608_MAC_FACTORY_WIFI5"
+}
+
+cr6608_mac_match_runtime_role() {
+	cmrr_ifname="$1"; cmrr_expected="$2"
+	cmrr_live="$(cr6608_mac_runtime_read "$cmrr_ifname")" || return 1
+	[ "$cmrr_live" = "$cmrr_expected" ]
+}
+
+cr6608_mac_dsa_runtime_valid() {
+	for cmd_ifname in eth0 br-lan lan1 lan2 lan3; do
+		cr6608_mac_match_runtime_role "$cmd_ifname" "$CR6608_MAC_FACTORY_LAN" || return 1
+	done
+}
+
+cr6608_mac_runtime_roles_valid() {
+	cr6608_mac_dsa_runtime_valid || return 1
+	cr6608_mac_match_runtime_role wan "$CR6608_MAC_FACTORY_WAN" || return 1
+	cr6608_mac_match_runtime_role phy0-ap0 "$CR6608_MAC_FACTORY_WIFI24" || return 1
+	cr6608_mac_match_runtime_role phy1-ap0 "$CR6608_MAC_FACTORY_WIFI5"
+}

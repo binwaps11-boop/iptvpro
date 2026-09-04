@@ -1,0 +1,300 @@
+#!/bin/sh
+# Fail-closed software radio-policy audit for a retail CR6608 artifact.
+# A PASS is not RF certification: conducted/radiated measurements and market
+# approval remain external gates.
+
+set -u
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+
+UCI_BIN='/sbin/uci'
+IW_BIN='/usr/sbin/iw'
+UBUS_BIN='/bin/ubus'
+JSONFILTER_BIN='/usr/bin/jsonfilter'
+AX_VERIFY_BIN='/usr/sbin/cr6608-ax-verify'
+MARKER='/etc/cr6608-retail-provisioned'
+MODULE_FILE='/etc/modules.d/mt7915e'
+MODULE_DIRS='/etc/modules.d /etc/modules-boot.d'
+ROM_PROFILE='/rom/etc/cr6608-artifact-profile'
+ROM_MODULE_FILE='/rom/etc/modules.d/mt7915e'
+RF_PARAM='/sys/module/mt7915e/parameters/cr6608_rf_38dbm'
+RF_ACTIVE_PARAM='/sys/module/mt7915e/parameters/cr6608_rf_38dbm_active'
+UL_PARAM='/sys/module/mt7915e/parameters/cr6608_ul_muru'
+MURU_MASK_PARAM='/sys/module/mt7915e/parameters/cr6608_muru_mask'
+UL_GUARD_INIT='/etc/init.d/cr6608-ul-muru-guard'
+DEBUG_ROOT='/sys/kernel/debug/ieee80211'
+
+fail() {
+	printf 'retail_radio_policy=FAIL reason=%s sale_ready=NO\n' "$1" >&2
+	exit 1
+}
+
+marker_value() {
+	key=$1
+	[ "$(grep -c "^${key}=" "$MARKER" 2>/dev/null)" -eq 1 ] 2>/dev/null ||
+		fail "marker_${key}_count"
+	sed -n "s/^${key}=//p" "$MARKER"
+}
+
+state_field_once() {
+	[ "$(printf '%s\n' "$1" | grep -Fxc "$2=$3" 2>/dev/null)" = 1 ]
+}
+
+state_uint() {
+	state_uint_data=$1
+	state_uint_key=$2
+	[ "$(printf '%s\n' "$state_uint_data" |
+		grep -Ec "^${state_uint_key}=[0-9][0-9]*$" 2>/dev/null)" = 1 ] || return 1
+	printf '%s\n' "$state_uint_data" |
+		sed -n "s/^${state_uint_key}=\([0-9][0-9]*\)$/\1/p"
+}
+
+[ "$#" -eq 0 ] || fail unexpected_argument
+[ "$(/usr/bin/id -u 2>/dev/null)" = 0 ] || fail must_run_as_root
+[ -f "$MARKER" ] && [ ! -L "$MARKER" ] || fail provisioning_marker_invalid
+[ "$(/bin/stat -c '%u' "$MARKER" 2>/dev/null)" = 0 ] ||
+	fail provisioning_marker_owner
+marker_mode="$(/bin/stat -c '%a' "$MARKER" 2>/dev/null)"
+case "$marker_mode" in 400|600) ;; *) fail provisioning_marker_mode ;; esac
+[ "$(wc -l < "$MARKER" 2>/dev/null | tr -d '[:space:]')" = 8 ] || fail provisioning_marker_schema
+[ "$(marker_value profile)" = retail-v2 ] || fail provisioning_marker_profile
+[ "$(marker_value sale_ready)" = NO ] || fail provisioning_marker_sale_state
+[ "$(marker_value radio_policy)" = retail-disabled-after-reboot ] ||
+	fail artifact_profile_not_retail
+COUNTRY="$(marker_value market_country)"
+case "$COUNTRY" in
+	[A-Z][A-Z]) [ "$COUNTRY" != 00 ] || fail invalid_market_country ;;
+	*) fail invalid_market_country ;;
+esac
+PRIMARY_AP_RADIO0="$(marker_value primary_ap_radio0)"
+PRIMARY_AP_RADIO1="$(marker_value primary_ap_radio1)"
+case "$PRIMARY_AP_RADIO0" in ''|*[!A-Za-z0-9_]*) fail provisioning_marker_primary_ap ;; esac
+case "$PRIMARY_AP_RADIO1" in ''|*[!A-Za-z0-9_]*) fail provisioning_marker_primary_ap ;; esac
+[ "$PRIMARY_AP_RADIO0" != "$PRIMARY_AP_RADIO1" ] || fail provisioning_marker_primary_ap
+[ "$(marker_value audit_complete)" = YES ] || fail provisioning_marker_audit_state
+case "$(marker_value provisioned_utc)" in
+	????-??-??T??:??:??Z) ;;
+	*) fail provisioning_marker_timestamp ;;
+esac
+
+# The writable overlay marker is state, not artifact identity.  A LAB image
+# must remain ineligible for a retail PASS even if a privileged operator
+# rewrites /etc and reboots.  Bind the decision to the immutable squashfs
+# view and reject initramfs, where /rom is intentionally unavailable.
+[ -f "$ROM_PROFILE" ] && [ ! -L "$ROM_PROFILE" ] ||
+	fail immutable_artifact_profile_unavailable
+[ "$(wc -l < "$ROM_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] ||
+	fail immutable_artifact_profile_invalid
+[ "$(grep -c '^profile=retail-v1$' "$ROM_PROFILE" 2>/dev/null)" -eq 1 ] 2>/dev/null ||
+	fail artifact_profile_not_retail
+[ "$(grep -c '^sale_ready=NO$' "$ROM_PROFILE" 2>/dev/null)" -eq 1 ] 2>/dev/null ||
+	fail immutable_artifact_sale_state
+[ "$(grep -c '^radio_policy=retail-disabled$' "$ROM_PROFILE" 2>/dev/null)" -eq 1 ] 2>/dev/null ||
+	fail artifact_profile_not_retail
+[ -f "$ROM_MODULE_FILE" ] && [ ! -L "$ROM_MODULE_FILE" ] ||
+	fail immutable_module_policy_unavailable
+[ "$(wc -l < "$ROM_MODULE_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ] ||
+	fail immutable_module_policy_invalid
+[ "$(sed -n '1p' "$ROM_MODULE_FILE")" = \
+	'mt7915e cr6608_rf_38dbm=0 cr6608_ul_muru=0 cr6608_muru_mask=0' ] ||
+	fail artifact_profile_not_retail
+
+[ -x "$UCI_BIN" ] || fail uci_missing
+[ -x "$IW_BIN" ] || fail iw_missing
+[ -x "$UBUS_BIN" ] || fail ubus_missing
+[ -x "$JSONFILTER_BIN" ] || fail jsonfilter_missing
+[ -x "$AX_VERIFY_BIN" ] || fail ax_verifier_missing
+[ -f "$MODULE_FILE" ] && [ ! -L "$MODULE_FILE" ] || fail module_policy_file_invalid
+[ "$(wc -l < "$MODULE_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ] ||
+	fail module_policy_line_count
+[ "$(sed -n '1p' "$MODULE_FILE")" = \
+	'mt7915e cr6608_rf_38dbm=0 cr6608_ul_muru=0 cr6608_muru_mask=0' ] ||
+	fail module_policy_not_retail
+
+module_loader_count=0
+for module_dir in $MODULE_DIRS; do
+	[ -d "$module_dir" ] || continue
+	for module_entry in "$module_dir"/*; do
+		[ -e "$module_entry" ] || [ -L "$module_entry" ] || continue
+		if grep -Eq '^[[:space:]]*mt7915e([[:space:]]|$)' "$module_entry" 2>/dev/null; then
+			[ "$module_entry" = "$MODULE_FILE" ] || fail duplicate_module_policy
+			module_loader_count=$((module_loader_count + 1))
+		fi
+	done
+done
+[ "$module_loader_count" -eq 1 ] || fail module_policy_loader_count
+
+[ -r "$RF_PARAM" ] && [ "$(cat "$RF_PARAM")" = N ] ||
+	fail lab_38dbm_runtime_enabled
+[ -r "$RF_ACTIVE_PARAM" ] && [ "$(cat "$RF_ACTIVE_PARAM")" = N ] ||
+	fail lab_38dbm_driver_active
+[ -r "$UL_PARAM" ] && [ "$(cat "$UL_PARAM")" = N ] ||
+	fail ul_muru_runtime_enabled
+[ -r "$MURU_MASK_PARAM" ] && [ "$(cat "$MURU_MASK_PARAM")" = 0 ] ||
+	fail muru_mask_runtime_enabled
+
+for radio in radio0 radio1; do
+	[ "$($UCI_BIN -q get "wireless.${radio}.country" 2>/dev/null)" = "$COUNTRY" ] ||
+		fail "${radio}_country_mismatch"
+	if "$UCI_BIN" -q get "wireless.${radio}.txpower" >/dev/null 2>&1; then
+		fail "${radio}_forced_txpower"
+	fi
+done
+for key in \
+	smartap.quick.country24 smartap.quick.country5 \
+	cr6608quick.default.country cr6608quick.default.country24 \
+	cr6608quick.default.country5; do
+	[ "$($UCI_BIN -q get "$key" 2>/dev/null)" = "$COUNTRY" ] ||
+		fail country_mirror_mismatch
+done
+for key in \
+	smartap.quick.txpower smartap.quick.txpower_radio0 smartap.quick.txpower_radio1 \
+	cr6608quick.default.txpower cr6608quick.default.txpower_radio0 \
+	cr6608quick.default.txpower_radio1; do
+	if "$UCI_BIN" -q get "$key" >/dev/null 2>&1; then
+		fail forced_txpower_mirror
+	fi
+done
+[ "$($UCI_BIN -q get smartap.experimental.ul_muru 2>/dev/null)" = 0 ] ||
+	fail ul_muru_policy_enabled
+[ "$($UCI_BIN -q get smartap.experimental.muru_mask 2>/dev/null)" = 0 ] ||
+	fail muru_mask_policy_enabled
+[ "$($UCI_BIN -q get smartap.experimental.ul_muru_guard 2>/dev/null)" = 0 ] ||
+	fail ul_muru_guard_policy_enabled
+[ "$($UCI_BIN -q get smartap.experimental.ul_muru_state 2>/dev/null)" = retail-disabled ] ||
+	fail ul_muru_state_not_retail
+[ -x "$UL_GUARD_INIT" ] || fail ul_muru_guard_init_missing
+if "$UL_GUARD_INIT" enabled >/dev/null 2>&1; then
+	fail ul_muru_guard_service_enabled
+fi
+
+iw_dev="$($IW_BIN dev 2>/dev/null)" || fail wireless_runtime_unavailable
+phy_stats="$(printf '%s\n' "$iw_dev" | awk '
+	/^[[:space:]]*phy#[0-9][0-9]*[[:space:]]*$/ {
+		phy=$0
+		gsub(/^[[:space:]]*|[[:space:]]*$/, "", phy)
+		seen[phy]=1
+		next
+	}
+	/^[[:space:]]*type[[:space:]]+AP[[:space:]]*$/ && phy != "" { ap[phy]++ }
+	END {
+		for (entry in seen) {
+			phys++
+			if (ap[entry] > 0) ap_phys++
+		}
+		printf "%d %d\n", phys, ap_phys
+	}')" || fail wireless_runtime_parse
+phy_count="${phy_stats%% *}"
+ap_phy_count="${phy_stats#* }"
+[ "$phy_count" -eq 2 ] 2>/dev/null || fail wireless_phy_count
+[ "$ap_phy_count" -eq "$phy_count" ] 2>/dev/null || fail wireless_ap_per_phy
+
+# Per-PHY AP presence is necessary but insufficient: a secondary/guest AP can
+# remain up while the provisioned sale AP failed.  Resolve the two marker
+# sections through netifd and require their concrete interfaces and hostapd
+# objects to be live APs.
+wireless_runtime="$($UBUS_BIN -S -t 5 call network.wireless status 2>/dev/null)" ||
+	fail wireless_netifd_runtime_unavailable
+runtime_value() {
+	printf '%s\n' "$wireless_runtime" | "$JSONFILTER_BIN" -e "$1" 2>/dev/null
+}
+runtime_primary_ifname() {
+	rpi_radio="$1"; rpi_section="$2"; rpi_index=0
+	while [ "$rpi_index" -lt 32 ]; do
+		rpi_status_section="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].section")"
+		[ -n "$rpi_status_section" ] || return 1
+		if [ "$rpi_status_section" = "$rpi_section" ]; then
+			rpi_ifname="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].ifname")"
+			rpi_mode="$(runtime_value "@.${rpi_radio}.interfaces[${rpi_index}].config.mode")"
+			case "$rpi_ifname" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+			[ "$rpi_mode" = ap ] || return 1
+			printf '%s\n' "$rpi_ifname"
+			return 0
+		fi
+		rpi_index=$((rpi_index + 1))
+	done
+	return 1
+}
+for runtime_binding in "radio0:$PRIMARY_AP_RADIO0" "radio1:$PRIMARY_AP_RADIO1"; do
+	runtime_radio="${runtime_binding%%:*}"
+	runtime_section="${runtime_binding#*:}"
+	[ "$(runtime_value "@.${runtime_radio}.up")" = true ] &&
+		[ "$(runtime_value "@.${runtime_radio}.disabled")" != true ] &&
+		[ "$(runtime_value "@.${runtime_radio}.pending")" != true ] ||
+		fail "${runtime_radio}_runtime_not_ready"
+	runtime_ifname="$(runtime_primary_ifname "$runtime_radio" "$runtime_section")" ||
+		fail "${runtime_radio}_primary_ap_runtime"
+	"$IW_BIN" dev "$runtime_ifname" info 2>/dev/null | awk '
+		$1 == "type" && $2 == "AP" { found=1 }
+		END { exit(found ? 0 : 1) }' || fail "${runtime_radio}_primary_ap_not_ap"
+	"$UBUS_BIN" -S list "hostapd.${runtime_ifname}" 2>/dev/null |
+		grep -Fqx "hostapd.${runtime_ifname}" || fail "${runtime_radio}_primary_hostapd_missing"
+	hostapd_runtime="$($UBUS_BIN -S -t 5 call "hostapd.${runtime_ifname}" get_status 2>/dev/null)" ||
+		fail "${runtime_radio}_primary_hostapd_status"
+	[ "$(printf '%s\n' "$hostapd_runtime" | "$JSONFILTER_BIN" -e '@.status' 2>/dev/null)" = ENABLED ] ||
+		fail "${runtime_radio}_primary_hostapd_not_enabled"
+done
+
+ul_gate_count=0
+for node in "$DEBUG_ROOT"/phy*/mt76/cr6608_ul_muru; do
+	[ -f "$node" ] || continue
+	ul_gate_count=$((ul_gate_count + 1))
+	[ "$(cat "$node" 2>/dev/null)" = 0 ] || fail ul_muru_driver_gate_enabled
+done
+[ "$ul_gate_count" -eq "$phy_count" ] || fail ul_muru_driver_gate_count
+muru_mask_count=0
+for node in "$DEBUG_ROOT"/phy*/mt76/cr6608_muru_mask; do
+	[ -f "$node" ] || continue
+	muru_mask_count=$((muru_mask_count + 1))
+	[ "$(cat "$node" 2>/dev/null)" = 0 ] || fail muru_mask_driver_gate_enabled
+done
+[ "$muru_mask_count" -eq "$phy_count" ] || fail muru_mask_driver_gate_count
+ul_state_count=0
+for node in "$DEBUG_ROOT"/phy*/mt76/cr6608_ul_muru_state; do
+	[ -f "$node" ] || continue
+	ul_state_count=$((ul_state_count + 1))
+	state="$(cat "$node" 2>/dev/null)" || fail ul_muru_driver_state_unreadable
+	state_field_once "$state" candidate_allowed 0 || fail ul_muru_driver_allowed
+	state_field_once "$state" candidate_ul_enabled 0 || fail ul_muru_driver_enabled
+	state_field_once "$state" candidate_mask 0 || fail muru_mask_driver_state
+	state_field_once "$state" candidate_dl_ofdma 0 || fail muru_dl_ofdma_driver_state
+	state_field_once "$state" candidate_ul_ofdma 0 || fail muru_ul_ofdma_driver_state
+	state_field_once "$state" candidate_dl_mumimo 0 || fail muru_dl_mumimo_driver_state
+	state_field_once "$state" candidate_ul_mumimo 0 || fail muru_ul_mumimo_driver_state
+	state_field_once "$state" fault_latched 0 || fail muru_fault_latched
+	state_field_once "$state" policy mediatek-25.12-mu-onoff-sta-rec-port ||
+		fail muru_driver_policy
+	[ "$(state_uint "$state" fault_latches)" = 0 ] || fail muru_fault_latches
+	[ "$(state_uint "$state" sta_rec_attempted)" = 0 ] || fail muru_sta_rec_attempted
+	[ "$(state_uint "$state" sta_rec_response_ok)" = 0 ] || fail muru_sta_rec_response_ok
+	[ "$(state_uint "$state" sta_rec_failed)" = 0 ] || fail muru_sta_rec_failed
+	[ "$(state_uint "$state" sta_rec_timeout)" = 0 ] || fail muru_sta_rec_timeout
+	[ "$(state_uint "$state" he_sta_rec_updates)" = 0 ] || fail muru_he_sta_rec_updates
+	[ "$(state_uint "$state" mimo_capable_updates)" = 0 ] ||
+		fail muru_mimo_capable_updates
+done
+[ "$ul_state_count" -eq "$phy_count" ] || fail ul_muru_driver_state_count
+
+# Reuse the full AX gate so retail qualification cannot pass merely because
+# two AP objects exist.  The verifier enforces the CR6608 2g/HE20 + 5g/HE80
+# topology, exact NSS2/MCS0-11 RX/TX capability maps, hostapd HE settings and
+# the stable-disabled UL-MURU policy.  Its PASS deliberately remains an
+# airtime-unverified software/driver result, not RF or multi-client proof.
+ax_verify_output="$($AX_VERIFY_BIN 2>&1)" || fail ax_configuration_gate
+[ "$(printf '%s\n' "$ax_verify_output" |
+	grep -Fxc 'RESULT_AX_CONFIGURATION=DRIVER_GATE_PASS_AIRTIME_UNVERIFIED' 2>/dev/null)" = 1 ] ||
+	fail ax_configuration_result
+if printf '%s\n' "$ax_verify_output" |
+	grep -Fq 'RESULT_AX_CONFIGURATION=FAIL'; then
+	fail ax_configuration_result
+fi
+
+reg_raw="$($IW_BIN reg get 2>/dev/null)" || fail regulatory_runtime_unavailable
+reg_countries="$(printf '%s\n' "$reg_raw" |
+	sed -n 's/^[[:space:]]*country \([A-Z0-9][A-Z0-9]\):.*/\1/p')"
+[ -n "$reg_countries" ] || fail regulatory_country_missing
+for reg_country in $reg_countries; do
+	[ "$reg_country" = "$COUNTRY" ] || fail regulatory_country_mismatch
+done
+
+printf 'retail_radio_policy=PASS country=%s sale_ready=NO external_rf_verification=REQUIRED artifact_sha_verification=REQUIRED\n' "$COUNTRY"

@@ -1,0 +1,259 @@
+#!/bin/sh
+
+# Maintain a forward-only wall-clock floor on systems without an RTC.  The
+# squashfs copy is immutable and belongs to the running image; the /etc copy
+# is an overlay state file which survives settings-preserving sysupgrades.
+STATE_FILE="${SMARTAP_TIME_ANCHOR_STATE_FILE:-/etc/smartap-time-anchor}"
+IMAGE_FILE="${SMARTAP_TIME_ANCHOR_IMAGE_FILE:-/rom/etc/smartap-time-anchor}"
+TAG="smartap-time-anchor"
+ACTION="${1:-apply}"
+MIN_WRITE_ADVANCE="${SMARTAP_TIME_ANCHOR_MIN_WRITE_ADVANCE:-21600}"
+MONITOR_INITIAL_DELAY="${SMARTAP_TIME_ANCHOR_INITIAL_DELAY:-300}"
+MONITOR_INTERVAL="${SMARTAP_TIME_ANCHOR_MONITOR_INTERVAL:-3600}"
+LOCK_DIR="${SMARTAP_TIME_ANCHOR_LOCK_DIR:-/var/run/smartap-time-anchor}"
+LOCK_FILE="${LOCK_DIR}/state.lock"
+LOCK_EXPECT_UID="${SMARTAP_TIME_ANCHOR_LOCK_EXPECT_UID:-0}"
+LOCK_ATTEMPTS="${SMARTAP_TIME_ANCHOR_LOCK_ATTEMPTS:-6}"
+
+log_notice() {
+	logger -t "$TAG" "$1" 2>/dev/null || true
+}
+
+log_warning() {
+	logger -t "$TAG" -p daemon.warning "$1" 2>/dev/null || true
+}
+
+fail() {
+	log_warning "$1"
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+valid_epoch() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	# Stay inside the range accepted by the UI and by 32-bit userspace tools.
+	[ "${#1}" -eq 10 ] &&
+		[ "$1" -ge 1577836800 ] 2>/dev/null &&
+		[ "$1" -le 2145916800 ] 2>/dev/null
+}
+
+valid_interval() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 604800 ] 2>/dev/null
+}
+
+valid_lock_attempts() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 30 ] 2>/dev/null
+}
+
+prepare_lock() {
+	local owner
+	case "$LOCK_EXPECT_UID" in ''|*[!0-9]*) return 1 ;; esac
+	[ ! -L "$LOCK_DIR" ] || return 1
+	if [ -e "$LOCK_DIR" ]; then
+		[ -d "$LOCK_DIR" ] || return 1
+	else
+		# Two root callers may reach first use together. Validate the directory
+		# created by the winner instead of treating that benign race as failure.
+		mkdir -m 0700 "$LOCK_DIR" 2>/dev/null ||
+			{ [ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; } || return 1
+	fi
+	[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || return 1
+	owner="$(stat -c %u "$LOCK_DIR" 2>/dev/null)"
+	[ "$owner" = "$LOCK_EXPECT_UID" ] || return 1
+	chmod 0700 "$LOCK_DIR" 2>/dev/null || return 1
+
+	[ ! -L "$LOCK_FILE" ] || return 1
+	umask 077
+	exec 9>>"$LOCK_FILE" || return 1
+	[ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || { exec 9>&-; return 1; }
+	owner="$(stat -c %u "$LOCK_FILE" 2>/dev/null)"
+	[ "$owner" = "$LOCK_EXPECT_UID" ] || { exec 9>&-; return 1; }
+	chmod 0600 "$LOCK_FILE" 2>/dev/null || { exec 9>&-; return 1; }
+}
+
+# BusyBox flock has no portable timeout option. Poll non-blocking acquisition
+# so a wedged sync cannot occupy a uhttpd worker indefinitely. Kernel flock is
+# released automatically after exit, SIGKILL, or sudden reboot.
+acquire_lock() {
+	local attempt=0
+	valid_lock_attempts "$LOCK_ATTEMPTS" || fail "invalid time anchor lock attempts"
+	command -v flock >/dev/null 2>&1 || fail "time anchor locking utility is unavailable"
+	prepare_lock || fail "unsafe time anchor lock path"
+	while :; do
+		flock -xn 9 2>/dev/null && return 0
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt "$LOCK_ATTEMPTS" ] || {
+			exec 9>&-
+			fail "time anchor update lock is busy"
+		}
+		sleep 1
+	done
+}
+
+release_lock() {
+	flock -u 9 2>/dev/null || true
+	exec 9>&-
+}
+
+read_anchor() {
+	local path="$1" value
+	[ -e "$path" ] || return 1
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || {
+		log_warning "ignoring unsafe or unreadable time anchor: $path"
+		return 1
+	}
+	value="$(cat "$path" 2>/dev/null)" || return 1
+	valid_epoch "$value" || {
+		log_warning "ignoring invalid time anchor: $path"
+		return 1
+	}
+	printf '%s\n' "$value"
+}
+
+select_anchor() {
+	local path candidate selected=""
+	for path in "$IMAGE_FILE" "$STATE_FILE"; do
+		candidate="$(read_anchor "$path")" || continue
+		if [ -z "$selected" ] || [ "$candidate" -gt "$selected" ] 2>/dev/null; then
+			selected="$candidate"
+		fi
+	done
+	[ -n "$selected" ] || return 1
+	printf '%s\n' "$selected"
+}
+
+sync_state() {
+	# A global BusyBox sync also persists the rename's parent-directory entry;
+	# fsyncing only the new file would not guarantee that after sudden power loss.
+	sync >/dev/null 2>&1
+}
+
+write_state() {
+	local epoch="$1" tmp current_state=""
+	valid_epoch "$epoch" || fail "refusing to store an invalid time anchor"
+	# Every supported writer holds LOCK_FILE. Re-read under that lock so a
+	# caller which calculated an old candidate before waiting can never publish
+	# it over a newer state.
+	current_state="$(read_anchor "$STATE_FILE")" || current_state=""
+	if [ -n "$current_state" ]; then
+		[ "$epoch" -ge "$current_state" ] 2>/dev/null ||
+			fail "refusing to replace a newer persistent time floor"
+		[ "$epoch" -gt "$current_state" ] 2>/dev/null || {
+			log_notice "time anchor write skipped because the state is current"
+			return 0
+		}
+	fi
+	umask 022
+	tmp="$(mktemp "${STATE_FILE}.tmp.XXXXXX" 2>/dev/null)" ||
+		fail "failed to allocate temporary time anchor"
+	printf '%s\n' "$epoch" >"$tmp" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to write temporary time anchor"
+	}
+	chmod 0644 "$tmp" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to set temporary time anchor permissions"
+	}
+	mv -f "$tmp" "$STATE_FILE" 2>/dev/null || {
+		rm -f "$tmp"
+		fail "failed to atomically refresh time anchor"
+	}
+	sync_state || fail "failed to durably synchronize time anchor"
+	log_notice "persistent time floor advanced to $epoch"
+}
+
+apply_anchor() {
+	local anchor now state=""
+	anchor="$(select_anchor)" || fail "no valid time anchor is available"
+	now="$(date +%s 2>/dev/null)"
+	if ! valid_epoch "$now" || [ "$now" -lt "$anchor" ] 2>/dev/null; then
+		date -u -s "@$anchor" >/dev/null 2>&1 || fail "failed to apply time anchor"
+		log_notice "clock advanced to persistent time floor $anchor"
+		now="$anchor"
+	fi
+
+	# A newer image floor, or recovery from a corrupt overlay file, is a single
+	# justified flash write.  Normal boots do not rewrite an unchanged state.
+	state="$(read_anchor "$STATE_FILE")" || state=""
+	if [ -z "$state" ] || [ "$state" -lt "$anchor" ] 2>/dev/null; then
+		write_state "$anchor"
+	fi
+	log_notice "time anchor check succeeded (anchor=$anchor current=$now)"
+}
+
+refresh_anchor() {
+	local force="${1:-0}" now anchor state="" advance
+	now="$(date +%s 2>/dev/null)"
+	valid_epoch "$now" || fail "current time is outside the accepted range"
+	anchor="$(select_anchor)" || fail "no valid time anchor is available"
+	[ "$now" -ge "$anchor" ] 2>/dev/null ||
+		fail "refusing to move the persistent time floor backwards"
+	state="$(read_anchor "$STATE_FILE")" || state=""
+	[ -z "$state" ] || [ "$now" -gt "$state" ] 2>/dev/null || {
+		log_notice "time anchor refresh skipped because the state is current"
+		return 0
+	}
+	advance=$((now - anchor))
+	if [ "$force" != 1 ] && [ "$advance" -lt "$MIN_WRITE_ADVANCE" ] 2>/dev/null; then
+		log_notice "time anchor refresh deferred (advance=${advance}s minimum=${MIN_WRITE_ADVANCE}s)"
+		return 0
+	fi
+	write_state "$now"
+}
+
+set_from_authenticated_source() {
+	local requested="$1" anchor current
+	valid_epoch "$requested" || fail "requested time is outside the accepted range"
+	anchor="$(select_anchor)" || fail "no valid time anchor is available"
+	[ "$requested" -ge "$anchor" ] 2>/dev/null ||
+		fail "refusing authenticated time rollback below the persistent floor"
+	current="$(date +%s 2>/dev/null)"
+	if valid_epoch "$current" && [ "$requested" -lt "$current" ] 2>/dev/null; then
+		fail "refusing authenticated time rollback below the current clock"
+	fi
+	date -u -s "@$requested" >/dev/null 2>&1 || fail "failed to set authenticated time"
+	# Dashboard login performs this synchronization automatically.  Reuse the
+	# coalescer so repeated logins cannot turn into repeated flash erases; a
+	# materially newer browser clock (six hours by default) is still persisted.
+	refresh_anchor 0
+	log_notice "time synchronized from authenticated source to $requested"
+}
+
+monitor_anchor() {
+	valid_interval "$MIN_WRITE_ADVANCE" || fail "invalid minimum write interval"
+	valid_interval "$MONITOR_INITIAL_DELAY" || fail "invalid monitor initial delay"
+	valid_interval "$MONITOR_INTERVAL" || fail "invalid monitor interval"
+	trap 'exit 0' INT TERM
+	delay="$MONITOR_INITIAL_DELAY"
+	while :; do
+		sleep "$delay" || exit 0
+		"$0" refresh || log_warning "periodic time anchor refresh failed"
+		delay="$MONITOR_INTERVAL"
+	done
+}
+
+valid_interval "$MIN_WRITE_ADVANCE" || fail "invalid minimum write interval"
+
+case "$ACTION" in
+	monitor)
+		# The monitor is long-lived and must not hold the state lock. Each child
+		# refresh takes the lock only for its bounded update transaction.
+		monitor_anchor
+		exit 0
+		;;
+	apply|refresh|refresh-force|set) ;;
+	*) fail "unknown action: $ACTION" ;;
+esac
+
+acquire_lock
+case "$ACTION" in
+	apply) apply_anchor ;;
+	refresh) refresh_anchor 0 ;;
+	refresh-force) refresh_anchor 1 ;;
+	set) set_from_authenticated_source "${2:-}" ;;
+esac
+release_lock
+
+exit 0

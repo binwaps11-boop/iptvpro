@@ -1,0 +1,203 @@
+#!/bin/sh
+# Destructively sanitize only the CR6608 crash-log partition after an operator
+# has made and verified an off-device backup. This tool is maintenance-image
+# only: the normal image must keep the partition kernel read-only.
+
+set -eu
+
+EXPECTED_BOARD='xiaomi,mi-router-cr6608'
+EXPECTED_NAME='crash_log'
+EXPECTED_SIZE='262144'
+EXPECTED_ERASE_SIZE='131072'
+EXPECTED_TYPE='nand'
+EXPECTED_WRITE_SIZE='2048'
+ERASED_SHA256='3b874d3ba46c638fc3094f8e92fb744ca974893873f8885f54e23760f9b6311b'
+MARKER_SHA256='c4597a2051d8a59278e3d360842197b35739297cf7c06974477b8ccf24b4da44'
+CONFIRM_TOKEN='CR6608_CRASH_LOG_ERASE_OFF_DEVICE_BACKUP_VERIFIED'
+
+BOARD_NAME='/tmp/sysinfo/board_name'
+PROC_MTD='/proc/mtd'
+SYS_MTD='/sys/class/mtd/mtd5'
+MTD_CHAR_DEVICE='/dev/mtd5'
+MTD_READ_DEVICE='/dev/mtd5ro'
+MTD_ERASE_ARGUMENT='/dev/mtd5'
+MAINTENANCE_MARKER='/etc/cr6608-crashlog-maintenance.marker'
+BACKUP_ATTESTATION='/etc/cr6608-crashlog-external-backup.attestation'
+LOCK_FILE='/var/lock/cr6608-crashlog-sanitize.lock'
+
+die() {
+	echo "REFUSED: $*" >&2
+	exit 1
+}
+
+require_command() {
+	command -v "$1" >/dev/null 2>&1 || die "required command is unavailable: $1"
+}
+
+single_line() {
+	[ -f "$1" ] || die "required attribute is missing: $1"
+	value="$(cat "$1" 2>/dev/null)" || die "cannot read required attribute: $1"
+	case "$value" in
+		*'
+'*) die "attribute is not a single line: $1" ;;
+	esac
+	printf '%s\n' "$value"
+}
+
+sha256_file() {
+	sha256sum "$1" 2>/dev/null | awk 'NR == 1 { print $1; exit }'
+}
+
+stream_size() {
+	wc -c <"$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+require_root_owned_file() {
+	path=$1
+	allowed_modes=$2
+	[ -f "$path" ] && [ ! -L "$path" ] || die "required root-owned file is missing or is a symlink: $path"
+	owner="$(stat -c '%u' "$path" 2>/dev/null)" || die "cannot read file owner: $path"
+	mode="$(stat -c '%a' "$path" 2>/dev/null)" || die "cannot read file mode: $path"
+	[ "$owner" = 0 ] || die "file is not owned by root: $path"
+	case ":$allowed_modes:" in
+		*":$mode:"*) ;;
+		*) die "file permissions are not root-only: $path mode=$mode" ;;
+	esac
+}
+
+verify_maintenance_marker() {
+	require_root_owned_file "$MAINTENANCE_MARKER" '400:444:600:644'
+	marker_hash="$(sha256_file "$MAINTENANCE_MARKER")"
+	[ "$marker_hash" = "$MARKER_SHA256" ] || die 'maintenance-image marker hash mismatch'
+}
+
+verify_exact_device() {
+	board="$(cat "$BOARD_NAME" 2>/dev/null || true)"
+	[ "$board" = "$EXPECTED_BOARD" ] || die "expected board $EXPECTED_BOARD, got ${board:-missing}"
+
+	[ -r "$PROC_MTD" ] || die 'MTD partition table is unavailable'
+	[ "$(grep -c '"crash_log"$' "$PROC_MTD" 2>/dev/null || true)" = 1 ] || \
+		die 'crash_log must appear exactly once in the MTD partition table'
+	grep -Eq '^mtd5:[[:space:]]+00040000[[:space:]]+00020000[[:space:]]+"crash_log"$' "$PROC_MTD" || \
+		die 'crash_log is not the exact expected MTD index and geometry'
+
+	[ "$(single_line "$SYS_MTD/name")" = "$EXPECTED_NAME" ] || die 'MTD label mismatch'
+	[ "$(single_line "$SYS_MTD/size")" = "$EXPECTED_SIZE" ] || die 'crash_log size mismatch'
+	[ "$(single_line "$SYS_MTD/erasesize")" = "$EXPECTED_ERASE_SIZE" ] || die 'crash_log erase size mismatch'
+	[ "$(single_line "$SYS_MTD/type")" = "$EXPECTED_TYPE" ] || die 'crash_log is not NAND'
+	[ "$(single_line "$SYS_MTD/writesize")" = "$EXPECTED_WRITE_SIZE" ] || die 'crash_log write size mismatch'
+	[ "$(single_line "$SYS_MTD/bad_blocks")" = 0 ] || die 'crash_log has bad block(s)'
+	[ "$(single_line "$SYS_MTD/ecc_failures")" = 0 ] || die 'crash_log has uncorrectable ECC failure(s)'
+	[ "$(single_line "$SYS_MTD/corrected_bits")" = 0 ] || die 'crash_log has corrected-bit activity'
+
+	flags_raw="$(single_line "$SYS_MTD/flags")"
+	case "$flags_raw" in
+		0x*)
+			flags_digits=${flags_raw#0x}
+			case "$flags_digits" in ''|*[!0-9a-fA-F]*) die 'invalid MTD flags value' ;; esac
+			;;
+		*)
+			case "$flags_raw" in ''|*[!0-9]*) die 'invalid MTD flags value' ;; esac
+			;;
+	esac
+	flags="$(printf '%d' "$flags_raw" 2>/dev/null)" || die 'cannot parse MTD flags value'
+	[ $((flags & 1024)) -ne 0 ] || die 'crash_log is kernel read-only; use only the dedicated maintenance image'
+
+	[ -c "$MTD_CHAR_DEVICE" ] || die 'writable MTD character device is missing'
+	[ -c "$MTD_READ_DEVICE" ] || die 'read-only MTD character device is missing'
+}
+
+verify_wired_ssh() {
+	[ -n "${SSH_CONNECTION:-}" ] || die 'a wired SSH maintenance session is required'
+	set -- $SSH_CONNECTION
+	[ "$#" -eq 4 ] || die 'SSH connection metadata is malformed'
+	peer_ip=$1
+
+	if iw dev 2>/dev/null | grep -Eq '^[[:space:]]*Interface[[:space:]]'; then
+		die 'a Wi-Fi interface remains active in maintenance mode'
+	fi
+
+	peer_mac="$(ip neigh show "$peer_ip" dev br-lan 2>/dev/null | awk '
+		NR == 1 {
+			for (i = 1; i <= NF; i++)
+				if ($i == "lladdr" && (i + 1) <= NF) { print $(i + 1); exit }
+		}')"
+	[ -n "$peer_mac" ] || die 'SSH peer is not present in the br-lan neighbor table'
+	peer_mac="$(printf '%s' "$peer_mac" | tr 'A-F' 'a-f')"
+
+	peer_port="$(bridge fdb show br br-lan 2>/dev/null | awk -v peer="$peer_mac" '
+		tolower($1) == peer {
+			for (i = 1; i <= NF; i++)
+				if ($i == "dev" && (i + 1) <= NF) { print $(i + 1); exit }
+		}')"
+	case "$peer_port" in
+		lan1|lan2|lan3) ;;
+		*) die 'SSH peer is not learned on a physical LAN port' ;;
+	esac
+	ip -o link show "$peer_port" 2>/dev/null | grep -q 'LOWER_UP' || \
+		die 'SSH peer LAN port has no carrier'
+}
+
+verify_backup_attestation() {
+	pre_hash=$1
+	require_root_owned_file "$BACKUP_ATTESTATION" '400:600'
+	[ "$(wc -l <"$BACKUP_ATTESTATION" | tr -d '[:space:]')" = 5 ] || \
+		die 'external-backup attestation must contain exactly five lines'
+	grep -Fqx 'CR6608_CRASHLOG_EXTERNAL_BACKUP_ATTESTATION=1' "$BACKUP_ATTESTATION" || \
+		die 'external-backup attestation header mismatch'
+	grep -Fqx 'BACKUP_STORED_OFF_DEVICE=1' "$BACKUP_ATTESTATION" || \
+		die 'off-device backup declaration is missing'
+	grep -Fqx "CRASH_LOG_PRE_ERASE_SHA256=$pre_hash" "$BACKUP_ATTESTATION" || \
+		die 'attested pre-erase hash does not match the live readback'
+	grep -Fqx "EXTERNAL_BACKUP_SHA256=$pre_hash" "$BACKUP_ATTESTATION" || \
+		die 'attested external-backup hash does not match the live readback'
+	grep -Fqx 'EXTERNAL_BACKUP_VERIFIED=1' "$BACKUP_ATTESTATION" || \
+		die 'external-backup verification declaration is missing'
+}
+
+usage() {
+	echo "Usage: $0 erase $CONFIRM_TOKEN" >&2
+	exit 2
+}
+
+[ "${1:-}" = erase ] || usage
+[ "$#" -eq 2 ] || usage
+[ "$2" = "$CONFIRM_TOKEN" ] || die 'confirmation token mismatch'
+
+for command_name in awk bridge dirname flock grep ip iw mkdir mtd sha256sum sleep stat sync tr wc; do
+	require_command "$command_name"
+done
+
+verify_maintenance_marker
+verify_exact_device
+verify_wired_ssh
+
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+flock -n 9 || die 'another crash-log transaction is already running'
+
+pre_size="$(stream_size "$MTD_READ_DEVICE")"
+[ "$pre_size" = "$EXPECTED_SIZE" ] || die "pre-erase readback size mismatch: $pre_size"
+pre_hash="$(sha256_file "$MTD_READ_DEVICE")"
+case "$pre_hash" in ''|*[!0-9a-f]*) die 'pre-erase readback hash is malformed' ;; esac
+[ "${#pre_hash}" -eq 64 ] || die 'pre-erase readback hash is malformed'
+
+if [ "$pre_hash" = "$ERASED_SHA256" ]; then
+	echo "CRASH_LOG_SANITIZE=PASS already_erased=1 sha256=$ERASED_SHA256"
+	exit 0
+fi
+
+verify_backup_attestation "$pre_hash"
+
+# The sole destructive command in this tool. Never add fallback targets.
+mtd erase "$MTD_ERASE_ARGUMENT" || die 'MTD erase command failed'
+sync
+sleep 1
+
+post_size="$(stream_size "$MTD_READ_DEVICE")"
+[ "$post_size" = "$EXPECTED_SIZE" ] || die "post-erase readback size mismatch: $post_size"
+post_hash="$(sha256_file "$MTD_READ_DEVICE")"
+[ "$post_hash" = "$ERASED_SHA256" ] || die "post-erase all-FF hash mismatch: $post_hash"
+
+echo "CRASH_LOG_SANITIZE=PASS already_erased=0 pre_sha256=$pre_hash post_sha256=$post_hash"
+exit 0

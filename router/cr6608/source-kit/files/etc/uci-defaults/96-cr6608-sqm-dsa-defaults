@@ -1,0 +1,62 @@
+#!/bin/sh
+
+set -eu
+
+changed=0
+migrated_placeholder=0
+UCI_BIN="${CR6608_SQM_UCI_BIN:-uci}"
+
+if ! "$UCI_BIN" -q get sqm.smartap >/dev/null 2>&1; then
+	legacy_section="$("$UCI_BIN" -q show sqm 2>/dev/null |
+		sed -n 's/^sqm\.\([^.=]*\)=queue$/\1/p' | sed -n '1p')"
+	if [ -n "$legacy_section" ] &&
+		[ "$("$UCI_BIN" -q get "sqm.$legacy_section.interface" 2>/dev/null || true)" = eth1 ] &&
+		[ "$("$UCI_BIN" -q get "sqm.$legacy_section.enabled" 2>/dev/null || true)" != 1 ]; then
+		"$UCI_BIN" rename "sqm.$legacy_section=smartap"
+		migrated_placeholder=1
+	else
+		"$UCI_BIN" set sqm.smartap='queue'
+	fi
+	changed=1
+fi
+
+set_default() {
+	option="$1"
+	value="$2"
+	if ! "$UCI_BIN" -q get "sqm.smartap.$option" >/dev/null 2>&1; then
+		"$UCI_BIN" set "sqm.smartap.$option=$value"
+		changed=1
+	fi
+}
+
+sqm_interface="$("$UCI_BIN" -q get sqm.smartap.interface 2>/dev/null || true)"
+case "$sqm_interface" in
+	''|eth1)
+		# CR6608 uses DSA names. `wan` is a real netdev even when the current
+		# deployment is a transparent AP with the WAN port disconnected.
+		"$UCI_BIN" set sqm.smartap.interface='wan'
+		changed=1
+		;;
+esac
+
+set_default enabled 0
+set_default qdisc cake
+set_default script piece_of_cake.qos
+set_default linklayer ethernet
+set_default overhead 44
+set_default smartap_profile balanced
+set_default qdisc_advanced 0
+set_default qdisc_really_really_advanced 0
+
+if [ "$migrated_placeholder" -eq 1 ]; then
+	# The upstream sample rates are not measurements of this user's line.
+	"$UCI_BIN" set sqm.smartap.download='0'
+	"$UCI_BIN" set sqm.smartap.upload='0'
+	changed=1
+else
+	set_default download 0
+	set_default upload 0
+fi
+
+[ "$changed" -eq 0 ] || "$UCI_BIN" commit sqm
+exit 0

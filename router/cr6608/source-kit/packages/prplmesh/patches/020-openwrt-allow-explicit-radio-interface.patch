@@ -1,0 +1,20 @@
+From: Smart AP firmware project
+Subject: [PATCH] cmake: allow OpenWrt radio interface overrides
+
+The generic OpenWrt branch assigned wlan1 as a normal CMake variable, which
+overrode an explicit -DBEEROCKS_WLAN2_IFACE supplied by the target package.
+Keep wlan1 as the default but store it in the cache so board packages can
+provide their actual netifd interface name.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -127,8 +127,8 @@ if (TARGET_PLATFORM STREQUAL "openwrt")
+         set(BEEROCKS_REPEATER_MODE 1)
+         set(BEEROCKS_MONITOR_POLLING_RATE_MSEC 1000)
+     else()
+-        set(BEEROCKS_WLAN2_IFACE "wlan1")
+-        set(BEEROCKS_WLAN2_STEERING_VAPS "wlan1.0")
++        set(BEEROCKS_WLAN2_IFACE "wlan1" CACHE STRING "2nd WLAN iface")
++        set(BEEROCKS_WLAN2_STEERING_VAPS "wlan1.0" CACHE STRING "2nd steering VAP")
+     endif()
+ elseif (TARGET_PLATFORM STREQUAL "rdkb")

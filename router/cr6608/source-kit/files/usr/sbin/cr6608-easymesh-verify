@@ -1,0 +1,467 @@
+#!/bin/sh
+
+set -u
+
+status=0
+root=/opt/prplmesh
+runtime_root=/tmp/beerocks
+proc_root=/proc
+sys_class_net="${CR6608_PRPLMESH_SYS_CLASS_NET:-/sys/class/net}"
+
+result() {
+	printf '%-32s %s\n' "$1" "$2"
+}
+
+require_binary() {
+	local name="$1"
+
+	if [ -x "$root/bin/$name" ]; then
+		result "$name binary" present
+	else
+		result "$name binary" missing
+		status=1
+	fi
+}
+
+require_process() {
+	local name="$1" pids
+
+	pids="$(process_pids "$name")"
+	if [ -n "$pids" ]; then
+		result "$name runtime" "running pid=$pids"
+	else
+		result "$name runtime" stopped
+		status=1
+	fi
+}
+
+mode_has_controller() {
+	case "$1" in
+		Multi-AP-Controller|Multi-AP-Controller-and-Agent) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+mode_has_agent() {
+	case "$1" in
+		Multi-AP-Agent|Multi-AP-Controller-and-Agent) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+agent_runtime_policy_valid() {
+	[ "$1" = 1 ] && [ "$2" = 1 ]
+}
+
+valid_lan_backhaul_name() {
+	case "$1" in lan1|lan2|lan3) return 0 ;; esac
+	return 1
+}
+
+backhaul_topology_valid() {
+	local iface="$1" master ports bridge_section
+
+	valid_lan_backhaul_name "$iface" || return 1
+	[ -d "$sys_class_net/$iface" ] || return 1
+	[ -L "$sys_class_net/$iface/master" ] || return 1
+	master="$(readlink "$sys_class_net/$iface/master" 2>/dev/null)" || return 1
+	[ "${master##*/}" = br-lan ] || return 1
+	bridge_section="$(uci -q show network 2>/dev/null | sed -n \
+		"s/^\(network\.[^.=]*\)\.name='br-lan'$/\1/p" | sed -n '1p')"
+	[ -n "$bridge_section" ] || return 1
+	[ "$(uci -q get "$bridge_section" 2>/dev/null)" = device ] || return 1
+	ports="$(uci -q get "$bridge_section.ports" 2>/dev/null)" || return 1
+	case " $ports " in *" $iface "*) return 0 ;; esac
+	return 1
+}
+
+backhaul_carrier_up() {
+	[ "$(cat "$sys_class_net/$1/carrier" 2>/dev/null)" = 1 ]
+}
+
+radio_runtime_valid() {
+	local iface="$1" expected_ssid="$2" info live_ssid
+	case "$iface" in ''|*[!A-Za-z0-9_.:-]*) return 1 ;; esac
+	info="$(iw dev "$iface" info 2>/dev/null)" || return 1
+	printf '%s\n' "$info" | grep -Eq '^[[:space:]]*type[[:space:]]+AP$' || return 1
+	live_ssid="$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*ssid[[:space:]]//p' | sed -n '1p')"
+	[ "$live_ssid" = "$expected_ssid" ] || return 1
+	[ -S "/var/run/hostapd/$iface" ]
+}
+
+credential_field_safe() {
+	local value="$1" clean
+	case "$value" in *'#'*) return 1 ;; esac
+	clean="$(printf '%s' "$value" | tr -d '\r\n')"
+	[ "$clean" = "$value" ]
+}
+
+radio_credentials_valid() {
+	local security="$1" ssid="$2" psk="$3" require_encrypted="$4"
+	local ssid_bytes psk_bytes
+
+	credential_field_safe "$ssid" && credential_field_safe "$psk" || return 1
+	ssid_bytes="$(LC_ALL=C printf '%s' "$ssid" | wc -c | tr -d ' ')"
+	psk_bytes="$(LC_ALL=C printf '%s' "$psk" | wc -c | tr -d ' ')"
+	[ "$ssid_bytes" -ge 1 ] 2>/dev/null && [ "$ssid_bytes" -le 32 ] 2>/dev/null || return 1
+	case "$security" in
+		none)
+			[ "$require_encrypted" = 0 ] || return 1
+			[ -z "$psk" ]
+			;;
+		wpa2-psk)
+			[ "$psk_bytes" -ge 8 ] 2>/dev/null && [ "$psk_bytes" -le 63 ] 2>/dev/null
+			;;
+		*) return 1 ;;
+	esac
+}
+
+runtime_policy_error() {
+	local wanted_mode="$1" wanted_passive="$2" active_confirmed="$3"
+
+	case "$wanted_mode" in
+		Multi-AP-Controller|Multi-AP-Agent|Multi-AP-Controller-and-Agent) ;;
+		*) printf 'INVALID_MANAGEMENT_MODE\n'; return 1 ;;
+	esac
+	case "$wanted_passive" in
+		1) ;;
+		0)
+			[ "$active_confirmed" = 1 ] || {
+				printf 'ACTIVE_CONTROL_NOT_CONFIRMED\n'
+				return 1
+			}
+			;;
+		*) printf 'INVALID_PASSIVE_MODE\n'; return 1 ;;
+	esac
+}
+
+required_socket_names() {
+	local wanted_mode="$1"
+
+	# uds_broker is owned by the common IEEE1905 transport.  The remaining
+	# sockets belong to the role whose process consumes them.
+	printf '%s\n' uds_broker
+	mode_has_controller "$wanted_mode" && printf '%s\n' uds_controller
+	if mode_has_agent "$wanted_mode"; then
+		printf '%s\n' uds_agent uds_backhaul uds_platform
+	fi
+}
+
+socket_present() {
+	[ -S "$runtime_root/$1" ]
+}
+
+# Linux truncates /proc/PID/comm to 15 characters. BusyBox pidof therefore
+# misses ieee1905_transport, beerocks_controller and beerocks_fronthaul even
+# while procd and /proc show them running. Match the executable basename from
+# /proc/PID/exe instead.
+process_pids() {
+	local name="$1" proc executable found=""
+
+	for proc in "$proc_root"/[0-9]*; do
+		executable="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+		[ "${executable##*/}" = "$name" ] || continue
+		found="${found}${found:+ }${proc##*/}"
+	done
+	printf '%s\n' "$found"
+}
+
+required_process_snapshot() {
+	local name snapshot="" pids required_processes
+
+	required_processes=ieee1905_transport
+	mode_has_controller "$mode" && required_processes="$required_processes beerocks_controller"
+	mode_has_agent "$mode" && required_processes="$required_processes beerocks_agent beerocks_fronthaul"
+	for name in $required_processes; do
+		pids="$(process_pids "$name")"
+		[ -n "$pids" ] || return 1
+		snapshot="${snapshot}${snapshot:+;}$name=$pids"
+	done
+	printf '%s\n' "$snapshot"
+}
+
+control_plane_observable() {
+	local section iface m2_count socket
+
+	required_process_snapshot >/dev/null || return 1
+	for socket in $(required_socket_names "$mode"); do
+		socket_present "$socket" || return 1
+	done
+	mode_has_agent "$mode" || return 0
+	for section in radio0 radio1; do
+		iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+		grep -q 'send ACTION_APMANAGER_JOINED_NOTIFICATION' \
+			"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null || return 1
+		if [ "$passive" = 1 ]; then
+			grep -q 'Autoconfiguration: passive OpenWrt mode keeps netifd hostapd data intact' \
+				"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null || return 1
+		elif grep -q 'Autoconfiguration: passive OpenWrt mode keeps netifd hostapd data intact' \
+			"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null; then
+			# A passive marker in an explicitly active run means the process
+			# environment and the UCI safety gate disagree.
+			return 1
+		fi
+	done
+	m2_count="$(grep -c 'Finished M2 parsing with .* and 0 errors\.' \
+		"$runtime_root/logs/beerocks_agent.log" 2>/dev/null || true)"
+	[ "${m2_count:-0}" -ge 2 ]
+}
+
+database_value() {
+	local key="$1"
+	awk -v wanted="$key" '
+		index($0, wanted "=") == 1 { print substr($0, length(wanted) + 2); exit }
+	' "$runtime_root/prplmesh_platform_db"
+}
+
+printf 'CR6608 prplMesh EasyMesh verification\n'
+result "verification scope" "local-runtime-only; no peer interoperability proof"
+printf 'RESULT_EASYMESH_PHYSICAL_INTEROPERABILITY=NOT_PROVEN_EXTERNAL_CONTROLLER_AGENT_AND_RF_TEST_REQUIRED\n'
+
+for binary in ieee1905_transport beerocks_controller beerocks_agent \
+	beerocks_fronthaul beerocks_cli; do
+	require_binary "$binary"
+done
+
+if [ ! -f /etc/config/prplmesh ]; then
+	result "UCI configuration" missing
+	printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=FAIL\n'
+	exit 1
+fi
+
+enabled="$(uci -q get prplmesh.config.enable 2>/dev/null || true)"
+operational="$(uci -q get prplmesh.config.operational 2>/dev/null || true)"
+mode="$(uci -q get prplmesh.config.management_mode 2>/dev/null || true)"
+passive="$(uci -q get prplmesh.config.passive_mode 2>/dev/null || true)"
+active_control_confirmed="$(uci -q get prplmesh.config.active_control_confirmed 2>/dev/null || true)"
+wired_backhaul="$(uci -q get prplmesh.config.wired_backhaul 2>/dev/null || true)"
+require_encrypted="$(uci -q get prplmesh.config.require_encrypted_fronthaul 2>/dev/null || true)"
+[ -n "$wired_backhaul" ] || wired_backhaul=1
+[ -n "$require_encrypted" ] || require_encrypted=1
+result "runtime gate" "${enabled:-missing}"
+result "operational gate" "${operational:-missing}"
+result "management mode" "${mode:-missing}"
+result "passive mode" "${passive:-missing}"
+result "active control confirmed" "${active_control_confirmed:-missing}"
+result "encrypted fronthaul required" "$require_encrypted"
+
+# A deliberately disabled service is a policy state, not a 128-second
+# readiness failure.  Return before process/log polling so dashboard and
+# release audits remain bounded when the factory-safe gate is closed.
+if [ "$enabled" != 1 ] || [ "$operational" != 1 ]; then
+	printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=DISABLED_BY_POLICY\n'
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=DISABLED_BY_POLICY\n'
+	exit 2
+fi
+if ! policy_error="$(runtime_policy_error "$mode" "$passive" "$active_control_confirmed")"; then
+	case "$policy_error" in
+		ACTIVE_CONTROL_NOT_CONFIRMED)
+			printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=ACTIVE_CONTROL_NOT_CONFIRMED\n'
+			printf 'RESULT_EASYMESH_CONTROL_PLANE=ACTIVE_CONTROL_NOT_CONFIRMED\n'
+			;;
+		*)
+			printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=%s\n' "$policy_error"
+			printf 'RESULT_EASYMESH_CONTROL_PLANE=%s\n' "$policy_error"
+			;;
+	esac
+	exit 1
+fi
+
+# These are immutable integration limits for the audited Agent path, not
+# optional tuning. Reject a stale/tampered policy before the 90-second runtime
+# settle loop and before reporting any process state as useful evidence.
+if mode_has_agent "$mode" &&
+   ! agent_runtime_policy_valid "$wired_backhaul" "$require_encrypted"; then
+	result "Agent safety policy" \
+		"invalid:wired=${wired_backhaul:-missing},encrypted=${require_encrypted:-missing}"
+	printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=INVALID_AGENT_SAFETY_POLICY\n'
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=INVALID_AGENT_SAFETY_POLICY\n'
+	exit 1
+fi
+
+if mode_has_agent "$mode"; then
+	result "wired backhaul policy" required
+	result "encrypted fronthaul policy" required
+	backhaul_iface="$(uci -q get prplmesh.config.backhaul_wire_iface 2>/dev/null || true)"
+	if backhaul_topology_valid "$backhaul_iface"; then
+		result "wired backhaul topology" "br-lan/$backhaul_iface"
+	else
+		result "wired backhaul topology" "invalid:${backhaul_iface:-unset}"
+		status=1
+	fi
+	for section in radio0 radio1; do
+		iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+		ssid="$(uci -q get prplmesh."$section".ssid 2>/dev/null || true)"
+		if radio_runtime_valid "$iface" "$ssid"; then
+			result "$section NL80211 AP" "$iface"
+		else
+			result "$section NL80211 AP" "missing:${iface:-unset}"
+			status=1
+		fi
+		security="$(uci -q get prplmesh."$section".security_mode 2>/dev/null || true)"
+		psk="$(uci -q get prplmesh."$section".psk 2>/dev/null || true)"
+		if radio_credentials_valid "$security" "$ssid" "$psk" "$require_encrypted"; then
+			result "$section credential policy" policy-valid
+		else
+			result "$section credential policy" invalid
+			status=1
+		fi
+	done
+fi
+
+require_process ieee1905_transport
+mode_has_controller "$mode" && require_process beerocks_controller
+if mode_has_agent "$mode"; then
+	require_process beerocks_agent
+	require_process beerocks_fronthaul
+fi
+
+if [ -r "$runtime_root/prplmesh_platform_db" ]; then
+	result "runtime platform database" present
+	if grep -Fq 'prplmesh_pass' "$runtime_root/prplmesh_platform_db"; then
+		result "example credentials" detected
+		status=1
+	else
+		result "example credentials" absent
+	fi
+	if mode_has_agent "$mode"; then
+		for section in radio0 radio1; do
+			iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+			expected_ssid="$(uci -q get prplmesh."$section".ssid 2>/dev/null || true)"
+			actual_ssid="$(database_value "wireless.$iface.ssid")"
+			if [ -n "$expected_ssid" ] && [ "$actual_ssid" = "$expected_ssid" ]; then
+				result "$section runtime SSID" matched
+			else
+				result "$section runtime SSID" "mismatch:${actual_ssid:-missing}"
+				status=1
+			fi
+			expected_security="$(uci -q get prplmesh."$section".security_mode 2>/dev/null || true)"
+			expected_psk="$(uci -q get prplmesh."$section".psk 2>/dev/null || true)"
+			actual_security="$(database_value "wireless.$iface.security_mode")"
+			actual_psk="$(database_value "wireless.$iface.psk")"
+			if [ "$actual_security" = "$expected_security" ] && \
+				[ "$actual_psk" = "$expected_psk" ]; then
+				result "$section runtime credentials" matched
+			else
+				result "$section runtime credentials" mismatch
+				status=1
+			fi
+		done
+	fi
+else
+	result "runtime platform database" missing
+	status=1
+fi
+
+settle_seconds=0
+# Production logs intentionally exclude DEBUG/TRACE state-transition lines.
+# Readiness therefore uses durable INFO events plus live processes and sockets.
+while [ "$settle_seconds" -lt 90 ]; do
+	control_plane_ready=0
+	control_plane_observable && control_plane_ready=1
+	[ "$control_plane_ready" -eq 1 ] && break
+	sleep 2
+	settle_seconds=$((settle_seconds + 2))
+done
+if [ "$control_plane_ready" -eq 1 ]; then
+	result "control-plane settle" "ready:${settle_seconds}s"
+else
+	result "control-plane settle" "timeout:${settle_seconds}s"
+	status=1
+fi
+
+initial_pids="$(required_process_snapshot 2>/dev/null || true)"
+sleep 8
+stable_pids="$(required_process_snapshot 2>/dev/null || true)"
+if [ -n "$initial_pids" ] && [ "$stable_pids" = "$initial_pids" ]; then
+	result "process stability (8s)" stable
+else
+	result "process stability (8s)" "changed:${initial_pids:-none}->${stable_pids:-none}"
+	status=1
+fi
+
+socket_count=0
+for socket in $(required_socket_names "$mode"); do
+	if socket_present "$socket"; then
+		result "$socket" present
+		socket_count=$((socket_count + 1))
+	else
+		result "$socket" missing
+		status=1
+	fi
+done
+result "required control sockets" "$socket_count"
+
+if logread 2>/dev/null | tail -500 | grep -Eqi \
+	'prplmesh.*(segfault|assert|fatal|crash)|beerocks.*(segfault|assert|fatal|crash)'; then
+	result "recent fatal log" detected
+	status=1
+else
+	result "recent fatal log" none
+fi
+if grep -Eiq 'segfault|assert|fatal|terminate called|core dumped' \
+	"$runtime_root"/logs/*.log 2>/dev/null; then
+	result "prplMesh file logs" fatal-detected
+	status=1
+else
+	result "prplMesh file logs" no-fatal
+fi
+
+if grep -Eiq \
+	'Failed reading front Wi-Fi credentials|unsupported freq_type|TLVF: (key|ssid) length is smaller|Autoconfiguration: "UPDATE |cannot save hostapd config|Move to TERMINATED state|could not open directory /sys/devices/|SIOCGIFHWADDR\. iface: eth0_[1-4]|UCI failed to lookup ptr for path: prplmesh\.radio[01]\.(sta_iface|hostap_iface_monitor_vaps)' \
+	"$runtime_root"/logs/*.log 2>/dev/null; then
+	result "control-plane error scan" detected
+	status=1
+else
+	result "control-plane error scan" clean
+fi
+
+if mode_has_agent "$mode"; then
+	backhaul_iface="$(uci -q get prplmesh.config.backhaul_wire_iface 2>/dev/null || true)"
+	if backhaul_topology_valid "$backhaul_iface" && backhaul_carrier_up "$backhaul_iface" &&
+		socket_present uds_backhaul && socket_present uds_broker; then
+		result "wired backhaul FSM" operational
+	elif backhaul_topology_valid "$backhaul_iface" && ! backhaul_carrier_up "$backhaul_iface"; then
+		result "wired backhaul FSM" no-carrier
+		status=1
+	else
+		result "wired backhaul FSM" not-operational
+		status=1
+	fi
+
+	for section in radio0 radio1; do
+		iface="$(uci -q get prplmesh."$section".hostap_iface 2>/dev/null || true)"
+		if grep -q 'send ACTION_APMANAGER_JOINED_NOTIFICATION' \
+			"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null; then
+			result "$section AP manager" operational
+		else
+			result "$section AP manager" not-operational
+			status=1
+		fi
+		if [ "$passive" = 1 ]; then
+			if grep -q 'Autoconfiguration: passive OpenWrt mode keeps netifd hostapd data intact' \
+				"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null; then
+				result "$section autoconfiguration" passive-confirmed
+			else
+				result "$section autoconfiguration" passive-marker-missing
+				status=1
+			fi
+		elif grep -q 'Autoconfiguration: passive OpenWrt mode keeps netifd hostapd data intact' \
+			"$runtime_root/logs/beerocks_ap_manager_${iface}.log" 2>/dev/null; then
+			result "$section autoconfiguration" active-passive-mismatch
+			status=1
+		else
+			result "$section autoconfiguration" active-policy-consistent
+		fi
+	done
+fi
+
+if [ "$status" -eq 0 ]; then
+	printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=PASS\n'
+	printf 'RESULT_EASYMESH_CONTROL_PLANE=PASS\n'
+	exit 0
+fi
+
+printf 'RESULT_EASYMESH_SOFTWARE_CONTRACT=FAIL\n'
+printf 'RESULT_EASYMESH_CONTROL_PLANE=FAIL\n'
+exit 1

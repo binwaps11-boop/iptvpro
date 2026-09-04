@@ -1,0 +1,397 @@
+#!/bin/sh
+# Migrate every install to the fail-closed, Wi-Fi-only rescue endpoint before
+# the 97-* security/bootstrap consumers inspect or rewrite rescue ownership.
+
+set -f
+umask 077
+
+RESCUE_IP='221.221.221.221'
+LEGACY_RESCUE_IP='169.254.66.1'
+RESCUE_SUBNET='221.221.221.221/32'
+RESCUE_ROUTE_PROTO='221'
+RESCUE_PACKET_MARK='0x6608cafe/0xffffffff'
+RESCUE_CONFIG_OWNER='wlanrescue-v1'
+RESCUE_GUARD='/usr/sbin/cr6608-rescue-guard'
+
+# Establish and verify the serialized deny-only nft boundary before inspecting
+# preserved configuration.  Any later collision/cleanup failure therefore
+# leaves both bridge and inet protection installed.
+[ -x "$RESCUE_GUARD" ] || exit 1
+"$RESCUE_GUARD" close >/dev/null 2>&1 || exit 1
+
+# Never share UCI's default delta directory with an interrupted migration or
+# with another management transaction.  Existing global deltas are treated as
+# an active foreign transaction; all rescue edits are staged in a private,
+# root-only savedir and are visible only to commands carrying this -P path.
+for migration_package in network firewall uhttpd; do
+	pending_changes="$(uci changes "$migration_package" 2>/dev/null)" || exit 1
+	[ -z "$pending_changes" ] || exit 1
+done
+MIGRATION_UCI_SAVEDIR="$(mktemp -d /tmp/cr6608-rescue-uci.XXXXXX 2>/dev/null)" || exit 1
+cleanup_migration_stage() {
+	case "$MIGRATION_UCI_SAVEDIR" in
+		/tmp/cr6608-rescue-uci.*) rm -rf -- "$MIGRATION_UCI_SAVEDIR" 2>/dev/null || true ;;
+	esac
+}
+trap cleanup_migration_stage EXIT
+trap 'exit 1' HUP INT TERM
+case "$MIGRATION_UCI_SAVEDIR" in
+	/tmp/cr6608-rescue-uci.*) ;;
+	*) exit 1 ;;
+esac
+chmod 0700 "$MIGRATION_UCI_SAVEDIR" 2>/dev/null || exit 1
+
+rescue_uci() {
+	uci -P "$MIGRATION_UCI_SAVEDIR" "$@"
+}
+
+# OpenWrt's `-P` deliberately sets CLI_FLAG_NOCOMMIT.  Use it for every
+# isolated read/mutation, then use the same private savedir with `-t` for the
+# explicit package commit; otherwise `uci -P ... commit` is a successful no-op.
+rescue_uci_commit() {
+	uci -t "$MIGRATION_UCI_SAVEDIR" commit "$1"
+}
+
+section_shape_exact() {
+	shape_package="$1"
+	shape_section="$2"
+	shape_type="$3"
+	shape_allowed="$4"
+	shape_output="$(rescue_uci -q show "$shape_package.$shape_section" 2>/dev/null)" || return 1
+	printf '%s\n' "$shape_output" |
+		awk -v prefix="$shape_package.$shape_section" -v type="$shape_type" \
+		    -v allowed="$shape_allowed" '
+			$0 == prefix "=" type { type_seen++; next }
+			index($0, prefix ".") == 1 {
+				rest=substr($0,length(prefix)+2)
+				eq=index(rest,"=")
+				if (!eq) { bad=1; next }
+				option=substr(rest,1,eq-1)
+				if (!index(" " allowed " ", " " option " ")) bad=1
+				next
+			}
+			{ bad=1 }
+			END { exit !(type_seen == 1 && !bad) }'
+}
+
+legacy_rescue_device_valid() {
+	legacy_device_candidate="$1"
+	case "$legacy_device_candidate" in
+		br-lan) return 0 ;;
+		br-lan.*)
+			legacy_vlan="${legacy_device_candidate#br-lan.}"
+			case "$legacy_vlan" in
+				''|0|0*|*[!0-9]*) return 1 ;;
+			esac
+			[ "${#legacy_vlan}" -le 4 ] &&
+				[ "$legacy_vlan" -ge 1 ] 2>/dev/null &&
+				[ "$legacy_vlan" -le 4094 ] 2>/dev/null
+			return $?
+			;;
+	esac
+	return 1
+}
+
+# Both network IDs are product-owned in current images.  Admit only the exact
+# prior product shapes which predate ownership markers; an arbitrary preserved
+# section named wlanrescue is foreign and must remain untouched behind deny.
+if rescue_uci -q get network.cr6608_rescue_dev >/dev/null 2>&1; then
+	if [ "$(rescue_uci -q get network.cr6608_rescue_dev.cr6608_owner 2>/dev/null)" != \
+	     "$RESCUE_CONFIG_OWNER" ]; then
+		section_shape_exact network cr6608_rescue_dev device 'name type' &&
+			[ "$(rescue_uci -q get network.cr6608_rescue_dev.name 2>/dev/null)" = cr-rescue ] &&
+			[ "$(rescue_uci -q get network.cr6608_rescue_dev.type 2>/dev/null)" = dummy ] || exit 1
+	fi
+fi
+
+legacy_current_network=0
+legacy_public_network=0
+if rescue_uci -q get network.wlanrescue >/dev/null 2>&1; then
+	if [ "$(rescue_uci -q get network.wlanrescue.cr6608_owner 2>/dev/null)" != \
+	     "$RESCUE_CONFIG_OWNER" ]; then
+		if section_shape_exact network wlanrescue interface \
+		   'device proto ipaddr netmask ipv6 delegate auto' &&
+		   [ "$(rescue_uci -q get network.wlanrescue.device 2>/dev/null)" = cr-rescue ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.proto 2>/dev/null)" = static ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.ipaddr 2>/dev/null)" = "$RESCUE_IP" ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.netmask 2>/dev/null)" = 255.255.255.255 ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.ipv6 2>/dev/null)" = 0 ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.delegate 2>/dev/null)" = 0 ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.auto 2>/dev/null)" = 0 ]; then
+			legacy_current_network=1
+		fi
+		if section_shape_exact network wlanrescue interface \
+		   'device proto ipaddr netmask ipv6 delegate' &&
+		   legacy_rescue_device_valid \
+			"$(rescue_uci -q get network.wlanrescue.device 2>/dev/null)" &&
+		   [ "$(rescue_uci -q get network.wlanrescue.proto 2>/dev/null)" = static ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.ipaddr 2>/dev/null)" = "$LEGACY_RESCUE_IP" ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.netmask 2>/dev/null)" = 255.255.255.0 ] &&
+		   [ "$(rescue_uci -q get network.wlanrescue.ipv6 2>/dev/null)" = 0 ]; then
+			legacy_public_delegate="$(
+				rescue_uci -q get network.wlanrescue.delegate 2>/dev/null
+			)" || legacy_public_delegate=''
+			case "$legacy_public_delegate" in
+				''|0) ;;
+				*) exit 1 ;;
+			esac
+			legacy_public_network=1
+		fi
+		[ "$legacy_current_network" = 1 ] || [ "$legacy_public_network" = 1 ] || exit 1
+	fi
+fi
+
+# First remove any live legacy alias.  Configuration is committed only after
+# the endpoint is dark, so an interrupted upgrade cannot expose it on a cable.
+[ -x /sbin/ip ] || exit 1
+old_rescue_device="$(rescue_uci -q get network.wlanrescue.device 2>/dev/null)"
+case "$old_rescue_device" in
+	@*)
+		old_rescue_network="${old_rescue_device#@}"
+		case "$old_rescue_network" in
+			''|*[!A-Za-z0-9_]*) old_rescue_device='' ;;
+			*) old_rescue_device="$(rescue_uci -q get "network.$old_rescue_network.device" 2>/dev/null)" ;;
+		esac
+		;;
+esac
+case "$old_rescue_device" in
+	''|*[!A-Za-z0-9_.-]*) old_rescue_device='' ;;
+esac
+[ "${#old_rescue_device}" -le 15 ] 2>/dev/null || old_rescue_device=''
+if [ -n "$old_rescue_device" ] && [ -e "/sys/class/net/$old_rescue_device" ]; then
+	# Never trust a preserved ipaddr value and never scan unrelated devices.
+	# Remove only the two product rescue addresses from the device that the old
+	# wlanrescue interface was actually configured to use.
+	old_rescue_addr_output="$(
+		/sbin/ip -4 -o addr show dev "$old_rescue_device" 2>/dev/null
+	)" || exit 1
+	old_rescue_records="$(
+		printf '%s\n' "$old_rescue_addr_output" |
+			awk -v legacy="$LEGACY_RESCUE_IP" -v current="$RESCUE_IP" '
+				{ split($4, parts, "/") }
+				parts[1] == legacy || parts[1] == current { print $4 }'
+	)" || exit 1
+	for old_rescue_cidr in $old_rescue_records; do
+		/sbin/ip -4 addr del "$old_rescue_cidr" dev "$old_rescue_device" \
+			>/dev/null 2>&1 || exit 1
+	done
+	old_rescue_verify="$(
+		/sbin/ip -4 -o addr show dev "$old_rescue_device" 2>/dev/null
+	)" || exit 1
+	printf '%s\n' "$old_rescue_verify" |
+		awk -v legacy="$LEGACY_RESCUE_IP" -v current="$RESCUE_IP" '
+			{ split($4, parts, "/") }
+			parts[1] == legacy || parts[1] == current { found=1 }
+			END { exit found ? 1 : 0 }' || exit 1
+fi
+if [ -n "$old_rescue_device" ]; then
+	owned_route_records="$(
+		/sbin/ip -4 -o route show exact "$RESCUE_SUBNET" table main \
+			proto "$RESCUE_ROUTE_PROTO" dev "$old_rescue_device" \
+			src "$RESCUE_IP" 2>/dev/null
+	)" || owned_route_records=''
+	if printf '%s\n' "$owned_route_records" |
+	   awk -v subnet="$RESCUE_SUBNET" -v dev="$old_rescue_device" \
+	       -v src="$RESCUE_IP" '
+		($1 == subnet || (subnet == src "/32" && $1 == src)) {
+			dev_ok=0; src_ok=0; scope_ok=0
+			for (i=1; i<=NF; i++) {
+				if ($i == "dev" && $(i+1) == dev) dev_ok=1
+				if ($i == "src" && $(i+1) == src) src_ok=1
+				if ($i == "scope" && $(i+1) == "link") scope_ok=1
+			}
+			if (dev_ok && src_ok && scope_ok) valid++
+			total++
+		}
+		END { exit !(total == 1 && valid == 1) }'; then
+		/sbin/ip -4 route del "$RESCUE_SUBNET" dev "$old_rescue_device" \
+			src "$RESCUE_IP" scope link proto "$RESCUE_ROUTE_PROTO" \
+			table main >/dev/null 2>&1 || exit 1
+	fi
+fi
+remaining_rescue_route="$(
+	/sbin/ip -4 -o route show exact "$RESCUE_SUBNET" table main \
+		proto "$RESCUE_ROUTE_PROTO" 2>/dev/null
+)" || exit 1
+[ -z "$remaining_rescue_route" ] || exit 1
+
+# Product firewall sections use collision-resistant IDs plus an ownership
+# marker.  Never delete a custom zone merely because its logical name is
+# "rescue"; a foreign wlanrescue membership is a collision and stays dark.
+legacy_rescue_owned=0
+if [ "$(rescue_uci -q get firewall.rescue 2>/dev/null)" = zone ] &&
+   section_shape_exact firewall rescue zone 'name network input output forward' &&
+   [ "$(rescue_uci -q get firewall.rescue.name 2>/dev/null)" = rescue ] &&
+   [ "$(rescue_uci -q get firewall.rescue.network 2>/dev/null)" = wlanrescue ] &&
+   [ "$(rescue_uci -q get firewall.rescue.input 2>/dev/null)" = REJECT ] &&
+   [ "$(rescue_uci -q get firewall.rescue.output 2>/dev/null)" = ACCEPT ] &&
+   [ "$(rescue_uci -q get firewall.rescue.forward 2>/dev/null)" = REJECT ] &&
+   section_shape_exact firewall rescue_web rule 'name src dest_ip proto dest_port family target' &&
+   [ "$(rescue_uci -q get firewall.rescue_web.name 2>/dev/null)" = CR6608-Rescue-Web ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.src 2>/dev/null)" = lan ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.dest_ip 2>/dev/null)" = "$RESCUE_IP" ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.proto 2>/dev/null)" = tcp ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.dest_port 2>/dev/null)" = '80 443' ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.family 2>/dev/null)" = ipv4 ] &&
+   [ "$(rescue_uci -q get firewall.rescue_web.target 2>/dev/null)" = ACCEPT ] &&
+   section_shape_exact firewall rescue_ping rule 'name src dest_ip proto icmp_type family target' &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.name 2>/dev/null)" = CR6608-Rescue-Ping ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.src 2>/dev/null)" = lan ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.dest_ip 2>/dev/null)" = "$RESCUE_IP" ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.proto 2>/dev/null)" = icmp ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.icmp_type 2>/dev/null)" = echo-request ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.family 2>/dev/null)" = ipv4 ] &&
+   [ "$(rescue_uci -q get firewall.rescue_ping.target 2>/dev/null)" = ACCEPT ] &&
+   section_shape_exact firewall rescue_reject rule 'name src dest_ip family target' &&
+   [ "$(rescue_uci -q get firewall.rescue_reject.name 2>/dev/null)" = CR6608-Rescue-Reject-Other ] &&
+   [ "$(rescue_uci -q get firewall.rescue_reject.src 2>/dev/null)" = lan ] &&
+   [ "$(rescue_uci -q get firewall.rescue_reject.dest_ip 2>/dev/null)" = "$RESCUE_IP" ] &&
+   [ "$(rescue_uci -q get firewall.rescue_reject.family 2>/dev/null)" = ipv4 ] &&
+   [ "$(rescue_uci -q get firewall.rescue_reject.target 2>/dev/null)" = REJECT ] &&
+   section_shape_exact firewall rescue_guard_reload include 'type path fw4_compatible' &&
+   [ "$(rescue_uci -q get firewall.rescue_guard_reload.type 2>/dev/null)" = script ] &&
+   [ "$(rescue_uci -q get firewall.rescue_guard_reload.path 2>/dev/null)" = /usr/libexec/cr6608-rescue-firewall-include ] &&
+   [ "$(rescue_uci -q get firewall.rescue_guard_reload.fw4_compatible 2>/dev/null)" = 1 ]; then
+	legacy_rescue_owned=1
+fi
+
+for owned_section in \
+	cr6608_rescue_zone cr6608_rescue_web cr6608_rescue_ping \
+	cr6608_rescue_reject cr6608_rescue_guard_reload; do
+	if rescue_uci -q get "firewall.$owned_section" >/dev/null 2>&1; then
+		[ "$(rescue_uci -q get "firewall.$owned_section.cr6608_owner" 2>/dev/null)" = \
+			"$RESCUE_CONFIG_OWNER" ] || exit 1
+	fi
+done
+
+firewall_snapshot="$(rescue_uci show firewall 2>/dev/null)" || exit 1
+legacy_lan_zone_section=''
+for rescue_zone_section in $(
+	printf '%s\n' "$firewall_snapshot" |
+		sed -n "s/^firewall\.\([^=]*\)=zone$/\1/p"
+); do
+	case " $(rescue_uci -q get "firewall.$rescue_zone_section.network" 2>/dev/null) " in
+		*' wlanrescue '*)
+			if [ "$rescue_zone_section" = cr6608_rescue_zone ]; then
+				:
+			elif [ "$rescue_zone_section" = rescue ] &&
+			     [ "$legacy_rescue_owned" = 1 ]; then
+				:
+			else
+				# The immediately previous retail image placed wlanrescue in its
+				# first anonymous LAN zone.  Admit only that exact paired legacy
+				# network+zone shape, never a look-alike custom trusted zone.
+				legacy_lan_zone_index="$(
+					printf '%s\n' "$rescue_zone_section" |
+						sed -n 's/^@zone\[\([0-9][0-9]*\)\]$/\1/p'
+				)"
+				[ "$legacy_public_network" = 1 ] &&
+					[ -n "$legacy_lan_zone_index" ] &&
+					[ -z "$legacy_lan_zone_section" ] &&
+					section_shape_exact firewall "$rescue_zone_section" zone \
+						'name network input output forward' &&
+					[ "$(rescue_uci -q get "firewall.$rescue_zone_section.name" 2>/dev/null)" = lan ] &&
+					[ "$(rescue_uci -q get "firewall.$rescue_zone_section.network" 2>/dev/null)" = 'lan wlanrescue' ] &&
+					[ "$(rescue_uci -q get "firewall.$rescue_zone_section.input" 2>/dev/null)" = ACCEPT ] &&
+					[ "$(rescue_uci -q get "firewall.$rescue_zone_section.output" 2>/dev/null)" = ACCEPT ] &&
+					[ "$(rescue_uci -q get "firewall.$rescue_zone_section.forward" 2>/dev/null)" = ACCEPT ] || exit 1
+				legacy_lan_zone_section="$rescue_zone_section"
+			fi
+			;;
+	esac
+done
+
+# Only begin staging UCI changes after every product ID and wlanrescue zone
+# membership has been proven either absent or product-owned.  UCI deltas live
+# across processes, so mutating first and merely skipping commit is not safe.
+if [ -n "$legacy_lan_zone_section" ]; then
+	rescue_uci del_list \
+		"firewall.$legacy_lan_zone_section.network=wlanrescue" || exit 1
+	[ "$(rescue_uci -q get "firewall.$legacy_lan_zone_section.network" 2>/dev/null)" = lan ] || exit 1
+fi
+
+# Recreate only sections already proven product-owned or exact legacy shapes.
+# `uci set section=type` preserves unknown options; deleting first prevents a
+# stale device/IP/IPv6 option from surviving in the addressless metadata.
+rescue_uci -q delete network.cr6608_rescue_dev >/dev/null 2>&1 || true
+rescue_uci -q delete network.wlanrescue >/dev/null 2>&1 || true
+rescue_uci set network.wlanrescue='interface' || exit 1
+rescue_uci set network.wlanrescue.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci set network.wlanrescue.proto='none' || exit 1
+rescue_uci set network.wlanrescue.ipv6='0' || exit 1
+rescue_uci set network.wlanrescue.delegate='0' || exit 1
+rescue_uci set network.wlanrescue.auto='0' || exit 1
+section_shape_exact network wlanrescue interface \
+	'cr6608_owner proto ipv6 delegate auto' || exit 1
+
+for owned_section in \
+	cr6608_rescue_zone cr6608_rescue_web cr6608_rescue_ping \
+	cr6608_rescue_reject cr6608_rescue_guard_reload; do
+	rescue_uci -q delete "firewall.$owned_section" >/dev/null 2>&1 || true
+done
+
+rescue_uci set firewall.cr6608_rescue_zone='zone' || exit 1
+rescue_uci set firewall.cr6608_rescue_zone.name='cr6608_rescue' || exit 1
+rescue_uci set firewall.cr6608_rescue_zone.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci add_list firewall.cr6608_rescue_zone.network='wlanrescue' || exit 1
+rescue_uci set firewall.cr6608_rescue_zone.input='REJECT' || exit 1
+rescue_uci set firewall.cr6608_rescue_zone.output='ACCEPT' || exit 1
+rescue_uci set firewall.cr6608_rescue_zone.forward='REJECT' || exit 1
+
+rescue_uci set firewall.cr6608_rescue_web='rule' || exit 1
+rescue_uci set firewall.cr6608_rescue_web.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci set firewall.cr6608_rescue_web.name='CR6608-Rescue-Web' || exit 1
+rescue_uci set firewall.cr6608_rescue_web.src='lan' || exit 1
+rescue_uci set firewall.cr6608_rescue_web.dest_ip="$RESCUE_IP" || exit 1
+rescue_uci set firewall.cr6608_rescue_web.proto='tcp' || exit 1
+rescue_uci add_list firewall.cr6608_rescue_web.dest_port='80' || exit 1
+rescue_uci add_list firewall.cr6608_rescue_web.dest_port='443' || exit 1
+rescue_uci set firewall.cr6608_rescue_web.family='ipv4' || exit 1
+rescue_uci set firewall.cr6608_rescue_web.mark="$RESCUE_PACKET_MARK" || exit 1
+rescue_uci set firewall.cr6608_rescue_web.target='ACCEPT' || exit 1
+
+rescue_uci set firewall.cr6608_rescue_ping='rule' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.name='CR6608-Rescue-Ping' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.src='lan' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.dest_ip="$RESCUE_IP" || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.proto='icmp' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.icmp_type='echo-request' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.family='ipv4' || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.mark="$RESCUE_PACKET_MARK" || exit 1
+rescue_uci set firewall.cr6608_rescue_ping.target='ACCEPT' || exit 1
+
+rescue_uci set firewall.cr6608_rescue_reject='rule' || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.name='CR6608-Rescue-Reject-Other' || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.src='lan' || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.dest_ip="$RESCUE_IP" || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.family='ipv4' || exit 1
+rescue_uci set firewall.cr6608_rescue_reject.target='REJECT' || exit 1
+
+rescue_uci set firewall.cr6608_rescue_guard_reload='include' || exit 1
+rescue_uci set firewall.cr6608_rescue_guard_reload.cr6608_owner="$RESCUE_CONFIG_OWNER" || exit 1
+rescue_uci set firewall.cr6608_rescue_guard_reload.type='script' || exit 1
+rescue_uci set firewall.cr6608_rescue_guard_reload.path='/usr/libexec/cr6608-rescue-firewall-include' || exit 1
+rescue_uci set firewall.cr6608_rescue_guard_reload.fw4_compatible='1' || exit 1
+
+if [ "$legacy_rescue_owned" = 1 ]; then
+	for legacy_section in \
+		rescue rescue_web rescue_ping rescue_reject rescue_guard_reload; do
+		rescue_uci -q delete "firewall.$legacy_section" >/dev/null 2>&1 || exit 1
+	done
+fi
+
+# The link-local endpoint does not need a global DNS-rebinding exception.
+rescue_uci set uhttpd.main.rfc1918_filter='1' || exit 1
+
+rescue_uci_commit network || exit 1
+rescue_uci_commit firewall || exit 1
+rescue_uci_commit uhttpd || exit 1
+
+# UCI defaults run from /etc/init.d/boot (START=10), before network and
+# firewall are started.  Do not reload services here: doing so can return
+# failure, retain this migration, and repeat it on every boot.  The committed
+# addressless metadata is consumed later by the START=99 guard; first boot is
+# also covered by the LAN/AP hotplug triggers after netifd becomes ready.
+exit 0

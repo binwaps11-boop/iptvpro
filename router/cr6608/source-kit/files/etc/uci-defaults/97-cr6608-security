@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# UCI defaults run from /etc/init.d/boot (START=10), before netifd and fw4.
+# Persist only the later-boot service link here.  On this first boot the
+# interface hotplug hook replays the runtime bridge/port policy only after LAN
+# is actually up; subsequent boots use the service's normal START=98 ordering.
+[ -x /etc/init.d/cr6608-security ] || exit 1
+/etc/init.d/cr6608-security enable || exit 1
+
+exit 0

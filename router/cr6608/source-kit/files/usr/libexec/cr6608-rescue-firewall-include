@@ -1,0 +1,43 @@
+#!/bin/sh
+# Invoked by firewall4 after its ruleset transaction.  First restore the
+# serialized deny-only boundary.  A not-yet-ready AP/configuration is normal
+# during boot/reload: leave rescue dark and let the live monitor or hotplug
+# retry instead of failing the entire firewall transaction.
+
+INIT='/etc/init.d/cr6608-rescue-guard'
+GUARD='/usr/sbin/cr6608-rescue-guard'
+
+[ -x "$GUARD" ] || {
+	command -v logger >/dev/null 2>&1 &&
+		logger -t cr6608-rescue-firewall-include -- \
+		'guard missing; firewall reload continues with the static reject boundary' \
+			>/dev/null 2>&1 || true
+	exit 0
+}
+
+# Never make fw4's main transaction depend on rescue availability.  The guard
+# close operation is itself dark-first: status 75 means another serialized
+# transition owns the endpoint, while every other failure has already retained
+# deny-only whenever nft was usable.  In either case fw4 must remain loaded.
+"$GUARD" close >/dev/null 2>&1
+close_rc=$?
+case "$close_rc" in
+	0) ;;
+	75) exit 0 ;;
+	*)
+		command -v logger >/dev/null 2>&1 &&
+			logger -t cr6608-rescue-firewall-include -- \
+			"close incomplete rc=$close_rc; firewall reload continues dark" \
+				>/dev/null 2>&1 || true
+		exit 0
+		;;
+esac
+
+[ -x "$INIT" ] || exit 0
+# Never create or replace the procd instance from a firewall callback. A live
+# monitor may recover a startup quiesce through reload_service; absence (which
+# includes an operator Stop) remains fail-closed until explicit service Start.
+if "$INIT" running >/dev/null 2>&1; then
+	"$INIT" reload >/dev/null 2>&1 || true
+fi
+exit 0

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Keep cached DSA/carrier state coherent when kernel netdevs appear or vanish.
+
+case "${ACTION:-}" in add|remove|move|register|unregister) ;; *) exit 0 ;; esac
+[ -x /usr/sbin/cr6608-dashboard-invalidate ] || exit 0
+/usr/sbin/cr6608-dashboard-invalidate >/dev/null 2>&1 &
+exit 0

@@ -1,0 +1,51 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	# Keep RPS packet steering disabled on MT7621. OpenWrt 25.12.5 users have
+	# reproduced long-uptime mtk_soc_eth TX-queue watchdog stalls with it on;
+	# software flow offload remains available without touching the TX queues.
+	option packet_steering '0'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+	list ports 'lan2'
+	list ports 'lan3'
+	# All three DSA LAN ports forward immediately by default. STP remains
+	# available as an explicit loop-protection option for installations that need it.
+	option stp '0'
+	option igmp_snooping '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.1'
+	option netmask '255.255.255.0'
+	# IPv6 routing, prefix delegation, RA and DHCPv6 are fixed off by product
+	# policy. The kernel remains compiled with IPv6 for stable loopback/nft ABI.
+	option ipv6 '0'
+	option delegate '0'
+
+# NOTE: there is deliberately NO DHCP client interface here. The device never requests
+# an address from anywhere and never hands one out. The physical WAN port is reserved for
+# an explicitly configured PPPoE client and is not part of the default LAN bridge.
+
+# Wi-Fi rescue metadata is deliberately addressless.  After nft isolation and
+# live topology checks, the guard attaches 221.221.221.221/32 to the resolved AP
+# L3 bridge/VLAN itself (required by OpenWrt's arp_ignore=1 defaults).
+config interface 'wlanrescue'
+	option cr6608_owner 'wlanrescue-v1'
+	option proto 'none'
+	option ipv6 '0'
+	option delegate '0'
+	# The guard owns activation so the address never exists without its nft gate.
+	option auto '0'
+
+# A clean install and factory reset start at 192.168.1.1. Quick Settings replaces
+# network.lan.ipaddr with the selected management address and creates no second alias.

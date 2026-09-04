@@ -1,0 +1,231 @@
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index 84a9596..c14be1f 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -39,6 +39,12 @@
+ #define HE_PHY(p, c)			u8_get_bits(c, IEEE80211_HE_PHY_##p)
+ #define HE_MAC(m, c)			u8_get_bits(c, IEEE80211_HE_MAC_##m)
+ 
++/* Upper bits describe peer eligibility; the lower nibble is the requested
++ * MURU bitmap. A zero synchronous response is not apply or OTA proof.
++ */
++#define CR6608_MURU_STA_HE		BIT(4)
++#define CR6608_MURU_STA_FULL_UL_MIMO	BIT(5)
++
+ static bool sr_scene_detect = true;
+ module_param(sr_scene_detect, bool, 0644);
+ MODULE_PARM_DESC(sr_scene_detect, "Enable firmware scene detection algorithm");
+@@ -467,6 +473,9 @@ mt7915_mcu_parse_response(struct mt76_dev *mdev, int cmd,
+ 	if (!skb) {
+ 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
+ 			cmd, seq);
++		if (mt7915_cr6608_muru_fault_latch(dev))
++			dev_crit(mdev->dev,
++				 "CR6608 MURU fault latch cleared the scheduler mask before MCU recovery\n");
+ 
+ 		mt7915_mcu_schedule_full_recovery(dev);
+ 
+@@ -1204,7 +1213,7 @@ mt7915_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta,
+ 	he->pkt_ext = 2;
+ }
+ 
+-static void
++static u8
+ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 			struct ieee80211_sta *sta, struct ieee80211_vif *vif)
+ {
+@@ -1212,36 +1221,44 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	struct ieee80211_he_cap_elem *elem = &sta->deflink.he_cap.he_cap_elem;
+ 	struct sta_rec_muru *muru;
+ 	struct tlv *tlv;
++	u8 state;
++	u8 mask;
+ 
+ 	if (vif->type != NL80211_IFTYPE_STATION &&
+ 	    vif->type != NL80211_IFTYPE_AP)
+-		return;
++		return 0;
++
++	if (!is_mt7915(&dev->mt76))
++		mask = CR6608_MURU_MASK;
++	else if (dev->cr6608_ul_muru_allowed) {
++		mask = mt7915_cr6608_muru_mask(dev);
++		if (!sta->deflink.he_cap.has_he)
++			mask &= CR6608_MURU_OFDMA_DL | CR6608_MURU_MUMIMO_DL;
++	} else
++		mask = CR6608_MURU_OFDMA_DL | CR6608_MURU_MUMIMO_DL;
++	state = mask;
+ 
+ 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_MURU, sizeof(*muru));
+ 
+ 	muru = (struct sta_rec_muru *)tlv;
+ 
+-	muru->cfg.mimo_dl_en = mvif->cap.he_mu_ebfer ||
++	muru->cfg.mimo_dl_en = (mvif->cap.he_mu_ebfer ||
+ 			       mvif->cap.vht_mu_ebfer ||
+-			       mvif->cap.vht_mu_ebfee;
+-	if (!is_mt7915(&dev->mt76) ||
+-	    READ_ONCE(dev->cr6608_ul_muru)) {
+-		muru->cfg.ofdma_ul_en = true;
+-		muru->cfg.mimo_ul_en = true;
+-		if (is_mt7915(&dev->mt76))
+-			atomic_inc(&dev->cr6608_ul_muru_sta_rec_updates);
+-	}
+-	muru->cfg.ofdma_dl_en = true;
++			       mvif->cap.vht_mu_ebfee) &&
++			       !!(mask & CR6608_MURU_MUMIMO_DL);
++	muru->cfg.mimo_ul_en = !is_mt7915(&dev->mt76) &&
++			       !!(mask & CR6608_MURU_MUMIMO_UL);
++	muru->cfg.ofdma_dl_en = !!(mask & CR6608_MURU_OFDMA_DL);
++	muru->cfg.ofdma_ul_en = !!(mask & CR6608_MURU_OFDMA_UL);
+ 
+-	if (sta->deflink.vht_cap.vht_supported)
++	if ((mask & CR6608_MURU_MUMIMO_DL) &&
++	    sta->deflink.vht_cap.vht_supported)
+ 		muru->mimo_dl.vht_mu_bfee =
+ 			!!(sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE);
+ 
+ 	if (!sta->deflink.he_cap.has_he)
+-		return;
+-
+-	if (is_mt7915(&dev->mt76) && READ_ONCE(dev->cr6608_ul_muru))
+-		atomic_inc(&dev->cr6608_ul_muru_he_sta_rec_updates);
++		return state;
++	state |= CR6608_MURU_STA_HE;
+ 
+ 	muru->mimo_dl.partial_bw_dl_mimo =
+ 		HE_PHY(CAP6_PARTIAL_BANDWIDTH_DL_MUMIMO, elem->phy_cap_info[6]);
+@@ -1250,10 +1267,14 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		HE_PHY(CAP2_UL_MU_FULL_MU_MIMO, elem->phy_cap_info[2]);
+ 	muru->mimo_ul.partial_ul_mimo =
+-		HE_PHY(CAP2_UL_MU_PARTIAL_MU_MIMO, elem->phy_cap_info[2]);
++		!is_mt7915(&dev->mt76) &&
++		HE_PHY(CAP2_UL_MU_PARTIAL_MU_MIMO, elem->phy_cap_info[2]);
+-	/* Count full-bandwidth peers accepted by this build's proof policy. */
+-	if (is_mt7915(&dev->mt76) && READ_ONCE(dev->cr6608_ul_muru) &&
+-	    muru->mimo_ul.full_ul_mimo)
+-		atomic_inc(&dev->cr6608_ul_muru_mimo_capable_updates);
++	if (muru->mimo_ul.full_ul_mimo) {
++		state |= CR6608_MURU_STA_FULL_UL_MIMO;
++		if (mask & CR6608_MURU_MUMIMO_UL)
++			muru->cfg.mimo_ul_en = true;
++	} else if (is_mt7915(&dev->mt76)) {
++		state &= ~CR6608_MURU_MUMIMO_UL;
++	}
+ 
+ 	muru->ofdma_dl.punc_pream_rx =
+ 		HE_PHY(CAP1_PREAMBLE_PUNC_RX_MASK, elem->phy_cap_info[1]);
+@@ -1272,6 +1293,8 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		HE_MAC(CAP3_OFDMA_RA, elem->mac_cap_info[3]);
+ 	muru->ofdma_ul.rx_ctrl_frame_to_mbss =
+ 		HE_MAC(CAP3_RX_CTRL_FRAME_TO_MULTIBSS, elem->mac_cap_info[3]);
++
++	return state;
+ }
+ 
+ static void
+@@ -2024,6 +2047,10 @@ int __mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 	struct ieee80211_link_sta *link_sta;
+ 	struct mt7915_sta *msta;
+ 	struct sk_buff *skb;
++	u8 cr6608_muru_state = 0;
++	u8 cr6608_tx_mask;
++	u8 cr6608_live_mask;
++	bool cr6608_muru_eligible;
+ 	int ret;
+ 
+ 	msta = sta ? (struct mt7915_sta *)sta->drv_priv : &mvif->sta;
+@@ -2068,7 +2095,8 @@ int __mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 		/* starec he */
+ 		mt7915_mcu_sta_he_tlv(skb, sta, vif);
+ 		/* starec muru */
+-		mt7915_mcu_sta_muru_tlv(dev, skb, sta, vif);
++		cr6608_muru_state = mt7915_mcu_sta_muru_tlv(dev, skb, sta,
++							      vif);
+ 		/* starec bfee */
+ 		mt7915_mcu_sta_bfee_tlv(dev, skb, vif, sta);
+ 	}
+@@ -2085,8 +2113,55 @@ out:
+ 		return ret;
+ 	}
+ 
+-	return mt76_mcu_skb_send_msg(&dev->mt76, skb,
+-				     MCU_EXT_CMD(STA_REC_UPDATE), true);
++	cr6608_tx_mask = cr6608_muru_state & CR6608_MURU_MASK;
++	cr6608_muru_eligible = is_mt7915(&dev->mt76) &&
++		dev->cr6608_ul_muru_allowed &&
++		(cr6608_muru_state & CR6608_MURU_STA_HE) &&
++		(cr6608_tx_mask & CR6608_MURU_UL_MASK);
++	if (cr6608_muru_eligible) {
++		cr6608_live_mask = mt7915_cr6608_muru_mask(dev);
++		if (cr6608_tx_mask & ~cr6608_live_mask) {
++			dev_kfree_skb(skb);
++			dev_crit(dev->mt76.dev,
++				 "CR6608 MURU mask changed before STA_REC send (0x%x -> 0x%x); forcing recovery\n",
++				 cr6608_tx_mask, cr6608_live_mask);
++			mt7915_cr6608_muru_fault_latch(dev);
++			mt7915_mcu_schedule_full_recovery(dev);
++			return -ECANCELED;
++		}
++		mt7915_cr6608_muru_sta_rec_attempt(dev);
++	}
++
++	ret = mt76_mcu_skb_send_msg(&dev->mt76, skb,
++				  MCU_EXT_CMD(STA_REC_UPDATE), true);
++	if (cr6608_muru_eligible) {
++		cr6608_live_mask = mt7915_cr6608_muru_mask(dev);
++		if (!ret && (cr6608_tx_mask & ~cr6608_live_mask)) {
++			mt7915_cr6608_muru_sta_rec_failure(dev, false);
++			dev_crit(dev->mt76.dev,
++				 "CR6608 MURU mask changed during STA_REC response (0x%x -> 0x%x); forcing recovery\n",
++				 cr6608_tx_mask, cr6608_live_mask);
++			mt7915_cr6608_muru_fault_latch(dev);
++			mt7915_mcu_schedule_full_recovery(dev);
++			return -ECANCELED;
++		}
++		if (!ret) {
++			mt7915_cr6608_muru_sta_rec_response(dev,
++				(cr6608_tx_mask & CR6608_MURU_MUMIMO_UL) &&
++				(cr6608_muru_state &
++				 CR6608_MURU_STA_FULL_UL_MIMO));
++		} else {
++			mt7915_cr6608_muru_sta_rec_failure(dev,
++							  ret == -ETIMEDOUT);
++			mt7915_cr6608_muru_fault_latch(dev);
++			dev_crit(dev->mt76.dev,
++				 "CR6608 MURU STA_REC response failed (%d); forcing immediate recovery\n",
++				 ret);
++			mt7915_mcu_schedule_full_recovery(dev);
++		}
++	}
++
++	return ret;
+ }
+ 
+ int mt7915_mcu_wed_enable_rx_stats(struct mt7915_dev *dev)
+@@ -4153,6 +4228,7 @@ void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
+ {
+ 	struct mt76_phy *ext_phy = dev->mt76.phys[MT_BAND1];
+ 	unsigned long flags;
++	bool muru_latched;
+ 	bool full_in_progress;
+ 
+ 	spin_lock_irqsave(&dev->recovery_tx_lock, flags);
+@@ -4164,6 +4240,7 @@ void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
+ 		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 		return;
+ 	}
++	muru_latched = mt7915_cr6608_muru_fault_latch(dev);
+ 	/* Calls from a failing transaction and its outer channel/config path can
+ 	 * describe the same fault.  Promote an outstanding partial request, but
+ 	 * allocate a new generation only when no recovery is already pending.
+@@ -4186,6 +4263,9 @@ void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
+ 	if (!full_in_progress)
+ 		queue_work(dev->mt76.wq, &dev->reset_work);
+ 	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (muru_latched)
++		dev_crit(dev->mt76.dev,
++			 "CR6608 MURU fault latch cleared the scheduler mask before full recovery\n");
+ 
+ 	wake_up(&dev->mt76.mcu.wait);
+ 	wake_up(&dev->reset_wait);

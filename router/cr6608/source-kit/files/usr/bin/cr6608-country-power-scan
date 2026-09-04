@@ -1,0 +1,282 @@
+#!/bin/sh
+#
+# CR6608 regulatory/kernel eligibility scan for a 3800 mBm request.
+# This tool never edits Factory/EEPROM and never labels conducted RF as proven.
+# It changes the temporary cfg80211 regulatory request, then restores netifd.
+
+set -u
+
+report=""
+run=0
+restore_needed=0
+probe_error=""
+
+usage() {
+	echo "usage: cr6608-country-power-scan [--inventory|--probe-all] [--report /root/file.csv]" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--inventory) run=0 ;;
+		--probe-all) run=1 ;;
+		--report)
+			[ "$#" -ge 2 ] || usage
+			report="$2"
+			shift
+			;;
+		-h|--help) usage ;;
+		*) usage ;;
+	esac
+	shift
+done
+
+PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+[ -r "$PRIVATE_RUNTIME_LIB" ] || { echo "private runtime helper unavailable" >&2; exit 1; }
+. "$PRIVATE_RUNTIME_LIB" || exit 1
+COUNTRY_RUNTIME_DIR="$(cr6608_private_runtime_dir country-power-scan)" || exit 1
+if [ -z "$report" ]; then
+	report_dir="$(mktemp -d "$COUNTRY_RUNTIME_DIR/run.XXXXXX" 2>/dev/null)" || exit 1
+	cr6608_private_dir_secure "$report_dir" || exit 1
+	report="$report_dir/report.csv"
+else
+	case "$report" in /root/*.csv) ;; *) echo "report must be a direct .csv file under /root" >&2; exit 2 ;; esac
+	case "${report#/root/}" in ''|*/*|*..*|*[!A-Za-z0-9_.-]*) echo "unsafe report path" >&2; exit 2 ;; esac
+	cr6608_private_parent_secure /root || { echo "insecure /root directory" >&2; exit 1; }
+	[ ! -e "$report" ] && [ ! -L "$report" ] || { echo "report already exists; refusing overwrite" >&2; exit 1; }
+fi
+
+BOARD_NAME_FILE="${CR6608_BOARD_NAME_FILE:-/tmp/sysinfo/board_name}"
+board="$(cat "$BOARD_NAME_FILE" 2>/dev/null)"
+[ "$board" = xiaomi,mi-router-cr6608 ] || {
+	echo "This scanner is restricted to Xiaomi CR6608." >&2
+	exit 1
+}
+
+for command in iw iwinfo ubus jsonfilter awk sed sort wifi; do
+	command -v "$command" >/dev/null 2>&1 || {
+		echo "missing command: $command" >&2
+		exit 1
+	}
+done
+
+lock="$COUNTRY_RUNTIME_DIR/lock"
+lock_owner=0
+process_start() {
+	case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+	awk '{print $22}' "/proc/$1/stat" 2>/dev/null
+}
+release_scan_lock() {
+	[ "$lock_owner" = 1 ] || return 0
+	read -r owner_pid owner_start <"$lock/owner" 2>/dev/null || return 0
+	[ "$owner_pid" = "$$" ] && [ "$owner_start" = "$scan_lock_start" ] || return 0
+	rm -f -- "$lock/owner" 2>/dev/null || true
+	rmdir "$lock" 2>/dev/null || true
+	lock_owner=0
+}
+acquire_scan_lock() {
+	attempt=0
+	while ! mkdir -m 0700 "$lock" 2>/dev/null; do
+		[ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+		owner_pid=""; owner_start=""
+		read -r owner_pid owner_start <"$lock/owner" 2>/dev/null || true
+		case "$owner_pid:$owner_start" in
+			*[!0-9:]*|:|*:) live_start="" ;;
+			*) live_start="$(process_start "$owner_pid")" ;;
+		esac
+		[ -z "$live_start" ] || [ "$live_start" != "$owner_start" ] || return 1
+		rm -f -- "$lock/owner" 2>/dev/null || return 1
+		rmdir "$lock" 2>/dev/null || return 1
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 3 ] || return 1
+	done
+	cr6608_private_dir_secure "$lock" || return 1
+	scan_lock_start="$(process_start "$$")" || { rmdir "$lock"; return 1; }
+	case "$scan_lock_start" in ''|*[!0-9]*) rmdir "$lock" 2>/dev/null || true; return 1 ;; esac
+	printf '%s %s\n' "$$" "$scan_lock_start" >"$lock/owner" 2>/dev/null || {
+		rmdir "$lock" 2>/dev/null || true
+		return 1
+	}
+	chmod 0600 "$lock/owner" 2>/dev/null || {
+		rm -f -- "$lock/owner"; rmdir "$lock" 2>/dev/null || true
+		return 1
+	}
+	lock_owner=1
+}
+if ! acquire_scan_lock; then
+	echo "another country scan is already active" >&2
+	exit 1
+fi
+
+restore() {
+	exit_rc=$?
+	trap - EXIT HUP INT TERM
+	[ -z "$probe_error" ] || rm -f -- "$probe_error" 2>/dev/null || true
+	if [ "$restore_needed" = 1 ]; then
+		if wifi reload >/dev/null 2>&1; then
+			restore_needed=0
+		else
+			sleep 1
+			wifi reload >/dev/null 2>&1 && restore_needed=0 || true
+		fi
+	fi
+	if [ "$restore_needed" = 1 ]; then
+		echo "RESTORE_WIFI_RELOAD=failed after retry; regulatory probe may still be active" >&2
+		[ "$exit_rc" -ne 0 ] || exit_rc=1
+	fi
+	release_scan_lock
+	exit "$exit_rc"
+}
+trap restore EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+: >"$report" || {
+	echo "cannot create report: $report" >&2
+	exit 1
+}
+chmod 0600 "$report" 2>/dev/null || exit 1
+
+csv() {
+	printf '"%s"' "$(printf '%s' "$1" | tr '\r\n' '  ' | sed 's/"/""/g')"
+}
+
+row() {
+	first=1
+	for value in "$@"; do
+		[ "$first" -eq 1 ] || printf ',' >>"$report"
+		csv "$value" >>"$report"
+		first=0
+	done
+	printf '\n' >>"$report"
+}
+
+countries="$(
+	for radio in radio0 radio1; do
+		ubus -S call iwinfo countrylist "{\"device\":\"${radio}\"}" 2>/dev/null |
+			jsonfilter -e '@.results[*].iso3166' 2>/dev/null
+	done |
+		tr a-z A-Z |
+		awk '/^[A-Z0-9][A-Z0-9]$/' |
+		sort -u
+)"
+[ -n "$countries" ] || countries=US
+
+row country effective_country phy band channel frequency dfs_status \
+	channel_max_dbm fixed_3800_request live_channel live_accepted_dbm \
+	kernel_result physical_rf
+
+if [ "$run" -eq 0 ]; then
+	echo "REPORT=$report"
+	echo "COUNTRIES=$(printf '%s\n' "$countries" | wc -l)"
+	echo "RESULT=NOT_RUN use --probe-all"
+	exit 0
+fi
+
+probe_error="$(cr6608_private_mktemp "$COUNTRY_RUNTIME_DIR" probe-error)" || exit 1
+restore_needed=1
+
+for country in $countries; do
+	: >"$probe_error" || exit 1
+	if iw reg set "$country" 2>"$probe_error"; then
+		reg_request=accepted
+	else
+		reg_request="rejected:$(tr '\r\n' '  ' <"$probe_error")"
+	fi
+	: >"$probe_error" || exit 1
+	sleep 1
+	effective="$(
+		iw reg get 2>/dev/null |
+			awk '/^country / { sub(/:/, "", $2); print $2; exit }'
+	)"
+	[ -n "$effective" ] || effective=unknown
+
+	for phy_path in /sys/class/ieee80211/*; do
+		[ -e "$phy_path" ] || continue
+		phy="${phy_path##*/}"
+		live_iface="$(
+			iw dev 2>/dev/null |
+				awk -v phy="$phy" '
+					$1 == "phy#" { current = "phy" substr($1, 5) }
+					$1 == "Interface" && current == phy { print $2; exit }
+				'
+		)"
+		live_channel=unknown
+		live_power=unknown
+		: >"$probe_error" || exit 1
+		if [ "$effective" = "$country" ] &&
+		   iw phy "$phy" set txpower fixed 3800 2>"$probe_error"; then
+			sleep 1
+			if [ -n "$live_iface" ]; then
+				live_power="$(iw dev "$live_iface" info 2>/dev/null |
+					awk '$1 == "txpower" { print $2; exit }')"
+			fi
+			if printf '%s\n' "$live_power" | awk '
+				$1 ~ /^[0-9]+([.][0-9]+)?$/ && ($1 + 0) >= 38 { ok = 1 }
+				END { exit(ok ? 0 : 1) }
+			'; then
+				fixed=accepted-readback-38
+			else
+				fixed="command-accepted-readback-${live_power:-unknown}"
+			fi
+		else
+			fixed="rejected:$(tr '\r\n' '  ' <"$probe_error")"
+		fi
+		: >"$probe_error" || exit 1
+
+		if [ -n "$live_iface" ]; then
+			live_channel="$(iw dev "$live_iface" info 2>/dev/null |
+				awk '$1 == "channel" { print $2; exit }')"
+			[ -n "$live_channel" ] || live_channel=unknown
+			[ -n "$live_power" ] || live_power=unknown
+		fi
+
+		iw phy "$phy" info 2>/dev/null |
+		awk -v country="$country" -v effective="$effective" \
+		    -v phy="$phy" -v fixed="$fixed" -v live_channel="$live_channel" \
+		    -v live_power="$live_power" -v reg_request="$reg_request" '
+			/ MHz \[[0-9]+\]/ {
+				line = $0
+				freq = $2 + 0
+				channel = substr($4, 2, length($4) - 2)
+				band = (freq < 3000 ? "2.4GHz" : (freq < 5925 ? "5GHz" : "6GHz"))
+				max = "unknown"
+				for (i = 1; i <= NF; i++) {
+					if ($i == "dBm)") {
+						max = $(i - 1)
+						sub(/^\(/, "", max)
+					}
+				}
+				dfs = (line ~ /radar detection/ ? "DFS" : "non-DFS")
+				disabled = (line ~ /\(disabled\)|\(no IR\)/)
+				result = "LIMITED"
+				if (disabled)
+					result = "UNAVAILABLE"
+				else if (effective != country)
+					result = "REGDOMAIN_NOT_APPLIED"
+				else if (max ~ /^[0-9]+([.][0-9]+)?$/ &&
+					 max + 0 >= 38 && channel == live_channel &&
+					 live_power ~ /^[0-9]+([.][0-9]+)?$/ &&
+					 live_power + 0 >= 38 &&
+					 fixed == "accepted-readback-38")
+					result = "ELIGIBLE_BY_KERNEL"
+				else if (max ~ /^[0-9]+([.][0-9]+)?$/ &&
+					 max + 0 >= 38)
+					result = "REQUIRES_PER_CHANNEL_PROBE"
+				printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
+				       country, effective, phy, band, channel, freq, dfs,
+				       max, fixed, live_channel, live_power, result,
+				       "NOT_MEASURED"
+			}
+		' |
+		while IFS='|' read -r c ec p b ch f dfs max fixed_result live_ch live_dbm result rf; do
+			row "$c" "$ec" "$p" "$b" "$ch" "$f" "$dfs" "$max" \
+				"$fixed_result" "$live_ch" "$live_dbm" "$result" "$rf"
+		done
+	done
+done
+
+echo "REPORT=$report"
+echo "RESULT=COMPLETE"
+echo "NOTE=ELIGIBLE_BY_KERNEL requires immediate read-back on the live channel; it is not conducted RF proof"

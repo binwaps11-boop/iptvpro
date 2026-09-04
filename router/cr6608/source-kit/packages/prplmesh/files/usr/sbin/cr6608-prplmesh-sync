@@ -1,0 +1,212 @@
+#!/bin/sh
+
+# Synchronise the already-selected OpenWrt AP credentials into prplMesh's UCI
+# store.  SSIDs and keys are deliberately read from UCI: callers pass section
+# names only, so secrets never appear in an argv or reusable temporary file.
+
+set -u
+set -f
+umask 077
+export LC_ALL=C
+
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+UCI_BIN="${PRPLMESH_UCI_BIN:-/sbin/uci}"
+CR_CHAR="$(printf '\r')"
+NL_CHAR='
+'
+GET_SENTINEL="$(printf '\034')"
+QGET_VALUE=''
+
+fail() {
+	printf 'prplmesh_credential_sync=FAIL reason=%s\n' "$1" >&2
+	exit 1
+}
+
+usage() {
+	printf 'usage: cr6608-prplmesh-sync --stage|--verify RADIO0_AP RADIO1_AP\n' >&2
+	exit 2
+}
+
+valid_section_name() {
+	case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+	return 0
+}
+
+qget() {
+	local captured
+	captured="$(
+		"$UCI_BIN" -q get "$1" 2>/dev/null
+		rc=$?
+		printf '%s' "$GET_SENTINEL"
+		exit "$rc"
+	)" || return 1
+	case "$captured" in *"$GET_SENTINEL") ;; *) return 1 ;; esac
+	QGET_VALUE="${captured%"$GET_SENTINEL"}"
+	return 0
+}
+
+qmatches() {
+	qget "$1" && [ "$QGET_VALUE" = "$2" ]
+}
+
+field_safe() {
+	local value="$1" maximum="$2" allow_empty="$3" length
+	length="$(LC_ALL=C printf '%s' "$value" | wc -c | tr -d ' ')" || return 1
+	case "$length" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$length" -le "$maximum" ] 2>/dev/null || return 1
+	[ "$allow_empty" = 1 ] || [ "$length" -gt 0 ] 2>/dev/null || return 1
+	case "$value" in *'#'*|*"$CR_CHAR"*|*"$NL_CHAR"*) return 1 ;; esac
+	[ -z "$value" ] || ! printf '%s' "$value" | grep -q '[[:cntrl:]]'
+}
+
+supported_wpa_passphrase() {
+	local value="$1" length
+	field_safe "$value" 63 0 || return 1
+	length="$(LC_ALL=C printf '%s' "$value" | wc -c | tr -d ' ')" || return 1
+	[ "$length" -ge 8 ] 2>/dev/null
+}
+
+encrypted_key_safe() {
+	local value="$1" length
+	field_safe "$value" 64 0 || return 1
+	length="$(LC_ALL=C printf '%s' "$value" | wc -c | tr -d ' ')" || return 1
+	[ "$length" -ge 8 ] 2>/dev/null
+}
+
+uci_quote() {
+	# UCI's batch grammar uses shell-style single-quoted words.  Escape a quote
+	# as '\'' while the value travels only over stdin to the UCI process.
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
+gates_closed() {
+	qmatches prplmesh.config.enable 0 &&
+		qmatches prplmesh.config.operational 0 &&
+		qmatches prplmesh.config.active_control_confirmed 0
+}
+
+load_radio() {
+	local output="$1" section="$2" device="$3" type mode ssid encryption key
+	local security mode_enabled
+
+	qget "wireless.${section}" || return 1
+	type="$QGET_VALUE"
+	[ "$type" = wifi-iface ] || return 1
+	qmatches "wireless.${section}.device" "$device" || return 1
+	qget "wireless.${section}.mode" || return 1
+	mode="$QGET_VALUE"
+	[ "$mode" = ap ] || return 1
+	qget "wireless.${section}.ssid" || return 1
+	ssid="$QGET_VALUE"
+	if qget "wireless.${section}.encryption"; then
+		encryption="$QGET_VALUE"
+	else
+		encryption=''
+	fi
+	if qget "wireless.${section}.key"; then
+		key="$QGET_VALUE"
+	else
+		key=''
+	fi
+	field_safe "$ssid" 32 0 || return 1
+
+	case "$encryption" in
+		none|'')
+			security=none
+			mode_enabled=None
+			key=''
+			;;
+		psk2|psk2+*|sae-mixed|sae-mixed+*)
+			if supported_wpa_passphrase "$key"; then
+				security=wpa2-psk
+				mode_enabled=WPA2-Personal
+			else
+				encrypted_key_safe "$key" || return 1
+				security=unsupported
+				mode_enabled=Unsupported
+			fi
+			;;
+		*)
+			encrypted_key_safe "$key" || return 1
+			security=unsupported
+			mode_enabled=Unsupported
+			;;
+	esac
+
+	case "$output" in
+		radio0)
+			RADIO0_SSID="$ssid"
+			RADIO0_SECURITY="$security"
+			RADIO0_KEY="$key"
+			RADIO0_MODE_ENABLED="$mode_enabled"
+			;;
+		radio1)
+			RADIO1_SSID="$ssid"
+			RADIO1_SECURITY="$security"
+			RADIO1_KEY="$key"
+			;;
+		*) return 1 ;;
+	esac
+}
+
+credentials_match() {
+	qmatches prplmesh.radio0.ssid "$RADIO0_SSID" &&
+		qmatches prplmesh.radio0.security_mode "$RADIO0_SECURITY" &&
+		qmatches prplmesh.radio0.psk "$RADIO0_KEY" &&
+		qmatches prplmesh.radio1.ssid "$RADIO1_SSID" &&
+		qmatches prplmesh.radio1.security_mode "$RADIO1_SECURITY" &&
+		qmatches prplmesh.radio1.psk "$RADIO1_KEY" &&
+		qmatches prplmesh.config.ssid "$RADIO0_SSID" &&
+		qmatches prplmesh.config.mode_enabled "$RADIO0_MODE_ENABLED" &&
+		qmatches prplmesh.config.key_passphrase "$RADIO0_KEY"
+}
+
+[ "$#" -eq 3 ] || usage
+action="$1"
+radio0_section="$2"
+radio1_section="$3"
+case "$action" in --stage|--verify) ;; *) usage ;; esac
+valid_section_name "$radio0_section" && valid_section_name "$radio1_section" &&
+	[ "$radio0_section" != "$radio1_section" ] || fail invalid_ap_sections
+
+qmatches prplmesh.config prplmesh &&
+	qmatches prplmesh.radio0 wifi-device &&
+	qmatches prplmesh.radio1 wifi-device || fail config_missing
+gates_closed || fail easymesh_gate_open
+
+RADIO0_SSID=''
+RADIO0_SECURITY=''
+RADIO0_KEY=''
+RADIO0_MODE_ENABLED=''
+RADIO1_SSID=''
+RADIO1_SECURITY=''
+RADIO1_KEY=''
+load_radio radio0 "$radio0_section" radio0 || fail radio0_credentials_invalid
+load_radio radio1 "$radio1_section" radio1 || fail radio1_credentials_invalid
+
+if [ "$action" = --stage ]; then
+	radio0_ssid_q="$(uci_quote "$RADIO0_SSID")" || fail quote_failed
+	radio0_key_q="$(uci_quote "$RADIO0_KEY")" || fail quote_failed
+	radio1_ssid_q="$(uci_quote "$RADIO1_SSID")" || fail quote_failed
+	radio1_key_q="$(uci_quote "$RADIO1_KEY")" || fail quote_failed
+	{
+		printf "set prplmesh.radio0.ssid='%s'\n" "$radio0_ssid_q"
+		printf "set prplmesh.radio0.security_mode='%s'\n" "$RADIO0_SECURITY"
+		printf "set prplmesh.radio0.psk='%s'\n" "$radio0_key_q"
+		printf "set prplmesh.radio1.ssid='%s'\n" "$radio1_ssid_q"
+		printf "set prplmesh.radio1.security_mode='%s'\n" "$RADIO1_SECURITY"
+		printf "set prplmesh.radio1.psk='%s'\n" "$radio1_key_q"
+		printf "set prplmesh.config.ssid='%s'\n" "$radio0_ssid_q"
+		printf "set prplmesh.config.mode_enabled='%s'\n" "$RADIO0_MODE_ENABLED"
+		printf "set prplmesh.config.key_passphrase='%s'\n" "$radio0_key_q"
+	} | "$UCI_BIN" -q batch >/dev/null || fail uci_batch_failed
+fi
+
+gates_closed || fail easymesh_gate_changed
+credentials_match || fail credential_verify_failed
+if [ "$action" = --stage ]; then
+	printf 'prplmesh_credential_sync=staged\n'
+else
+	printf 'prplmesh_credential_sync=verified\n'
+fi

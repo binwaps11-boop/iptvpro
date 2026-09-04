@@ -1,0 +1,15 @@
+{
+	"admin/logout": {
+		"title": "Log out",
+		"order": 999,
+		"action": {
+			"type": "function",
+			"module": "luci.controller.cr6608.logout",
+			"function": "action_logout"
+		},
+		"depends": {
+			"acl": [ "luci-base" ]
+		},
+		"firstchild_ineligible": true
+	}
+}

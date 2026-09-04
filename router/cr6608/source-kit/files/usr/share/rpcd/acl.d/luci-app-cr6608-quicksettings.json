@@ -1,0 +1,16 @@
+{
+	"luci-app-cr6608-quicksettings": {
+		"description": "Grant access to CR6608 quick settings",
+		"read": {
+			"uci": [ "cr6608quick", "smartap", "usteer", "prplmesh", "network", "wireless", "dhcp", "firewall", "system" ],
+			"ubus": {
+				"network.wireless": [ "status" ],
+				"uci": [ "get" ],
+				"system": [ "board", "info" ]
+			}
+		},
+		"write": {
+			"uci": [ "cr6608quick", "smartap", "usteer", "prplmesh", "network", "wireless", "dhcp", "firewall", "system" ]
+		}
+	}
+}

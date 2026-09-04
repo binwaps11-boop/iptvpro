@@ -1,0 +1,1713 @@
+#!/bin/sh
+# CR6608 Wi-Fi-only recovery endpoint.
+#
+# OpenWrt deliberately sets arp_ignore=1 on LAN bridges.  The /32 is therefore
+# attached directly to the live L3 bridge/VLAN resolved from the primary AP
+# network, so Wi-Fi clients can ARP for it.  Bridge-family nft rules remain the
+# security boundary: only interfaces which `iw dev` currently reports as type
+# AP may ARP for or exchange web/ping traffic with the endpoint.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+set -f
+
+RESCUE_IP='221.221.221.221'
+RESCUE_CIDR='221.221.221.221/32'
+# Publish only the exact requested host route.  Never claim the surrounding
+# public /24 or interfere with unrelated Internet destinations.
+RESCUE_CLIENT_SUBNET='221.221.221.221/32'
+# The previous image used this link-local address.  Closed/migration rules
+# deny it while the upgrade removes its product-owned address and route.
+LEGACY_RESCUE_IP='169.254.66.1'
+RESCUE_ROUTE_PROTO='221'
+RESCUE_PACKET_MARK='0x6608cafe'
+RESCUE_CONFIG_OWNER='wlanrescue-v1'
+RESCUE_ZONE_SECTION='cr6608_rescue_zone'
+RESCUE_WEB_SECTION='cr6608_rescue_web'
+RESCUE_PING_SECTION='cr6608_rescue_ping'
+RESCUE_REJECT_SECTION='cr6608_rescue_reject'
+RESCUE_INCLUDE_SECTION='cr6608_rescue_guard_reload'
+BRIDGE_TABLE='cr6608_rescue'
+INET_TABLE='cr6608_rescue'
+STATIC_BRIDGE_TABLE='cr6608_rescue_static'
+STATIC_INET_TABLE='cr6608_rescue_static'
+
+GUARD_BIN='/usr/sbin/cr6608-rescue-guard'
+RESCUE_INIT='/etc/init.d/cr6608-rescue-guard'
+NFT_BIN='/usr/sbin/nft'
+UCI_BIN='/sbin/uci'
+IW_BIN='/usr/sbin/iw'
+IP_BIN='/sbin/ip'
+UBUS_BIN='/bin/ubus'
+JSONFILTER_BIN='/usr/bin/jsonfilter'
+FW4_BIN='/sbin/fw4'
+FLOCK_BIN='flock'
+LOGGER_BIN='logger'
+MKTEMP_BIN='mktemp'
+SETSID_BIN='/usr/bin/setsid'
+KILL_BIN='/bin/kill'
+PROC_ROOT='/proc'
+SYS_CLASS_NET='/sys/class/net'
+STATE_DIR='/var/run/cr6608-rescue-guard'
+# Flock the shipped guard inode read-only.  Unlike /var/lock, acquiring this
+# inode never needs free tmpfs blocks or a writable directory during cold boot.
+LOCK_FILE="$GUARD_BIN"
+ROUTE_OWNER_FILE="$STATE_DIR/route-owner"
+RULESET_STATE_FILE="$STATE_DIR/ruleset.snapshot"
+QUIESCE_FILE="$STATE_DIR/operator-quiesced"
+COMMAND_TIMEOUT='8'
+FIREWALL_TIMEOUT='45'
+CLOSE_TIMEOUT='3'
+KILL_TIMEOUT='2'
+LOCK_WAIT_ATTEMPTS='5'
+LOCK_RETRY_SECONDS='1'
+MONITOR_INTERVAL='10'
+MONITOR_CHILD_TIMEOUT='45'
+MONITOR_RECOVERY_ATTEMPTS='3'
+MONITOR_RECOVERY_DELAY='2'
+MONITOR_FAILURE_BACKOFF='30'
+MONITOR_BUSY_LIMIT='3'
+RULES_FILE=''
+rescue_path_device=''
+rescue_path_networks=''
+RUN_LIMIT_PID=''
+RUN_LIMIT_START=''
+RUN_LIMIT_OUT=''
+RUN_LIMIT_ERR=''
+LOCK_HELD='0'
+PRESERVE_ROUTE_ON_CLOSE='0'
+firewall_monitor_was_running='0'
+
+have_command() {
+	case "$1" in
+		*/*) [ -x "$1" ] ;;
+		*) command -v "$1" >/dev/null 2>&1 ;;
+	esac
+}
+
+run_limit_process_identity() {
+	exec 9>&-
+	awk '
+		{
+			line=$0; close_at=0
+			for (i=length(line)-1; i>0; i--)
+				if (substr(line,i,2)==") ") { close_at=i; break }
+			if (!close_at) exit 1
+			count=split(substr(line,close_at+2), field, " ")
+			if (count < 20) exit 1
+			print field[1] " " field[20]
+		}' "$PROC_ROOT/$1/stat" 2>/dev/null
+}
+
+run_limit_process_running() {
+	run_seen="$(run_limit_process_identity "$1")"
+	[ -n "$run_seen" ] || return 1
+	run_state="${run_seen%% *}"
+	run_seen_start="${run_seen#* }"
+	[ "$run_state" != Z ] && [ "$run_seen_start" = "$2" ]
+}
+
+run_limit_fast_grace() {
+	# Some shipped BusyBox variants reject fractional sleep.  Prefer it when
+	# supported, otherwise use ucode's millisecond sleep without logging noise.
+	# The final whole-second fallback prevents a hot watchdog loop on minimal
+	# recovery images that contain neither capability.
+	sleep 0.1 9>&- 2>/dev/null && return 0
+	if [ -x /usr/bin/ucode ]; then
+		/usr/bin/ucode -e 'sleep(100)' 9>&- >/dev/null 2>&1 && return 0
+	fi
+	sleep 1 9>&- 2>/dev/null || true
+}
+
+run_limit_signal_group() {
+	run_signal="$1"
+	run_group="$2"
+	# procps kill accepts `--` before a negative process-group id; BusyBox 1.37
+	# rejects it.  Probe only option parsing with a nonexistent group.
+	"$KILL_BIN" -0 -- -999999 9>&- >/dev/null 2>&1
+	if [ "$?" -eq 2 ]; then
+		"$KILL_BIN" "-$run_signal" "-$run_group" 9>&- 2>/dev/null
+	else
+		"$KILL_BIN" "-$run_signal" -- "-$run_group" 9>&- 2>/dev/null
+	fi
+}
+
+run_limit_cancel_active() {
+	if [ -n "$RUN_LIMIT_PID" ] && [ -n "$RUN_LIMIT_START" ] &&
+	   run_limit_process_running "$RUN_LIMIT_PID" "$RUN_LIMIT_START"; then
+		run_limit_signal_group TERM "$RUN_LIMIT_PID" ||
+			"$KILL_BIN" -TERM "$RUN_LIMIT_PID" 9>&- 2>/dev/null || true
+		sleep "$KILL_TIMEOUT" 9>&-
+		run_limit_signal_group KILL "$RUN_LIMIT_PID" ||
+			"$KILL_BIN" -KILL "$RUN_LIMIT_PID" 9>&- 2>/dev/null || true
+		run_limit_fast_grace
+		if ! run_limit_process_running "$RUN_LIMIT_PID" "$RUN_LIMIT_START"; then
+			wait "$RUN_LIMIT_PID" 2>/dev/null || true
+		fi
+	fi
+	RUN_LIMIT_PID=''
+	RUN_LIMIT_START=''
+	[ -z "$RUN_LIMIT_OUT" ] || rm -f -- "$RUN_LIMIT_OUT" 9>&- 2>/dev/null || true
+	[ -z "$RUN_LIMIT_ERR" ] || rm -f -- "$RUN_LIMIT_ERR" 9>&- 2>/dev/null || true
+	RUN_LIMIT_OUT=''
+	RUN_LIMIT_ERR=''
+}
+
+run_timed_seconds_impl() {
+	run_capture_output="$1"
+	run_inherit_stdin="$2"
+	run_seconds="$3"
+	shift 3
+	case "$run_seconds" in ''|*[!0-9]*|0) run_seconds=1 ;; esac
+	if [ "$run_capture_output" = 1 ]; then
+		run_out="$(exec 9>&-; "$MKTEMP_BIN" "/tmp/cr6608-rescue-out.$$.XXXXXX" 2>/dev/null)" || return 125
+		run_err="$(exec 9>&-; "$MKTEMP_BIN" "/tmp/cr6608-rescue-err.$$.XXXXXX" 2>/dev/null)" || {
+			rm -f -- "$run_out" 9>&- 2>/dev/null || true
+			return 125
+		}
+		chmod 0600 "$run_out" "$run_err" 9>&- 2>/dev/null || {
+			rm -f -- "$run_out" "$run_err" 9>&- 2>/dev/null || true
+			return 125
+		}
+		RUN_LIMIT_OUT="$run_out"
+		RUN_LIMIT_ERR="$run_err"
+	else
+		run_out=''
+		run_err=''
+		RUN_LIMIT_OUT=''
+		RUN_LIMIT_ERR=''
+	fi
+	if [ "$run_inherit_stdin" = 1 ]; then
+		# Used only for an nft ruleset supplied by a pipe.  The child still closes
+		# fd 9 and receives the same watchdog/process-group treatment; unlike the
+		# ordinary runner, its stdin must remain attached to the producer.  POSIX
+		# shells may replace fd 0 for an asynchronous list, so save the pipe before
+		# spawning and close the temporary descriptor in both processes.
+		[ "$run_capture_output" = 0 ] || return 125
+		exec 8<&0 || return 125
+		( exec "$SETSID_BIN" "$@" ) 0<&8 8<&- 9>&- &
+		exec 8<&-
+	elif [ "$run_capture_output" = 1 ]; then
+		( exec "$SETSID_BIN" "$@" ) 9>&- </dev/null >"$run_out" 2>"$run_err" &
+	else
+		# No watched child may retain the transition lock.  In particular, a
+		# killed or uninterruptible mutator must not unlock late and continue
+		# after the guard process has left its critical section.
+		( exec "$SETSID_BIN" "$@" ) 9>&- </dev/null &
+	fi
+	run_pid=$!
+	run_identity="$(run_limit_process_identity "$run_pid")"
+	run_start="${run_identity#* }"
+	RUN_LIMIT_PID="$run_pid"
+	RUN_LIMIT_START="$run_start"
+
+	if [ -z "$run_identity" ] || [ -z "$run_start" ]; then
+		if "$KILL_BIN" -0 "$run_pid" 9>&- 2>/dev/null; then
+			run_limit_signal_group KILL "$run_pid" ||
+				"$KILL_BIN" -KILL "$run_pid" 9>&- 2>/dev/null || true
+			sleep 1 9>&-
+			# Never wait on a still-live, potentially uninterruptible task.
+			if ! "$KILL_BIN" -0 "$run_pid" 9>&- 2>/dev/null; then
+				wait "$run_pid" 2>/dev/null || true
+			fi
+			run_rc=125
+		else
+			wait "$run_pid" 2>/dev/null
+			run_rc=$?
+		fi
+	else
+		run_elapsed=0
+		if run_limit_process_running "$run_pid" "$run_start"; then
+			run_limit_fast_grace
+		fi
+		while run_limit_process_running "$run_pid" "$run_start" &&
+		      [ "$run_elapsed" -lt "$run_seconds" ]; do
+			sleep 1 9>&-
+			run_elapsed=$((run_elapsed + 1))
+		done
+		if run_limit_process_running "$run_pid" "$run_start"; then
+			run_limit_signal_group TERM "$run_pid" ||
+				"$KILL_BIN" -TERM "$run_pid" 9>&- 2>/dev/null || true
+			sleep "$KILL_TIMEOUT" 9>&-
+			run_limit_signal_group KILL "$run_pid" ||
+				"$KILL_BIN" -KILL "$run_pid" 9>&- 2>/dev/null || true
+			run_rc=124
+			run_limit_fast_grace
+			if ! run_limit_process_running "$run_pid" "$run_start"; then
+				wait "$run_pid" 2>/dev/null || true
+			fi
+		else
+			wait "$run_pid" 2>/dev/null
+			run_rc=$?
+		fi
+	fi
+	RUN_LIMIT_PID=''
+	RUN_LIMIT_START=''
+	if [ "$run_capture_output" = 1 ]; then
+		cat "$run_out" 9>&-
+		cat "$run_err" 9>&- >&2
+		rm -f -- "$run_out" "$run_err" 9>&- 2>/dev/null || true
+	fi
+	RUN_LIMIT_OUT=''
+	RUN_LIMIT_ERR=''
+	return "$run_rc"
+}
+
+run_timed_seconds() {
+	run_timed_seconds_impl 1 0 "$@"
+}
+
+run_stream_timed_seconds() {
+	run_timed_seconds_impl 0 0 "$@"
+}
+
+run_stdin_timed_seconds() {
+	run_timed_seconds_impl 0 1 "$@"
+}
+
+run_timed() {
+	run_timed_seconds "$COMMAND_TIMEOUT" "$@"
+}
+
+# Never turn a missing watchdog helper into an unbounded close command.  The
+# image inspector makes these BusyBox applets mandatory; runtime corruption
+# therefore fails quickly instead of wedging procd forever.
+run_close_timed() {
+	if have_command "$SETSID_BIN" && have_command "$KILL_BIN" &&
+	   [ -r "$PROC_ROOT/1/stat" ]; then
+		run_stream_timed_seconds "$CLOSE_TIMEOUT" "$@"
+	else
+		return 125
+	fi
+}
+
+run_stdin_close_timed() {
+	if have_command "$SETSID_BIN" && have_command "$KILL_BIN" &&
+	   [ -r "$PROC_ROOT/1/stat" ]; then
+		run_stdin_timed_seconds "$CLOSE_TIMEOUT" "$@"
+	else
+		return 125
+	fi
+}
+
+guard_log() {
+	have_command "$LOGGER_BIN" || return 0
+	run_close_timed "$LOGGER_BIN" -t cr6608-rescue-guard -- "$*" \
+		>/dev/null 2>&1 || true
+}
+
+rescue_monitor_is_running() {
+	have_command "$RESCUE_INIT" || return 1
+	run_timed "$RESCUE_INIT" running >/dev/null 2>&1
+}
+
+verify_fw4_absent() {
+	fw4_tables="$(run_timed "$NFT_BIN" list tables 2>/dev/null)" || return 1
+	! printf '%s\n' "$fw4_tables" | grep -Eq \
+		'^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4([[:space:]]|$)'
+}
+
+quiesce_state_present() {
+	[ -e "$QUIESCE_FILE" ] || [ -L "$QUIESCE_FILE" ]
+}
+
+publish_quiesce_state() {
+	if quiesce_state_present; then
+		[ -f "$QUIESCE_FILE" ] && [ ! -L "$QUIESCE_FILE" ]
+		return $?
+	fi
+	quiesce_tmp="$QUIESCE_FILE.$$"
+	[ ! -e "$quiesce_tmp" ] && [ ! -L "$quiesce_tmp" ] || return 1
+	printf 'operator-stop\n' >"$quiesce_tmp" || return 1
+	chmod 0600 "$quiesce_tmp" 9>&- 2>/dev/null || {
+		rm -f -- "$quiesce_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+	mv -f -- "$quiesce_tmp" "$QUIESCE_FILE" 9>&- 2>/dev/null || {
+		rm -f -- "$quiesce_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+}
+
+clear_quiesce_state() {
+	quiesce_state_present || return 0
+	[ -f "$QUIESCE_FILE" ] && [ ! -L "$QUIESCE_FILE" ] || return 1
+	rm -f -- "$QUIESCE_FILE" 9>&- 2>/dev/null || return 1
+	! quiesce_state_present
+}
+
+render_deny_ruleset() {
+	cat 9>&- <<EOF
+table bridge $BRIDGE_TABLE {}
+delete table bridge $BRIDGE_TABLE
+table bridge $BRIDGE_TABLE {
+	chain deny_ingress {
+		type filter hook prerouting priority -310; policy accept;
+		ether type arp arp daddr ip $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_IN"
+		vlan type arp arp daddr ip $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IN"
+		ether type ip ip daddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_IN"
+		vlan type ip ip daddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IP_IN"
+		ether type arp arp daddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_BRIDGE_ARP_IN"
+		vlan type arp arp daddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_IN"
+	}
+	chain deny_egress {
+		type filter hook postrouting priority 310; policy accept;
+		ether type arp arp saddr ip $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_OUT"
+		vlan type arp arp saddr ip $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_OUT"
+		ether type ip ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_OUT"
+		vlan type ip ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IP_OUT"
+		ether type arp arp saddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_BRIDGE_ARP_OUT"
+		vlan type arp arp saddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_OUT"
+	}
+}
+
+table inet $INET_TABLE {}
+delete table inet $INET_TABLE
+table inet $INET_TABLE {
+	chain deny_input {
+		type filter hook input priority -310; policy accept;
+		ip daddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_INET_IN"
+		ip daddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_INET_IN"
+	}
+	chain deny_output {
+		type filter hook output priority 310; policy accept;
+		ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_DENY_ONLY_INET_OUT"
+		ip saddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_INET_OUT"
+	}
+}
+
+# A separate early gate survives loss of the two live guard tables.  It runs
+# before fw4's conntrack-established accept and requires every current-address
+# frame/packet to carry the per-packet AP mark.  The active ruleset below sets
+# that mark on both requests and replies; without it the endpoint is dark.
+table bridge $STATIC_BRIDGE_TABLE {}
+delete table bridge $STATIC_BRIDGE_TABLE
+table bridge $STATIC_BRIDGE_TABLE {
+	chain mark_gate_ingress {
+		type filter hook prerouting priority -300; policy accept;
+		ether type arp arp daddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_IN"
+		vlan type arp arp daddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_BRIDGE_VLAN_ARP_IN"
+		ether type arp arp daddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_ARP_MARK_DENY"
+		vlan type arp arp daddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_MARK_DENY"
+		ether type ip ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_IP_MARK_DENY"
+		vlan type ip ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_MARK_DENY"
+	}
+	chain mark_gate_egress {
+		type filter hook postrouting priority 320; policy accept;
+		ether type arp arp saddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_OUT"
+		vlan type arp arp saddr ip $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_BRIDGE_VLAN_ARP_OUT"
+		ether type arp arp saddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_ARP_REPLY_MARK_DENY"
+		vlan type arp arp saddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_REPLY_MARK_DENY"
+		ether type ip ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_IP_REPLY_MARK_DENY"
+		vlan type ip ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_REPLY_MARK_DENY"
+	}
+}
+
+table inet $STATIC_INET_TABLE {}
+delete table inet $STATIC_INET_TABLE
+table inet $STATIC_INET_TABLE {
+	chain mark_gate_input {
+		type filter hook input priority -300; policy accept;
+		ip daddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_INET_IN"
+		ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_INET_MARK_DENY"
+	}
+	chain mark_gate_output {
+		type filter hook output priority 320; policy accept;
+		ip saddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_INET_OUT"
+		ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_INET_REPLY_MARK_DENY"
+	}
+}
+
+table bridge rescue221 {}
+delete table bridge rescue221
+EOF
+}
+
+verify_deny_rules() {
+	deny_bridge_rules="$(
+		exec 9>&-
+		run_close_timed "$NFT_BIN" list table bridge "$BRIDGE_TABLE" 2>/dev/null
+	)" || return 1
+	deny_inet_rules="$(
+		exec 9>&-
+		run_close_timed "$NFT_BIN" list table inet "$INET_TABLE" 2>/dev/null
+	)" || return 1
+	deny_static_bridge_rules="$(
+		exec 9>&-
+		run_close_timed "$NFT_BIN" list table bridge "$STATIC_BRIDGE_TABLE" 2>/dev/null
+	)" || return 1
+	deny_static_inet_rules="$(
+		exec 9>&-
+		run_close_timed "$NFT_BIN" list table inet "$STATIC_INET_TABLE" 2>/dev/null
+	)" || return 1
+	for deny_bridge_marker in \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_IN \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IN \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_IN \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IP_IN \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_OUT \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_OUT \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_OUT \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_VLAN_IP_OUT \
+		CR6608_RESCUE_LEGACY_BRIDGE_ARP_IN \
+		CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_IN \
+		CR6608_RESCUE_LEGACY_BRIDGE_ARP_OUT \
+		CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_OUT; do
+		case "$deny_bridge_rules" in *"$deny_bridge_marker"*) ;; *) return 1 ;; esac
+	done
+	for deny_inet_marker in \
+		CR6608_RESCUE_DENY_ONLY_INET_IN \
+		CR6608_RESCUE_DENY_ONLY_INET_OUT \
+		CR6608_RESCUE_LEGACY_INET_IN \
+		CR6608_RESCUE_LEGACY_INET_OUT; do
+		case "$deny_inet_rules" in *"$deny_inet_marker"*) ;; *) return 1 ;; esac
+	done
+	for deny_static_bridge_marker in \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_IN \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_VLAN_ARP_IN \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_OUT \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_VLAN_ARP_OUT \
+		CR6608_RESCUE_STATIC_BRIDGE_ARP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_ARP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_REPLY_MARK_DENY; do
+		case "$deny_static_bridge_rules" in *"$deny_static_bridge_marker"*) ;; *) return 1 ;; esac
+	done
+	for deny_static_inet_marker in \
+		CR6608_RESCUE_STATIC_LEGACY_INET_IN \
+		CR6608_RESCUE_STATIC_LEGACY_INET_OUT \
+		CR6608_RESCUE_STATIC_INET_MARK_DENY \
+		CR6608_RESCUE_STATIC_INET_REPLY_MARK_DENY; do
+		case "$deny_static_inet_rules" in *"$deny_static_inet_marker"*) ;; *) return 1 ;; esac
+	done
+}
+
+# Last-resort boundary for failures that occur before the normal watchdog
+# helpers or writable state directory are usable.  nft applies the whole batch
+# atomically; both pipe processes close fd 9, and no scratch file is created.
+# The normal path remains watchdog bounded.  This fallback is intentionally
+# used only while failing closed.
+install_emergency_deny_rules() {
+	have_command "$NFT_BIN" || return 1
+	emergency_ruleset="$(exec 9>&-; render_deny_ruleset)" || return 1
+	[ -n "$emergency_ruleset" ] || return 1
+	( printf '%s\n' "$emergency_ruleset" ) 9>&- |
+		( exec "$NFT_BIN" -f - ) 9>&- >/dev/null 2>&1 || return 1
+	emergency_bridge_rules="$(
+		exec 9>&-
+		( exec "$NFT_BIN" list table bridge "$BRIDGE_TABLE" ) 9>&- 2>/dev/null
+	)" || return 1
+	emergency_inet_rules="$(
+		exec 9>&-
+		( exec "$NFT_BIN" list table inet "$INET_TABLE" ) 9>&- 2>/dev/null
+	)" || return 1
+	emergency_static_bridge_rules="$(
+		exec 9>&-
+		( exec "$NFT_BIN" list table bridge "$STATIC_BRIDGE_TABLE" ) 9>&- 2>/dev/null
+	)" || return 1
+	emergency_static_inet_rules="$(
+		exec 9>&-
+		( exec "$NFT_BIN" list table inet "$STATIC_INET_TABLE" ) 9>&- 2>/dev/null
+	)" || return 1
+	for emergency_bridge_marker in \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_IN \
+		CR6608_RESCUE_DENY_ONLY_BRIDGE_IP_OUT \
+		CR6608_RESCUE_LEGACY_BRIDGE_ARP_IN \
+		CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_IN \
+		CR6608_RESCUE_LEGACY_BRIDGE_ARP_OUT \
+		CR6608_RESCUE_LEGACY_BRIDGE_VLAN_ARP_OUT; do
+		case "$emergency_bridge_rules" in
+			*"$emergency_bridge_marker"*) ;;
+			*) return 1 ;;
+		esac
+	done
+	for emergency_inet_marker in \
+		CR6608_RESCUE_DENY_ONLY_INET_IN \
+		CR6608_RESCUE_DENY_ONLY_INET_OUT \
+		CR6608_RESCUE_LEGACY_INET_IN \
+		CR6608_RESCUE_LEGACY_INET_OUT; do
+		case "$emergency_inet_rules" in
+			*"$emergency_inet_marker"*) ;;
+			*) return 1 ;;
+		esac
+	done
+	for emergency_static_marker in \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_IN \
+		CR6608_RESCUE_STATIC_LEGACY_BRIDGE_ARP_OUT; do
+		case "$emergency_static_bridge_rules" in
+			*"$emergency_static_marker"*) ;;
+			*) return 1 ;;
+		esac
+	done
+	for emergency_static_marker in \
+		CR6608_RESCUE_STATIC_INET_MARK_DENY \
+		CR6608_RESCUE_STATIC_INET_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_LEGACY_INET_IN \
+		CR6608_RESCUE_STATIC_LEGACY_INET_OUT; do
+		case "$emergency_static_inet_rules" in
+			*"$emergency_static_marker"*) ;;
+			*) return 1 ;;
+		esac
+	done
+}
+
+install_deny_rules() {
+	have_command "$NFT_BIN" || return 1
+	deny_ruleset="$(exec 9>&-; render_deny_ruleset)" || return 1
+	[ -n "$deny_ruleset" ] || return 1
+	( printf '%s\n' "$deny_ruleset" ) 9>&- |
+		( exec 9>&-; run_stdin_close_timed "$NFT_BIN" -c -f - ) \
+			>/dev/null 2>&1 || return 1
+	( printf '%s\n' "$deny_ruleset" ) 9>&- |
+		( exec 9>&-; run_stdin_close_timed "$NFT_BIN" -f - ) \
+			>/dev/null 2>&1 || return 1
+	verify_deny_rules
+}
+
+valid_vlan_suffix() {
+	valid_vlan="$1"
+	case "$valid_vlan" in
+		''|0|0*|*[!0-9]*) return 1 ;;
+	esac
+	[ "${#valid_vlan}" -le 4 ] &&
+		[ "$valid_vlan" -ge 1 ] 2>/dev/null &&
+		[ "$valid_vlan" -le 4094 ] 2>/dev/null
+}
+
+valid_route_owner_device() {
+	owner_candidate="$1"
+	case "$owner_candidate" in
+		br-lan) return 0 ;;
+		br-lan.*)
+			owner_suffix="${owner_candidate#br-lan.}"
+			valid_vlan_suffix "$owner_suffix"
+			return $?
+			;;
+	esac
+	return 1
+}
+
+load_route_owner() {
+	exec 9>&-
+	[ -f "$ROUTE_OWNER_FILE" ] && [ ! -L "$ROUTE_OWNER_FILE" ] || return 1
+	route_owner_first=''
+	route_owner_extra=''
+	{
+		IFS= read -r route_owner_first || true
+		IFS= read -r route_owner_extra || true
+	} <"$ROUTE_OWNER_FILE"
+	[ -n "$route_owner_first" ] && [ -z "$route_owner_extra" ] || return 1
+	valid_route_owner_device "$route_owner_first" || return 1
+	printf '%s\n' "$route_owner_first"
+}
+
+write_route_owner() {
+	valid_route_owner_device "$rescue_path_device" || return 1
+	if [ -e "$ROUTE_OWNER_FILE" ] || [ -L "$ROUTE_OWNER_FILE" ]; then
+		[ -f "$ROUTE_OWNER_FILE" ] && [ ! -L "$ROUTE_OWNER_FILE" ] || return 1
+	fi
+	route_owner_tmp="$ROUTE_OWNER_FILE.$$"
+	[ ! -e "$route_owner_tmp" ] && [ ! -L "$route_owner_tmp" ] || return 1
+	printf '%s\n' "$rescue_path_device" >"$route_owner_tmp" || return 1
+	chmod 0600 "$route_owner_tmp" 9>&- 2>/dev/null || {
+		rm -f -- "$route_owner_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+	mv -f -- "$route_owner_tmp" "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || {
+		rm -f -- "$route_owner_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+}
+
+route_records_match_owner() {
+	match_records="$1"
+	match_owner="$2"
+	( printf '%s\n' "$match_records" ) 9>&- |
+		awk -v subnet="$RESCUE_CLIENT_SUBNET" -v dev="$match_owner" \
+		    -v src="$RESCUE_IP" '
+			($1 == subnet || (subnet == src "/32" && $1 == src)) {
+				dev_ok=0; src_ok=0; scope_ok=0
+				for (i=1; i<=NF; i++) {
+					if ($i == "dev" && $(i+1) == dev) dev_ok=1
+					if ($i == "src" && $(i+1) == src) src_ok=1
+					if ($i == "scope" && $(i+1) == "link") scope_ok=1
+				}
+				if (dev_ok && src_ok && scope_ok) valid++
+				total++
+			}
+			END { exit !(total == 1 && valid == 1) }' 9>&-
+}
+
+route_owner_for_records() {
+	owner_records="$1"
+	stored_owner="$(load_route_owner 2>/dev/null)" || stored_owner=''
+	if [ -n "$stored_owner" ] &&
+	   route_records_match_owner "$owner_records" "$stored_owner"; then
+		printf '%s\n' "$stored_owner"
+		return 0
+	fi
+	# A protocol tag is not proof of ownership by itself.  Refuse to delete an
+	# exact-looking route unless the root-only state file names the same path.
+	return 1
+}
+
+delete_owned_routes() {
+	have_command "$IP_BIN" || return 1
+	owned_records="$(
+		exec 9>&-
+		run_close_timed "$IP_BIN" -4 -o route show exact \
+			"$RESCUE_CLIENT_SUBNET" table main proto "$RESCUE_ROUTE_PROTO" 2>/dev/null
+	)" || return 1
+	if [ -z "$owned_records" ]; then
+		rm -f -- "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || true
+		return 0
+	fi
+	# A protocol-tagged route without matching root-only state is foreign.  It is
+	# preserved; removing the local rescue address is sufficient to make it dark.
+	delete_owner="$(exec 9>&-; route_owner_for_records "$owned_records" 2>/dev/null)" || return 0
+	run_close_timed "$IP_BIN" -4 route del "$RESCUE_CLIENT_SUBNET" \
+		dev "$delete_owner" src "$RESCUE_IP" scope link \
+		proto "$RESCUE_ROUTE_PROTO" table main >/dev/null 2>&1 || return 1
+	remaining_owned_records="$(
+		exec 9>&-
+		run_close_timed "$IP_BIN" -4 -o route show exact \
+			"$RESCUE_CLIENT_SUBNET" table main proto "$RESCUE_ROUTE_PROTO" 2>/dev/null
+	)" || return 1
+	[ -z "$remaining_owned_records" ] || return 1
+	rm -f -- "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || true
+}
+
+remove_owned_route_for_apply() {
+	owned_records="$(route_records_owned 2>/dev/null)" || return 1
+	if [ -z "$owned_records" ]; then
+		rm -f -- "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || true
+		return 0
+	fi
+	delete_owner="$(exec 9>&-; route_owner_for_records "$owned_records" 2>/dev/null)" || return 1
+	run_timed "$IP_BIN" -4 route del "$RESCUE_CLIENT_SUBNET" \
+		dev "$delete_owner" src "$RESCUE_IP" scope link \
+		proto "$RESCUE_ROUTE_PROTO" table main || return 1
+	rm -f -- "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || true
+}
+
+close_endpoint() {
+	[ "$LOCK_HELD" = 1 ] || return 1
+	close_failed=0
+
+	# Install both bridge and inet deny-only tables in one nft transaction before
+	# touching addresses or routes.  These tables are deliberately retained: if
+	# any removal or verification fails, wired/LAN firewall allows can never turn
+	# the stale local address back into an exposed endpoint.
+	if install_deny_rules; then
+		rm -f -- "$RULESET_STATE_FILE" 9>&- 2>/dev/null || close_failed=1
+	else
+		# Missing setsid/proc/tmpfs must still leave both current and legacy
+		# addresses behind an atomic kernel deny boundary.
+		install_emergency_deny_rules || true
+		close_failed=1
+	fi
+
+	if have_command "$IP_BIN"; then
+		if [ "$PRESERVE_ROUTE_ON_CLOSE" = 1 ]; then
+			# A route added before an ownership-state publication failure is no
+			# longer distinguishable from an identical foreign replacement.  Keep
+			# it unreachable behind deny-only and discard any stale owner hint.
+			rm -f -- "$ROUTE_OWNER_FILE" 9>&- 2>/dev/null || close_failed=1
+		else
+			delete_owned_routes || close_failed=1
+		fi
+		rescue_addr_output="$(
+			exec 9>&-
+			run_close_timed "$IP_BIN" -4 -o addr show 2>/dev/null
+		)" || {
+			rescue_addr_output=''
+			close_failed=1
+		}
+		rescue_addr_records="$(
+			exec 9>&-
+			printf '%s\n' "$rescue_addr_output" |
+				awk -v target="$RESCUE_IP" '
+					{ split($4, parts, "/"); split($2, devparts, "@") }
+					parts[1] == target { print devparts[1] ":" $4 }'
+		)" || close_failed=1
+		for rescue_addr_record in $rescue_addr_records; do
+			rescue_addr_dev="${rescue_addr_record%%:*}"
+			rescue_addr_cidr="${rescue_addr_record#*:}"
+			run_close_timed "$IP_BIN" -4 addr del "$rescue_addr_cidr" \
+				dev "$rescue_addr_dev" >/dev/null 2>&1 || close_failed=1
+		done
+		rescue_addr_verify="$(
+			exec 9>&-
+			run_close_timed "$IP_BIN" -4 -o addr show 2>/dev/null
+		)" || {
+			rescue_addr_verify=''
+			close_failed=1
+		}
+		( printf '%s\n' "$rescue_addr_verify" ) 9>&- |
+			awk -v target="$RESCUE_IP" '
+				{ split($4, parts, "/") }
+				parts[1] == target { found=1 }
+				END { exit found ? 1 : 0 }' 9>&- || close_failed=1
+	else
+		close_failed=1
+	fi
+
+	[ "$close_failed" -eq 0 ]
+}
+
+cleanup_rules_file() {
+	[ -n "$RULES_FILE" ] || return 0
+	rm -f -- "$RULES_FILE" 9>&- >/dev/null 2>&1 || true
+	RULES_FILE=''
+}
+
+fail_closed() {
+	reason="$1"
+	cleanup_rules_file
+	if [ "$LOCK_HELD" = 1 ]; then
+		close_endpoint || guard_log "CLOSE_INCOMPLETE trigger=$reason"
+	else
+		install_emergency_deny_rules || true
+	fi
+	guard_log "FAIL reason=$reason"
+	printf 'CR6608_RESCUE_GUARD=FAIL reason=%s\n' "$reason" >&2
+	exit 1
+}
+
+uci_get() {
+	exec 9>&-
+	run_timed "$UCI_BIN" -q get "$1" 2>/dev/null
+}
+
+expect_uci() {
+	actual="$(uci_get "$1")"
+	[ "$actual" = "$2" ] || fail_closed "uci:$1"
+}
+
+expect_uci_section_shape() {
+	shape_key="$1"
+	shape_type="$2"
+	shape_allowed="$3"
+	shape_output="$(
+		exec 9>&-
+		run_timed "$UCI_BIN" -q show "$shape_key" 2>/dev/null
+	)" || fail_closed "uci-shape:$shape_key"
+	( printf '%s\n' "$shape_output" ) 9>&- |
+		awk -v prefix="$shape_key" -v type="$shape_type" \
+		    -v allowed="$shape_allowed" '
+			$0 == prefix "=" type { type_seen++; next }
+			index($0, prefix ".") == 1 {
+				rest=substr($0,length(prefix)+2)
+				eq=index(rest,"=")
+				if (!eq) { bad=1; next }
+				option=substr(rest,1,eq-1)
+				if (!index(" " allowed " ", " " option " ")) bad=1
+				next
+			}
+			{ bad=1 }
+			END { exit !(type_seen == 1 && !bad) }' 9>&- ||
+		fail_closed "uci-shape:$shape_key"
+}
+
+primary_ap_eligible() {
+	eligible_section="$1"
+	eligible_radio="$2"
+	[ "$(uci_get "wireless.$eligible_section")" = wifi-iface ] || return 1
+	[ "$(uci_get "wireless.$eligible_section.device")" = "$eligible_radio" ] || return 1
+	[ "$(uci_get "wireless.$eligible_section.mode")" = ap ] || return 1
+	[ "$(uci_get "wireless.$eligible_section.disabled")" != 1 ] || return 1
+	case "$eligible_section" in
+		*guest*|*rescue*|*recovery*|*mesh*|*backhaul*) return 1 ;;
+	esac
+	eligible_networks="$(uci_get "wireless.$eligible_section.network")"
+	set -- $eligible_networks
+	[ "$#" -eq 1 ] || return 1
+	case "$1" in
+		*guest*|*rescue*|*recovery*|*mesh*|*backhaul*) return 1 ;;
+	esac
+	return 0
+}
+
+primary_ap_section() {
+	exec 9>&-
+	primary_radio="$1"
+	preferred_section="$2"
+
+	if primary_ap_eligible "$preferred_section" "$primary_radio"; then
+		printf '%s\n' "$preferred_section"
+		return 0
+	fi
+
+	primary_sections="$(
+		run_timed "$UCI_BIN" -q show wireless 2>/dev/null |
+			sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'
+	)" || return 1
+	fallback_section=''
+	for primary_section in $primary_sections; do
+		[ "$primary_section" != "$preferred_section" ] || continue
+		primary_ap_eligible "$primary_section" "$primary_radio" || continue
+		# More than one plausible fallback is not enough information to infer
+		# which AP is the product's primary management path.
+		[ -z "$fallback_section" ] || return 2
+		fallback_section="$primary_section"
+	done
+	[ -n "$fallback_section" ] || return 1
+	printf '%s\n' "$fallback_section"
+}
+
+validate_path_device() {
+	path_candidate="$1"
+	case "$path_candidate" in
+		br-lan) ;;
+		br-lan.*)
+			path_suffix="${path_candidate#br-lan.}"
+			valid_vlan_suffix "$path_suffix" || return 1
+			;;
+		*) return 1 ;;
+	esac
+	[ -e "$SYS_CLASS_NET/$path_candidate" ]
+}
+
+runtime_path_for_network() {
+	runtime_network="$1"
+	runtime_expected="$2"
+	runtime_status="$(
+		exec 9>&-
+		run_timed "$UBUS_BIN" -S call "network.interface.$runtime_network" status 2>/dev/null
+	)" || return 1
+	[ -n "$runtime_status" ] || return 1
+	runtime_up="$(exec 9>&-; run_timed "$JSONFILTER_BIN" -s "$runtime_status" -e '@.up' 2>/dev/null)" || return 1
+	runtime_l3="$(exec 9>&-; run_timed "$JSONFILTER_BIN" -s "$runtime_status" -e '@.l3_device' 2>/dev/null)" || return 1
+	runtime_device="$(exec 9>&-; run_timed "$JSONFILTER_BIN" -s "$runtime_status" -e '@.device' 2>/dev/null)" || return 1
+	[ "$runtime_up" = true ] &&
+		[ "$runtime_l3" = "$runtime_expected" ] &&
+		[ "$runtime_device" = "$runtime_expected" ] &&
+		validate_path_device "$runtime_l3" || return 1
+	printf '%s\n' "$runtime_l3"
+}
+
+derive_primary_ap_path() {
+	rescue_path_device=''
+	rescue_path_networks=''
+	active_primary_count=0
+
+	for primary_spec in radio0:wifinet0 radio1:wifinet1; do
+		primary_radio="${primary_spec%%:*}"
+		preferred_section="${primary_spec#*:}"
+		expect_uci "wireless.$primary_radio" wifi-device
+		[ "$(uci_get "wireless.$primary_radio.disabled")" != 1 ] || continue
+
+		primary_section="$(primary_ap_section "$primary_radio" "$preferred_section")"
+		primary_section_rc=$?
+		case "$primary_section_rc" in
+			0) ;;
+			1) primary_section='' ;;
+			*) fail_closed "wireless:${primary_radio}-primary-ap" ;;
+		esac
+		# The product UI supports disabling one band and changing a band to
+		# station/mesh mode.  Such a radio is not an ingress path for rescue and
+		# must not veto an otherwise valid AP on the other band.  We derive state
+		# only from actual enabled primary AP sections and still require at least
+		# one below, so an all-client/all-disabled configuration remains dark.
+		[ -n "$primary_section" ] || continue
+		primary_network_list="$(uci_get "wireless.$primary_section.network")"
+		set -- $primary_network_list
+		[ "$#" -eq 1 ] || fail_closed "wireless:${primary_radio}-network-count"
+		primary_network="$1"
+		case "$primary_network" in
+			''|*[!A-Za-z0-9_]*|wlanrescue) \
+				fail_closed "wireless:${primary_radio}-network" ;;
+		esac
+		[ "$(uci_get "network.$primary_network")" = interface ] ||
+			fail_closed "network:missing-$primary_network"
+		primary_configured_path="$(uci_get "network.$primary_network.device")"
+		# A main Wi-Fi iface may legitimately be assigned by LuCI to an IoT or
+		# other custom network.  It is not a rescue-management path; ignore that
+		# band and derive from another valid br-lan[/VID] AP.  Malformed/ambiguous
+		# AP ownership still fails above, and zero valid management APs fails below.
+		validate_path_device "$primary_configured_path" || continue
+		primary_path="$(
+			exec 9>&-
+			runtime_path_for_network "$primary_network" "$primary_configured_path"
+		)" || fail_closed "network:runtime-path-$primary_network"
+
+		if [ -n "$rescue_path_device" ] &&
+		   [ "$rescue_path_device" != "$primary_path" ]; then
+			fail_closed 'network:primary-ap-path-conflict'
+		fi
+		rescue_path_device="$primary_path"
+		case " $rescue_path_networks " in
+			*" $primary_network "*) ;;
+			*) rescue_path_networks="${rescue_path_networks}${rescue_path_networks:+ }$primary_network" ;;
+		esac
+		if [ -n "$primary_section" ]; then
+			active_primary_count=$((active_primary_count + 1))
+		fi
+	done
+
+	[ "$active_primary_count" -gt 0 ] || fail_closed 'network:no-active-primary-ap'
+}
+
+validate_configuration() {
+	expect_uci_section_shape network.wlanrescue interface \
+		'cr6608_owner proto ipv6 delegate auto'
+	expect_uci network.wlanrescue interface
+	expect_uci network.wlanrescue.cr6608_owner "$RESCUE_CONFIG_OWNER"
+	expect_uci network.wlanrescue.proto none
+	expect_uci network.wlanrescue.ipv6 0
+	expect_uci network.wlanrescue.delegate 0
+	expect_uci network.wlanrescue.auto 0
+
+	lan_zone="$(
+		exec 9>&-
+		run_timed "$UCI_BIN" show firewall 2>/dev/null |
+			sed -n "s/^firewall\.\([^=]*\)\.name='lan'$/\1/p" |
+			head -n 1
+	)"
+	[ -n "$lan_zone" ] || fail_closed 'firewall:lan-zone'
+	case " $(uci_get "firewall.$lan_zone.network") " in
+		*' wlanrescue '*) fail_closed 'firewall:wlanrescue-in-lan' ;;
+	esac
+
+	for zone_section in $(
+		exec 9>&-
+		run_timed "$UCI_BIN" show firewall 2>/dev/null |
+			sed -n "s/^firewall\.\([^=]*\)=zone$/\1/p"
+	); do
+		case " $(uci_get "firewall.$zone_section.network") " in
+			*' wlanrescue '*)
+				[ "$zone_section" = "$RESCUE_ZONE_SECTION" ] || \
+					fail_closed "firewall:wlanrescue-zone-$zone_section"
+				;;
+		esac
+	done
+
+	expect_uci "firewall.$RESCUE_ZONE_SECTION" zone
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.name" cr6608_rescue
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.cr6608_owner" "$RESCUE_CONFIG_OWNER"
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.network" wlanrescue
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.input" REJECT
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.output" ACCEPT
+	expect_uci "firewall.$RESCUE_ZONE_SECTION.forward" REJECT
+	expect_uci "firewall.$RESCUE_WEB_SECTION" rule
+	expect_uci "firewall.$RESCUE_WEB_SECTION.cr6608_owner" "$RESCUE_CONFIG_OWNER"
+	expect_uci "firewall.$RESCUE_WEB_SECTION.src" lan
+	expect_uci "firewall.$RESCUE_WEB_SECTION.dest_ip" "$RESCUE_IP"
+	expect_uci "firewall.$RESCUE_WEB_SECTION.proto" tcp
+	expect_uci "firewall.$RESCUE_WEB_SECTION.dest_port" '80 443'
+	expect_uci "firewall.$RESCUE_WEB_SECTION.family" ipv4
+	expect_uci "firewall.$RESCUE_WEB_SECTION.mark" "$RESCUE_PACKET_MARK/0xffffffff"
+	expect_uci "firewall.$RESCUE_WEB_SECTION.target" ACCEPT
+	expect_uci "firewall.$RESCUE_PING_SECTION" rule
+	expect_uci "firewall.$RESCUE_PING_SECTION.cr6608_owner" "$RESCUE_CONFIG_OWNER"
+	expect_uci "firewall.$RESCUE_PING_SECTION.src" lan
+	expect_uci "firewall.$RESCUE_PING_SECTION.dest_ip" "$RESCUE_IP"
+	expect_uci "firewall.$RESCUE_PING_SECTION.proto" icmp
+	expect_uci "firewall.$RESCUE_PING_SECTION.icmp_type" echo-request
+	expect_uci "firewall.$RESCUE_PING_SECTION.family" ipv4
+	expect_uci "firewall.$RESCUE_PING_SECTION.mark" "$RESCUE_PACKET_MARK/0xffffffff"
+	expect_uci "firewall.$RESCUE_PING_SECTION.target" ACCEPT
+	expect_uci "firewall.$RESCUE_REJECT_SECTION" rule
+	expect_uci "firewall.$RESCUE_REJECT_SECTION.cr6608_owner" "$RESCUE_CONFIG_OWNER"
+	expect_uci "firewall.$RESCUE_REJECT_SECTION.src" lan
+	expect_uci "firewall.$RESCUE_REJECT_SECTION.dest_ip" "$RESCUE_IP"
+	expect_uci "firewall.$RESCUE_REJECT_SECTION.family" ipv4
+	expect_uci "firewall.$RESCUE_REJECT_SECTION.target" REJECT
+	expect_uci "firewall.$RESCUE_INCLUDE_SECTION" include
+	expect_uci "firewall.$RESCUE_INCLUDE_SECTION.cr6608_owner" "$RESCUE_CONFIG_OWNER"
+	expect_uci "firewall.$RESCUE_INCLUDE_SECTION.type" script
+	expect_uci "firewall.$RESCUE_INCLUDE_SECTION.path" /usr/libexec/cr6608-rescue-firewall-include
+	expect_uci "firewall.$RESCUE_INCLUDE_SECTION.fw4_compatible" 1
+	expect_uci uhttpd.main.rfc1918_filter 1
+
+	# Derive the return path from the enabled primary AP on each product radio.
+	# A stale cr6608_vlan section is never authoritative by itself, and two
+	# enabled primary APs must resolve to the same live L3 bridge/VLAN device.
+	derive_primary_ap_path
+	lan_zone_networks="$(uci_get "firewall.$lan_zone.network")"
+	for primary_network in $rescue_path_networks; do
+		case " $lan_zone_networks " in
+			*" $primary_network "*) ;;
+			*) fail_closed "firewall:primary-network-$primary_network" ;;
+		esac
+	done
+}
+
+discover_wifi_aps() {
+	exec 9>&-
+	iw_output="$(run_timed "$IW_BIN" dev 2>/dev/null)" || return 1
+	printf '%s\n' "$iw_output" | awk '$1 == "Interface" { iface=$2; next }
+		     $1 == "type" && $2 == "AP" && iface != "" { print iface; iface="" }'
+}
+
+build_wifi_elements() {
+	wifi_elements=''
+	wifi_count=0
+	ap_interfaces="$(discover_wifi_aps)" || fail_closed 'iw-enumeration'
+	while IFS= read -r wifi_ifname; do
+		[ -n "$wifi_ifname" ] || continue
+		case "$wifi_ifname" in *[!A-Za-z0-9_.-]*) fail_closed 'iw-invalid-ifname' ;; esac
+		[ "${#wifi_ifname}" -le 15 ] || fail_closed 'iw-long-ifname'
+		[ -e "$SYS_CLASS_NET/$wifi_ifname" ] || fail_closed "iw-missing:$wifi_ifname"
+		case " $wifi_elements " in
+			*" \"$wifi_ifname\" "*) continue ;;
+		esac
+		if [ -n "$wifi_elements" ]; then
+			wifi_elements="$wifi_elements, \"$wifi_ifname\""
+		else
+			wifi_elements="\"$wifi_ifname\""
+		fi
+		wifi_count=$((wifi_count + 1))
+	done <<EOF
+$ap_interfaces
+EOF
+	[ "$wifi_count" -gt 0 ] || fail_closed 'no-live-ap'
+}
+
+write_ruleset() {
+	RULES_FILE="$STATE_DIR/rules.$$"
+	cat 9>&- >"$RULES_FILE" <<EOF
+table bridge $BRIDGE_TABLE {}
+delete table bridge $BRIDGE_TABLE
+table bridge $BRIDGE_TABLE {
+	set wifi_ap_ifaces {
+		type ifname
+		flags constant
+		elements = { $wifi_elements }
+	}
+
+	chain ingress {
+		type filter hook prerouting priority -310; policy accept;
+		# No forwarded frame may impersonate the locally owned endpoint.  Local
+		# replies do not traverse bridge prerouting, so these source drops reject
+		# cable/AP spoofing without affecting the real ARP/IP response path.
+		ether type arp arp saddr ip $RESCUE_IP counter drop comment "CR6608_RESCUE_SOURCE_SPOOF_ARP_DENY"
+		vlan type arp arp saddr ip $RESCUE_IP counter drop comment "CR6608_RESCUE_SOURCE_SPOOF_VLAN_ARP_DENY"
+		ether type ip ip saddr $RESCUE_IP counter drop comment "CR6608_RESCUE_SOURCE_SPOOF_IP_DENY"
+		vlan type ip ip saddr $RESCUE_IP counter drop comment "CR6608_RESCUE_SOURCE_SPOOF_VLAN_IP_DENY"
+		iifname @wifi_ap_ifaces ether type arp arp daddr ip $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_ARP"
+		ether type arp arp daddr ip $RESCUE_IP counter drop comment "CR6608_RESCUE_WIRED_ARP_DENY"
+		iifname @wifi_ap_ifaces vlan type arp arp daddr ip $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_ARP"
+		vlan type arp arp daddr ip $RESCUE_IP counter drop comment "CR6608_RESCUE_WIRED_VLAN_ARP_DENY"
+		iifname @wifi_ap_ifaces ether type ip ip daddr $RESCUE_IP tcp dport { 80, 443 } meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_WEB"
+		iifname @wifi_ap_ifaces ether type ip ip daddr $RESCUE_IP ip protocol icmp icmp type echo-request meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_PING"
+		ether type ip ip daddr $RESCUE_IP counter drop comment "CR6608_RESCUE_WIRED_DENY"
+		iifname @wifi_ap_ifaces vlan type ip ip daddr $RESCUE_IP tcp dport { 80, 443 } meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_WEB"
+		iifname @wifi_ap_ifaces vlan type ip ip daddr $RESCUE_IP ip protocol icmp icmp type echo-request meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_PING"
+		vlan type ip ip daddr $RESCUE_IP counter drop comment "CR6608_RESCUE_WIRED_VLAN_DENY"
+	}
+
+	chain egress {
+		type filter hook postrouting priority 310; policy accept;
+		oifname @wifi_ap_ifaces ether type arp arp saddr ip $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_ARP_REPLY"
+		ether type arp arp saddr ip $RESCUE_IP drop comment "CR6608_RESCUE_WIRED_ARP_REPLY_DENY"
+		oifname @wifi_ap_ifaces vlan type arp arp saddr ip $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_ARP_REPLY"
+		vlan type arp arp saddr ip $RESCUE_IP drop comment "CR6608_RESCUE_WIRED_VLAN_ARP_REPLY_DENY"
+		oifname @wifi_ap_ifaces ether type ip ip saddr $RESCUE_IP tcp sport { 80, 443 } meta mark $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_WEB_REPLY"
+		oifname @wifi_ap_ifaces ether type ip ip saddr $RESCUE_IP ip protocol icmp meta mark $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_ICMP_REPLY"
+		ether type ip ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_WIRED_REPLY_DENY"
+		oifname @wifi_ap_ifaces vlan type ip ip saddr $RESCUE_IP tcp sport { 80, 443 } meta mark $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_WEB_REPLY"
+		oifname @wifi_ap_ifaces vlan type ip ip saddr $RESCUE_IP ip protocol icmp meta mark $RESCUE_PACKET_MARK accept comment "CR6608_RESCUE_WIFI_VLAN_ICMP_REPLY"
+		vlan type ip ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_WIRED_VLAN_REPLY_DENY"
+	}
+}
+
+table inet $INET_TABLE {}
+delete table inet $INET_TABLE
+table inet $INET_TABLE {
+	chain direct_input {
+		type filter hook input priority -310; policy accept;
+		ip daddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_INET_IN"
+		iifname "$rescue_path_device" meta mark $RESCUE_PACKET_MARK ip daddr $RESCUE_IP accept comment "CR6608_RESCUE_DIRECT_MARK_ALLOW"
+		ip daddr $RESCUE_IP drop comment "CR6608_RESCUE_DIRECT_INPUT_DENY"
+	}
+	chain direct_output {
+		type filter hook output priority 310; policy accept;
+		ip saddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_LEGACY_INET_OUT"
+		oifname "$rescue_path_device" ip saddr $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept
+		ip saddr $RESCUE_IP drop comment "CR6608_RESCUE_DIRECT_OUTPUT_DENY"
+	}
+}
+
+# Replace the closed-mode static gate with its active form.  Legacy protection
+# remains in inet input/output (local traffic only), while broad bridge matches
+# for the legacy public address are removed so ordinary forwarded Internet
+# traffic is never black-holed after migration.
+table bridge $STATIC_BRIDGE_TABLE {}
+delete table bridge $STATIC_BRIDGE_TABLE
+table bridge $STATIC_BRIDGE_TABLE {
+	chain mark_gate_ingress {
+		type filter hook prerouting priority -300; policy accept;
+		ether type arp arp daddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_ARP_MARK_DENY"
+		vlan type arp arp daddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_MARK_DENY"
+		ether type ip ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_IP_MARK_DENY"
+		vlan type ip ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_MARK_DENY"
+	}
+	chain mark_gate_egress {
+		type filter hook postrouting priority 320; policy accept;
+		ether type arp arp saddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_ARP_REPLY_MARK_DENY"
+		vlan type arp arp saddr ip $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_REPLY_MARK_DENY"
+		ether type ip ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_IP_REPLY_MARK_DENY"
+		vlan type ip ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_REPLY_MARK_DENY"
+	}
+}
+
+table inet $STATIC_INET_TABLE {}
+delete table inet $STATIC_INET_TABLE
+table inet $STATIC_INET_TABLE {
+	chain mark_gate_input {
+		type filter hook input priority -300; policy accept;
+		ip daddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_INET_IN"
+		ip daddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_INET_MARK_DENY"
+	}
+	chain mark_gate_output {
+		type filter hook output priority 320; policy accept;
+		ip saddr $LEGACY_RESCUE_IP drop comment "CR6608_RESCUE_STATIC_LEGACY_INET_OUT"
+		ip saddr $RESCUE_IP meta mark != $RESCUE_PACKET_MARK drop comment "CR6608_RESCUE_STATIC_INET_REPLY_MARK_DENY"
+	}
+}
+EOF
+}
+
+verify_rules() {
+	bridge_rules="$(exec 9>&-; run_timed "$NFT_BIN" list table bridge "$BRIDGE_TABLE" 2>/dev/null)" || return 1
+	inet_rules="$(exec 9>&-; run_timed "$NFT_BIN" list table inet "$INET_TABLE" 2>/dev/null)" || return 1
+	static_bridge_rules="$(exec 9>&-; run_timed "$NFT_BIN" list table bridge "$STATIC_BRIDGE_TABLE" 2>/dev/null)" || return 1
+	static_inet_rules="$(exec 9>&-; run_timed "$NFT_BIN" list table inet "$STATIC_INET_TABLE" 2>/dev/null)" || return 1
+	for bridge_marker in \
+		CR6608_RESCUE_SOURCE_SPOOF_ARP_DENY \
+		CR6608_RESCUE_SOURCE_SPOOF_VLAN_ARP_DENY \
+		CR6608_RESCUE_SOURCE_SPOOF_IP_DENY \
+		CR6608_RESCUE_SOURCE_SPOOF_VLAN_IP_DENY \
+		CR6608_RESCUE_WIFI_ARP \
+		CR6608_RESCUE_WIRED_ARP_DENY \
+		CR6608_RESCUE_WIFI_VLAN_ARP \
+		CR6608_RESCUE_WIRED_VLAN_ARP_DENY \
+		CR6608_RESCUE_WIFI_WEB \
+		CR6608_RESCUE_WIFI_PING \
+		CR6608_RESCUE_WIRED_DENY \
+		CR6608_RESCUE_WIFI_VLAN_WEB \
+		CR6608_RESCUE_WIFI_VLAN_PING \
+		CR6608_RESCUE_WIRED_VLAN_DENY \
+		CR6608_RESCUE_WIFI_ARP_REPLY \
+		CR6608_RESCUE_WIRED_ARP_REPLY_DENY \
+		CR6608_RESCUE_WIFI_VLAN_ARP_REPLY \
+		CR6608_RESCUE_WIRED_VLAN_ARP_REPLY_DENY \
+		CR6608_RESCUE_WIFI_WEB_REPLY \
+		CR6608_RESCUE_WIFI_ICMP_REPLY \
+		CR6608_RESCUE_WIRED_REPLY_DENY \
+		CR6608_RESCUE_WIFI_VLAN_WEB_REPLY \
+		CR6608_RESCUE_WIFI_VLAN_ICMP_REPLY \
+		CR6608_RESCUE_WIRED_VLAN_REPLY_DENY; do
+		case "$bridge_rules" in *"$bridge_marker"*) ;; *) return 1 ;; esac
+	done
+	# Membership must match the current AP list exactly.  Merely finding every
+	# live AP would allow a stale ifname to remain authorized and later be reused
+	# by a non-AP interface.
+	( printf '%s\n' "$bridge_rules" ) 9>&- |
+		awk -v expected="$ap_interfaces" '
+			BEGIN {
+				count=split(expected, item, /[[:space:]]+/)
+				for (i=1; i<=count; i++) {
+					if (item[i] == "") continue
+					if (!(item[i] in want)) want_count++
+					want[item[i]]=1
+				}
+			}
+			$1 == "set" && $2 == "wifi_ap_ifaces" { in_set=1; found_set=1; next }
+			in_set && $1 == "}" { in_set=0; next }
+			in_set {
+				line=$0
+				while (match(line, /"[^"]+"/)) {
+					name=substr(line,RSTART+1,RLENGTH-2)
+					got[name]++
+					got_count++
+					line=substr(line,RSTART+RLENGTH)
+				}
+			}
+			END {
+				if (!found_set || got_count != want_count) exit 1
+				for (name in want) if (got[name] != 1) exit 1
+				for (name in got) if (want[name] != 1 || got[name] != 1) exit 1
+			}' 9>&- || return 1
+	for inet_marker in \
+		CR6608_RESCUE_DIRECT_MARK_ALLOW \
+		CR6608_RESCUE_DIRECT_INPUT_DENY \
+		CR6608_RESCUE_DIRECT_OUTPUT_DENY \
+		CR6608_RESCUE_LEGACY_INET_IN \
+		CR6608_RESCUE_LEGACY_INET_OUT; do
+		case "$inet_rules" in *"$inet_marker"*) ;; *) return 1 ;; esac
+	done
+	case "$inet_rules" in
+		*"iifname \"$rescue_path_device\" meta mark $RESCUE_PACKET_MARK ip daddr $RESCUE_IP accept"*) ;;
+		*) return 1 ;;
+	esac
+	case "$inet_rules" in
+		*"oifname \"$rescue_path_device\" ip saddr $RESCUE_IP meta mark set $RESCUE_PACKET_MARK accept"*) ;;
+		*) return 1 ;;
+	esac
+	for static_bridge_marker in \
+		CR6608_RESCUE_STATIC_BRIDGE_ARP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_ARP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_ARP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_IP_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_BRIDGE_VLAN_IP_REPLY_MARK_DENY; do
+		case "$static_bridge_rules" in *"$static_bridge_marker"*) ;; *) return 1 ;; esac
+	done
+	for static_inet_marker in \
+		CR6608_RESCUE_STATIC_INET_MARK_DENY \
+		CR6608_RESCUE_STATIC_INET_REPLY_MARK_DENY \
+		CR6608_RESCUE_STATIC_LEGACY_INET_IN \
+		CR6608_RESCUE_STATIC_LEGACY_INET_OUT; do
+		case "$static_inet_rules" in *"$static_inet_marker"*) ;; *) return 1 ;; esac
+	done
+	return 0
+}
+
+read_canonical_ruleset() {
+	exec 9>&-
+	canonical_bridge="$(
+		run_timed "$NFT_BIN" list table bridge "$BRIDGE_TABLE" 2>/dev/null
+	)" || return 1
+	canonical_inet="$(
+		run_timed "$NFT_BIN" list table inet "$INET_TABLE" 2>/dev/null
+	)" || return 1
+	canonical_static_bridge="$(
+		run_timed "$NFT_BIN" list table bridge "$STATIC_BRIDGE_TABLE" 2>/dev/null
+	)" || return 1
+	canonical_static_inet="$(
+		run_timed "$NFT_BIN" list table inet "$STATIC_INET_TABLE" 2>/dev/null
+	)" || return 1
+	{
+		printf 'family bridge\n%s\n' "$canonical_bridge"
+		printf 'family inet\n%s\n' "$canonical_inet"
+		printf 'family bridge-static\n%s\n' "$canonical_static_bridge"
+		printf 'family inet-static\n%s\n' "$canonical_static_inet"
+	} | awk '
+		NF {
+			# nft expands a `counter` statement to live packet/byte totals.  Keep
+			# the counter and every rule token in the integrity snapshot, but
+			# normalize only those two volatile numeric values so ordinary denied
+			# cable traffic cannot look like ruleset tampering.
+			for (i=1; i<=NF-4; i++)
+				if ($i == "counter" && $(i+1) == "packets" && $(i+3) == "bytes") {
+					$(i+2)="<packets>"
+					$(i+4)="<bytes>"
+				}
+			$1=$1
+			print
+		}'
+}
+
+write_ruleset_snapshot() {
+	if [ -e "$RULESET_STATE_FILE" ] || [ -L "$RULESET_STATE_FILE" ]; then
+		[ -f "$RULESET_STATE_FILE" ] && [ ! -L "$RULESET_STATE_FILE" ] || return 1
+	fi
+	canonical_rules="$(read_canonical_ruleset)" || return 1
+	[ -n "$canonical_rules" ] || return 1
+	ruleset_state_tmp="$RULESET_STATE_FILE.$$"
+	[ ! -e "$ruleset_state_tmp" ] && [ ! -L "$ruleset_state_tmp" ] || return 1
+	printf '%s\n' "$canonical_rules" >"$ruleset_state_tmp" || return 1
+	chmod 0600 "$ruleset_state_tmp" 9>&- 2>/dev/null || {
+		rm -f -- "$ruleset_state_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+	mv -f -- "$ruleset_state_tmp" "$RULESET_STATE_FILE" 9>&- 2>/dev/null || {
+		rm -f -- "$ruleset_state_tmp" 9>&- 2>/dev/null || true
+		return 1
+	}
+}
+
+verify_ruleset_snapshot() {
+	[ -f "$RULESET_STATE_FILE" ] && [ ! -L "$RULESET_STATE_FILE" ] || return 1
+	stored_rules="$(exec 9>&-; cat "$RULESET_STATE_FILE" 2>/dev/null)" || return 1
+	[ -n "$stored_rules" ] || return 1
+	current_rules="$(read_canonical_ruleset)" || return 1
+	[ "$current_rules" = "$stored_rules" ]
+}
+
+verify_address() {
+	address_records="$(
+		exec 9>&-
+		run_timed "$IP_BIN" -4 -o addr show 2>/dev/null
+	)" || return 1
+	( printf '%s\n' "$address_records" ) 9>&- |
+		awk -v cidr="$RESCUE_CIDR" -v expected_dev="$rescue_path_device" '
+			{ split($2, devparts, "@"); split($4, parts, "/") }
+			parts[1] == "221.221.221.221" {
+				total++
+				if ($3 == "inet" && $4 == cidr && devparts[1] == expected_dev) valid++
+			}
+			END { exit !(total == 1 && valid == 1) }' 9>&-
+}
+
+route_records_all() {
+	exec 9>&-
+	run_timed "$IP_BIN" -4 -o route show exact "$RESCUE_CLIENT_SUBNET" \
+		table main
+}
+
+route_records_owned() {
+	exec 9>&-
+	run_timed "$IP_BIN" -4 -o route show exact "$RESCUE_CLIENT_SUBNET" \
+		table main proto "$RESCUE_ROUTE_PROTO"
+}
+
+route_record_count() {
+	count_records="$1"
+	( printf '%s\n' "$count_records" ) 9>&- |
+		awk 'NF { count++ } END { print count + 0 }' 9>&-
+}
+
+check_route_conflicts() {
+	all_route_records="$(route_records_all 2>/dev/null)" || return 1
+	owned_route_records="$(route_records_owned 2>/dev/null)" || return 1
+	# The kernel protocol selector is authoritative.  iproute2 omits the matching
+	# "proto" token from filtered output, so compare record counts rather than two
+	# different text renderings.  Any additional exact-prefix route is foreign.
+	all_route_count="$(route_record_count "$all_route_records")" || return 1
+	owned_route_count="$(route_record_count "$owned_route_records")" || return 1
+	[ "$all_route_count" = "$owned_route_count" ] || return 1
+	[ -z "$owned_route_records" ] && return 0
+	route_owner_for_records "$owned_route_records" >/dev/null 2>&1
+}
+
+verify_route() {
+	all_route_records="$(route_records_all 2>/dev/null)" || return 1
+	owned_route_records="$(route_records_owned 2>/dev/null)" || return 1
+	all_route_count="$(route_record_count "$all_route_records")" || return 1
+	owned_route_count="$(route_record_count "$owned_route_records")" || return 1
+	[ "$all_route_count" = "$owned_route_count" ] || return 1
+	stored_owner="$(load_route_owner 2>/dev/null)" || return 1
+	[ "$stored_owner" = "$rescue_path_device" ] || return 1
+	route_records_match_owner "$owned_route_records" "$stored_owner"
+}
+
+acquire_transition_lock() {
+	lock_attempt=0
+	while [ "$lock_attempt" -lt "$LOCK_WAIT_ATTEMPTS" ]; do
+		# -n makes this a single nonblocking kernel lock attempt.  It is the only
+		# child allowed to inherit fd 9 and does not require scratch/watchdog state.
+		if "$FLOCK_BIN" -xn 9 </dev/null >/dev/null 2>&1; then
+			return 0
+		fi
+		lock_attempt=$((lock_attempt + 1))
+		[ "$lock_attempt" -lt "$LOCK_WAIT_ATTEMPTS" ] || break
+		sleep "$LOCK_RETRY_SECONDS" 9>&-
+	done
+	return 1
+}
+
+release_transition_lock() {
+	[ "$LOCK_HELD" = 1 ] || return 1
+	exec 9>&- || return 1
+	LOCK_HELD='0'
+	return 0
+}
+
+guard_busy() {
+	busy_reason="$1"
+	cleanup_rules_file
+	guard_log "BUSY reason=$busy_reason"
+	printf 'CR6608_RESCUE_GUARD=BUSY reason=%s\n' "$busy_reason" >&2
+	exit 75
+}
+
+guard_serialized_close() {
+	[ -x "$GUARD_BIN" ] || return 1
+	run_stream_timed_seconds "$MONITOR_CHILD_TIMEOUT" "$GUARD_BIN" close \
+		>/dev/null 2>&1
+}
+
+monitor_loop() {
+	guard_log 'MONITOR started'
+	monitor_busy_count=0
+	while :; do
+		monitor_busy_exhausted=0
+		if run_stream_timed_seconds "$MONITOR_CHILD_TIMEOUT" "$GUARD_BIN" health \
+			>/dev/null 2>&1; then
+			monitor_recovered=1
+			monitor_busy_count=0
+		else
+			monitor_health_rc=$?
+			if [ "$monitor_health_rc" -eq 75 ]; then
+				monitor_busy_count=$((monitor_busy_count + 1))
+				if [ "$monitor_busy_count" -ge "$MONITOR_BUSY_LIMIT" ]; then
+					# Repeated rc75 can be real contention, a leaked descriptor, or a
+					# broken flock helper.  Stop trusting it after a bounded number of
+					# cycles and atomically force the endpoint dark without scratch.
+					install_emergency_deny_rules || true
+					monitor_recovered=0
+					monitor_busy_exhausted=1
+					guard_log "FAIL reason=transition-busy-exhausted count=$monitor_busy_count"
+				else
+					# A short legitimate apply/check/close owns the endpoint and is
+					# responsible for leaving a verified-open or closed state.
+					monitor_recovered=1
+					guard_log "MONITOR deferred reason=transition-busy count=$monitor_busy_count"
+				fi
+			else
+				monitor_busy_count=0
+				# `health` closes before ordinary failure.  A watchdog-killed health
+				# is still safe because every recovery apply closes immediately after
+				# acquiring the same lock, before reading UCI or iw state.
+				monitor_recovered=0
+				monitor_attempt=1
+				while [ "$monitor_attempt" -le "$MONITOR_RECOVERY_ATTEMPTS" ]; do
+					if run_stream_timed_seconds "$MONITOR_CHILD_TIMEOUT" "$GUARD_BIN" apply \
+						>/dev/null 2>&1; then
+						monitor_recovered=1
+						guard_log "RECOVERED attempt=$monitor_attempt"
+						break
+					fi
+					monitor_attempt=$((monitor_attempt + 1))
+					[ "$monitor_attempt" -le "$MONITOR_RECOVERY_ATTEMPTS" ] || break
+					sleep "$MONITOR_RECOVERY_DELAY"
+				done
+			fi
+		fi
+
+		if [ "$monitor_recovered" != 1 ]; then
+			if [ "$monitor_busy_exhausted" != 1 ]; then
+				guard_serialized_close >/dev/null 2>&1 || true
+			fi
+			guard_log 'FAIL reason=monitor-recovery-exhausted'
+			# Stay alive and dark.  Crashing here can defeat procd's respawn
+			# threshold after a long healthy run and leave no recovery owner.
+			sleep "$MONITOR_FAILURE_BACKOFF" || return 1
+			continue
+		fi
+		sleep "$MONITOR_INTERVAL" || return 1
+	done
+}
+
+guard_signal_exit() {
+	trap - HUP INT TERM
+	run_limit_cancel_active
+	cleanup_rules_file
+	if [ "$LOCK_HELD" = 1 ]; then
+		close_endpoint
+	else
+		guard_serialized_close >/dev/null 2>&1 || true
+	fi
+	exit 143
+}
+
+mode="${1:-apply}"
+case "$mode" in
+	start|apply|check|health|monitor|close|quiesce|firewall-stop) ;;
+	*) printf 'usage: %s [start|apply|check|health|monitor|close|quiesce|firewall-stop]\n' "$0" >&2; exit 2 ;;
+esac
+
+trap guard_signal_exit HUP INT TERM
+
+if [ "$mode" = monitor ]; then
+	for required_command in "$SETSID_BIN" "$KILL_BIN" "$FLOCK_BIN"; do
+		have_command "$required_command" || fail_closed "missing-command:$required_command"
+	done
+	[ -r "$PROC_ROOT/1/stat" ] || fail_closed 'missing-proc-stat'
+	[ -x "$GUARD_BIN" ] || fail_closed 'missing-guard-self'
+	monitor_loop
+	monitor_rc=$?
+	[ "$monitor_rc" -eq 0 ] || guard_serialized_close >/dev/null 2>&1 || true
+	exit "$monitor_rc"
+fi
+
+have_command "$FLOCK_BIN" || fail_closed "missing-command:$FLOCK_BIN"
+[ -r "$LOCK_FILE" ] || fail_closed 'lock-open'
+exec 9<"$LOCK_FILE" || fail_closed 'lock-open'
+acquire_transition_lock || guard_busy 'lock-acquire'
+LOCK_HELD='1'
+
+for required_command in "$SETSID_BIN" "$KILL_BIN"; do
+	have_command "$required_command" || fail_closed "missing-command:$required_command"
+done
+[ -r "$PROC_ROOT/1/stat" ] || fail_closed 'missing-proc-stat'
+
+if [ "$mode" = quiesce ]; then
+	# Publish the operator's stop intent while holding the same transition lock
+	# used by monitor recovery.  A health/apply wake after unlock can then only
+	# reinforce the dark boundary; it cannot race procd's subsequent kill.
+	mkdir -p -- "$STATE_DIR" 9>&- 2>/dev/null || fail_closed 'state-directory'
+	publish_quiesce_state || fail_closed 'quiesce-state'
+	close_endpoint || fail_closed 'quiesce-close'
+	release_transition_lock || fail_closed 'lock-release'
+	guard_log 'QUIESCED mode=operator-stop'
+	printf 'CR6608_RESCUE_GUARD=QUIESCED mode=operator-stop\n'
+	exit 0
+fi
+
+case "$mode" in
+	apply|check|health)
+		if quiesce_state_present; then
+			close_endpoint || fail_closed 'quiesced-close'
+			release_transition_lock || fail_closed 'lock-release'
+			printf 'CR6608_RESCUE_GUARD=QUIESCED mode=%s\n' "$mode"
+			exit 0
+		fi
+		;;
+esac
+
+if [ "$mode" = firewall-stop ] && rescue_monitor_is_running; then
+	# A firewall Stop may preserve the endpoint only when a live procd monitor
+	# already owns recovery.  Merely being enabled is insufficient: LuCI's Stop
+	# action must leave rescue dark until the operator starts it again.
+	firewall_monitor_was_running='1'
+fi
+
+case "$mode" in
+	start|apply|firewall-stop)
+		close_endpoint || fail_closed 'dark-close'
+		;;
+esac
+
+if [ "$mode" = close ]; then
+	close_endpoint || fail_closed 'close-incomplete'
+	release_transition_lock || fail_closed 'lock-release'
+	printf 'CR6608_RESCUE_GUARD=CLOSED\n'
+	exit 0
+fi
+
+# Keep the guard lock across dark-close, removal of inet/fw4, and the complete
+# verified re-activation so neither monitor nor UI rollback can interleave.
+if [ "$mode" = firewall-stop ]; then
+	have_command "$FW4_BIN" || fail_closed "missing-command:$FW4_BIN"
+	# Never use `fw4 flush`: it deletes unrelated bridge/inet product tables.
+	# `fw4 stop` removes only inet/fw4.  Treat an already-absent fw4 table as an
+	# idempotent stop, but fail closed if the command failed while it still exists.
+	run_stream_timed_seconds "$FIREWALL_TIMEOUT" "$FW4_BIN" stop \
+		>/dev/null 2>&1 || true
+	# Do not trust the command's exit status: prove that the owned table is gone.
+	# A failed query is distinct from an absent table and therefore fails closed.
+	verify_fw4_absent || fail_closed 'firewall-stop'
+	if quiesce_state_present ||
+	   [ "$firewall_monitor_was_running" != 1 ] ||
+	   ! rescue_monitor_is_running; then
+		close_endpoint || fail_closed 'firewall-stop-close'
+		release_transition_lock || fail_closed 'lock-release'
+		guard_log 'CLOSED mode=firewall-stop monitor=stopped'
+		printf 'CR6608_RESCUE_GUARD=CLOSED mode=firewall-stop monitor=stopped\n'
+		exit 0
+	fi
+fi
+
+# State is needed only after close has atomically installed the deny boundary.
+# Thus an ENOSPC/read-only tmpfs failure cannot expose either rescue address.
+mkdir -p -- "$STATE_DIR" 9>&- 2>/dev/null || fail_closed 'state-directory'
+
+case "$mode" in
+	health) required_commands="$NFT_BIN $IW_BIN $IP_BIN" ;;
+	*) required_commands="$NFT_BIN $UCI_BIN $IW_BIN $IP_BIN $UBUS_BIN $JSONFILTER_BIN" ;;
+esac
+for required_command in $required_commands; do
+	have_command "$required_command" || fail_closed "missing-command:$required_command"
+done
+
+if [ "$mode" = health ]; then
+	rescue_path_device="$(load_route_owner 2>/dev/null)" ||
+		fail_closed 'route-owner-state'
+	# Prove the last published kernel ruleset before waiting on live AP discovery.
+	verify_ruleset_snapshot || fail_closed 'rules-snapshot-health'
+	build_wifi_elements
+	verify_rules || fail_closed 'rules-health'
+	verify_ruleset_snapshot || fail_closed 'rules-snapshot-health'
+	verify_address || fail_closed 'address-health'
+	verify_route || fail_closed 'route-health'
+	release_transition_lock || fail_closed 'lock-release'
+	# Health is called every monitor interval; avoid flash/log churn on success.
+	printf 'CR6608_RESCUE_GUARD=PASS mode=health wifi_aps=%s address=%s\n' \
+		"$wifi_count" "$RESCUE_CIDR"
+	exit 0
+fi
+
+if [ "$mode" = check ]; then
+	# Full operator checks are intentionally slower; bracket the UCI walk with
+	# exact kernel snapshots so a concurrent rule loss cannot be reported PASS.
+	verify_ruleset_snapshot || fail_closed 'rules-snapshot-health'
+fi
+validate_configuration
+build_wifi_elements
+check_route_conflicts || fail_closed 'route-conflict'
+
+if [ "$mode" = firewall-stop ] && ! rescue_monitor_is_running; then
+	close_endpoint || fail_closed 'firewall-stop-close'
+	release_transition_lock || fail_closed 'lock-release'
+	guard_log 'CLOSED mode=firewall-stop monitor=stopped'
+	printf 'CR6608_RESCUE_GUARD=CLOSED mode=firewall-stop monitor=stopped\n'
+	exit 0
+fi
+
+if [ "$mode" = check ]; then
+	verify_rules || fail_closed 'rules-health'
+	verify_ruleset_snapshot || fail_closed 'rules-snapshot-health'
+	verify_address || fail_closed 'address-health'
+	verify_route || fail_closed 'route-health'
+	release_transition_lock || fail_closed 'lock-release'
+	guard_log "PASS mode=check wifi_aps=$wifi_count address=$RESCUE_CIDR"
+	printf 'CR6608_RESCUE_GUARD=PASS mode=check wifi_aps=%s address=%s\n' \
+		"$wifi_count" "$RESCUE_CIDR"
+	exit 0
+fi
+
+write_ruleset || fail_closed 'rules-write'
+run_timed "$NFT_BIN" -c -f "$RULES_FILE" >/dev/null 2>&1 || fail_closed 'rules-precheck'
+run_timed "$NFT_BIN" -f "$RULES_FILE" >/dev/null 2>&1 || fail_closed 'rules-apply'
+cleanup_rules_file
+verify_rules || fail_closed 'rules-health'
+write_ruleset_snapshot || fail_closed 'rules-snapshot-state'
+remove_owned_route_for_apply >/dev/null 2>&1 || fail_closed 'route-owned-delete'
+if [ "$mode" = firewall-stop ] && ! rescue_monitor_is_running; then
+	close_endpoint || fail_closed 'firewall-stop-close'
+	release_transition_lock || fail_closed 'lock-release'
+	guard_log 'CLOSED mode=firewall-stop monitor=stopped'
+	printf 'CR6608_RESCUE_GUARD=CLOSED mode=firewall-stop monitor=stopped\n'
+	exit 0
+fi
+run_timed "$IP_BIN" -4 addr add "$RESCUE_CIDR" \
+	dev "$rescue_path_device" >/dev/null 2>&1 || fail_closed 'address-apply'
+PRESERVE_ROUTE_ON_CLOSE='1'
+run_timed "$IP_BIN" -4 route add "$RESCUE_CLIENT_SUBNET" \
+	dev "$rescue_path_device" src "$RESCUE_IP" scope link \
+	proto "$RESCUE_ROUTE_PROTO" >/dev/null 2>&1 || fail_closed 'route-apply'
+# Publish ownership only after `ip route add` succeeds.  If publication fails,
+# leave the now-unowned route untouched behind deny-only nft and remove the
+# local address; deleting an identical foreign replacement is not race-safe.
+if ! write_route_owner; then
+	fail_closed 'route-owner-state'
+fi
+PRESERVE_ROUTE_ON_CLOSE='0'
+verify_address || fail_closed 'address-health'
+verify_route || fail_closed 'route-health'
+verify_rules || fail_closed 'rules-health'
+verify_ruleset_snapshot || fail_closed 'rules-snapshot-health'
+
+if [ "$mode" = start ]; then
+	# Only a fully verified explicit init start may clear an operator stop.  Any
+	# activation failure keeps the marker, so hotplug/reload cannot later open an
+	# endpoint for a service whose procd monitor was never spawned.
+	clear_quiesce_state || fail_closed 'quiesce-clear'
+fi
+
+if [ "$mode" = firewall-stop ] && ! rescue_monitor_is_running; then
+	close_endpoint || fail_closed 'firewall-stop-close'
+	release_transition_lock || fail_closed 'lock-release'
+	guard_log 'CLOSED mode=firewall-stop monitor=stopped'
+	printf 'CR6608_RESCUE_GUARD=CLOSED mode=firewall-stop monitor=stopped\n'
+	exit 0
+fi
+
+release_transition_lock || fail_closed 'lock-release'
+guard_log "PASS mode=$mode wifi_aps=$wifi_count address=$RESCUE_CIDR"
+printf 'CR6608_RESCUE_GUARD=PASS mode=%s wifi_aps=%s address=%s\n' \
+	"$mode" "$wifi_count" "$RESCUE_CIDR"
+exit 0

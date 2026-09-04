@@ -1,0 +1,58 @@
+#!/bin/sh
+# Normalize preserved management listeners to the IPv4-only product policy.
+# IPv6 wildcard listeners are removed, HTTP remains available on IPv4 port 80,
+# and TLS remains pinned to the audited IPv4 port 443 endpoint.
+# Redirect is deliberately enabled only by cr6608-retail-provision after unique
+# credentials exist; existing units retain HTTP access during the upgrade.
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+if [ -z "$board" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	board="$(ubus call system board 2>/dev/null | jsonfilter -e '@.board_name' 2>/dev/null)"
+fi
+[ -n "$board" ] || exit 1
+[ "$board" = xiaomi,mi-router-cr6608 ] || exit 0
+
+section="$(uci -q show uhttpd 2>/dev/null |
+	sed -n 's/^uhttpd\.\([^=]*\)=uhttpd$/\1/p' | head -n 1)"
+[ -n "$section" ] || exit 1
+
+changed=0
+abort_migration() {
+	uci -q revert uhttpd >/dev/null 2>&1 || true
+	exit 1
+}
+
+http_listeners="$(uci -q get "uhttpd.${section}.listen_http" 2>/dev/null)"
+for listener in $http_listeners; do
+	case "$listener" in
+		\[::\]:*)
+			port="${listener##*:}"
+			case " $http_listeners " in *" 0.0.0.0:$port "*) ;; *)
+				uci add_list "uhttpd.${section}.listen_http=0.0.0.0:$port" || abort_migration
+			;; esac
+			uci -q del_list "uhttpd.${section}.listen_http=$listener" || abort_migration
+			changed=1
+		;;
+	esac
+done
+
+https_listeners="$(uci -q get "uhttpd.${section}.listen_https" 2>/dev/null)"
+case " $https_listeners " in *" 0.0.0.0:443 "*) ;; *)
+	uci add_list "uhttpd.${section}.listen_https=0.0.0.0:443" || abort_migration
+	changed=1
+;; esac
+for listener in $https_listeners; do
+	case "$listener" in
+		\[::\]:*) uci -q del_list "uhttpd.${section}.listen_https=$listener" || abort_migration; changed=1 ;;
+	esac
+done
+if ! uci -q get "uhttpd.${section}.cert" >/dev/null 2>&1; then
+	uci set "uhttpd.${section}.cert=/etc/uhttpd.crt" || abort_migration
+	changed=1
+fi
+if ! uci -q get "uhttpd.${section}.key" >/dev/null 2>&1; then
+	uci set "uhttpd.${section}.key=/etc/uhttpd.key" || abort_migration
+	changed=1
+fi
+[ "$changed" -eq 0 ] || uci commit uhttpd || abort_migration
+exit 0

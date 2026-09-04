@@ -1,4 +1,21 @@
-name: Build CR6608 v92 (38 dBm from source, real mt76 driver)
+name: "[BROKEN - superseded] Build CR6608 v92 (38 dBm from source)"
+
+# STATUS: this workflow cannot run in this repository.
+#
+#   * It reads router/cr6608/ubuntu-build/{files,cr6608.seed.config,
+#     apply-mt76-38.py}. None of those paths exist here, so the "Bake in the
+#     v92 overlay" step fails on its first cp.
+#   * It targets OpenWrt 24.10.6 and rewrites mt7915 sources with an ad-hoc
+#     Python script rather than applying the reviewed patch stack.
+#
+# Use .github/workflows/build-cr6608-v87.yml instead. That one builds
+# OpenWrt 25.12.5 from router/cr6608/source-kit, applies all twelve reviewed
+# mt76 patches with zero fuzz, and verifies the CR6608 symbols in both the
+# compiled module and the shipped image.
+#
+# Kept only so its history and intent stay visible; delete it whenever you
+# like.
+
 
 # Builds a from-source OpenWrt 24.10.6 image for the Xiaomi CR6608 on GitHub's
 # Ubuntu runners (they have the open internet + toolchain this needs). Bakes in

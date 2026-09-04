@@ -1,0 +1,182 @@
+#!/bin/sh
+# Read-only by default. Use --probe-3800 for a one-shot cfg80211 request.
+
+probe=0
+probe_error=""
+probe_restore_needed=0
+IEEE80211_ROOT="${CR6608_IEEE80211_ROOT:-/sys/class/ieee80211}"
+case "${1:-}" in
+	'') ;;
+	--probe-3800) probe=1 ;;
+	*)
+		echo "usage: cr6608-txpower-verify [--probe-3800]" >&2
+		exit 2
+		;;
+esac
+
+probe_cleanup() {
+	trap - EXIT HUP INT TERM
+	[ -z "$probe_error" ] || rm -f -- "$probe_error" 2>/dev/null || true
+	[ "$probe_restore_needed" = 1 ] || return 0
+	wifi reload >/dev/null 2>&1 || true
+}
+
+radio_sections() {
+	uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+radio_interfaces() {
+	local radio="$1"
+	ubus call network.wireless status 2>/dev/null |
+		jsonfilter -e "@.${radio}.interfaces[*].ifname" 2>/dev/null
+}
+
+interface_phy() {
+	local iface="$1" index
+	index="$(iw dev "$iface" info 2>/dev/null |
+		awk '$1 == "wiphy" { print $2; exit }')"
+	[ -n "$index" ] && printf 'phy%s\n' "$index"
+}
+
+interface_power() {
+	iw dev "$1" info 2>/dev/null |
+		awk '$1 == "txpower" { print $2; exit }'
+}
+
+echo "================ CR6608 TX-POWER VERIFY ================"
+echo "# Board, release and kernel"
+ubus call system board 2>/dev/null || true
+uname -a 2>/dev/null || true
+echo
+
+echo "# Module request and CR6608-only DTS gate"
+cat /etc/modules.d/mt7915e 2>/dev/null || true
+printf 'cr6608_rf_38dbm='
+cat /sys/module/mt7915e/parameters/cr6608_rf_38dbm 2>/dev/null || echo "missing"
+printf 'dts_property='
+dts_property="$(find /sys/firmware/devicetree/base \
+	-name 'mediatek,cr6608-lab-txpower-38dbm' -print 2>/dev/null |
+	head -n 1)"
+[ -n "$dts_property" ] && echo "$dts_property" || echo "missing"
+echo
+
+echo "# UCI wireless configuration"
+uci show wireless 2>/dev/null || true
+echo
+
+echo "# Regulatory domain"
+iw reg get 2>/dev/null || true
+echo
+
+echo "# Driver channel and per-channel power limits"
+for phy in "$IEEE80211_ROOT"/*; do
+	[ -e "$phy" ] || continue
+	phy="${phy##*/}"
+	echo "## $phy"
+	iw phy "$phy" info 2>/dev/null || true
+done
+echo
+
+echo "# Runtime interfaces and driver-reported power"
+iw dev 2>/dev/null || true
+echo
+
+echo "# iwinfo"
+iwinfo 2>/dev/null || true
+echo
+
+echo "# Requested versus accepted"
+for radio in $(radio_sections); do
+	requested="$(uci -q get "wireless.${radio}.txpower" 2>/dev/null)"
+	country="$(uci -q get "wireless.${radio}.country" 2>/dev/null)"
+	channel="$(uci -q get "wireless.${radio}.channel" 2>/dev/null)"
+	interfaces="$(radio_interfaces "$radio")"
+	if [ -z "$interfaces" ]; then
+		printf '%s COUNTRY=%s CHANNEL=%s REQUESTED_POWER=%s dBm IFACE=missing PHY=unknown DRIVER_ACCEPTED_POWER=unknown\n' \
+			"$radio" "${country:-unknown}" "${channel:-unknown}" "${requested:-unknown}"
+		continue
+	fi
+	for iface in $interfaces; do
+		phy="$(interface_phy "$iface")"
+		accepted="$(interface_power "$iface")"
+		printf '%s COUNTRY=%s CHANNEL=%s REQUESTED_POWER=%s dBm IFACE=%s PHY=%s DRIVER_ACCEPTED_POWER=%s dBm\n' \
+			"$radio" "${country:-unknown}" "${channel:-unknown}" "${requested:-unknown}" \
+			"$iface" "${phy:-unknown}" "${accepted:-unknown}"
+	done
+done
+echo
+
+if [ "$probe" -eq 1 ]; then
+	PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+	[ -r "$PRIVATE_RUNTIME_LIB" ] || { echo "private runtime helper unavailable" >&2; exit 1; }
+	. "$PRIVATE_RUNTIME_LIB" || exit 1
+	TXPOWER_VERIFY_RUNTIME_DIR="$(cr6608_private_runtime_dir txpower-verify)" || exit 1
+	probe_error="$(cr6608_private_mktemp "$TXPOWER_VERIFY_RUNTIME_DIR" probe-error)" || exit 1
+	probe_restore_needed=1
+	trap probe_cleanup EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	echo "# One-shot fixed 3800 mBm probe"
+	for phy_path in "$IEEE80211_ROOT"/*; do
+		[ -e "$phy_path" ] || continue
+		phy="${phy_path##*/}"
+		: >"$probe_error" || exit 1
+		if iw phy "$phy" set txpower fixed 3800 2>"$probe_error"; then
+			sleep 1
+			readback="$(
+				for iface in $(iw dev 2>/dev/null |
+					awk '$1 == "Interface" { print $2 }'); do
+					[ "$(interface_phy "$iface")" = "$phy" ] || continue
+					interface_power "$iface"
+				done | head -n 1
+			)"
+			if printf '%s\n' "$readback" | awk '
+				$1 ~ /^[0-9]+([.][0-9]+)?$/ && ($1 + 0) >= 38 { ok = 1 }
+				END { exit(ok ? 0 : 1) }
+			'; then
+				result="accepted readback=${readback}"
+			else
+				result="command-accepted-but-readback=${readback:-unknown}"
+			fi
+		else
+			result="rejected:$(tr '\n' ' ' <"$probe_error")"
+		fi
+		printf '%s PROBE_3800=%s\n' "$phy" "$result"
+	done
+	rm -f -- "$probe_error"
+	probe_error=""
+	echo "# Restoring the persistent UCI request through netifd"
+	if wifi reload >/dev/null 2>&1; then
+		probe_restore_needed=0
+	else
+		echo "RESTORE_WIFI_RELOAD=failed; cleanup retry armed" >&2
+		exit 1
+	fi
+	sleep 3
+	iw dev 2>/dev/null || true
+else
+	echo "PROBE_3800=NOT_RUN (use --probe-3800; it briefly changes the driver request and reloads Wi-Fi)"
+fi
+echo
+
+echo "# mt7915, mt76, cfg80211, calibration and power messages"
+dmesg 2>/dev/null |
+	grep -Ei 'CR6608-LAB-38|mt7915|mt76|cfg80211|eeprom|cal|factory|power|unknown parameter' ||
+	true
+echo
+
+rate_witness="$(dmesg 2>/dev/null |
+	grep -c 'CR6608-RF .*rate-SKU MCU witness verified')"
+mcu_success="$(dmesg 2>/dev/null |
+	grep -c 'CR6608-RF MCU/SKU result.*result=0')"
+path_disabled="$(dmesg 2>/dev/null |
+	grep -c 'rate-SKU MCU witness verified:.*path=disabled-not-verified')"
+printf 'MCU_RATE_SKU_WITNESS_VERIFIED_COUNT=%s\n' "$rate_witness"
+printf 'MCU_SKU_RESULT_SUCCESS_COUNT=%s\n' "$mcu_success"
+printf 'MCU_PATH_SKU_DISABLED_NOT_VERIFIED_COUNT=%s\n' "$path_disabled"
+echo "MCU_EFFECTIVE_RF_POWER=NOT_READ_BACK_BY_FIRMWARE"
+echo "RF_MEASURED_POWER=NOT_MEASURED"
+echo "NOTE=command-completed means transport status only; iw reports driver state, not conducted RF power"
+echo "========================================================="

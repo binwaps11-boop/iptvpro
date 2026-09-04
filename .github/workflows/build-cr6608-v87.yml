@@ -1,0 +1,318 @@
+name: Build CR6608 v87 (OpenWrt 25.12.5, 38 dBm + MU-RU mask 15)
+
+# Builds a from-source OpenWrt 25.12.5 image for the Xiaomi Mi Router CR6608
+# from router/cr6608/source-kit on a GitHub Ubuntu runner, which has the open
+# internet this project's sandbox does not.
+#
+# Scope, stated honestly:
+#   * This is an ENGINEERING build. It applies the source kit's real patch
+#     stack, DTS gates, seed config and files overlay, and it verifies each
+#     step. It is NOT the kit's attested release pipeline (build.sh), which
+#     additionally requires the private signing keys, an independently
+#     received operator trust record, a privileged network-namespace rescue
+#     evidence file and a pinned Playwright/Chromium install.
+#   * The 38 dBm request and MU-RU mask 15 both remain non-sale LAB settings.
+#     Driver/MCU acceptance is not an RF measurement and not a regulatory
+#     approval. See router/cr6608/source-kit/README.md "RF statement".
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Radio profile"
+        required: true
+        default: "ul-forced-lab"
+        type: choice
+        options:
+          - ul-forced-lab   # 38 dBm ON  + MU-RU mask 15 (persistent LAB)
+          - lab             # 38 dBm ON  + MU-RU mask 0
+          - ul-lab          # 38 dBm OFF + MU-RU mask 15
+          - retail          # 38 dBm OFF + MU-RU mask 0
+
+permissions:
+  contents: read
+
+env:
+  OPENWRT_TAG: v25.12.5
+  # Pinned by router/cr6608/source-kit/docs/MT7915-MURU-VENDOR-BASELINE.md and
+  # by OpenWrt 25.12.5's own package/kernel/mt76/Makefile.
+  MT76_COMMIT: 39c960c3ada558b4c2e7915772483d3731573d09
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          echo "== before =="; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "== after =="; df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget quilt \
+            libelf-dev ecj fastjar java-propose-classpath squashfs-tools zstd
+
+      - name: Run the source kit's own contract tests
+        run: |
+          cd router/cr6608/source-kit
+          # These are the pure-source gates that need no device, no signing key
+          # and no privileged namespace. A failure here means the patch stack
+          # itself is inconsistent, so stop before spending an hour compiling.
+          for t in tests/test-muru-driver-port.sh \
+                   tests/test-muru-fault-attribution.sh \
+                   tests/test-ax-feature-contracts.sh \
+                   tests/test-luci-wireless-txpower-preserve.sh \
+                   tests/test-all-channel-38-contract.py; do
+            echo "== $t"
+            case "$t" in
+              *.py) python3 "$t" ;;
+              *)    bash "$t" ;;
+            esac
+          done
+
+      - name: Clone OpenWrt ${{ env.OPENWRT_TAG }}
+        run: |
+          git clone --depth 1 --branch "$OPENWRT_TAG" \
+            https://github.com/openwrt/openwrt.git ow
+          cd ow && git log -1 --oneline
+
+      - name: Apply CR6608 DTS gates
+        run: |
+          cd ow
+          KIT="$GITHUB_WORKSPACE/router/cr6608/source-kit"
+          # -F0: no fuzz. If upstream moved, we want a hard failure, not a
+          # silently misplaced hunk.
+          patch -p1 -F0 < "$KIT/patches/996-cr6608-dts-rf-38dbm-lab-mode.patch"
+          case "${{ inputs.profile }}" in
+            ul-lab|ul-forced-lab)
+              patch -p1 -F0 < "$KIT/patches/996a-cr6608-dts-ul-muru-ram-gate.patch"
+              ;;
+          esac
+          echo "== resulting CR6608 DTS =="
+          cat target/linux/ramips/dts/mt7621_xiaomi_mi-router-cr6608.dts
+
+      - name: Verify the mt76 package pin matches the kit's baseline
+        run: |
+          cd ow
+          PINNED="$(sed -n 's/^PKG_SOURCE_VERSION:=//p' package/kernel/mt76/Makefile)"
+          echo "openwrt mt76 pin: $PINNED"
+          echo "kit baseline    : $MT76_COMMIT"
+          [ "$PINNED" = "$MT76_COMMIT" ] || {
+            echo "::error::mt76 pin drifted from the reviewed baseline"; exit 1; }
+
+      - name: Stage the mt76 driver patches
+        run: |
+          cd ow
+          KIT="$GITHUB_WORKSPACE/router/cr6608/source-kit"
+          DEST=package/kernel/mt76/patches
+          mkdir -p "$DEST"
+          # OpenWrt applies package patches in filename order; the kit's names
+          # already encode that order.
+          for p in 999-mt7915-cr6608-rf-38dbm-request-path.patch \
+                   zz-mt7915-cr6608-factory38-path.patch \
+                   zzz-mt7915-cr6608-firmware-eeprom-shadow.patch \
+                   zzzz-mt7915-cr6608-ul-muru-experimental.patch \
+                   zzzzz-mt7915-cr6608-ul-muru-vendor-baseline.patch \
+                   zzzzzz-01-mt7915-cr6608-muru-mask-state.patch \
+                   zzzzzz-02-mt7915-cr6608-muru-mask-init.patch \
+                   zzzzzz-03-mt7915-cr6608-muru-fault-latch-mac.patch \
+                   zzzzzz-04-mt7915-cr6608-muru-telemetry-debugfs.patch \
+                   zzzzzz-05-mt7915-cr6608-muru-mcu-response.patch \
+                   zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch \
+                   zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch; do
+            cp -v "$KIT/patches/$p" "$DEST/$p"
+          done
+          ls -la "$DEST"
+
+      - name: Prove every driver patch applies with zero fuzz
+        run: |
+          cd ow
+          # Independently reproduce the patch stack against the pinned upstream
+          # tree before the build touches it, so a rejected hunk is reported
+          # here rather than as an opaque compile error later.
+          git clone --quiet https://github.com/openwrt/mt76 /tmp/mt76check
+          cd /tmp/mt76check
+          git checkout --quiet "$MT76_COMMIT"
+          for p in "$GITHUB_WORKSPACE/ow/package/kernel/mt76/patches/"*.patch; do
+            printf '%-62s ' "$(basename "$p")"
+            patch -p1 -F0 -s < "$p" && echo "APPLIED-CLEAN"
+          done
+          echo "== CR6608 symbols now present in the driver source =="
+          grep -c 'cr6608' mt7915/*.c mt7915/*.h | sed 's/^/  /'
+
+      - name: Bake in the files overlay
+        run: |
+          cd ow
+          KIT="$GITHUB_WORKSPACE/router/cr6608/source-kit"
+          mkdir -p files
+          cp -a "$KIT/files/." files/
+          # Use the kit's own applier rather than a raw copy: it validates the
+          # required per-profile file set before it replaces anything, and it
+          # is a no-op for the default lab profile by design.
+          sh "$KIT/profiles/apply-build-profile.sh" "${{ inputs.profile }}" "$PWD/files"
+          chmod 0755 files/usr/sbin/* files/usr/bin/* files/etc/init.d/* \
+                     files/www/cgi-bin/* 2>/dev/null || true
+          echo "== module parameters that will ship =="
+          cat files/etc/modules.d/mt7915e
+          echo "== artifact profile =="
+          cat files/etc/cr6608-artifact-profile
+          echo "== overlay file count =="
+          find files -type f | wc -l
+
+      - name: Add the kit's local packages
+        run: |
+          cd ow
+          KIT="$GITHUB_WORKSPACE/router/cr6608/source-kit"
+          # Same destinations build.sh uses, so feeds/menuconfig resolve the
+          # package names the seed config selects.
+          cp -a "$KIT/packages/prplmesh" package/network/services/prplmesh
+          cp -a "$KIT/packages/cr6608-mndp" package/network/services/cr6608-mndp
+          mkdir -p package/network/services/cr6608-mndp/src
+          install -m 0644 "$KIT/src/cr6608-mndp-advertise.c" \
+            package/network/services/cr6608-mndp/src/cr6608-mndp-advertise.c
+          ls package/network/services/prplmesh package/network/services/cr6608-mndp
+
+      - name: Update and install feeds
+        run: |
+          cd ow
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Seed .config and expand
+        run: |
+          cd ow
+          cp "$GITHUB_WORKSPACE/router/cr6608/source-kit/cr6608.seed.config" .config
+          make defconfig
+          grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y' .config \
+            || { echo "::error::CR6608 device profile not selected"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_kmod-mt7915e=y' .config \
+            || { echo "::error::mt7915e driver not selected"; exit 1; }
+
+      - name: Download sources
+        run: cd ow && make download -j8 V=s
+
+      - name: Build firmware
+        run: |
+          cd ow
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Prove the compiled driver carries the CR6608 changes
+        run: |
+          cd ow
+          KO="$(find build_dir -name 'mt7915e.ko' 2>/dev/null | head -1)"
+          [ -n "$KO" ] || { echo "::error::mt7915e.ko not found"; exit 1; }
+          echo "mt7915e.ko: $KO"
+          MISSING=0
+          # Module parameters are emitted as __param_<name> symbols, so their
+          # presence in the binary proves the gate code was compiled in, not
+          # just that a string was pasted somewhere.
+          for sym in __param_cr6608_rf_38dbm \
+                     __param_cr6608_muru_mask \
+                     __param_cr6608_rf_band0_sku_applied_per_path_half_dbm \
+                     __param_cr6608_rf_band1_sku_applied_per_path_half_dbm \
+                     __param_cr6608_factory38_persisted_match; do
+            if strings -a "$KO" | grep -qx "$sym"; then
+              echo "  OK   $sym"
+            else
+              echo "  MISS $sym"; MISSING=1
+            fi
+          done
+          # Strings unique to the two new attribution patches. These live in
+          # the per-radio debugfs node and the recovery telemetry, so they do
+          # not depend on any optional kernel config.
+          for s in "cr6608_ul_attribution" \
+                   "ul_mumimo_multi_user_ppdus" \
+                   "unattributed_disarms" \
+                   "upstream_dl_floor" \
+                   "strike_limit"; do
+            if strings -a "$KO" | grep -qF "$s"; then
+              echo "  OK   $s"
+            else
+              echo "  MISS $s"; MISSING=1
+            fi
+          done
+          # The per-peer nodes are compiled only when mac80211 debugfs is on
+          # (CONFIG_MAC80211_DEBUGFS, which itself needs CFG80211_DEBUGFS).
+          # Without them there is no client-attributed uplink evidence, which
+          # is the whole point of patch 07 -- so treat it as an error and say
+          # exactly which config is responsible.
+          for s in "he_tb_ul_mumimo_shared" "cr6608_muru_capabilities"; do
+            if strings -a "$KO" | grep -qF "$s"; then
+              echo "  OK   $s (per-peer)"
+            else
+              echo "::error::$s missing - mac80211 debugfs is off, so per-peer uplink attribution was not compiled"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" = 0 ] || { echo "::error::compiled driver is missing CR6608 symbols"; exit 1; }
+
+      - name: Prove the shipped image contains that driver and the overlay
+        run: |
+          cd ow
+          BIN="$(ls bin/targets/ramips/mt7621/*sysupgrade.bin | head -1)"
+          echo "image: $BIN"
+          sha256sum bin/targets/ramips/mt7621/*.bin
+          rm -rf /tmp/imgchk && mkdir -p /tmp/imgchk
+          tar -xf "$BIN" -C /tmp/imgchk
+          ROOT="$(find /tmp/imgchk -name root -type f | head -1)"
+          [ -n "$ROOT" ] || { echo "::error::no squashfs root in image"; exit 1; }
+          unsquashfs -q -d /tmp/imgchk/sq "$ROOT" >/dev/null
+          IMGKO="$(find /tmp/imgchk/sq -name 'mt7915e.ko*' | head -1)"
+          [ -n "$IMGKO" ] || { echo "::error::mt7915e.ko not in image"; exit 1; }
+          case "$IMGKO" in *.ko.zst) zstd -dq -f "$IMGKO" -o /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;; esac
+          strings -a "$IMGKO" | grep -qx __param_cr6608_rf_38dbm \
+            || { echo "::error::image driver lacks the 38 dBm gate"; exit 1; }
+          strings -a "$IMGKO" | grep -qx __param_cr6608_muru_mask \
+            || { echo "::error::image driver lacks the MU-RU mask"; exit 1; }
+          strings -a "$IMGKO" | grep -qF ul_mumimo_multi_user_ppdus \
+            || { echo "::error::image driver lacks the uplink attribution patch"; exit 1; }
+          echo "== module parameters inside the image =="
+          cat /tmp/imgchk/sq/etc/modules.d/mt7915e
+          echo "== configured txpower inside the image =="
+          grep -n 'txpower' /tmp/imgchk/sq/etc/config/wireless
+          echo "== AX support manifest inside the image =="
+          cat /tmp/imgchk/sq/usr/share/cr6608/ax-feature-support
+
+      - name: Summarise
+        run: |
+          cd ow
+          {
+            echo "### CR6608 v87 build"
+            echo
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| profile | \`${{ inputs.profile }}\` |"
+            echo "| OpenWrt | \`$OPENWRT_TAG\` |"
+            echo "| mt76 | \`$MT76_COMMIT\` |"
+            echo "| module params | \`$(cat files/etc/modules.d/mt7915e)\` |"
+            echo
+            echo '```'
+            sha256sum bin/targets/ramips/mt7621/*sysupgrade.bin
+            echo '```'
+            echo
+            echo "38 dBm and MU-RU mask 15 are non-sale LAB settings. Driver/MCU"
+            echo "acceptance is not an RF measurement or a regulatory approval."
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -la bin/targets/ramips/mt7621/
+
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: cr6608-v87-${{ inputs.profile }}
+          path: |
+            ow/bin/targets/ramips/mt7621/*.bin
+            ow/bin/targets/ramips/mt7621/*.manifest
+            ow/bin/targets/ramips/mt7621/sha256sums
+          if-no-files-found: error
+          retention-days: 30

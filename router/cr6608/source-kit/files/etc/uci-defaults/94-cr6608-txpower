@@ -1,0 +1,75 @@
+#!/bin/sh
+
+# First-boot defaults only. Never overwrite a country or power value that came
+# from retained settings or that the user later selected.
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+if [ -z "$board" ] && command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+	board="$(ubus call system board 2>/dev/null | jsonfilter -e '@.board_name' 2>/dev/null)"
+fi
+[ "$board" = "xiaomi,mi-router-cr6608" ] || exit 0
+
+# A Retail-v1 artifact never manufactures a country or power request. Prefer
+# the immutable squashfs identity, while retaining /etc for initramfs/source
+# fixtures. A present but malformed identity also takes the conservative path.
+artifact_profile='/rom/etc/cr6608-artifact-profile'
+[ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] ||
+	artifact_profile='/etc/cr6608-artifact-profile'
+retail_or_unknown=0
+ul_muru_qualification=0
+if [ -e "$artifact_profile" ] || [ -L "$artifact_profile" ]; then
+	if [ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] &&
+		[ "$(wc -l < "$artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=retail-v1' "$artifact_profile" &&
+		grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+		grep -Fqx 'radio_policy=retail-disabled' "$artifact_profile"; then
+		retail_or_unknown=1
+	elif [ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] &&
+		[ "$(wc -l < "$artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=ul-muru-ram-v1' "$artifact_profile" &&
+		grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+		grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$artifact_profile"; then
+		ul_muru_qualification=1
+	elif [ -f "$artifact_profile" ] && [ ! -L "$artifact_profile" ] &&
+		[ "$(wc -l < "$artifact_profile" 2>/dev/null | tr -d '[:space:]')" = 3 ] &&
+		grep -Fqx 'profile=ul-muru-forced-lab-v1' "$artifact_profile" &&
+		grep -Fqx 'sale_ready=NO' "$artifact_profile" &&
+		grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$artifact_profile"; then
+		:
+	elif ! grep -Fqx 'profile=lab-operator-v1' "$artifact_profile" 2>/dev/null ||
+		! grep -Fqx 'sale_ready=NO' "$artifact_profile" 2>/dev/null ||
+		! grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$artifact_profile" 2>/dev/null; then
+		retail_or_unknown=1
+	fi
+fi
+
+radios="$(uci -q show wireless 2>/dev/null |
+	sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+if [ -z "$radios" ]; then
+	/sbin/wifi config >/dev/null 2>&1 || exit 1
+	radios="$(uci -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+fi
+
+changed=0
+for radio in $radios; do
+	if [ "$retail_or_unknown" = 1 ]; then
+		if uci -q get "wireless.${radio}.txpower" >/dev/null 2>&1; then
+			uci -q delete "wireless.${radio}.txpower" || exit 1
+			changed=1
+		fi
+		continue
+	fi
+	if ! uci -q get "wireless.${radio}.country" >/dev/null 2>&1; then
+		uci set "wireless.${radio}.country=US" || exit 1
+		changed=1
+	fi
+	if ! uci -q get "wireless.${radio}.txpower" >/dev/null 2>&1; then
+		default_txpower=38
+		[ "$ul_muru_qualification" != 1 ] || default_txpower=20
+		uci set "wireless.${radio}.txpower=${default_txpower}" || exit 1
+		changed=1
+	fi
+done
+
+[ "$changed" -eq 0 ] || uci commit wireless
+exit 0

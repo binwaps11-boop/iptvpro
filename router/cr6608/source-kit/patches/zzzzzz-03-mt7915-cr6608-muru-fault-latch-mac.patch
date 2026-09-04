@@ -1,0 +1,50 @@
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index aa9a641..b491c21 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1533,6 +1533,9 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 	int i;
+ 
+ 	dev = container_of(work, struct mt7915_dev, reset_work);
++	if (mt7915_cr6608_muru_fault_latch(dev))
++		dev_crit(dev->mt76.dev,
++			 "CR6608 MURU fault latch cleared the scheduler mask before reset work\n");
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+ 
+@@ -1843,6 +1846,7 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ {
+ 	struct mt76_phy *ext_phy;
+ 	unsigned long flags;
++	bool muru_latched;
+ 	bool claim_tx;
+ 
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+@@ -1853,6 +1857,7 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 		return;
+ 	}
++	muru_latched = mt7915_cr6608_muru_fault_latch(dev);
+ 	WRITE_ONCE(dev->recovery.state, state);
+ 	if (claim_tx) {
+ 		dev->recovery.generation++;
+@@ -1869,6 +1874,9 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 	}
+ 	if (dev->recovery.hw_full_reset) {
+ 		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++		if (muru_latched)
++			dev_crit(dev->mt76.dev,
++				 "CR6608 MURU fault latch cleared the scheduler mask before firmware recovery\n");
+ 		if (claim_tx)
+ 			wake_up(&dev->mt76.mcu.wait);
+ 		return;
+@@ -1878,6 +1886,9 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 	else
+ 		queue_work(dev->mt76.wq, &dev->reset_work);
+ 	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
++	if (muru_latched)
++		dev_crit(dev->mt76.dev,
++			 "CR6608 MURU fault latch cleared the scheduler mask before firmware recovery\n");
+ 	if (claim_tx)
+ 		wake_up(&dev->mt76.mcu.wait);
+ 

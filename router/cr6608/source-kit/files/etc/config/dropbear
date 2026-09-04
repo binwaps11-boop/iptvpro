@@ -1,0 +1,11 @@
+# See https://openwrt.org/docs/guide-user/base-system/dropbear
+config dropbear main
+	option enable '1'
+	option PasswordAuth 'on'
+	option RootPasswordAuth 'on'
+	option Port         '2003'
+	# Management SSH is reachable from the trusted LAN only.
+	option Interface    'lan'
+#	option BannerFile   '/etc/banner'
+#	option LocalPortForward 'off'
+#	option RemotePortForward 'off'

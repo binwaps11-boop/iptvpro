@@ -1,0 +1,539 @@
+#!/bin/sh
+
+# Runtime safety guard for the CR6608 MT7915 MURU qualification profiles.
+# The MediaTek-compatible bitmap is enabled only by the immutable RAM profile
+# or the explicit persistent forced-LAB profile.  Normal LAB, RETAIL, unknown
+# profiles and every detected fault converge to mask 0.
+
+TAG="cr6608-ul-muru-guard"
+MODULE_FILE="${CR6608_UL_MURU_MODULE_FILE:-/etc/modules.d/mt7915e}"
+LEGACY_MODULE_PARAM="${CR6608_UL_MURU_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_ul_muru}"
+MASK_MODULE_PARAM="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
+DEBUG_ROOT="${CR6608_UL_MURU_DEBUG_ROOT:-/sys/kernel/debug/ieee80211}"
+REBOOT_CMD="${CR6608_UL_MURU_REBOOT_CMD:-/sbin/reboot}"
+GUARD_INIT="${CR6608_UL_MURU_GUARD_INIT:-/etc/init.d/cr6608-ul-muru-guard}"
+REBOOT_DELAY="${CR6608_UL_MURU_REBOOT_DELAY:-3}"
+INTERVAL="${CR6608_UL_MURU_INTERVAL:-15}"
+HANG_PATTERN='mt7915.*(Message[[:space:]]+[[:xdigit:]]+[[:space:]]+timeout|wifi subsystem reset failure|Could not release semaphore|Timeout for initializing firmware|Firmware did not enter download state|chip full reset failed|tx hang|mcu.*tim(e|ed) out|firmware.*(crash|assert)|watchdog|ser.*(fail|error))'
+
+if [ -n "${CR6608_UL_MURU_ARTIFACT_PROFILE:-}" ]; then
+	ARTIFACT_PROFILE="$CR6608_UL_MURU_ARTIFACT_PROFILE"
+elif [ -f /rom/etc/cr6608-artifact-profile ] &&
+     [ ! -L /rom/etc/cr6608-artifact-profile ]; then
+	ARTIFACT_PROFILE=/rom/etc/cr6608-artifact-profile
+else
+	ARTIFACT_PROFILE=/etc/cr6608-artifact-profile
+fi
+
+hang_signature_present() {
+	grep -Eqi "$HANG_PATTERN"
+}
+
+matching_signatures() {
+	logread 2>/dev/null | grep -Ei "$HANG_PATTERN" || true
+}
+
+signature_snapshot() {
+	local matching="${1:-}" count fingerprint
+	if [ -z "$matching" ]; then
+		printf '0:none\n'
+		return
+	fi
+	count="$(printf '%s\n' "$matching" | awk 'END { print NR + 0 }')"
+	fingerprint="$(printf '%s\n' "$matching" |
+		cksum | awk '{ print $1 "-" $2 }')"
+	printf '%s:%s\n' "$count" "$fingerprint"
+}
+
+# Return success only when CURRENT is an exact line-aligned suffix of BASELINE.
+# That is the only count-decrease transition attributable solely to log-ring
+# eviction. Both strings live only in this guard process's RAM.
+signatures_are_pure_suffix() {
+	local baseline_lines="$1" current_lines="$2"
+	[ -z "$current_lines" ] && return 0
+	[ "$baseline_lines" = "$current_lines" ] && return 0
+	case "$baseline_lines" in
+		*"
+$current_lines") return 0 ;;
+	esac
+	return 1
+}
+
+signature_self_test() {
+	local signature
+	for signature in \
+		'Message 00005aed timeout' \
+		'wifi subsystem reset failure' \
+		'Could not release semaphore' \
+		'Timeout for initializing firmware' \
+		'Firmware did not enter download state' \
+		'chip full reset failed'; do
+		printf 'kernel: mt7915e 0000:02:00.0: %s\n' "$signature" |
+			hang_signature_present || return 1
+	done
+	if printf 'kernel: mt7915e 0000:02:00.0: normal startup complete\n' |
+	   hang_signature_present; then
+		return 1
+	fi
+	printf 'ul_muru_guard_signature_self_test=pass\n'
+}
+
+if [ "${1:-}" = --signature-self-test ]; then
+	signature_self_test
+	exit $?
+fi
+
+PRIVATE_RUNTIME_LIB="${CR6608_PRIVATE_RUNTIME_LIB:-/usr/libexec/cr6608-private-runtime}"
+[ -r "$PRIVATE_RUNTIME_LIB" ] || exit 1
+. "$PRIVATE_RUNTIME_LIB" || exit 1
+UL_MURU_RUNTIME_DIR="$(cr6608_private_runtime_dir ul-muru)" || exit 1
+STATE_FILE="$UL_MURU_RUNTIME_DIR/state.json"
+
+profile_kind() {
+	[ -f "$ARTIFACT_PROFILE" ] && [ ! -L "$ARTIFACT_PROFILE" ] || {
+		printf 'unknown\n'
+		return
+	}
+	[ "$(wc -l < "$ARTIFACT_PROFILE" 2>/dev/null | tr -d '[:space:]')" = 3 ] || {
+		printf 'unknown\n'
+		return
+	}
+	if grep -Fqx 'profile=ul-muru-ram-v1' "$ARTIFACT_PROFILE" &&
+	   grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+	   grep -Fqx 'radio_policy=ul-muru-ram-qualification' "$ARTIFACT_PROFILE"; then
+		printf 'ul-muru-ram-v1\n'
+	elif grep -Fqx 'profile=ul-muru-forced-lab-v1' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'radio_policy=ul-muru-persistent-mask15-38dbm-lab' "$ARTIFACT_PROFILE"; then
+		printf 'ul-muru-forced-lab-v1\n'
+	elif grep -Fqx 'profile=lab-operator-v1' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'radio_policy=lab-operator-38dbm-ul-muru' "$ARTIFACT_PROFILE"; then
+		printf 'lab-operator-v1\n'
+	elif grep -Fqx 'profile=retail-v1' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'sale_ready=NO' "$ARTIFACT_PROFILE" &&
+	     grep -Fqx 'radio_policy=retail-disabled' "$ARTIFACT_PROFILE"; then
+		printf 'retail-v1\n'
+	else
+		printf 'unknown\n'
+	fi
+}
+
+PROFILE_KIND="$(profile_kind)"
+
+write_state() {
+	local state="$1" reason="$2" state_tmp
+	state_tmp="$(cr6608_private_mktemp "$UL_MURU_RUNTIME_DIR" state)" || return 1
+	printf '{"state":"%s","reason":"%s","profile":"%s","time":%s}\n' \
+		"$state" "$reason" "$PROFILE_KIND" "$(date +%s)" >"$state_tmp" || {
+		rm -f -- "$state_tmp" 2>/dev/null || true
+		return 1
+	}
+	cr6608_private_publish_file "$state_tmp" "$STATE_FILE" || {
+		rm -f -- "$state_tmp" 2>/dev/null || true
+		return 1
+	}
+}
+
+legacy_debug_nodes() {
+	find "$DEBUG_ROOT" -path '*/mt76/cr6608_ul_muru' -type f 2>/dev/null
+}
+
+mask_debug_nodes() {
+	find "$DEBUG_ROOT" -path '*/mt76/cr6608_muru_mask' -type f 2>/dev/null
+}
+
+state_nodes() {
+	find "$DEBUG_ROOT" -path '*/mt76/cr6608_ul_muru_state' -type f 2>/dev/null
+}
+
+recovery_nodes() {
+	find "$DEBUG_ROOT" -path '*/mt76/sys_recovery' -type f 2>/dev/null
+}
+
+legacy_module_disabled() {
+	case "$(cat "$LEGACY_MODULE_PARAM" 2>/dev/null || true)" in
+		N|0) return 0 ;;
+	esac
+	return 1
+}
+
+mask_module_is() {
+	[ "$(cat "$MASK_MODULE_PARAM" 2>/dev/null || true)" = "$1" ]
+}
+
+module_token_value() {
+	awk -v key="$1" '
+		$1 == "mt7915e" {
+			lines++
+			for (i = 2; i <= NF; i++) {
+				prefix = key "="
+				if (index($i, prefix) == 1) {
+					count++
+					value = substr($i, length(prefix) + 1)
+				}
+			}
+		}
+		END {
+			if (lines == 1 && count == 1) print value
+			else exit 1
+		}' "$MODULE_FILE" 2>/dev/null
+}
+
+module_policy_is() {
+	[ -f "$MODULE_FILE" ] && [ "$(module_token_value cr6608_ul_muru)" = 0 ] &&
+		[ "$(module_token_value cr6608_muru_mask)" = "$1" ]
+}
+
+persist_disabled_module_policy() {
+	local module_tmp="${MODULE_FILE}.muru-disable.$$"
+	awk '
+		$1 == "mt7915e" {
+			lines++
+			out = $1
+			for (i = 2; i <= NF; i++)
+				if ($i !~ /^cr6608_ul_muru=/ &&
+				    $i !~ /^cr6608_muru_mask=/)
+					out = out " " $i
+			print out " cr6608_ul_muru=0 cr6608_muru_mask=0"
+			next
+		}
+		{ print }
+		END { if (lines != 1) exit 1 }
+	' "$MODULE_FILE" >"$module_tmp" || {
+		rm -f -- "$module_tmp" 2>/dev/null || true
+		return 1
+	}
+	chmod 0644 "$module_tmp" && mv -f "$module_tmp" "$MODULE_FILE" || {
+		rm -f -- "$module_tmp" 2>/dev/null || true
+		return 1
+	}
+	module_policy_is 0
+}
+
+# Validate the ABI exposed by cr6608_ul_muru_state and publish a telemetry
+# snapshot in globals for the caller. The kernel publishes these fields under
+# one telemetry lock: response+failure cannot exceed attempted, HE equals
+# response, MIMO is a response subset, and timeout is a failure subset.
+driver_states_match() {
+	local expected_mask="$1" expected_fault="$2" allowed enabled bit
+	local node record fault latches attempted response_ok failed timeout he_updates mimo_updates
+	TELEMETRY_NODE_COUNT=0
+	TELEMETRY_FAULT_LATCHED=0
+	TELEMETRY_FAULT_LATCHES=0
+	TELEMETRY_ATTEMPTED=0
+	TELEMETRY_RESPONSE_OK=0
+	TELEMETRY_FAILED=0
+	TELEMETRY_TIMEOUT=0
+	[ "$expected_mask" = 15 ] && allowed=1 || allowed=0
+	[ "$expected_mask" = 15 ] && enabled=1 || enabled=0
+	[ "$expected_mask" = 15 ] && bit=1 || bit=0
+	for node in $(state_nodes); do
+		TELEMETRY_NODE_COUNT=$((TELEMETRY_NODE_COUNT + 1))
+		record="$(awk -F= -v mask="$expected_mask" -v allowed="$allowed" \
+			-v enabled="$enabled" -v bit="$bit" -v expected_fault="$expected_fault" '
+			NF >= 2 {
+				key = $1
+				value = substr($0, length(key) + 2)
+				count[key]++
+				field[key] = value
+			}
+			END {
+				split("candidate_allowed candidate_ul_enabled candidate_mask candidate_dl_ofdma candidate_ul_ofdma candidate_dl_mumimo candidate_ul_mumimo fault_latched fault_latches policy sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", required, " ")
+				for (i in required) if (count[required[i]] != 1) exit 1
+				if (field["candidate_allowed"] != allowed ||
+				    field["candidate_ul_enabled"] != enabled ||
+				    field["candidate_mask"] != mask ||
+				    field["candidate_dl_ofdma"] != bit ||
+				    field["candidate_ul_ofdma"] != bit ||
+				    field["candidate_dl_mumimo"] != bit ||
+				    field["candidate_ul_mumimo"] != bit ||
+				    field["policy"] != "mediatek-25.12-mu-onoff-sta-rec-port") exit 1
+				split("fault_latched fault_latches sta_rec_attempted sta_rec_response_ok sta_rec_failed sta_rec_timeout he_sta_rec_updates mimo_capable_updates", numeric, " ")
+				for (i in numeric) if (field[numeric[i]] !~ /^[0-9]+$/) exit 1
+				if (field["fault_latched"] !~ /^[01]$/) exit 1
+				if (expected_fault != "any" && field["fault_latched"] != expected_fault) exit 1
+				if (field["fault_latched"] == 1 && field["fault_latches"] < 1) exit 1
+				if (field["sta_rec_response_ok"] > field["sta_rec_attempted"] ||
+				    field["sta_rec_failed"] > field["sta_rec_attempted"] - field["sta_rec_response_ok"] ||
+				    field["sta_rec_timeout"] > field["sta_rec_failed"] ||
+				    field["he_sta_rec_updates"] != field["sta_rec_response_ok"] ||
+				    field["mimo_capable_updates"] > field["sta_rec_response_ok"]) exit 1
+				printf "%s %s %s %s %s %s %s %s\n",
+					field["fault_latched"], field["fault_latches"],
+					field["sta_rec_attempted"], field["sta_rec_response_ok"],
+					field["sta_rec_failed"], field["sta_rec_timeout"],
+					field["he_sta_rec_updates"], field["mimo_capable_updates"]
+			}' "$node" 2>/dev/null)" || return 1
+		set -- $record
+		[ "$#" -eq 8 ] || return 1
+		fault=$1; latches=$2; attempted=$3; response_ok=$4
+		failed=$5; timeout=$6; he_updates=$7; mimo_updates=$8
+		[ "$fault" -le "$TELEMETRY_FAULT_LATCHED" ] || TELEMETRY_FAULT_LATCHED="$fault"
+		[ "$latches" -le "$TELEMETRY_FAULT_LATCHES" ] || TELEMETRY_FAULT_LATCHES="$latches"
+		[ "$attempted" -le "$TELEMETRY_ATTEMPTED" ] || TELEMETRY_ATTEMPTED="$attempted"
+		[ "$response_ok" -le "$TELEMETRY_RESPONSE_OK" ] || TELEMETRY_RESPONSE_OK="$response_ok"
+		[ "$failed" -le "$TELEMETRY_FAILED" ] || TELEMETRY_FAILED="$failed"
+		[ "$timeout" -le "$TELEMETRY_TIMEOUT" ] || TELEMETRY_TIMEOUT="$timeout"
+		: "$he_updates" "$mimo_updates"
+	done
+	[ "$TELEMETRY_NODE_COUNT" -gt 0 ]
+}
+
+driver_debug_matches() {
+	local expected_mask="$1" expected_legacy="$2" node
+	MASK_NODE_COUNT=0
+	MASK_NODE_MATCHING=0
+	LEGACY_NODE_COUNT=0
+	LEGACY_NODE_MATCHING=0
+	for node in $(mask_debug_nodes); do
+		MASK_NODE_COUNT=$((MASK_NODE_COUNT + 1))
+		[ "$(cat "$node" 2>/dev/null)" = "$expected_mask" ] &&
+			MASK_NODE_MATCHING=$((MASK_NODE_MATCHING + 1))
+	done
+	for node in $(legacy_debug_nodes); do
+		LEGACY_NODE_COUNT=$((LEGACY_NODE_COUNT + 1))
+		[ "$(cat "$node" 2>/dev/null)" = "$expected_legacy" ] &&
+			LEGACY_NODE_MATCHING=$((LEGACY_NODE_MATCHING + 1))
+	done
+	[ "$MASK_NODE_COUNT" -gt 0 ] &&
+		[ "$MASK_NODE_MATCHING" -eq "$MASK_NODE_COUNT" ] &&
+		[ "$LEGACY_NODE_COUNT" -eq "$MASK_NODE_COUNT" ] &&
+		[ "$LEGACY_NODE_MATCHING" -eq "$LEGACY_NODE_COUNT" ]
+}
+
+driver_contract_matches() {
+	local expected_mask="$1" expected_legacy=0
+	[ "$expected_mask" = 15 ] && expected_legacy=1
+	legacy_module_disabled && mask_module_is "$expected_mask" &&
+		driver_debug_matches "$expected_mask" "$expected_legacy" &&
+		driver_states_match "$expected_mask" 0 &&
+		[ "$TELEMETRY_NODE_COUNT" -eq "$MASK_NODE_COUNT" ]
+}
+
+telemetry_fault_present() {
+	local node
+	for node in $(state_nodes); do
+		grep -qx 'fault_latched=1' "$node" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+idle_forever() {
+	while sleep 3600; do :; done
+}
+
+reset_total() {
+	local total=0 line wm wa node
+	for node in $(recovery_nodes); do
+		line="$(grep 'SYS_RESET_COUNT:' "$node" 2>/dev/null | tail -n 1)"
+		wm="$(printf '%s\n' "$line" | sed -n 's/.*WM \([0-9][0-9]*\),.*/\1/p')"
+		wa="$(printf '%s\n' "$line" | sed -n 's/.*WA \([0-9][0-9]*\).*/\1/p')"
+		total=$((total + ${wm:-0} + ${wa:-0}))
+	done
+	printf '%s\n' "$total"
+}
+
+arm_stats() {
+	local node
+	for node in "$DEBUG_ROOT"/phy*/mt76/muru_debug; do
+		[ -f "$node" ] && printf '1\n' >"$node" 2>/dev/null
+	done
+}
+
+runtime_disable() {
+	local reason="$1" node persisted=1 reboot_reason policy_state
+	logger -p daemon.crit -t "$TAG" "clearing every CR6608 MURU bit: $reason"
+
+	# The legacy zero setter uses atomic_xchg and remains usable after the
+	# kernel fault latch.  The bitmap setter is also attempted for ordinary
+	# guard trips, then both debug views are read back.
+	for node in $(legacy_debug_nodes); do
+		printf '0\n' >"$node" 2>/dev/null || true
+	done
+	for node in $(mask_debug_nodes); do
+		printf '0\n' >"$node" 2>/dev/null || true
+	done
+	driver_debug_matches 0 0 || true
+
+	policy_state=disabled-by-guard
+	[ "$(uci -q get smartap.experimental.ul_muru_state 2>/dev/null)" = retail-disabled ] &&
+		policy_state=retail-disabled
+	uci -q set smartap.experimental.ul_muru='0' &&
+		uci -q set smartap.experimental.muru_mask='0' &&
+		uci -q set smartap.experimental.ul_muru_guard='0' &&
+		uci -q set smartap.experimental.ul_muru_reconcile='1' &&
+		uci -q set smartap.experimental.ul_muru_state="$policy_state" &&
+		uci -q set smartap.experimental.ul_muru_reason="$reason" &&
+		uci -q commit smartap &&
+		[ "$(uci -q get smartap.experimental.ul_muru 2>/dev/null)" = 0 ] &&
+		[ "$(uci -q get smartap.experimental.muru_mask 2>/dev/null)" = 0 ] ||
+		persisted=0
+
+	persist_disabled_module_policy || persisted=0
+
+	if [ "$MASK_NODE_COUNT" -gt 0 ] &&
+	   [ "$MASK_NODE_MATCHING" -eq "$MASK_NODE_COUNT" ] &&
+	   [ "$LEGACY_NODE_COUNT" -eq "$MASK_NODE_COUNT" ] &&
+	   [ "$LEGACY_NODE_MATCHING" -eq "$LEGACY_NODE_COUNT" ]; then
+		reboot_reason="${reason}-wiphy-capability-refresh"
+	else
+		reboot_reason="${reason}-driver-gates-${MASK_NODE_MATCHING}-of-${MASK_NODE_COUNT}"
+		logger -p daemon.crit -t "$TAG" \
+			'MURU driver mask could not be fully cleared; reboot is required'
+	fi
+	write_state reboot-required "$reboot_reason"
+	sync
+	# HE capabilities were fixed when the wiphy was registered. A Wi-Fi reload
+	# cannot retract them, so a verified persistent kill always reboots.
+	if [ "$persisted" = 1 ] && [ -x "$REBOOT_CMD" ]; then
+		write_state rebooting "$reboot_reason"
+		sync
+		sleep "$REBOOT_DELAY"
+		"$REBOOT_CMD"
+		write_state reboot-failed "${reboot_reason}-reboot-command-returned"
+	else
+		write_state reboot-required "${reboot_reason}-persistence-${persisted}"
+		logger -p daemon.crit -t "$TAG" \
+			'automatic reboot refused because the persistent MURU disable was not verified'
+	fi
+}
+
+wait_for_driver() {
+	local n=0
+	while [ "$n" -lt 60 ]; do
+		[ -n "$(mask_debug_nodes)" ] && [ -n "$(legacy_debug_nodes)" ] &&
+			[ -n "$(state_nodes)" ] && return 0
+		n=$((n + 1))
+		sleep 1
+	done
+	return 1
+}
+
+wait_for_driver || {
+	write_state unavailable driver-debugfs-missing
+	logger -p daemon.err -t "$TAG" 'driver debugfs ABI did not appear'
+	exit 1
+}
+
+uci_legacy="$(uci -q get smartap.experimental.ul_muru 2>/dev/null || true)"
+uci_mask="$(uci -q get smartap.experimental.muru_mask 2>/dev/null || true)"
+
+case "$PROFILE_KIND" in
+	lab-operator-v1|retail-v1)
+		expected_mask=0
+		;;
+	ul-muru-ram-v1|ul-muru-forced-lab-v1)
+		expected_mask=15
+		;;
+	*)
+		runtime_disable unknown-or-invalid-artifact-profile
+		idle_forever
+		exit 1
+		;;
+esac
+
+if [ "$expected_mask" = 0 ]; then
+	if [ "$uci_legacy" = 0 ] && [ "$uci_mask" = 0 ] &&
+	   module_policy_is 0 && driver_contract_matches 0 &&
+	   [ "$TELEMETRY_FAULT_LATCHES" -eq 0 ] &&
+	   [ "$TELEMETRY_ATTEMPTED" -eq 0 ] &&
+	   [ "$TELEMETRY_RESPONSE_OK" -eq 0 ] &&
+	   [ "$TELEMETRY_FAILED" -eq 0 ] &&
+	   [ "$TELEMETRY_TIMEOUT" -eq 0 ]; then
+		if [ "$(uci -q get smartap.experimental.ul_muru_guard 2>/dev/null)" = 0 ]; then
+			if [ ! -x "$GUARD_INIT" ] || ! "$GUARD_INIT" disable ||
+			   ! uci -q set smartap.experimental.ul_muru_reconcile='0' ||
+			   ! uci -q commit smartap; then
+				write_state service-disable-failed stable-runtime-next-boot-link-not-disabled
+				idle_forever
+				exit 1
+			fi
+		fi
+		write_state disabled "${PROFILE_KIND}-mask-zero"
+		idle_forever
+		exit 0
+	fi
+	runtime_disable startup-disabled-policy-runtime-mismatch
+	idle_forever
+	exit 1
+fi
+
+# The qualification profile is armed only with the exact MediaTek bitmap,
+# legacy bool off, matching UCI/module policy, clean fault latch and a valid
+# counter relation on every PHY view.
+if telemetry_fault_present; then
+	runtime_disable startup-telemetry-fault-latched
+	idle_forever
+	exit 1
+fi
+if [ "$uci_legacy" != 0 ] || [ "$uci_mask" != 15 ] ||
+   ! module_policy_is 15 || ! driver_contract_matches 15; then
+	runtime_disable startup-enabled-policy-runtime-mismatch
+	idle_forever
+	exit 1
+fi
+if [ "$TELEMETRY_FAULT_LATCHES" -ne 0 ] ||
+   [ "$TELEMETRY_FAILED" -ne 0 ] || [ "$TELEMETRY_TIMEOUT" -ne 0 ]; then
+	runtime_disable "startup-mcu-telemetry-failed-${TELEMETRY_FAILED}-timeout-${TELEMETRY_TIMEOUT}"
+	idle_forever
+	exit 1
+fi
+
+arm_stats
+baseline="$(reset_total)"
+signature_baseline_lines="$(matching_signatures)"
+signature_baseline_snapshot="$(signature_snapshot "$signature_baseline_lines")"
+signature_baseline_count="${signature_baseline_snapshot%%:*}"
+signature_baseline_fingerprint="${signature_baseline_snapshot#*:}"
+failed_baseline="$TELEMETRY_FAILED"
+timeout_baseline="$TELEMETRY_TIMEOUT"
+write_state armed "mask-15-reset-${baseline}-signatures-${signature_baseline_count}-fingerprint-${signature_baseline_fingerprint}-response-ok-${TELEMETRY_RESPONSE_OK}"
+logger -p daemon.notice -t "$TAG" \
+	"MURU mask 15 armed; reset baseline=$baseline signature count=$signature_baseline_count fingerprint=$signature_baseline_fingerprint"
+
+while sleep "$INTERVAL"; do
+	current="$(reset_total)"
+	if [ "$current" -gt "$baseline" ]; then
+		runtime_disable "firmware-reset-count-${baseline}-to-${current}"
+		idle_forever
+		exit 1
+	fi
+
+	current_signature_lines="$(matching_signatures)"
+	current_signature_snapshot="$(signature_snapshot "$current_signature_lines")"
+	current_signatures="${current_signature_snapshot%%:*}"
+	current_signature_fingerprint="${current_signature_snapshot#*:}"
+	if [ "$current_signatures" -gt "$signature_baseline_count" ] ||
+	   { [ "$current_signatures" -eq "$signature_baseline_count" ] &&
+	     [ "$current_signature_fingerprint" != "$signature_baseline_fingerprint" ]; } ||
+	   { [ "$current_signatures" -lt "$signature_baseline_count" ] &&
+	     ! signatures_are_pure_suffix "$signature_baseline_lines" "$current_signature_lines"; }; then
+		runtime_disable "mt7915-hang-signature-${signature_baseline_count}-to-${current_signatures}-fingerprint-${signature_baseline_fingerprint}-to-${current_signature_fingerprint}"
+		idle_forever
+		exit 1
+	fi
+	# Rebase only after an identical snapshot or a proven pure suffix eviction.
+	signature_baseline_lines="$current_signature_lines"
+	signature_baseline_count="$current_signatures"
+	signature_baseline_fingerprint="$current_signature_fingerprint"
+
+	if telemetry_fault_present; then
+		runtime_disable runtime-telemetry-fault-latched
+		idle_forever
+		exit 1
+	fi
+	if ! driver_contract_matches 15; then
+		runtime_disable runtime-mask-or-telemetry-contract-mismatch
+		idle_forever
+		exit 1
+	fi
+	if [ "$TELEMETRY_FAILED" -gt "$failed_baseline" ] ||
+	   [ "$TELEMETRY_TIMEOUT" -gt "$timeout_baseline" ]; then
+		runtime_disable "mcu-sta-rec-failed-${failed_baseline}-to-${TELEMETRY_FAILED}-timeout-${timeout_baseline}-to-${TELEMETRY_TIMEOUT}"
+		idle_forever
+		exit 1
+	fi
+
+	write_state armed "mask-15-reset-${current}-signatures-${current_signatures}-fingerprint-${current_signature_fingerprint}-response-ok-${TELEMETRY_RESPONSE_OK}"
+done

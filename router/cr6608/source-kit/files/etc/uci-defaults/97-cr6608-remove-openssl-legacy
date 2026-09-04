@@ -1,0 +1,4 @@
+#!/bin/sh
+uci -q delete openssl.legacy
+uci -q commit openssl
+exit 0

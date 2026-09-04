@@ -1,0 +1,209 @@
+#!/bin/sh
+
+set -u
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+LC_ALL=C
+export LC_ALL
+
+IPV6_CONF_ROOT="${CR6608_IPV6_CONF_ROOT:-/proc/sys/net/ipv6/conf}"
+IP_BIN="${CR6608_IPV6_IP_BIN:-/sbin/ip}"
+PROC_NET_TCP6="${CR6608_IPV6_PROC_TCP6:-/proc/net/tcp6}"
+PROC_NET_UDP6="${CR6608_IPV6_PROC_UDP6:-/proc/net/udp6}"
+PASSWD_FILE="${CR6608_IPV6_PASSWD_FILE:-/etc/passwd}"
+PROC_ROOT="${CR6608_IPV6_PROC_ROOT:-/proc}"
+IP_LOCAL_PORT_RANGE="${CR6608_IPV6_PORT_RANGE:-/proc/sys/net/ipv4/ip_local_port_range}"
+READLINK_BIN="${CR6608_IPV6_READLINK_BIN:-/usr/bin/readlink}"
+
+valid_interface_name() {
+	case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+}
+
+disable_one() {
+	cio_name="$1"
+	valid_interface_name "$cio_name" || return 1
+	cio_path="$IPV6_CONF_ROOT/$cio_name/disable_ipv6"
+	[ -w "$cio_path" ] || return 1
+	printf '1\n' > "$cio_path"
+}
+
+apply_all() {
+	for cia_path in "$IPV6_CONF_ROOT"/*/disable_ipv6; do
+		[ -e "$cia_path" ] || continue
+		cia_name="${cia_path%/disable_ipv6}"
+		cia_name="${cia_name##*/}"
+		disable_one "$cia_name" || return 1
+	done
+}
+
+verify_all() {
+	local civ_addresses civ_routes
+	# A missing procfs policy tree or missing iproute2 binary is not evidence
+	# that IPv6 is disabled. Require the three kernel-wide policy nodes before
+	# accepting any per-interface sweep.
+	for civ_required in all default lo; do
+		[ -r "$IPV6_CONF_ROOT/$civ_required/disable_ipv6" ] || return 1
+		[ "$(sed -n '1p' "$IPV6_CONF_ROOT/$civ_required/disable_ipv6" 2>/dev/null)" = 1 ] || return 1
+	done
+	civ_seen=0
+	for civ_path in "$IPV6_CONF_ROOT"/*/disable_ipv6; do
+		[ -r "$civ_path" ] || continue
+		civ_seen=1
+		[ "$(sed -n '1p' "$civ_path" 2>/dev/null)" = 1 ] || return 1
+	done
+	[ "$civ_seen" = 1 ] || return 1
+	[ -x "$IP_BIN" ] || return 1
+	# A failed iproute2 query is missing evidence, not proof that no IPv6
+	# address exists. Capture and validate the producer before inspecting it.
+	civ_addresses="$("$IP_BIN" -6 address show 2>/dev/null)" || return 1
+	if printf '%s\n' "$civ_addresses" |
+		grep -Eq '(^|[[:space:]])inet6[[:space:]]'; then
+		return 1
+	fi
+	civ_routes="$("$IP_BIN" -6 route show table all 2>/dev/null)" || return 1
+	if printf '%s\n' "$civ_routes" | grep -Eq '[^[:space:]]'; then
+		return 1
+	fi
+	return 0
+}
+
+ntpd_owns_inode() {
+	cnoi_inode="$1"
+	case "$cnoi_inode" in ''|*[!0-9]*) return 1 ;; esac
+	[ -x "$READLINK_BIN" ] || return 1
+	for cnoi_fd in "$PROC_ROOT"/[0-9]*/fd/*; do
+		[ -e "$cnoi_fd" ] || continue
+		[ "$("$READLINK_BIN" "$cnoi_fd" 2>/dev/null)" = "socket:[$cnoi_inode]" ] || continue
+		cnoi_fd_dir="${cnoi_fd%/*}"
+		cnoi_pid_dir="${cnoi_fd_dir%/*}"
+		[ -r "$cnoi_pid_dir/status" ] && [ -r "$cnoi_pid_dir/cmdline" ] || continue
+		cnoi_uid="$(awk '$1 == "Uid:" { print $2; exit }' "$cnoi_pid_dir/status" 2>/dev/null)"
+		[ "$cnoi_uid" = "$civ_ntp_uid" ] || continue
+		cnoi_command="$(tr '\000' '\n' < "$cnoi_pid_dir/cmdline" 2>/dev/null | sed -n '1p')"
+		[ "$cnoi_command" = /usr/sbin/ntpd ] || continue
+		return 0
+	done
+	return 1
+}
+
+listener_tables_empty() {
+	# /proc/net/tcp6 and udp6 are expected on this IPv6-capable kernel even
+	# when the protocol is administratively disabled. Missing or unreadable
+	# evidence must fail closed instead of silently skipping the check.
+	[ -r "$PROC_NET_TCP6" ] && [ -r "$PROC_NET_UDP6" ] || return 1
+	awk '
+		NR == 1 {
+			if ($1 != "sl" || $2 != "local_address" ||
+			    ($3 != "remote_address" && $3 != "rem_address") || $4 != "st") bad=1
+			next
+		}
+		{ bad=1 }
+		END { if (NR != 1 || bad) exit 1 }
+	' "$PROC_NET_TCP6" 2>/dev/null || return 1
+
+	# BusyBox ntpd uses one unconnected AF_INET6 wildcard socket as its
+	# dual-stack IPv4 client transport. It can remain open far longer than a
+	# DNS lookup, even though every interface has disable_ipv6=1 and there are
+	# no IPv6 addresses or routes. Permit only that exact non-server shape:
+	# the ntp uid, one socket at most, an ephemeral local port, no peer, and
+	# UDP state 07. Port 123, another uid, any peer/address, or a second socket
+	# still fails closed.
+	[ -r "$PASSWD_FILE" ] || return 1
+	civ_ntp_uid="$(awk -F: '$1 == "ntp" { count++; uid=$3 } END { if (count == 1) print uid; else exit 1 }' "$PASSWD_FILE" 2>/dev/null)" || return 1
+	case "$civ_ntp_uid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -r "$IP_LOCAL_PORT_RANGE" ] || return 1
+	civ_port_range="$(awk 'NR == 1 && NF == 2 { print $1 ":" $2; valid=1; next } { valid=0 } END { if (NR != 1 || !valid) exit 1 }' "$IP_LOCAL_PORT_RANGE" 2>/dev/null)" || return 1
+	civ_port_low="${civ_port_range%%:*}"
+	civ_port_high="${civ_port_range#*:}"
+	case "$civ_port_low" in ''|*[!0-9]*) return 1 ;; esac
+	case "$civ_port_high" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$civ_port_low" -ge 1 ] && [ "$civ_port_high" -le 65535 ] &&
+		[ "$civ_port_low" -le "$civ_port_high" ] || return 1
+	civ_ntp_inode="$(awk -v ntp_uid="$civ_ntp_uid" \
+		-v port_low="$civ_port_low" -v port_high="$civ_port_high" '
+		function hex4(value, i, digit, result) {
+			if (length(value) != 4 || value !~ /^[0-9A-Fa-f]+$/) return -1
+			value=toupper(value)
+			result=0
+			for (i=1; i<=4; i++) {
+				digit=index("0123456789ABCDEF", substr(value, i, 1)) - 1
+				if (digit < 0) return -1
+				result=(result * 16) + digit
+			}
+			return result
+		}
+		NR == 1 {
+			if ($1 != "sl" || $2 != "local_address" ||
+			    ($3 != "remote_address" && $3 != "rem_address") || $4 != "st") bad=1
+			next
+		}
+		{
+			rows++
+			local_parts=split($2, local, ":")
+			peer_parts=split($3, peer, ":")
+			local_port=hex4(local[2])
+			if (NF >= 10 && local_parts == 2 && peer_parts == 2 &&
+			    length(local[1]) == 32 && local[1] ~ /^[0-9A-Fa-f]+$/ &&
+			    local[1] == "00000000000000000000000000000000" &&
+			    local_port >= port_low && local_port <= port_high &&
+			    peer[1] == "00000000000000000000000000000000" &&
+			    peer[2] == "0000" && $4 == "07" && $8 == ntp_uid &&
+			    $10 ~ /^[0-9]+$/ && ($10 + 0) > 0) {
+				allowed++
+				inode=$10
+			} else
+				bad=1
+		}
+		END {
+			if (NR < 1 || bad || rows > 1 || allowed != rows) exit 1
+			if (rows == 1) print inode
+		}' "$PROC_NET_UDP6" 2>/dev/null)" || return 1
+	[ -z "$civ_ntp_inode" ] || ntpd_owns_inode "$civ_ntp_inode" || return 1
+}
+
+verify_listener_tables() {
+	# Debounce table changes while ntpd rotates its permitted client socket,
+	# but continue to reject any persistent socket outside the strict shape.
+	civ_attempts="${CR6608_IPV6_LISTENER_RETRIES:-5}"
+	case "$civ_attempts" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$civ_attempts" -ge 1 ] && [ "$civ_attempts" -le 10 ] || return 1
+	civ_attempt=1
+	while [ "$civ_attempt" -le "$civ_attempts" ]; do
+		listener_tables_empty && return 0
+		[ "$civ_attempt" -eq "$civ_attempts" ] || sleep 1
+		civ_attempt=$((civ_attempt + 1))
+	done
+	return 1
+}
+
+case "${1:-apply}" in
+	apply)
+		apply_all || exit 1
+		verify_all || exit 1
+		;;
+	interface)
+		[ "$#" -eq 2 ] || exit 2
+		disable_one "$2" || exit 1
+		# Hotplug handles one newly-created netdevice. The full service-level
+		# verification runs after netifd/dnsmasq have settled.
+		exit 0
+		;;
+	verify)
+		verify_all || exit 1
+		verify_listener_tables || exit 1
+		;;
+	--json)
+		if verify_all && verify_listener_tables; then
+			printf '%s\n' '{"ok":true,"ipv6_disabled":true,"all_interfaces":true}'
+			exit 0
+		fi
+		printf '%s\n' '{"ok":false,"ipv6_disabled":false,"all_interfaces":false}'
+		exit 1
+		;;
+	*) printf '%s\n' 'usage: cr6608-ipv4-only [apply|verify|--json|interface IFNAME]' >&2; exit 2 ;;
+esac
+
+verify_listener_tables || exit 1
+exit 0

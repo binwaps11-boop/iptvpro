@@ -1,0 +1,191 @@
+#!/bin/sh
+# Safe first-boot AP policy and settings-preserving v53 IPv6 migration.
+
+set -eu
+
+UCI_BIN="${CR6608_IPV6_UCI_BIN:-uci}"
+SYSCTL_BIN="${CR6608_IPV6_SYSCTL_BIN:-sysctl}"
+INITD_DIR="${CR6608_IPV6_INITD_DIR:-/etc/init.d}"
+LEGACY_IPV6_SYSCTL="${CR6608_IPV6_LEGACY_SYSCTL:-/etc/sysctl.d/12-cr6608-ipv6-off.conf}"
+
+uget() { "$UCI_BIN" -q get "$1" 2>/dev/null; }
+uset() { "$UCI_BIN" -q set "$1"; }
+udelete() { "$UCI_BIN" -q delete "$1" 2>/dev/null || true; }
+uadd() { "$UCI_BIN" -q add_list "$1"; }
+ucommit() { "$UCI_BIN" -q commit "$1"; }
+
+install_ipv6_firewall_rules() {
+	# Named sections are deleted and recreated so an interrupted uci-defaults run
+	# is idempotent and cannot duplicate list values on its next boot.
+	udelete firewall.cr6608_allow_dhcpv6
+	uset firewall.cr6608_allow_dhcpv6=rule
+	uset firewall.cr6608_allow_dhcpv6.name=Allow-DHCPv6
+	uset firewall.cr6608_allow_dhcpv6.src=wan
+	uset firewall.cr6608_allow_dhcpv6.proto=udp
+	uset firewall.cr6608_allow_dhcpv6.dest_port=546
+	uset firewall.cr6608_allow_dhcpv6.family=ipv6
+	uset firewall.cr6608_allow_dhcpv6.target=ACCEPT
+
+	udelete firewall.cr6608_allow_mld
+	uset firewall.cr6608_allow_mld=rule
+	uset firewall.cr6608_allow_mld.name=Allow-MLD
+	uset firewall.cr6608_allow_mld.src=wan
+	uset firewall.cr6608_allow_mld.proto=icmp
+	uset firewall.cr6608_allow_mld.src_ip='fe80::/10'
+	for icmp_type in 130/0 131/0 132/0 143/0; do
+		uadd "firewall.cr6608_allow_mld.icmp_type=$icmp_type"
+	done
+	uset firewall.cr6608_allow_mld.family=ipv6
+	uset firewall.cr6608_allow_mld.target=ACCEPT
+
+	udelete firewall.cr6608_allow_icmpv6_input
+	uset firewall.cr6608_allow_icmpv6_input=rule
+	uset firewall.cr6608_allow_icmpv6_input.name=Allow-ICMPv6-Input
+	uset firewall.cr6608_allow_icmpv6_input.src=wan
+	uset firewall.cr6608_allow_icmpv6_input.proto=icmp
+	for icmp_type in echo-request echo-reply destination-unreachable packet-too-big \
+		time-exceeded bad-header unknown-header-type router-solicitation \
+		neighbour-solicitation router-advertisement neighbour-advertisement; do
+		uadd "firewall.cr6608_allow_icmpv6_input.icmp_type=$icmp_type"
+	done
+	uset firewall.cr6608_allow_icmpv6_input.limit=1000/sec
+	uset firewall.cr6608_allow_icmpv6_input.family=ipv6
+	uset firewall.cr6608_allow_icmpv6_input.target=ACCEPT
+
+	udelete firewall.cr6608_allow_icmpv6_forward
+	uset firewall.cr6608_allow_icmpv6_forward=rule
+	uset firewall.cr6608_allow_icmpv6_forward.name=Allow-ICMPv6-Forward
+	uset firewall.cr6608_allow_icmpv6_forward.src=wan
+	uset firewall.cr6608_allow_icmpv6_forward.dest='*'
+	uset firewall.cr6608_allow_icmpv6_forward.proto=icmp
+	for icmp_type in echo-request echo-reply destination-unreachable packet-too-big \
+		time-exceeded bad-header unknown-header-type; do
+		uadd "firewall.cr6608_allow_icmpv6_forward.icmp_type=$icmp_type"
+	done
+	uset firewall.cr6608_allow_icmpv6_forward.limit=1000/sec
+	uset firewall.cr6608_allow_icmpv6_forward.family=ipv6
+	uset firewall.cr6608_allow_icmpv6_forward.target=ACCEPT
+}
+
+# A stored choice in either settings store is authoritative. A marker-less
+# preserved installation now adopts the product's explicit IPv6-off default;
+# it must never be silently promoted to dual stack during an upgrade. The
+# rescue alias deliberately remains IPv4-only.
+# This product profile is IPv4-only, including loopback and management.
+uset network.loopback.ipv6=0
+legacy_ipv6_policy=0
+ipv6_firewall_changed=0
+quick_ipv6_policy="$(uget cr6608quick.default.ipv6_enabled || true)"
+smart_ipv6_policy="$(uget smartap.quick.ipv6_enabled || true)"
+ipv6_policy_enabled=0
+if [ -z "$quick_ipv6_policy" ] && [ -z "$smart_ipv6_policy" ]; then
+	legacy_ipv6_policy=1
+	if uget cr6608quick.default >/dev/null 2>&1; then
+		uset cr6608quick.default.ipv6_enabled=0
+	fi
+	if uget smartap.quick >/dev/null 2>&1; then
+		uset smartap.quick.ipv6_enabled=0
+	fi
+else
+	# The two settings stores should agree.  An explicit Off in either store is
+	# fail-closed and must not be overridden by a preserved wan6 section.
+	case "$quick_ipv6_policy:$smart_ipv6_policy" in
+		0:*|*:0) ipv6_policy_enabled=0 ;;
+		1:*|*:1) ipv6_policy_enabled=1 ;;
+		*) ipv6_policy_enabled=0 ;;
+	esac
+fi
+
+# v86 product policy is IPv6 Off.  Override all preserved dual-stack choices
+# before any router/service branch below and synchronize both UI stores.
+ipv6_policy_enabled=0
+quick_ipv6_policy=0
+smart_ipv6_policy=0
+uset cr6608quick.default.ipv6_enabled=0
+uset smartap.quick.ipv6_enabled=0
+
+if [ "$ipv6_policy_enabled" = '1' ]; then
+	# Keep an explicit opt-in reversible across settings-preserving upgrades.
+	# Repair stale v53/v54 interface flags and ensure the required ICMPv6/PMTU
+	# policy exists, but never take this branch for the new IPv6-off default.
+	udelete network.lan.ipv6
+	if [ "$(uget network.wan.proto || true)" = 'pppoe' ] &&
+	   [ "$(uget network.wan.disabled || true)" != '1' ]; then
+		uset network.wan.ipv6=auto
+	fi
+	install_ipv6_firewall_rules
+	ipv6_firewall_changed=1
+fi
+
+[ "$ipv6_policy_enabled" = '1' ] && uset dhcp.@dnsmasq[0].filter_aaaa=0 || uset dhcp.@dnsmasq[0].filter_aaaa=1
+uget dhcp.odhcpd >/dev/null 2>&1 || uset dhcp.odhcpd=odhcpd
+uget dhcp.odhcpd.maindhcp >/dev/null 2>&1 || uset dhcp.odhcpd.maindhcp=0
+
+ipv6_router=0
+if [ "$ipv6_policy_enabled" = '1' ]; then
+	if [ "$(uget network.wan.proto || true)" = 'pppoe' ] &&
+	   [ "$(uget network.wan.disabled || true)" != '1' ] &&
+	   [ "$(uget network.wan.ipv6 || true)" = 'auto' ]; then
+		ipv6_router=1
+	fi
+	if [ "$(uget network.wan6.proto || true)" = 'dhcpv6' ] &&
+	   [ "$(uget network.wan6.disabled || true)" != '1' ]; then
+		ipv6_router=1
+	fi
+fi
+if [ "$ipv6_router" = '1' ]; then
+	uset dhcp.odhcpd.disabled=0
+	uset network.lan.delegate=1
+	uget network.lan.ip6assign >/dev/null 2>&1 || uset network.lan.ip6assign=64
+	# A v53 PPPoE configuration may have a DHCPv4 section but no odhcpd
+	# interface policy. Create only the LAN service section required by router
+	# mode, then advertise the delegated prefix explicitly.
+	uget dhcp.lan >/dev/null 2>&1 || uset dhcp.lan=dhcp
+	uset dhcp.lan.interface=lan
+	uset dhcp.lan.dhcpv6=server
+	uset dhcp.lan.ra=server
+	uset dhcp.lan.ra_slaac=1
+	uset dhcp.lan.ndp=disabled
+else
+	uset dhcp.odhcpd.disabled=1
+	if [ "$ipv6_policy_enabled" = '0' ]; then
+		uset network.lan.ipv6=0
+		uset network.lan.delegate=0
+		if uget network.wan >/dev/null 2>&1; then uset network.wan.ipv6=0; fi
+		if uget network.wan6 >/dev/null 2>&1; then uset network.wan6.disabled=1; fi
+		if uget dhcp.lan >/dev/null 2>&1; then
+			uset dhcp.lan.dhcpv6=disabled
+			uset dhcp.lan.ra=disabled
+			udelete dhcp.lan.ra_slaac
+			uset dhcp.lan.ndp=disabled
+		fi
+	fi
+fi
+
+ucommit dhcp
+ucommit network
+if [ "$ipv6_firewall_changed" = '1' ]; then
+	ucommit firewall
+fi
+ucommit cr6608quick 2>/dev/null || true
+ucommit smartap 2>/dev/null || true
+
+# A settings-preserving sysupgrade may retain the legacy file. Remove it, then
+# enforce the product's IPv4-only kernel policy for every current/future link.
+rm -f -- "$LEGACY_IPV6_SYSCTL"
+"$SYSCTL_BIN" -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+"$SYSCTL_BIN" -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+"$SYSCTL_BIN" -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
+
+if [ -x "$INITD_DIR/odhcpd" ]; then
+	if [ "$ipv6_router" = '1' ]; then
+		"$INITD_DIR/odhcpd" enable >/dev/null 2>&1 || true
+		"$INITD_DIR/odhcpd" restart >/dev/null 2>&1 || true
+	else
+		"$INITD_DIR/odhcpd" disable >/dev/null 2>&1 || true
+		"$INITD_DIR/odhcpd" stop >/dev/null 2>&1 || true
+	fi
+fi
+[ "$ipv6_firewall_changed" != '1' ] || "$INITD_DIR/firewall" reload >/dev/null 2>&1 || true
+"$INITD_DIR/dnsmasq" reload >/dev/null 2>&1 || true
+exit 0

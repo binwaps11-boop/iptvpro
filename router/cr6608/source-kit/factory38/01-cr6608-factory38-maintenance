@@ -1,0 +1,19 @@
+#!/bin/sh
+# Factory-38 maintenance image: keep both radios disabled before netifd starts.
+
+set -eu
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null || true)"
+[ "$board" = 'xiaomi,mi-router-cr6608' ] || exit 1
+
+radios="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+[ -n "$radios" ] || exit 1
+
+for radio in $radios; do
+	uci -q set "wireless.${radio}.disabled=1"
+done
+uci commit wireless
+wifi down 2>/dev/null || true
+logger -t cr6608-factory38 'maintenance image active; Wi-Fi forced disabled until read-only firmware is restored'
+
+exit 0

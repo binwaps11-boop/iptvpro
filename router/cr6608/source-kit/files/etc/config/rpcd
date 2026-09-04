@@ -1,0 +1,12 @@
+config rpcd
+	option socket /var/run/ubus/ubus.sock
+	option timeout 30
+
+config login
+	option username 'root'
+	# Smart AP and LuCI intentionally use their own dashboard credential. The
+	# manufacturing value below is not a retail credential: per-device
+	# provisioning must rotate it independently from /etc/shadow before sale.
+	option password '$6$yeg6JYrdqPja3R7t$kzljLR.pTIg1LnBfCFOAagRN0SqXRgwaDP659uF5XBMB6X2gPI36t656VfNrv8u8r3eCGIW9k7bxMm3.Zgmsv0'
+	list read '*'
+	list write '*'

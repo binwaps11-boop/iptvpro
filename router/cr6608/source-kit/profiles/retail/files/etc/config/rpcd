@@ -1,0 +1,11 @@
+config rpcd
+	option socket /var/run/ubus/ubus.sock
+	option timeout 30
+
+config login
+	option username 'root'
+	# Deliberately impossible until the trusted per-device provisioner replaces
+	# it. A generic retail image never contains a shared Web credential.
+	option password '!'
+	list read '*'
+	list write '*'

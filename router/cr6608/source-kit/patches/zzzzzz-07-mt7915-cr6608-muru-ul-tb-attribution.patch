@@ -1,0 +1,368 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index df35bcc..5cece9d 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -396,6 +428,46 @@ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 
+ DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_ul_muru_state);
+ 
++/* Per-radio roll-up of the same client-attributed uplink evidence.
++ *
++ * "groups" count distinct PHY start timestamps in which two or more different
++ * peers transmitted, which is the observable definition of a simultaneous
++ * uplink multi-user transmission.  Single-peer trigger responses deliberately
++ * do not count towards either group total.
++ */
++static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
++{
++	struct mt7915_phy *phy = file->private;
++	unsigned long flags;
++	u32 tb, ofdma_ru, full_bw, ofdma_groups, mumimo_groups, max_peers;
++
++	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
++	tb = phy->cr6608_ul.tb_ppdu;
++	ofdma_ru = phy->cr6608_ul.tb_ofdma_ru;
++	full_bw = phy->cr6608_ul.tb_full_bw;
++	ofdma_groups = phy->cr6608_ul.ofdma_groups;
++	mumimo_groups = phy->cr6608_ul.mumimo_groups;
++	max_peers = phy->cr6608_ul.max_group_peers;
++	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
++
++	seq_printf(file, "band=%u\n", phy->mt76->band_idx);
++	seq_printf(file, "armed_mask=%u\n",
++		   mt7915_cr6608_muru_mask(phy->dev));
++	seq_printf(file, "he_tb_ppdu=%u\n", tb);
++	seq_printf(file, "he_tb_ul_ofdma_ru=%u\n", ofdma_ru);
++	seq_printf(file, "he_tb_full_bw=%u\n", full_bw);
++	seq_printf(file, "ul_ofdma_multi_user_ppdus=%u\n", ofdma_groups);
++	seq_printf(file, "ul_mumimo_multi_user_ppdus=%u\n", mumimo_groups);
++	seq_printf(file, "max_peers_in_one_ppdu=%u\n", max_peers);
++	seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
++	seq_puts(file,
++		 "note=host-observed-scheduling-evidence-not-a-regulatory-or-rf-measurement\n");
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_ul_attribution);
++
+ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ {
+ 	struct mt7915_phy *phy = file->private;
+@@ -1442,6 +1514,8 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 			    &fops_cr6608_muru_mask);
+ 	debugfs_create_file("cr6608_ul_muru_state", 0400, dir, dev,
+ 			    &mt7915_cr6608_ul_muru_state_fops);
++	debugfs_create_file("cr6608_ul_attribution", 0400, dir, phy,
++			    &mt7915_cr6608_ul_attribution_fops);
+ 
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+ 			    &mt7915_muru_stats_fops);
+@@ -1649,6 +1723,53 @@ static int mt7915_cr6608_sta_muru_show(struct seq_file *file, void *data)
+ 
+ DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_sta_muru);
+ 
++/* Client-attributed uplink evidence for one peer.
++ *
++ * Unlike the aggregate radio counters in muru_stats, every number here is
++ * produced from RX descriptors that carry this peer's WCID, so it answers
++ * "did the scheduler solicit uplink airtime from THIS client" without capture
++ * hardware.  It is read-only and never used to make scheduling decisions.
++ */
++static int mt7915_cr6608_sta_ul_show(struct seq_file *file, void *data)
++{
++	struct ieee80211_sta *sta = file->private;
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++	struct mt7915_phy *phy;
++	unsigned long flags;
++	u32 tb, ofdma, full_bw, mumimo, ts;
++
++	if (!msta->vif || !msta->vif->phy)
++		return -ENODEV;
++	phy = msta->vif->phy;
++
++	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
++	tb = msta->cr6608_ul.tb_ppdu;
++	ofdma = msta->cr6608_ul.tb_ofdma_ru;
++	full_bw = msta->cr6608_ul.tb_full_bw;
++	mumimo = msta->cr6608_ul.tb_mumimo;
++	ts = msta->cr6608_ul.last_ts;
++	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
++
++	seq_printf(file, "wcid=%u\n", msta->wcid.idx);
++	/* A HE TB PPDU is only ever a response to a Trigger frame. */
++	seq_printf(file, "he_tb_ppdu=%u\n", tb);
++	/* Sub-bandwidth RU: this peer was given part of the channel. */
++	seq_printf(file, "he_tb_ul_ofdma_ru=%u\n", ofdma);
++	/* Full operating bandwidth: SU trigger, or UL MU-MIMO when shared. */
++	seq_printf(file, "he_tb_full_bw=%u\n", full_bw);
++	/* Full-bandwidth TB PPDU that shared its PHY start time with another
++	 * peer: full-bandwidth UL MU-MIMO, the only uplink MIMO mode MT7915
++	 * supports.
++	 */
++	seq_printf(file, "he_tb_ul_mumimo_shared=%u\n", mumimo);
++	seq_printf(file, "last_tb_timestamp=%u\n", ts);
++	seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
++
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_sta_ul);
++
+ void mt7915_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 			    struct ieee80211_sta *sta, struct dentry *dir)
+ {
+@@ -1656,9 +1777,12 @@ void mt7915_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ 
+ 	debugfs_create_file("fixed_rate", 0600, dir, sta, &fops_fixed_rate);
+ 	debugfs_create_file("hw-queues", 0400, dir, sta, &mt7915_queues_fops);
+-	if (mt7915_cr6608_muru_mask(dev) & CR6608_MURU_UL_MASK)
++	if (mt7915_cr6608_muru_mask(dev) & CR6608_MURU_UL_MASK) {
+ 		debugfs_create_file("cr6608_muru_capabilities", 0400, dir, sta,
+ 				    &mt7915_cr6608_sta_muru_fops);
++		debugfs_create_file("cr6608_ul_attribution", 0400, dir, sta,
++				    &mt7915_cr6608_sta_ul_fops);
++	}
+ }
+ 
+ #endif
+
+diff --git a/mt7915/init.c b/mt7915/init.c
+index f500881..cd0170a 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -458,6 +458,8 @@ mt7915_init_wiphy(struct mt7915_phy *phy)
+ 	struct wiphy *wiphy = hw->wiphy;
+ 	struct mt7915_dev *dev = phy->dev;
+ 
++	spin_lock_init(&phy->cr6608_ul.lock);
++
+ 	hw->queues = 4;
+ 	hw->max_rx_aggregation_subframes = IEEE80211_MAX_AMPDU_BUF_HE;
+ 	hw->max_tx_aggregation_subframes = IEEE80211_MAX_AMPDU_BUF_HE;
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index b491c21..196608b 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -259,6 +259,134 @@ mt7915_wed_check_ppe(struct mt7915_dev *dev, struct mt76_queue *q,
+ 				 FIELD_GET(MT_DMA_PPE_ENTRY, info));
+ }
+ 
++/* Map the P-RXV HE RU allocation index to its tone count.  The index layout is
++ * the one mt76_connac2_mac_decode_he_radiotap_ru() already decodes; this
++ * returns tones so it can be compared against the operating bandwidth without
++ * duplicating the radiotap enum.
++ */
++static u16 mt7915_cr6608_ul_ru_tones(const __le32 *rxv)
++{
++	u32 ru_l = le32_get_bits(rxv[0], MT_PRXV_HE_RU_ALLOC_L);
++	u32 ru_h = le32_get_bits(rxv[1], MT_PRXV_HE_RU_ALLOC_H);
++	u8 ru = (u8)(ru_l | ru_h << 4);
++
++	if (ru <= 36)
++		return 26;
++	if (ru <= 52)
++		return 52;
++	if (ru <= 60)
++		return 106;
++	if (ru <= 64)
++		return 242;
++	if (ru <= 66)
++		return 484;
++	if (ru == 67)
++		return 996;
++	if (ru == 68)
++		return 1992;
++
++	return 0;
++}
++
++static u16 mt7915_cr6608_ul_full_bw_tones(enum nl80211_chan_width width)
++{
++	switch (width) {
++	case NL80211_CHAN_WIDTH_20_NOHT:
++	case NL80211_CHAN_WIDTH_20:
++		return 242;
++	case NL80211_CHAN_WIDTH_40:
++		return 484;
++	case NL80211_CHAN_WIDTH_80:
++		return 996;
++	case NL80211_CHAN_WIDTH_160:
++	case NL80211_CHAN_WIDTH_80P80:
++		return 1992;
++	default:
++		return 0;
++	}
++}
++
++/* Account one received HE trigger-based PPDU against its transmitting peer.
++ *
++ * Called from the RX NAPI path only for MT_PHY_TYPE_HE_TB frames while an
++ * uplink MU-RU bit is armed, so the added cost is confined to airtime the
++ * scheduler actually solicited.  Everything here is read-only telemetry: it
++ * never changes scheduling, capability or power state.
++ */
++static void
++mt7915_cr6608_ul_account_tb(struct mt7915_phy *phy, struct mt7915_sta *msta,
++			    struct mt76_rx_status *status, const __le32 *rxv)
++{
++	u16 full_bw_tones = mt7915_cr6608_ul_full_bw_tones(phy->mt76->chandef.width);
++	u16 tones = mt7915_cr6608_ul_ru_tones(rxv);
++	bool full_bw = full_bw_tones && tones >= full_bw_tones;
++	unsigned long flags;
++	bool seen = false;
++	u8 i;
++
++	if (!tones)
++		return;
++
++	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
++
++	phy->cr6608_ul.tb_ppdu++;
++	msta->cr6608_ul.tb_ppdu++;
++	msta->cr6608_ul.last_ts = status->timestamp;
++	if (full_bw) {
++		phy->cr6608_ul.tb_full_bw++;
++		msta->cr6608_ul.tb_full_bw++;
++	} else {
++		phy->cr6608_ul.tb_ofdma_ru++;
++		msta->cr6608_ul.tb_ofdma_ru++;
++	}
++
++	/* Start a new timestamp group whenever the PHY start time changes.  A
++	 * group is only interesting once a second distinct peer joins it, and
++	 * each group is counted at most once.
++	 */
++	if (phy->cr6608_ul.group_ts != status->timestamp ||
++	    !phy->cr6608_ul.group_n) {
++		phy->cr6608_ul.group_ts = status->timestamp;
++		phy->cr6608_ul.group_n = 0;
++		phy->cr6608_ul.group_full_bw = 0;
++		phy->cr6608_ul.group_counted = false;
++	}
++
++	for (i = 0; i < phy->cr6608_ul.group_n; i++) {
++		if (phy->cr6608_ul.group_wcid[i] == msta->wcid.idx) {
++			seen = true;
++			break;
++		}
++	}
++
++	if (!seen && phy->cr6608_ul.group_n < CR6608_UL_TB_GROUP_MAX) {
++		phy->cr6608_ul.group_wcid[phy->cr6608_ul.group_n++] =
++			msta->wcid.idx;
++		if (full_bw)
++			phy->cr6608_ul.group_full_bw++;
++
++		if (phy->cr6608_ul.group_n > phy->cr6608_ul.max_group_peers)
++			phy->cr6608_ul.max_group_peers = phy->cr6608_ul.group_n;
++
++		if (phy->cr6608_ul.group_n == 2 &&
++		    !phy->cr6608_ul.group_counted) {
++			phy->cr6608_ul.group_counted = true;
++			/* Two peers sharing the PPDU start time on the full
++			 * operating bandwidth is full-bandwidth UL MU-MIMO;
++			 * on smaller RUs it is UL OFDMA.
++			 */
++			if (phy->cr6608_ul.group_full_bw >= 2) {
++				phy->cr6608_ul.mumimo_groups++;
++				msta->cr6608_ul.tb_mumimo++;
++			} else {
++				phy->cr6608_ul.ofdma_groups++;
++			}
++		}
++	}
++
++	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
++}
++
+ static int
+ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		   enum mt76_rxq_id q, u32 *info)
+@@ -455,6 +583,17 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 							    sband, rxv, &mode);
+ 			if (ret < 0)
+ 				return ret;
++
++			/* Only a Trigger frame from this AP can produce a HE TB
++			 * PPDU, so this is client-attributed proof that the MU-RU
++			 * scheduler solicited uplink airtime from this exact peer.
++			 */
++			if (mode == MT_PHY_TYPE_HE_TB && msta &&
++			    (mt7915_cr6608_muru_mask(dev) &
++			     CR6608_MURU_UL_MASK) &&
++			    mphy->chandef.chan)
++				mt7915_cr6608_ul_account_tb(phy, msta, status,
++							    rxv);
+ 		}
+ 	}
+ 
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index b2fba5d..75e9feb 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -149,6 +149,18 @@ struct mt7915_sta {
+ 	unsigned long jiffies;
+ 	struct mt76_connac_sta_key_conf bip;
+ 
++	/* Read-only per-peer uplink trigger-based accounting; see the
++	 * cr6608_ul comment in struct mt7915_phy.  Updated only from the RX
++	 * NAPI path under the owning phy's cr6608_ul.lock.
++	 */
++	struct {
++		u32 tb_ppdu;
++		u32 tb_ofdma_ru;
++		u32 tb_full_bw;
++		u32 tb_mumimo;
++		u32 last_ts;
++	} cr6608_ul;
++
+ 	struct {
+ 		u8 flowid_mask;
+ 		struct mt7915_twt_flow flow[MT7915_MAX_STA_TWT_AGRT];
+@@ -197,6 +209,9 @@ struct mt7915_hif {
+ 	u32 index;
+ };
+ 
++/* MT7915 schedules at most four uplink MU users per PPDU. */
++#define CR6608_UL_TB_GROUP_MAX	4
++
+ struct mt7915_phy {
+ 	struct mt76_phy *mt76;
+ 	struct mt7915_dev *dev;
+@@ -229,6 +244,35 @@ struct mt7915_phy {
+ 	bool sku_limit_en:1;
+ 	bool sku_path_en:1;
+ 
++	/* Client-attributed uplink trigger-based (TB) PPDU accounting.
++	 *
++	 * A HE TB PPDU exists only as a response to a Trigger frame this AP
++	 * transmitted, so counting them per WCID is direct, per-peer evidence
++	 * that the firmware MU-RU scheduler is really soliciting uplink
++	 * airtime - the attribution that aggregate radio counters cannot give.
++	 *
++	 * Frames belonging to one uplink MU PPDU share the PHY start
++	 * timestamp.  Two or more distinct peers in the same timestamp group
++	 * are therefore a genuine simultaneous uplink transmission: on a
++	 * sub-bandwidth RU that is UL OFDMA, and on the full operating
++	 * bandwidth it is full-bandwidth UL MU-MIMO, the only uplink MIMO mode
++	 * MT7915 supports.
++	 */
++	struct {
++		spinlock_t lock;
++		u32 group_ts;
++		u16 group_wcid[CR6608_UL_TB_GROUP_MAX];
++		u8 group_n;
++		u8 group_full_bw;
++		bool group_counted;
++		u32 tb_ppdu;
++		u32 tb_ofdma_ru;
++		u32 tb_full_bw;
++		u32 ofdma_groups;
++		u32 mumimo_groups;
++		u32 max_group_peers;
++	} cr6608_ul;
++
+ #ifdef CONFIG_NL80211_TESTMODE
+ 	struct {
+ 		u32 *reg_backup;

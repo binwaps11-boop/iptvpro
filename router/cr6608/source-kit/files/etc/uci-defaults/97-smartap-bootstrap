@@ -1,0 +1,8 @@
+#!/bin/sh
+# First-boot baseline: recovery IP/SSID, smartap defaults, txpower (no DHCP client).
+if [ -x /usr/sbin/smartap-bootstrap ]; then
+	# /etc/init.d/boot runs UCI defaults before network/firewall.  Commit the
+	# baseline now and let normal service order plus rescue hotplug apply it.
+	/usr/sbin/smartap-bootstrap firstboot || exit $?
+fi
+exit 0

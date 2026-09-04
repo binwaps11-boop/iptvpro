@@ -1,0 +1,9 @@
+{%
+	/*
+	 * Smart AP owns password entry. The authenticated dashboard creates a
+	 * short-lived LuCI session through /cgi-bin/dashluci before opening LuCI.
+	 * A direct or expired LuCI request therefore returns to Smart AP instead of
+	 * exposing a second, inconsistent login screen.
+	 */
+	http.redirect('/');
+%}

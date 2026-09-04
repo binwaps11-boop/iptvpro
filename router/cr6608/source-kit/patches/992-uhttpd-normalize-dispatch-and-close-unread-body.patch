@@ -1,0 +1,238 @@
+--- a/client.c
++++ b/client.c
+@@ -57,6 +57,9 @@ void uh_http_header(struct client *cl, i
+ 
+ 	cl->http_code = code;
+ 
++	if (r->transfer_chunked || r->content_length > 0)
++		r->connection_close = true;
++
+ 	if (!uh_use_chunked(cl))
+ 		enc = "";
+ 
+@@ -72,9 +75,18 @@ void uh_http_header(struct client *cl, i
+ 	if (!r->connection_close)
+ 		ustream_printf(cl->us, "Keep-Alive: timeout=%d\r\n", conf.http_keepalive);
+ 
++	if (cl->tls &&
++	    !uh_proc_header_exists(cl, "Strict-Transport-Security"))
++		ustream_printf(cl->us,
++				"Strict-Transport-Security: max-age=31536000\r\n");
++
+-	blobmsg_for_each_attr(cur, cl->hdr_response.head, rem)
++	blobmsg_for_each_attr(cur, cl->hdr_response.head, rem) {
++		if (uh_proc_header_exists(cl, blobmsg_name(cur)))
++			continue;
++
+ 		ustream_printf(cl->us, "%s: %s\r\n", blobmsg_name(cur),
+ 			       blobmsg_get_string(cur));
++	}
+ }
+ 
+ static void uh_connection_close(struct client *cl)
+@@ -124,11 +136,21 @@ static void uh_poll_connection(struct cl
+ 
+ void uh_request_done(struct client *cl)
+ {
++	struct http_request *r = &cl->request;
++
+ 	uh_chunk_eof(cl);
+ 	uh_dispatch_done(cl);
+ 	blob_buf_init(&cl->hdr_response, 0);
+ 	memset(&cl->dispatch, 0, sizeof(cl->dispatch));
+ 
++	/* Close the connection even when keep alive is set, when it
++	 * contains a request body, as it was not read and we are
++	 * currently out of sync. Without handling this the body will be
++	 * interpreted as part of the next request.
++	 */
++	if (r->transfer_chunked || r->content_length > 0)
++		cl->request.connection_close = true;
++
+ 	if (!conf.http_keepalive || cl->request.connection_close)
+ 		return uh_connection_close(cl);
+ 
+@@ -140,7 +162,6 @@ void uh_request_done(struct client *cl)
+ void __printf(4, 5)
+ uh_client_error(struct client *cl, int code, const char *summary, const char *fmt, ...)
+ {
+-	struct http_request *r = &cl->request;
+ 	va_list arg;
+ 
+ 	uh_http_header(cl, code, summary);
+@@ -154,15 +175,6 @@ uh_client_error(struct client *cl, int c
+ 		va_end(arg);
+ 	}
+ 
+-	/* Close the connection even when keep alive is set, when it
+-	 * contains a request body, as it was not read and we are
+-	 * currently out of sync. Without handling this the body will be
+-	 * interpreted as part of the next request. The alternative
+-	 * would be to read and discard the request body here.
+-	 */
+-	if (r->transfer_chunked || r->content_length > 0)
+-		cl->request.connection_close = true;
+-
+ 	uh_request_done(cl);
+ }
+ 
+--- a/file.c
++++ b/file.c
+@@ -77,14 +77,11 @@ void uh_index_add(const char *filename)
+ 	list_add_tail(&idx->list, &index_files);
+ }
+ 
+-static char * canonpath(const char *path, char *path_resolved)
++static char * canonpath_lexical(const char *path, char *path_resolved)
+ {
+ 	const char *path_cpy = path;
+ 	char *path_res = path_resolved;
+ 
+-	if (conf.no_symlinks)
+-		return realpath(path, path_resolved);
+-
+ 	/* normalize */
+ 	while ((*path_cpy != '\0') && (path_cpy < (path + PATH_MAX - 2))) {
+ 		if (*path_cpy != '/')
+@@ -129,6 +126,63 @@ next:
+ 	return path_resolved;
+ }
+ 
++static char * canonpath(const char *path, char *path_resolved)
++{
++	if (conf.no_symlinks)
++		return realpath(path, path_resolved);
++
++	return canonpath_lexical(path, path_resolved);
++}
++
++/*
++ * URL based handlers are selected before uh_path_lookup() decodes and
++ * canonicalizes the request path. Match handlers against the same logical
++ * path that the filesystem dispatcher will use, otherwise percent-encoding,
++ * repeated slashes or dot segments can bypass a configured prefix and reach
++ * a CGI below it.
++ *
++ * Keep the original query string, but decode and normalize only the path.
++ * A malformed or overlong URL simply falls back to the existing filesystem
++ * lookup, which will reject it in the usual way.
++ */
++static char * normalize_dispatch_url(const char *url)
++{
++	static char decoded[PATH_MAX];
++	static char normalized[PATH_MAX];
++	static char result[PATH_MAX];
++	const char *query;
++	size_t path_len, normalized_len, query_len = 0;
++	int decoded_len;
++
++	if (!url)
++		return NULL;
++
++	query = strchr(url, '?');
++	path_len = query ? (size_t)(query - url) : strlen(url);
++	if (!path_len || path_len > INT_MAX)
++		return NULL;
++
++	decoded_len = uh_urldecode(decoded, sizeof(decoded), url, path_len);
++	if (decoded_len < 0 || decoded[0] != '/' ||
++	    (size_t)decoded_len != strlen(decoded))
++		return NULL;
++
++	canonpath_lexical(decoded, normalized);
++	normalized_len = strlen(normalized);
++	if (query)
++		query_len = strlen(query);
++
++	if (normalized_len + query_len >= sizeof(result))
++		return NULL;
++
++	memcpy(result, normalized, normalized_len);
++	if (query_len)
++		memcpy(result + normalized_len, query, query_len);
++	result[normalized_len + query_len] = 0;
++
++	return result;
++}
++
+ /* Returns NULL on error.
+ ** NB: improperly encoded URL should give client 400 [Bad Syntax]; returning
+ ** NULL here causes 404 [Not Found], but that's not too unreasonable. */
+@@ -620,6 +674,8 @@ static void uh_file_data(struct client *
+ {
++	cl->dispatch.no_cache = true;
++
+ 	/* test preconditions */
+ 	if (!cl->dispatch.no_cache &&
+ 	    (!uh_file_if_modified_since(cl, &pi->stat) ||
+ 	     !uh_file_if_match(cl, &pi->stat) ||
+ 	     !uh_file_if_range(cl, &pi->stat) ||
+@@ -637,6 +693,10 @@ static void uh_file_data(struct client *
+ 	ustream_printf(cl->us, "Content-Type: %s\r\n",
+ 			   uh_file_mime_lookup(pi->name));
+ 
++	ustream_printf(cl->us, "Cache-Control: no-store, no-cache, must-revalidate\r\n");
++	ustream_printf(cl->us, "Pragma: no-cache\r\n");
++	ustream_printf(cl->us, "Expires: 0\r\n");
++
+ 	ustream_printf(cl->us, "Content-Length: %" PRIu64 "\r\n\r\n",
+ 			   pi->stat.st_size);
+ 
+@@ -961,6 +1021,7 @@ void uh_handle_request(struct client *cl
+ 	struct http_request *req = &cl->request;
+ 	struct dispatch_handler *d;
+ 	char *url = blobmsg_data(blob_data(cl->hdr.head));
++	char *dispatch_url;
+ 	char *error_handler, *escaped_url;
+ 
+ 	blob_buf_init(&cl->hdr_response, 0);
+@@ -975,9 +1036,10 @@ void uh_handle_request(struct client *cl
+ 		return;
+ 
+ 	req->redirect_status = 200;
+-	d = dispatch_find(url, NULL);
++	dispatch_url = normalize_dispatch_url(url);
++	d = dispatch_url ? dispatch_find(dispatch_url, NULL) : NULL;
+ 	if (d)
+-		return uh_invoke_handler(cl, d, url, NULL);
++		return uh_invoke_handler(cl, d, dispatch_url, NULL);
+ 
+ 	if (__handle_file_request(cl, url, false))
+ 		return;
+--- a/proc.c
++++ b/proc.c
+@@ -265,6 +265,24 @@ static void proc_free(struct client *cl)
+ 	uh_relay_free(&p->r);
+ }
++
++bool uh_proc_header_exists(struct client *cl, const char *name)
++{
++	struct dispatch_proc *p = &cl->dispatch.proc;
++	struct blob_attr *cur;
++	int rem;
++
++	if (!name || cl->dispatch.free != proc_free ||
++	    p->r.header_cb || !p->hdr.head)
++		return false;
++
++	blob_for_each_attr(cur, p->hdr.head, rem) {
++		if (!strcasecmp(blobmsg_name(cur), name))
++			return true;
++	}
++
++	return false;
++}
+ 
+ static void proc_write_cb(struct uloop_fd *fd, unsigned int events)
+ {
+ 	struct client *cl = container_of(fd, struct client, dispatch.proc.wrfd);
+--- a/uhttpd.h
++++ b/uhttpd.h
+@@ -346,6 +346,7 @@ void uh_relay_kill(struct client *cl, str
+ struct env_var *uh_get_process_vars(struct client *cl, struct path_info *pi);
+ bool uh_create_process(struct client *cl, struct path_info *pi, char *url,
+ 		       void (*cb)(struct client *cl, struct path_info *pi, char *url));
++bool uh_proc_header_exists(struct client *cl, const char *name);
+ 
+ int uh_plugin_init(const char *name);
+ void uh_plugin_post_init(void);
