@@ -1,0 +1,151 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index f86eb31d..3875151c 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -274,11 +274,11 @@ static int mt7915_cr6608_ul_muru_set(void *data, u64 val)
+ {
+ 	struct mt7915_dev *dev = data;
+ 
+-	/* This is deliberately a one-way runtime kill switch.  Advertising HE
+-	 * capabilities is fixed when the wiphy is registered, so re-enabling
+-	 * safely requires a fresh driver load.  Disabling here prevents new
+-	 * STA_REC_MURU records from arming the firmware scheduler; userspace
+-	 * follows it with a normal Wi-Fi reload to rebuild existing stations.
++	/* This is deliberately a one-way runtime kill switch.  The B22
++	 * advertisement is decided once at driver load (cr6608_ul_mimo_advertise)
++	 * and never follows the live mask, so re-enabling safely requires a
++	 * fresh driver load.  Disabling here stops new STA_REC_MURU records from
++	 * arming the firmware scheduler and replays the existing ones.
+ 	 */
+ 	if (val)
+ 		return -EPERM;
+@@ -404,6 +404,9 @@ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 	seq_printf(file, "candidate_ul_mumimo=%u\n",
+ 		   !!(mask & CR6608_MURU_MUMIMO_UL));
+ 	seq_printf(file, "candidate_ceiling=%d\n", ceiling);
++	/* Decided at driver load; 0 = MediaTek vendor parity. */
++	seq_printf(file, "ul_mimo_advertised=%u\n",
++		   dev->cr6608_ul_mimo_advertise);
+ 	/* Bits the radio keeps requesting even with the uplink experiment
+ 	 * retired, so a MU-RU fault never regresses upstream DL behaviour.
+ 	 */
+diff --git a/mt7915/init.c b/mt7915/init.c
+index 868a6dfb..eacca0db 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -19,6 +19,11 @@ MODULE_PARM_DESC(cr6608_ul_muru,
+ 
+ static unsigned char cr6608_muru_mask;
+ module_param(cr6608_muru_mask, byte, 0444);
++
++static bool cr6608_advertise_ul_mumimo;
++module_param(cr6608_advertise_ul_mumimo, bool, 0444);
++MODULE_PARM_DESC(cr6608_advertise_ul_mumimo,
++		 "CR6608: advertise HE PHY CAP2 full-bandwidth UL MU-MIMO (B22) when mask bit 3 is armed. Default 0 = MediaTek vendor parity (scheduler armed per peer, B22 not advertised)");
+ MODULE_PARM_DESC(cr6608_muru_mask,
+ 		 "CR6608 MediaTek MURU bitmap: DL-OFDMA=1 UL-OFDMA=2 DL-MUMIMO=4 UL-MUMIMO=8");
+ 
+@@ -1033,8 +1038,10 @@ mt7915_set_stream_he_txbf_caps(struct mt7915_phy *phy,
+ 	elem->phy_cap_info[7] &= ~IEEE80211_HE_PHY_CAP7_MAX_NC_MASK;
+ 
+ 	c = IEEE80211_HE_PHY_CAP2_NDP_4x_LTF_AND_3_2US;
+-	if (!is_mt7915(&dev->mt76) ||
+-	    (mt7915_cr6608_muru_mask(dev) & CR6608_MURU_MUMIMO_UL))
++	/* Boot-time decision only (see cr6608_ul_mimo_advertise); the live
++	 * scheduler mask must never change what the wiphy advertises.
++	 */
++	if (!is_mt7915(&dev->mt76) || dev->cr6608_ul_mimo_advertise)
+ 		c |= IEEE80211_HE_PHY_CAP2_UL_MU_FULL_MU_MIMO;
+ 	elem->phy_cap_info[2] |= c;
+ 
+@@ -1385,6 +1392,9 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 
+ 		atomic_set(&dev->cr6608_muru_ceiling, boot_mask);
+ 		atomic_set(&dev->cr6608_muru_mask, boot_mask);
++		dev->cr6608_ul_mimo_advertise =
++			!!(boot_mask & CR6608_MURU_MUMIMO_UL) &&
++			cr6608_advertise_ul_mumimo;
+ 		/* Keep upstream DL behaviour available even after the uplink
+ 		 * experiment is retired at runtime.
+ 		 */
+
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index f7a20bf3..d6bc3132 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -1239,16 +1239,25 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		return 0;
+ 
+ 	if (!is_mt7915(&dev->mt76))
+-		mask = CR6608_MURU_MASK;
+-	else if (dev->cr6608_ul_muru_allowed) {
++		/* Exactly upstream 39c960c3 for mt7916/mt7981/mt7986: DL bits and
++		 * UL MU-MIMO; upstream has never requested UL OFDMA on any chip.
++		 */
++		mask = CR6608_MURU_DL_MASK | CR6608_MURU_MUMIMO_UL;
++	else if (dev->cr6608_ul_muru_allowed)
+ 		/* The effective mask keeps the upstream DL floor, so a retired or
+ 		 * latched uplink experiment cannot silently turn off DL OFDMA and
+ 		 * DL MU-MIMO, which this radio supports on the plain upstream path.
++		 *
++		 * The cfg bits are phy-wide and identical for EVERY peer, HE or
++		 * not: the firmware latches its MURU enable state from the first
++		 * station record (upstream abd80cf6, "the firmware couldn't enable
++		 * muru if the first connected station is non-HE type"), and
++		 * MediaTek's own mt7915 build sends them uniformly.  Per-peer
++		 * eligibility is carried by the capability fields below, exactly as
++		 * upstream and mt7996 do.
+ 		 */
+ 		mask = mt7915_cr6608_muru_effective_mask(dev);
+-		if (!sta->deflink.he_cap.has_he)
+-			mask &= CR6608_MURU_DL_MASK;
+-	} else
++	else
+ 		mask = CR6608_MURU_DL_MASK;
+ 	state = mask;
+ 
+@@ -1260,8 +1269,7 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 			       mvif->cap.vht_mu_ebfer ||
+ 			       mvif->cap.vht_mu_ebfee) &&
+ 			       !!(mask & CR6608_MURU_MUMIMO_DL);
+-	muru->cfg.mimo_ul_en = !is_mt7915(&dev->mt76) &&
+-			       !!(mask & CR6608_MURU_MUMIMO_UL);
++	muru->cfg.mimo_ul_en = !!(mask & CR6608_MURU_MUMIMO_UL);
+ 	muru->cfg.ofdma_dl_en = !!(mask & CR6608_MURU_OFDMA_DL);
+ 	muru->cfg.ofdma_ul_en = !!(mask & CR6608_MURU_OFDMA_UL);
+ 
+@@ -1282,13 +1290,8 @@ mt7915_mcu_sta_muru_tlv(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	muru->mimo_ul.partial_ul_mimo =
+ 		!is_mt7915(&dev->mt76) &&
+ 		HE_PHY(CAP2_UL_MU_PARTIAL_MU_MIMO, elem->phy_cap_info[2]);
+-	if (muru->mimo_ul.full_ul_mimo) {
++	if (muru->mimo_ul.full_ul_mimo)
+ 		state |= CR6608_MURU_STA_FULL_UL_MIMO;
+-		if (mask & CR6608_MURU_MUMIMO_UL)
+-			muru->cfg.mimo_ul_en = true;
+-	} else if (is_mt7915(&dev->mt76)) {
+-		state &= ~CR6608_MURU_MUMIMO_UL;
+-	}
+ 
+ 	muru->ofdma_dl.punc_pream_rx =
+ 		HE_PHY(CAP1_PREAMBLE_PUNC_RX_MASK, elem->phy_cap_info[1]);
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 7bd08dd4..528a05f1 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -367,6 +367,15 @@ struct mt7915_dev {
+ 	bool flash_mode;
+ 	bool muru_debug;
+ 	bool cr6608_ul_muru_allowed;
++	/* Decided once at driver load: whether the AP HE PHY capabilities
++	 * carry B22 (full-bandwidth UL MU-MIMO reception).  MediaTek's own
++	 * mt7915 build requests UL MU-MIMO per peer WITHOUT advertising B22, so
++	 * the default is vendor parity; advertising is an explicit opt-in for
++	 * A/B over-the-air comparison.  Frozen so that mt7915_set_antenna(),
++	 * which re-runs mt7915_set_stream_he_caps(), cannot flip the beacon
++	 * capability at runtime while disarm/re-arm move the live mask.
++	 */
++	bool cr6608_ul_mimo_advertise;
+ 	atomic_t cr6608_muru_ceiling;
+ 	atomic_t cr6608_muru_dl_floor;
+ 	atomic_t cr6608_muru_mask;

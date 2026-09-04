@@ -71,7 +71,11 @@ jobs:
           # itself is inconsistent, so stop before spending an hour compiling.
           for t in tests/test-muru-driver-port.sh \
                    tests/test-muru-fault-attribution.sh \
+                   tests/test-muru-live-refresh.sh \
+                   tests/test-muru-vendor-parity.sh \
+                   tests/test-ul-mu-evidence-runtime.sh \
                    tests/test-ax-feature-contracts.sh \
+                   tests/test-release-package-contract.sh \
                    tests/test-luci-wireless-txpower-preserve.sh \
                    tests/test-all-channel-38-contract.py; do
             echo "== $t"
@@ -131,7 +135,9 @@ jobs:
                    zzzzzz-05-mt7915-cr6608-muru-mcu-response.patch \
                    zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch \
                    zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch \
-                   zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch; do
+                   zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch \
+                   zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch \
+                   zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch; do
             cp -v "$KIT/patches/$p" "$DEST/$p"
           done
           ls -la "$DEST"
@@ -215,47 +221,54 @@ jobs:
           [ -n "$KO" ] || { echo "::error::mt7915e.ko not found"; exit 1; }
           echo "mt7915e.ko: $KO"
           MISSING=0
-          # Module parameters are emitted as __param_<name> symbols, so their
-          # presence in the binary proves the gate code was compiled in, not
-          # just that a string was pasted somewhere.
-          for sym in __param_cr6608_rf_38dbm \
-                     __param_cr6608_muru_mask \
-                     __param_cr6608_rf_band0_sku_applied_per_path_half_dbm \
-                     __param_cr6608_rf_band1_sku_applied_per_path_half_dbm \
-                     __param_cr6608_factory38_persisted_match; do
-            if strings -a "$KO" | grep -qx "$sym"; then
-              echo "  OK   $sym"
+          # OpenWrt installs a STRIPPED module: the __param_<name> ELF symbol
+          # names are gone, but each module parameter still leaves its
+          # 'parm=<name>:<description>' record in .modinfo, and that record
+          # only exists if the module_param() line was compiled in.
+          for parm in cr6608_rf_38dbm \
+                      cr6608_muru_mask \
+                      cr6608_advertise_ul_mumimo \
+                      cr6608_rf_band0_sku_applied_per_path_half_dbm \
+                      cr6608_rf_band1_sku_applied_per_path_half_dbm \
+                      cr6608_factory38_persisted_match; do
+            if strings -a "$KO" | grep -q "^parm=$parm:"; then
+              echo "  OK   parm=$parm"
             else
-              echo "  MISS $sym"; MISSING=1
+              echo "  MISS parm=$parm"; MISSING=1
             fi
           done
-          # Strings unique to the two new attribution patches. These live in
-          # the per-radio debugfs node and the recovery telemetry, so they do
+          # Strings unique to the attribution / honesty patches. These live in
+          # the per-radio debugfs nodes and the recovery telemetry, so they do
           # not depend on any optional kernel config.
           for s in "cr6608_ul_attribution" \
                    "ul_mumimo_multi_user_ppdus" \
                    "unattributed_disarms" \
                    "upstream_dl_floor" \
-                   "strike_limit"; do
+                   "strike_limit" \
+                   "ul_mimo_advertised" \
+                   "rxv_group5_enabled" \
+                   "cr6608_rxv_group5" \
+                   "firmware-stats-unavailable"; do
             if strings -a "$KO" | grep -qF "$s"; then
               echo "  OK   $s"
             else
               echo "  MISS $s"; MISSING=1
             fi
           done
-          # The per-peer nodes are compiled only when mac80211 debugfs is on
-          # (CONFIG_MAC80211_DEBUGFS, which itself needs CFG80211_DEBUGFS).
-          # Without them there is no client-attributed uplink evidence, which
-          # is the whole point of patch 07 -- so treat it as an error and say
-          # exactly which config is responsible.
+          # The per-peer nodes are compiled only when mac80211 debugfs is on.
+          # OpenWrt's kmod-mac80211 leaves it OFF by default; the kit's seed
+          # config sets CONFIG_PACKAGE_MAC80211_DEBUGFS=y precisely so these
+          # nodes exist. If they are missing the seed was not honoured.
           for s in "he_tb_ul_mumimo_shared" "cr6608_muru_capabilities"; do
             if strings -a "$KO" | grep -qF "$s"; then
               echo "  OK   $s (per-peer)"
             else
-              echo "::error::$s missing - mac80211 debugfs is off, so per-peer uplink attribution was not compiled"
+              echo "::error::$s missing - CONFIG_PACKAGE_MAC80211_DEBUGFS is off, so the per-peer debugfs nodes were not compiled"
               MISSING=1
             fi
           done
+          grep -q '^CONFIG_PACKAGE_MAC80211_DEBUGFS=y' .config \
+            || { echo "::error::seed did not enable CONFIG_PACKAGE_MAC80211_DEBUGFS"; MISSING=1; }
           [ "$MISSING" = 0 ] || { echo "::error::compiled driver is missing CR6608 symbols"; exit 1; }
 
       - name: Prove the shipped image contains that driver and the overlay
@@ -272,12 +285,18 @@ jobs:
           IMGKO="$(find /tmp/imgchk/sq -name 'mt7915e.ko*' | head -1)"
           [ -n "$IMGKO" ] || { echo "::error::mt7915e.ko not in image"; exit 1; }
           case "$IMGKO" in *.ko.zst) zstd -dq -f "$IMGKO" -o /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;; esac
-          strings -a "$IMGKO" | grep -qx __param_cr6608_rf_38dbm \
+          strings -a "$IMGKO" | grep -q '^parm=cr6608_rf_38dbm:' \
             || { echo "::error::image driver lacks the 38 dBm gate"; exit 1; }
-          strings -a "$IMGKO" | grep -qx __param_cr6608_muru_mask \
+          strings -a "$IMGKO" | grep -q '^parm=cr6608_muru_mask:' \
             || { echo "::error::image driver lacks the MU-RU mask"; exit 1; }
+          strings -a "$IMGKO" | grep -q '^parm=cr6608_advertise_ul_mumimo:' \
+            || { echo "::error::image driver lacks the vendor-parity advertisement switch"; exit 1; }
           strings -a "$IMGKO" | grep -qF ul_mumimo_multi_user_ppdus \
             || { echo "::error::image driver lacks the uplink attribution patch"; exit 1; }
+          strings -a "$IMGKO" | grep -qF he_tb_ul_mumimo_shared \
+            || { echo "::error::image driver lacks the per-peer debugfs nodes (MAC80211_DEBUGFS off)"; exit 1; }
+          echo "== module parameters compiled into the image driver =="
+          strings -a "$IMGKO" | grep '^parm=cr6608_' | cut -d: -f1 | sort
           echo "== module parameters inside the image =="
           cat /tmp/imgchk/sq/etc/modules.d/mt7915e
           echo "== configured txpower inside the image =="

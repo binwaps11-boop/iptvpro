@@ -24,6 +24,7 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 mask_file="$WORK/mask"
 printf '15\n' > "$mask_file"
 
+G5=1
 radio() {
 	# radio <phy> <band> <tb> <ofdma_ru> <full_bw> <ofdma_groups> <mumimo_groups> <max_peers>
 	d="$WORK/debug/$1/mt76"
@@ -31,6 +32,7 @@ radio() {
 	{
 		printf 'band=%s\n' "$2"
 		printf 'armed_mask=15\n'
+		printf 'rxv_group5_enabled=%s\n' "$G5"
 		printf 'he_tb_ppdu=%s\n' "$3"
 		printf 'he_tb_ul_ofdma_ru=%s\n' "$4"
 		printf 'he_tb_full_bw=%s\n' "$5"
@@ -206,6 +208,55 @@ rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
 radio phy0 1 0 0 0 0 0 0
 out="$(CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" CR6608_MURU_MASK_MODULE_PARAM="$mask_file" sh "$TOOL" --with-firmware --window 0)"
 printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_STATS_UNAVAILABLE' || fail 'missing muru_stats not reported as unavailable'
+
+# 17. RXD group 5 off: host counters are structurally zero on MT7915, so the
+#     verdict must say UNAVAILABLE, never "nothing scheduled", and the
+#     firmware counters stand alone as scheduler evidence.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+G5=0 radio phy0 1 0 0 0 0 0 0
+out="$(run)"
+printf '%s\n' "$out" | grep -qx 'verdict=HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF' || { printf '%s\n' "$out" >&2; fail 'group-5-off not reported as unavailable'; }
+printf '%s\n' "$out" | grep -qx 'host_attribution=unavailable-rxv-group5-off' || fail 'host_attribution line wrong'
+fwstats phy0 0 0 0; printf '1\n' > "$WORK/debug/phy0/mt76/muru_debug"
+( sleep 1; fwstats phy0 90 0 90 ) &
+out="$(runfw)"; wait
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_ONLY_UL_OFDMA_TB_PPDUS_SEEN' || { printf '%s\n' "$out" >&2; fail 'firmware-only UL OFDMA evidence not reported'; }
+printf '%s\n' "$out" | grep -q 'cannot-attribute-it-to-a-client' || fail 'firmware-only note missing'
+( sleep 1; fwstats phy0 150 40 90 ) &
+out="$(runfw)"; wait
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_ONLY_UL_MUMIMO_TB_PPDUS_SEEN' || fail 'firmware-only UL MU-MIMO evidence not reported'
+# A driver without the group-5 line (pre-patch-10) must also be treated as unavailable.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"; radio phy0 1 0 0 0 0 0 0
+sed -i '/^rxv_group5_enabled=/d' "$WORK/debug/phy0/mt76/cr6608_ul_attribution"
+run | grep -qx 'verdict=HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF' || fail 'missing group-5 line not treated as unavailable'
+
+# 18. --enable-crxv turns group 5 on for the window only and restores it.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+G5=0 radio phy0 1 0 0 0 0 0 0
+printf '0\n' > "$WORK/debug/phy0/mt76/cr6608_rxv_group5"
+fwstats phy0 0 0 0; printf '0\n' > "$WORK/debug/phy0/mt76/muru_debug"
+( sleep 1; cat "$WORK/debug/phy0/mt76/cr6608_rxv_group5" > "$WORK/crxv_during" ) &
+CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" CR6608_MURU_MASK_MODULE_PARAM="$mask_file" sh "$TOOL" --with-firmware --enable-crxv --window 2 >/dev/null; wait
+[ "$(cat "$WORK/crxv_during")" = 1 ] || fail 'enable-crxv did not enable group 5 during the window'
+[ "$(cat "$WORK/debug/phy0/mt76/cr6608_rxv_group5")" = 0 ] || fail 'enable-crxv did not restore group 5'
+[ "$(cat "$WORK/debug/phy0/mt76/muru_debug")" = 0 ] || fail 'muru_debug not restored in enable-crxv run'
+
+# 19. Firmware that refuses MURU_GET_TXC_TX_STATS: probe fails, muru_debug is
+#     left off, and the result is UNAVAILABLE - never a corroboration claim.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 0 0 0 0 0 0
+printf 'firmware-stats-unavailable err=-110\n' > "$WORK/debug/phy0/mt76/muru_stats"
+printf '0\n' > "$WORK/debug/phy0/mt76/muru_debug"
+( sleep 1; cat "$WORK/debug/phy0/mt76/muru_debug" > "$WORK/md_during" ) &
+out="$(runfw)"; wait
+[ "$(cat "$WORK/md_during")" = 0 ] || fail 'muru_debug was left on although the stats probe failed'
+printf '%s\n' "$out" | grep -q 'status=stats-probe-failed' || fail 'stats probe failure not reported'
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_STATS_UNAVAILABLE' || fail 'unavailable stats reported as something else'
+
+# 20. Firmware identity: a build different from the audited baseline is flagged.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"; radio phy0 1 0 0 0 0 0 0
+out="$(CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" CR6608_MURU_MASK_MODULE_PARAM="$mask_file" CR6608_FW_BASELINE_BUILD=19990101000000 sh "$TOOL")"
+printf '%s\n' "$out" | grep -q '^firmware_build=' || fail 'firmware_build line missing'
 
 # 16. Bad arguments are rejected.
 ! CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" sh "$TOOL" --window abc >/dev/null 2>&1 || fail 'non-integer window accepted'

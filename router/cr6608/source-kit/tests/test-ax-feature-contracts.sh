@@ -746,6 +746,8 @@ for marker in \
 	'ul_muru_fault_policy=kernel-attributed-latch-watchdog-or-sta-rec-plus-unattributed-disarm' \
 	'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-unattributed-strikes' \
 	'ul_muru_dl_floor=upstream-dl-ofdma-and-dl-mumimo-retained-through-fault' \
+	'ul_muru_cfg_policy=phy-wide-cfg-bits-for-every-peer-per-abd80cf6-eligibility-from-peer-he-caps' \
+	'ul_mumimo_advertisement=vendor-parity-b22-off-by-default-boot-frozen-opt-in-cr6608_advertise_ul_mumimo' \
 	'ul_muru_global_mcu_commands=not-used' \
 	'background_cac=enabled-driver-runtime-capability-gated' \
 	'easymesh=prplmesh-controller-agent-runtime-gated'; do
@@ -758,10 +760,10 @@ if grep -Eq 'unsupported-on-mt7915|background_cac=disabled-by-cr6608-dts' \
 fi
 
 [ -f "${SUPPORT}" ] || fail "official AX feature support manifest is missing"
-[ "$(wc -l < "${SUPPORT}" | tr -d '[:space:]')" -eq 26 ] ||
-	fail "AX support manifest schema must contain exactly 26 lines"
-grep -Fq '!= 26' "${VERIFY}" ||
-	fail "runtime AX verifier does not enforce the 26-line support schema"
+[ "$(wc -l < "${SUPPORT}" | tr -d '[:space:]')" -eq 28 ] ||
+	fail "AX support manifest schema must contain exactly 28 lines"
+grep -Fq '!= 28' "${VERIFY}" ||
+	fail "runtime AX verifier does not enforce the 28-line support schema"
 for marker in \
 	'format=1' \
 	'board=xiaomi,mi-router-cr6608' \
@@ -788,7 +790,7 @@ for marker in \
 	'easymesh=prplmesh-controller-agent-runtime-gated' \
 	'mesh_80211s=supported-by-wpad-openssl' \
 	'runtime_gate=immutable-profile-plus-read-only-module-mask-plus-kernel-fault-latch-plus-muru-debugfs' \
-	'ota_evidence=per-peer-he-tb-ppdu-wcid-attribution-plus-shared-ppdu-timestamp-grouping-not-an-rf-or-regulatory-measurement'; do
+	'ota_evidence=firmware-hetrig-tb-ppdu-counters-plus-per-peer-wcid-attribution-when-rxd-group5-is-enabled-not-an-rf-or-regulatory-measurement'; do
 	grep -Fqx "${marker}" "${SUPPORT}" || fail "support manifest lacks ${marker}"
 done
 

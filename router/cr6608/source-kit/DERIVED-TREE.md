@@ -38,11 +38,13 @@ Driver (`patches/`), both host-side only, no new firmware command:
 - `zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch`
 - `zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch`
 - `zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch`
+- `zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch`
+- `zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch`
 
 Build wiring:
 
 - `build.sh` / `build.remote.sh`: the two patches added to
-  `SRC_MURU_PORT_PATCHES`, the ordered-patch count raised from five to eight,
+  `SRC_MURU_PORT_PATCHES`, the ordered-patch count raised from five to ten,
   and the two new source gates registered and executed.
 
 Tests:
@@ -50,6 +52,7 @@ Tests:
 - `tests/test-muru-fault-attribution.sh` (new)
 - `tests/test-ul-mu-evidence-runtime.sh` (new)
 - `tests/test-muru-live-refresh.sh` (new)
+- `tests/test-muru-vendor-parity.sh` (new)
 - `tests/test-ax-feature-contracts.sh`: updated for the 26-line support
   manifest and the changed fault/OTA-evidence records.
 

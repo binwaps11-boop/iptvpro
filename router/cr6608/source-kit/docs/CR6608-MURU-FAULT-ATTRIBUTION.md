@@ -228,3 +228,121 @@ uploads), then `cr6608-ul-mu-evidence --with-firmware --window 60`. Expected
 on a working uplink scheduler: `verdict=UL_OFDMA_CLIENT_ATTRIBUTED` or
 `verdict=UL_MUMIMO_CLIENT_ATTRIBUTED` with `firmware_corroboration=FIRMWARE_CORROBORATED`.
 Anything else is reported as exactly what it is.
+
+## Patch 09 — uniform per-peer cfg bits and boot-frozen, vendor-parity B22
+
+Two evidence-backed corrections to the station-record and capability path.
+
+### The first-station latch (`abd80cf6`)
+
+MeiChia Chiu's upstream fix `abd80cf6` (2022-02-15) states the firmware
+behaviour directly: *"The muru enable/disable are only set after the first
+station connection. Without this patch, the firmware couldn't enable muru if
+the first connected station is non-HE type."* Its fix was to send identical
+`cfg.*_en` bits for every station. MediaTek's shipped mt7915 build does the
+same (`0099` lines 3843–3845: every peer gets `muru_onoff`'s bits, HE or not).
+
+The kit, until patch 09, downgraded the bits per peer: non-HE peers were sent
+DL-only bits, and `mimo_ul_en` was set only for HE peers advertising B22. On a
+firmware that latches from the first record, a legacy/VHT client or an HE
+phone without B22 associating first could leave the uplink scheduler unarmed
+for the whole BSS — "UL never observed", no hang, and invisible to the
+synchronous-response telemetry. That is a plausible mechanism for exactly the
+symptom this work set out to explain.
+
+Patch 09 sends the phy-wide effective mask to every peer and leaves
+eligibility where upstream and mt7996 keep it: in the per-peer capability
+fields (`mimo_ul.full_ul_mimo`, `ofdma_ul.t_frame_dur/mu_cascading/uo_ra`,
+…) that the firmware reads per WCID. Partial-bandwidth UL MU-MIMO stays
+forced off on mt7915 (`a2838480`). Non-MT7915 chips are restored to exactly
+upstream's request (DL bits and UL MU-MIMO; upstream has never requested UL
+OFDMA on any chip), fixing an unintended behaviour change in the earlier
+port.
+
+### B22: vendor parity by default, frozen at boot
+
+MediaTek's mt7915 build enables `mimo_ul_en` per peer **without**
+advertising HE PHY CAP2 B22 (the upstream `!is_mt7915` guard is untouched in
+`0099`). That is the only mt7915 UL MU-MIMO configuration any vendor has
+shipped and field-tested on the pinned firmware. The kit's previous
+behaviour — advertising B22 whenever bit 3 was armed — was a third variant
+neither upstream nor MediaTek runs.
+
+Per IEEE 802.11ax-2021 Table 9-322c the AP's B22 states reception support;
+the normative scheduling constraint is the *peer's* B22, which the driver
+already reads. So removing the AP bit does not by itself stop the firmware
+from soliciting full-bandwidth UL MU-MIMO.
+
+Patch 09 therefore:
+
+- defaults to vendor parity (`cr6608_advertise_ul_mumimo=0`, B22 off,
+  scheduler bits requested per peer);
+- keeps the previous behaviour as an explicit opt-in
+  (`cr6608_advertise_ul_mumimo=1`) so the two configurations can be compared
+  over the air with `cr6608-ul-mu-evidence`;
+- decides the advertisement **once at driver load** and exposes it as
+  `ul_mimo_advertised=` in `cr6608_ul_muru_state`. Previously the gate read
+  the live mask, and `mt7915_set_antenna()` re-runs
+  `mt7915_set_stream_he_caps()`, so an antenna change while disarmed could
+  silently drop B22 with no re-arm path to restore it.
+
+Withheld on purpose, and recorded so nobody "enables everything" later: TRS,
+MU Cascading, OFDMA RA (UORA), NDP Feedback Report, Triggered CQI Feedback,
+BSRP/BQRP A-MPDU aggregation, UL 2×996 RU, partial-bandwidth UL MU-MIMO. No
+chip in this driver (mt7915/mt7916/mt7986/mt7996) advertises them, MediaTek's
+downstream does not add them, and the firmware consumes only the *peer's*
+values for them. Advertising any of them would be a fake capability.
+
+## Patch 10 — evidence honesty
+
+### The per-peer counters were structurally zero on MT7915
+
+The firmware-blob audit found a defect in patch 07: on MT7915 the RX PHY
+type of a received PPDU is decoded from the C-RXV group (RXD group 5,
+`mt76_connac_mac.c`), and upstream clears `MT_DMA_DCR0_RXD_G5_EN` at init
+(`d33943ba`: *"When per-packet rate reporting is enabled, the hardware can
+get stuck under some conditions"*), enabling it only for a monitor interface.
+In normal AP operation `mode` therefore never equals `MT_PHY_TYPE_HE_TB` and
+`cr6608_ul_attribution` reads `he_tb_ppdu=0` whatever the scheduler does.
+Read as "no trigger responses", that would have been a false negative — the
+exact kind of misleading evidence this project must not produce.
+
+Patch 10 makes the nodes say what they can see:
+
+- `rxv_group5_enabled=` on the per-radio node, read from `MT_DMA_DCR0`;
+- `evidence=unavailable-crxv-disabled` (per radio and per peer) whenever
+  group 5 is off on mt7915, instead of the client-attribution claim;
+- a `0600` `cr6608_rxv_group5` knob that sets the same register bit upstream
+  sets for monitor mode. It is gated on the CR6608 experiment, mutex-protected,
+  refuses a stopped phy, logs the `d33943ba` risk when enabled, is re-cleared
+  by any firmware reset, and is never touched by a profile. The evidence tool
+  enables it only for `--enable-crxv` windows and restores it on every exit.
+
+`cr6608-ul-mu-evidence` v3 reports `host_attribution=` and returns
+`HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF` when no radio can see PPDU
+types; in that state the firmware's own `hetrig_*` counters are the proof and
+are reported as `FIRMWARE_ONLY_*`, explicitly marked as not client-attributed.
+
+### Firmware statistics that cannot be produced
+
+`muru_stats` now prints `firmware-stats-unavailable err=<errno>` instead of
+failing the read when `MURU_GET_TXC_TX_STATS` is refused or times out. The
+evidence tool probes once before enabling the 500 ms poll and leaves
+`muru_debug` off if the probe fails, so an unsupported sub-command cannot
+turn an evidence window into a stream of MCU timeouts (which patch 06 would
+count as strikes).
+
+### Firmware identity
+
+The audited firmware is `mt7915_wm.bin` release
+`t-neptune-mp-mt7915-2045-MT7915_MP_7_4_2045-20240429200502`, trailer build
+`20240429200752`, which the driver prints as the WM firmware version. The
+evidence tool reads it (`ethtool -i`, or the kernel log) and prints
+`firmware_build=` and `firmware_baseline_match=`; a different build is
+flagged because none of this evidence contract has been checked against it.
+
+### Upstream bug carried along
+
+`e4823530` dropped the `he_ext_su_cnt` accumulation in
+`mt7915_mcu_muru_debug_get()`, so the `HE EXT` column and the HE DL total in
+`muru_stats` were wrong on every mt7915. Patch 10 restores it.

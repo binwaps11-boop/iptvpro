@@ -149,6 +149,24 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   after fifteen minutes without a disarm, so unrelated recoveries months apart
   can never spend the permanent latch. See
   `docs/CR6608-MURU-FAULT-ATTRIBUTION.md`.
+- `patches/zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch`: sends the
+  phy-wide `STA_REC_MURU` cfg bits identically to every peer (upstream
+  `abd80cf6`: the firmware latches its MURU enable from the first station
+  record; MediaTek's mt7915 build sends them uniformly), keeps per-peer
+  eligibility in the peer's HE capability fields, restores exact upstream
+  behaviour for non-MT7915 chips, and freezes the HE PHY CAP2 B22
+  advertisement to a boot-time decision that defaults to MediaTek vendor parity
+  (B22 off, scheduler armed); `cr6608_advertise_ul_mumimo=1` opts into the
+  previous advertising behaviour for A/B over-the-air comparison.
+- `patches/zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch`: on MT7915 the
+  RX PHY type is only reported with RXD group 5 (C-RXV), which upstream keeps
+  off outside monitor mode (`d33943ba`), so the patch-07 per-peer counters are
+  structurally zero in normal operation. The per-radio and per-peer nodes now
+  report `rxv_group5_enabled=` and say `evidence=unavailable-crxv-disabled`
+  when they cannot see PPDU types; a `0600` `cr6608_rxv_group5` knob lets the
+  evidence tool enable group 5 for a bounded window (never by a profile).
+  Also surfaces a failed `MURU_GET_TXC_TX_STATS` in `muru_stats` instead of an
+  errno, and restores the `he_ext_su_cnt` accumulation upstream dropped.
 - `packages/prplmesh`: pinned prplMesh Controller + Agent + IEEE1905 transport
   built against the generic NL80211 backend and the image's single
   `wpad-openssl` implementation. It is runtime-gated until all processes and

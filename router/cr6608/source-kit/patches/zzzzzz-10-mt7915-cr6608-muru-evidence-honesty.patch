@@ -1,0 +1,153 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index f86eb31d..3875151c 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -446,6 +449,8 @@ static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
+ 	struct mt7915_phy *phy = file->private;
+ 	unsigned long flags;
+ 	u32 tb, ofdma_ru, full_bw, ofdma_groups, mumimo_groups, max_peers;
++	bool g5 = !!(mt76_rr(phy->dev, MT_DMA_DCR0(phy->mt76->band_idx)) &
++		     MT_DMA_DCR0_RXD_G5_EN);
+ 
+ 	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
+ 	tb = phy->cr6608_ul.tb_ppdu;
+@@ -459,13 +464,24 @@ static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
+ 	seq_printf(file, "band=%u\n", phy->mt76->band_idx);
+ 	seq_printf(file, "armed_mask=%u\n",
+ 		   mt7915_cr6608_muru_mask(phy->dev));
++	/* On MT7915 the RX PHY type comes from the C-RXV group (RXD group 5),
++	 * which upstream leaves disabled by default because per-packet rate
++	 * reporting can stall the hardware (d33943ba) and enables only in
++	 * monitor mode.  While it is off, no HE TB PPDU can be recognised and
++	 * every counter below legitimately stays 0: that is "unavailable", not
++	 * "the scheduler did not solicit".
++	 */
++	seq_printf(file, "rxv_group5_enabled=%u\n", g5);
+ 	seq_printf(file, "he_tb_ppdu=%u\n", tb);
+ 	seq_printf(file, "he_tb_ul_ofdma_ru=%u\n", ofdma_ru);
+ 	seq_printf(file, "he_tb_full_bw=%u\n", full_bw);
+ 	seq_printf(file, "ul_ofdma_multi_user_ppdus=%u\n", ofdma_groups);
+ 	seq_printf(file, "ul_mumimo_multi_user_ppdus=%u\n", mumimo_groups);
+ 	seq_printf(file, "max_peers_in_one_ppdu=%u\n", max_peers);
+-	seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
++	if (is_mt7915(&phy->dev->mt76) && !g5)
++		seq_puts(file, "evidence=unavailable-crxv-disabled\n");
++	else
++		seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
+ 	seq_puts(file,
+ 		 "note=host-observed-scheduling-evidence-not-a-regulatory-or-rf-measurement\n");
+ 
+@@ -474,6 +490,56 @@ static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
+ 
+ DEFINE_SHOW_ATTRIBUTE(mt7915_cr6608_ul_attribution);
+ 
++/* Opt-in, bounded evidence window: enable RXD group 5 (C-RXV) so received
++ * HE TB PPDUs can be recognised and attributed to their WCID.  This is the
++ * same register bit upstream sets for a monitor interface (mt7915/main.c,
++ * mt7915_configure_filter) and carries the same documented hardware risk
++ * (d33943ba: per-packet rate reporting can stall RX).  It is never enabled
++ * by a profile; the evidence tool turns it on for a window and restores it.
++ * A firmware reset re-clears it (mt7915_mac_init_band).
++ */
++static int mt7915_cr6608_rxv_group5_get(void *data, u64 *val)
++{
++	struct mt7915_phy *phy = data;
++
++	*val = !!(mt76_rr(phy->dev, MT_DMA_DCR0(phy->mt76->band_idx)) &
++		  MT_DMA_DCR0_RXD_G5_EN);
++	return 0;
++}
++
++static int mt7915_cr6608_rxv_group5_set(void *data, u64 val)
++{
++	struct mt7915_phy *phy = data;
++	struct mt7915_dev *dev = phy->dev;
++
++	if (val > 1)
++		return -EINVAL;
++	if (!dev->cr6608_ul_muru_allowed)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&dev->mt76.mutex);
++	if (!test_bit(MT76_STATE_RUNNING, &phy->mt76->state)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -ENETDOWN;
++	}
++	mt76_rmw_field(dev, MT_DMA_DCR0(phy->mt76->band_idx),
++		       MT_DMA_DCR0_RXD_G5_EN, !!val);
++	mutex_unlock(&dev->mt76.mutex);
++
++	if (val)
++		dev_warn(dev->mt76.dev,
++			 "CR6608 band %u: RXD group 5 (C-RXV) enabled for an evidence window; upstream keeps it off outside monitor mode because per-packet rate reporting can stall RX\n",
++			 phy->mt76->band_idx);
++	else
++		dev_info(dev->mt76.dev,
++			 "CR6608 band %u: RXD group 5 (C-RXV) disabled again\n",
++			 phy->mt76->band_idx);
++	return 0;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(fops_cr6608_rxv_group5, mt7915_cr6608_rxv_group5_get,
++			 mt7915_cr6608_rxv_group5_set, "%lld\n");
++
+ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ {
+ 	struct mt7915_phy *phy = file->private;
+@@ -502,8 +568,15 @@ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ 	mutex_lock(&dev->mt76.mutex);
+ 
+ 	ret = mt7915_mcu_muru_debug_get(phy);
+-	if (ret)
++	if (ret) {
++		/* Say so in the file instead of failing the read, so a tool can
++		 * tell "firmware refused/timed out on MURU_GET_TXC_TX_STATS" apart
++		 * from "no PPDUs".
++		 */
++		seq_printf(file, "firmware-stats-unavailable err=%d\n", ret);
++		ret = 0;
+ 		goto exit;
++	}
+ 
+ 	/* Non-HE Downlink*/
+ 	seq_puts(file, "[Non-HE]\nDownlink\nData Type:  ");
+@@ -1522,6 +1595,8 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 			    &mt7915_cr6608_ul_muru_state_fops);
+ 	debugfs_create_file("cr6608_ul_attribution", 0400, dir, phy,
+ 			    &mt7915_cr6608_ul_attribution_fops);
++	debugfs_create_file("cr6608_rxv_group5", 0600, dir, phy,
++			    &fops_cr6608_rxv_group5);
+ 
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+ 			    &mt7915_muru_stats_fops);
+@@ -1769,7 +1844,12 @@ static int mt7915_cr6608_sta_ul_show(struct seq_file *file, void *data)
+ 	 */
+ 	seq_printf(file, "he_tb_ul_mumimo_shared=%u\n", mumimo);
+ 	seq_printf(file, "last_tb_timestamp=%u\n", ts);
+-	seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
++	if (is_mt7915(&phy->dev->mt76) &&
++	    !(mt76_rr(phy->dev, MT_DMA_DCR0(phy->mt76->band_idx)) &
++	      MT_DMA_DCR0_RXD_G5_EN))
++		seq_puts(file, "evidence=unavailable-crxv-disabled\n");
++	else
++		seq_puts(file, "evidence=client-attributed-rx-descriptor-wcid\n");
+ 
+ 	return 0;
+ }
+
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index f7a20bf3..d6bc3132 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -2641,6 +2644,11 @@ int mt7915_mcu_muru_debug_get(struct mt7915_phy *phy)
+ 	__dl_u32(vht_3mu_cnt);
+ 	__dl_u32(vht_4mu_cnt);
+ 	__dl_u32(he_su_cnt);
++	/* Upstream e4823530 dropped this accumulation; the firmware event
++	 * carries it and debugfs prints it, so without it the HE EXT column
++	 * and the HE DL total are wrong.
++	 */
++	__dl_u32(he_ext_su_cnt);
+ 	__dl_u32(he_2ru_cnt);
+ 	__dl_u32(he_2mu_cnt);
+ 	__dl_u32(he_3ru_cnt);

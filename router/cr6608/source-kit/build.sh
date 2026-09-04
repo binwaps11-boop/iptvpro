@@ -232,6 +232,8 @@ SRC_MURU_PORT_PATCHES=(
 	"${SCRIPT_DIR}/patches/zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch"
 )
 MURU_FIRMWARE_VERIFY="${SCRIPT_DIR}/tools/verify-mt7915-muru-firmware.sh"
 SRC_RF_DTS_PATCH="${SCRIPT_DIR}/patches/996-cr6608-dts-rf-38dbm-lab-mode.patch"
@@ -331,6 +333,7 @@ MURU_DRIVER_PORT_TEST="${SCRIPT_DIR}/tests/test-muru-driver-port.sh"
 MURU_FAULT_ATTRIBUTION_TEST="${SCRIPT_DIR}/tests/test-muru-fault-attribution.sh"
 UL_MU_EVIDENCE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-ul-mu-evidence-runtime.sh"
 MURU_LIVE_REFRESH_TEST="${SCRIPT_DIR}/tests/test-muru-live-refresh.sh"
+MURU_VENDOR_PARITY_TEST="${SCRIPT_DIR}/tests/test-muru-vendor-parity.sh"
 EASYMESH_VERIFIER_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-easymesh-verifier-runtime.sh"
 PORT_READINESS_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-port-readiness-runtime.sh"
 PRPLMESH_ROLE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-prplmesh-role-runtime.sh"
@@ -1873,6 +1876,7 @@ write_input_manifest() {
 		record_regular_input source-test "${MURU_FAULT_ATTRIBUTION_TEST}"
 		record_regular_input source-test "${UL_MU_EVIDENCE_RUNTIME_TEST}"
 		record_regular_input source-test "${MURU_LIVE_REFRESH_TEST}"
+		record_regular_input source-test "${MURU_VENDOR_PARITY_TEST}"
 		record_regular_input source-test "${EASYMESH_VERIFIER_RUNTIME_TEST}"
 		record_regular_input source-test "${PORT_READINESS_RUNTIME_TEST}"
 		record_regular_input source-test "${PRPLMESH_ROLE_RUNTIME_TEST}"
@@ -2476,6 +2480,7 @@ for required_muru_input in \
 	"${MURU_FAULT_ATTRIBUTION_TEST}" \
 	"${UL_MU_EVIDENCE_RUNTIME_TEST}" \
 	"${MURU_LIVE_REFRESH_TEST}" \
+	"${MURU_VENDOR_PARITY_TEST}" \
 	"${PORT_READINESS_RUNTIME_TEST}" "${PRPLMESH_ROLE_RUNTIME_TEST}" \
 	"${PRPLMESH_CREDENTIAL_SYNC_TEST}" "${PRPLMESH_CREDENTIAL_SYNC_HELPER}" \
 	"${SRC_UL_MURU_DTS_PATCH}" \
@@ -3064,6 +3069,11 @@ sh -n "${MURU_LIVE_REFRESH_TEST}" || \
 sh "${MURU_LIVE_REFRESH_TEST}" | grep -qx 'muru_live_refresh_contract=pass' || \
 	die "MURU live record refresh or strike decay contract failed"
 printf 'muru_live_refresh_contract=pass\n'
+sh -n "${MURU_VENDOR_PARITY_TEST}" || \
+	die "MURU vendor parity test syntax failed"
+sh "${MURU_VENDOR_PARITY_TEST}" | grep -qx 'muru_vendor_parity_contract=pass' || \
+	die "MURU uniform-cfg, vendor-parity B22, or evidence-honesty contract failed"
+printf 'muru_vendor_parity_contract=pass\n'
 sh -n "${EASYMESH_VERIFIER_RUNTIME_TEST}" || \
 	die "EasyMesh verifier runtime test syntax failed"
 sh "${EASYMESH_VERIFIER_RUNTIME_TEST}" | \
@@ -3571,8 +3581,8 @@ mapfile -t cr6608_muru_port_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f \
 		-name 'zzzzzz-*-mt7915-cr6608-muru-*.patch' -print
 )
-[ "${#cr6608_muru_port_patches[@]}" -eq 8 ] ||
-	die "Expected exactly eight ordered MediaTek 25.12 MURU port patches"
+[ "${#cr6608_muru_port_patches[@]}" -eq 10 ] ||
+	die "Expected exactly ten ordered MediaTek 25.12 MURU port patches"
 mapfile -t cr6608_rf_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f -name '*mt7915-cr6608-rf-*.patch' -print
 )

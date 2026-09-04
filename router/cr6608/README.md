@@ -136,6 +136,34 @@ Read-only, and active only while an uplink bit is armed, so the retail and
 mask-0 profiles pay nothing. Exposed as `cr6608_ul_attribution` per phy and
 per station, and summarised by `cr6608-ul-mu-evidence`.
 
+### Second pass — evidence audit findings (patches 08–10)
+
+A multi-source audit (full upstream mt76 history, MediaTek's official 25.12
+feed at the kit-pinned commit, the firmware blobs themselves) established:
+
+- The MT7915 firmware blob is **byte-identical** across OpenWrt 25.12.5,
+  MediaTek's 25.12 downstream and MediaTek's legacy 5.4 tree: release
+  `MT7915_MP_7_4_2045`, built 2024-04-29, two releases newer than the 2022
+  hang report upstream's guard still rests on. It demonstrably contains a
+  trigger-based uplink scheduler (BSRP handling, Trigger composition, per-WCID
+  `fgTrigOn` decisions, `UL OFDMA / UL MU-MIMO` counters).
+- MediaTek ships mt7915 with all four scheduler bits on for **every** peer,
+  through the same `STA_REC_MURU` path, with **no** global enable command and
+  **without** advertising B22.
+- Upstream `abd80cf6`: the firmware latches MURU from the **first** station
+  record. The kit's per-peer downgrade could leave UL unarmed for the whole
+  BSS if a legacy or non-B22 client associated first — patch 09 fixes it.
+- Patch 07's per-peer counters were **unreachable** on MT7915 (RXD group 5 is
+  off outside monitor mode) — patch 10 makes that state visible and adds a
+  bounded opt-in window instead of pretending.
+- The "commands 80/81" the kit claimed to withhold do not exist; the gates now
+  name MediaTek's real MURU_CTRL inventory.
+- The firmware triggers a peer only on valid BSRs, with OM-control UL-MU not
+  disabled, and when its RX-airtime threshold is met — a quiet or
+  single-client test legitimately shows zero.
+
+Patch 08 adds live station-record refresh (no Wi-Fi reload) and strike decay.
+
 ### What was deliberately not done
 
 No new or undocumented MCU command was added. `MURU_CTRL` sub-commands beyond
@@ -214,7 +242,8 @@ cat /sys/kernel/debug/ieee80211/phy*/mt76/cr6608_ul_muru_state
 #   candidate_ceiling / upstream_dl_floor / unattributed_disarms / rearms / strikes
 
 # Client-attributed uplink evidence (needs two HE clients uploading at once)
-cr6608-ul-mu-evidence
+cr6608-ul-mu-evidence --with-firmware --window 60          # firmware-corroborated
+cr6608-ul-mu-evidence --with-firmware --enable-crxv --window 60   # + per-client attribution (bounded)
 ```
 
 `cr6608-ul-mu-evidence` verdicts:

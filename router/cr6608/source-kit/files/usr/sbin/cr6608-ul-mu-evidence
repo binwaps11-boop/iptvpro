@@ -20,18 +20,31 @@
 # Host-observed scheduling evidence only.  Not an RF measurement, not a
 # throughput claim, and not a regulatory or sale approval.
 #
-# usage: cr6608-ul-mu-evidence [--with-firmware] [--window SECONDS]
+# On MT7915 the host-side attribution can only see the PHY type of a received
+# PPDU while RXD group 5 (C-RXV) is enabled, which upstream keeps off outside
+# monitor mode because per-packet rate reporting can stall RX (d33943ba).  The
+# driver reports that state as rxv_group5_enabled=; while it is 0 the host
+# counters are reported as UNAVAILABLE, never as "nothing scheduled", and the
+# firmware's own hetrig_* statistics are the proof.  --enable-crxv turns
+# group 5 on for the window only (opt-in, restored on every exit path).
+#
+# usage: cr6608-ul-mu-evidence [--with-firmware] [--enable-crxv] [--window SECONDS]
 
 set -eu
 
 debug_root="${CR6608_UL_MURU_DEBUG_ROOT:-/sys/kernel/debug/ieee80211}"
 mask_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
 
+# The firmware build this evidence contract was written against.
+fw_baseline_build="${CR6608_FW_BASELINE_BUILD:-20240429200752}"
+
 with_firmware=0
+enable_crxv=0
 window=30
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--with-firmware) with_firmware=1 ;;
+		--enable-crxv) enable_crxv=1 ;;
 		--window)
 			shift
 			case "${1:-}" in
@@ -39,7 +52,7 @@ while [ "$#" -gt 0 ]; do
 			esac
 			window="$1" ;;
 		-h|--help)
-			sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+			sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
 			exit 0 ;;
 		*) printf 'error=unknown-argument %s\n' "$1"; exit 2 ;;
 	esac
@@ -86,18 +99,26 @@ snapshot() {
 		max_peers="$(read_field "$node" max_peers_in_one_ppdu)"
 		band="$(read_field "$node" band)"
 		armed="$(read_field "$node" armed_mask)"
+		g5="$(read_field "$node" rxv_group5_enabled)"
+		# Older drivers (before patch 10) do not report the group-5 state;
+		# treat that as unknown rather than as enabled.
+		is_uint "$g5" || g5=unknown
 		ok=1
 		for v in "$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers"; do
 			is_uint "$v" || ok=0
 		done
 		if [ "$ok" = 1 ]; then
-			printf 'radio %s %s %s %s %s %s %s %s %s\n' "$phy" "${band:-?}" "${armed:-?}" \
-				"$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers" >> "$out"
+			printf 'radio %s %s %s %s %s %s %s %s %s %s\n' "$phy" "${band:-?}" "${armed:-?}" \
+				"$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers" "$g5" >> "$out"
 		else
 			printf 'radio %s malformed\n' "$phy" >> "$out"
 		fi
 		if [ "$with_firmware" = 1 ]; then
 			stats="$debug_root/$phy/mt76/muru_stats"
+			if grep -q '^firmware-stats-unavailable' "$stats" 2>/dev/null; then
+				printf 'fw %s unavailable\n' "$phy" >> "$out"
+				continue
+			fi
 			fw_all="$(fw_total "$stats" 'All HE UL TB PPDU count')"
 			fw_mu="$(fw_total "$stats" 'Total HE MU-MIMO UL TB PPDU count')"
 			fw_ofdma="$(fw_total "$stats" 'Total HE OFDMA UL TB PPDU count')"
@@ -149,25 +170,82 @@ enable_muru_debug() {
 	done
 }
 
-tmp="$(mktemp -d)"
-trap 'restore_muru_debug; rm -rf "$tmp"' EXIT INT TERM
+crxv_restore_list=''
+restore_crxv() {
+	for entry in $crxv_restore_list; do
+		f="${entry%%=*}"; v="${entry#*=}"
+		printf '%s\n' "$v" > "$f" 2>/dev/null || :
+	done
+}
+enable_crxv_window() {
+	for f in "$debug_root"/phy*/mt76/cr6608_rxv_group5; do
+		[ -f "$f" ] || continue
+		cur="$(head -n1 "$f" 2>/dev/null | tr -d '[:space:]')"
+		[ "$cur" = 1 ] && continue
+		crxv_restore_list="$crxv_restore_list $f=${cur:-0}"
+		printf '1\n' > "$f" 2>/dev/null || :
+	done
+}
 
-printf 'schema=cr6608-ul-mu-evidence-v2\n'
+tmp="$(mktemp -d)"
+trap 'restore_crxv; restore_muru_debug; rm -rf "$tmp"' EXIT INT TERM
+
+printf 'schema=cr6608-ul-mu-evidence-v3\n'
 printf 'mode=%s\n' "$([ "$with_firmware" = 1 ] && printf 'host-plus-firmware-window' || printf 'host-cumulative')"
+
+# Firmware identity: wiphy->fw_version is "<fw_ver>-<build_date>" (ethtool -i
+# on any netdev of the phy); fall back to the WM banner in the kernel log.
+fw_build=''
+for netdir in /sys/class/ieee80211/phy*/device/net/*; do
+	[ -d "$netdir" ] || continue
+	ifname="$(basename "$netdir")"
+	v="$(ethtool -i "$ifname" 2>/dev/null | sed -n 's/^firmware-version: *//p' | head -n1)"
+	case "$v" in *-*) fw_build="${v##*-}"; break ;; esac
+done
+[ -n "$fw_build" ] || fw_build="$(dmesg 2>/dev/null | sed -n 's/.*WM Firmware Version: [^,]*, Build Time: \([0-9]*\).*/\1/p' | tail -n1)"
+if [ -n "$fw_build" ]; then
+	printf 'firmware_build=%s\n' "$fw_build"
+	if [ "$fw_build" = "$fw_baseline_build" ]; then
+		printf 'firmware_baseline_match=1\n'
+	else
+		printf 'firmware_baseline_match=0 baseline=%s\n' "$fw_baseline_build"
+		printf 'note=firmware-differs-from-the-audited-baseline-evidence-contract-not-verified-for-this-build\n'
+	fi
+else
+	printf 'firmware_build=unknown\n'
+fi
 if [ -r "$mask_param" ]; then
 	printf 'module_mask=%s\n' "$(cat "$mask_param" 2>/dev/null || printf 'unreadable')"
 else
 	printf 'module_mask=unavailable\n'
 fi
 
+[ "$enable_crxv" = 1 ] && enable_crxv_window
 if [ "$with_firmware" = 1 ]; then
-	enable_muru_debug
+	# Probe the statistics once before enabling the 500 ms poll: if this
+	# firmware does not answer MURU_GET_TXC_TX_STATS, leaving muru_debug on
+	# would generate a stream of MCU timeouts.
+	stats_probe_failed=0
+	for f in "$debug_root"/phy*/mt76/muru_debug; do
+		[ -f "$f" ] || continue
+		phy="$(phy_of "$f")"
+		cur="$(head -n1 "$f" 2>/dev/null | tr -d '[:space:]')"
+		[ "$cur" = 1 ] || printf '1\n' > "$f" 2>/dev/null || :
+		if grep -q '^firmware-stats-unavailable' "$debug_root/$phy/mt76/muru_stats" 2>/dev/null; then
+			stats_probe_failed=1
+			printf 'firmware=%s status=stats-probe-failed muru_debug-left-off\n' "$phy"
+		fi
+		[ "$cur" = 1 ] || printf '%s\n' "${cur:-0}" > "$f" 2>/dev/null || :
+	done
+	[ "$stats_probe_failed" = 1 ] || enable_muru_debug
 	snapshot "$tmp/before"
 	printf 'window_seconds=%s\n' "$window"
 	[ "$window" -gt 0 ] && sleep "$window"
 	snapshot "$tmp/after"
 	restore_muru_debug
 	restore_list=''
+	restore_crxv
+	crxv_restore_list=''
 else
 	snapshot "$tmp/after"
 	: > "$tmp/before"
@@ -190,6 +268,7 @@ before_line() {
 }
 
 radios=0; tb_total=0; ofdma_total=0; mumimo_total=0
+radios_attributable=0
 fw_radios=0; fw_all_total=0; fw_mu_total=0; fw_ofdma_total=0
 peers_with_tb=0; peers_with_mumimo=0
 verdict=UNKNOWN
@@ -200,15 +279,21 @@ while read -r kind phy rest; do
 		radios=$((radios + 1))
 		case "$rest" in malformed) printf 'radio=%s status=malformed\n' "$phy"; continue ;; esac
 		set -- $rest
-		band=$1; armed=$2; tb=$3; ofdma_ru=$4; full_bw=$5; og=$6; mg=$7; mp=$8
-		# radio <phy> <band> <armed> <tb> <ofdma_ru> <full_bw> <og> <mg> <mp>
+		band=$1; armed=$2; tb=$3; ofdma_ru=$4; full_bw=$5; og=$6; mg=$7; mp=$8; g5=${9:-unknown}
+		# radio <phy> <band> <armed> <tb> <ofdma_ru> <full_bw> <og> <mg> <mp> <g5>
 		b="$(before_line radio "$phy")"; set -- $b
-		btb=${5:-0}; bofdma=${6:-0}; bfull=${7:-0}; bog=${8:-0}; bmg=${9:-0}
+		btb=${5:-0}; bofdma=${6:-0}; bfull=${7:-0}; bog=${8:-0}; bmg=${9:-0}; bg5=${11:-unknown}
+		case "$g5" in
+			1) radios_attributable=$((radios_attributable + 1)) ;;
+		esac
+		if [ "$with_firmware" = 1 ] && [ "$bg5" != "$g5" ]; then
+			printf 'radio=%s note=rxv-group5-state-changed-during-window before=%s after=%s\n' "$phy" "$bg5" "$g5"
+		fi
 		d_tb=$(delta "$tb" "$btb"); d_ofdma=$(delta "$ofdma_ru" "$bofdma")
 		d_full=$(delta "$full_bw" "$bfull"); d_og=$(delta "$og" "$bog"); d_mg=$(delta "$mg" "$bmg")
 		tb_total=$((tb_total + d_tb)); ofdma_total=$((ofdma_total + d_og)); mumimo_total=$((mumimo_total + d_mg))
-		printf 'radio=%s band=%s armed_mask=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s max_peers_in_one_ppdu=%s\n' \
-			"$phy" "$band" "$armed" "$d_tb" "$d_ofdma" "$d_full" "$d_og" "$d_mg" "$mp"
+		printf 'radio=%s band=%s armed_mask=%s rxv_group5_enabled=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s max_peers_in_one_ppdu=%s\n' \
+			"$phy" "$band" "$armed" "$g5" "$d_tb" "$d_ofdma" "$d_full" "$d_og" "$d_mg" "$mp"
 		;;
 	fw)
 		case "$rest" in unavailable) printf 'firmware=%s status=unavailable-muru_stats-or-muru_debug\n' "$phy"; continue ;; esac
@@ -246,10 +331,18 @@ printf 'totals he_tb_ppdu=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_p
 [ "$with_firmware" = 1 ] && printf 'firmware_totals he_ul_tb_ppdu=%s he_mumimo_ul_tb_ppdu=%s he_ofdma_ul_tb_ppdu=%s radios_reporting=%s\n' \
 	"$fw_all_total" "$fw_mu_total" "$fw_ofdma_total" "$fw_radios"
 
+printf 'host_attribution=%s\n' "$([ "$radios_attributable" -gt 0 ] && printf 'available' || printf 'unavailable-rxv-group5-off')"
+
 # Host verdict first (client-attributed), then firmware corroboration.
 if [ "$radios" -eq 0 ]; then
 	verdict=NO_ATTRIBUTION_NODES
 	printf 'reason=driver-lacks-the-uplink-attribution-patch-or-no-uplink-bit-is-armed\n'
+elif [ "$radios_attributable" -eq 0 ] && [ "$tb_total" -eq 0 ]; then
+	# MT7915 cannot recognise a HE TB PPDU while RXD group 5 is off; the
+	# host counters are structurally zero here and must not be read as
+	# "the scheduler did not solicit".
+	verdict=HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF
+	printf 'reason=per-packet-phy-type-is-only-reported-with-crxv-use-enable-crxv-for-a-bounded-window-or-rely-on-firmware-hetrig-counters\n'
 elif [ "$mumimo_total" -gt 0 ] && [ "$peers_with_mumimo" -ge 2 ]; then
 	verdict=UL_MUMIMO_CLIENT_ATTRIBUTED
 elif [ "$ofdma_total" -gt 0 ] && [ "$peers_with_tb" -ge 2 ]; then
@@ -267,6 +360,16 @@ if [ "$with_firmware" = 1 ] && [ "$radios" -gt 0 ]; then
 		corroboration=FIRMWARE_STATS_UNAVAILABLE
 	else
 		case "$verdict" in
+		HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF)
+			if [ "$fw_mu_total" -gt 0 ]; then
+				corroboration=FIRMWARE_ONLY_UL_MUMIMO_TB_PPDUS_SEEN
+			elif [ "$fw_ofdma_total" -gt 0 ]; then
+				corroboration=FIRMWARE_ONLY_UL_OFDMA_TB_PPDUS_SEEN
+			elif [ "$fw_all_total" -gt 0 ]; then
+				corroboration=FIRMWARE_ONLY_SU_TRIGGER_RESPONSES_SEEN
+			else
+				corroboration=FIRMWARE_AGREES_NOTHING_SCHEDULED
+			fi ;;
 		UL_MUMIMO_CLIENT_ATTRIBUTED)
 			[ "$fw_mu_total" -gt 0 ] && corroboration=FIRMWARE_CORROBORATED || corroboration=FIRMWARE_DISAGREES_MUMIMO_COUNTER_ZERO ;;
 		UL_OFDMA_CLIENT_ATTRIBUTED)
@@ -280,6 +383,8 @@ if [ "$with_firmware" = 1 ] && [ "$radios" -gt 0 ]; then
 	printf 'firmware_corroboration=%s\n' "$corroboration"
 	case "$corroboration" in FIRMWARE_DISAGREES*|FIRMWARE_SAW*)
 		printf 'note=host-and-firmware-counters-disagree-treat-the-result-as-inconclusive\n' ;;
+	FIRMWARE_ONLY_*)
+		printf 'note=firmware-aggregate-counters-prove-the-scheduler-solicited-uplink-airtime-but-cannot-attribute-it-to-a-client\n' ;;
 	esac
 fi
 
