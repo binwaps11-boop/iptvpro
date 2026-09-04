@@ -231,6 +231,7 @@ SRC_MURU_PORT_PATCHES=(
 	"${SCRIPT_DIR}/patches/zzzzzz-05-mt7915-cr6608-muru-mcu-response.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch"
 )
 MURU_FIRMWARE_VERIFY="${SCRIPT_DIR}/tools/verify-mt7915-muru-firmware.sh"
 SRC_RF_DTS_PATCH="${SCRIPT_DIR}/patches/996-cr6608-dts-rf-38dbm-lab-mode.patch"
@@ -329,6 +330,7 @@ UL_MURU_AIRTEST_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-ul-muru-airtest-runtime.s
 MURU_DRIVER_PORT_TEST="${SCRIPT_DIR}/tests/test-muru-driver-port.sh"
 MURU_FAULT_ATTRIBUTION_TEST="${SCRIPT_DIR}/tests/test-muru-fault-attribution.sh"
 UL_MU_EVIDENCE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-ul-mu-evidence-runtime.sh"
+MURU_LIVE_REFRESH_TEST="${SCRIPT_DIR}/tests/test-muru-live-refresh.sh"
 EASYMESH_VERIFIER_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-easymesh-verifier-runtime.sh"
 PORT_READINESS_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-port-readiness-runtime.sh"
 PRPLMESH_ROLE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-prplmesh-role-runtime.sh"
@@ -1870,6 +1872,7 @@ write_input_manifest() {
 		record_regular_input source-test "${MURU_DRIVER_PORT_TEST}"
 		record_regular_input source-test "${MURU_FAULT_ATTRIBUTION_TEST}"
 		record_regular_input source-test "${UL_MU_EVIDENCE_RUNTIME_TEST}"
+		record_regular_input source-test "${MURU_LIVE_REFRESH_TEST}"
 		record_regular_input source-test "${EASYMESH_VERIFIER_RUNTIME_TEST}"
 		record_regular_input source-test "${PORT_READINESS_RUNTIME_TEST}"
 		record_regular_input source-test "${PRPLMESH_ROLE_RUNTIME_TEST}"
@@ -2472,6 +2475,7 @@ for required_muru_input in \
 	"${MURU_FIRMWARE_VERIFY}" "${MURU_DRIVER_PORT_TEST}" \
 	"${MURU_FAULT_ATTRIBUTION_TEST}" \
 	"${UL_MU_EVIDENCE_RUNTIME_TEST}" \
+	"${MURU_LIVE_REFRESH_TEST}" \
 	"${PORT_READINESS_RUNTIME_TEST}" "${PRPLMESH_ROLE_RUNTIME_TEST}" \
 	"${PRPLMESH_CREDENTIAL_SYNC_TEST}" "${PRPLMESH_CREDENTIAL_SYNC_HELPER}" \
 	"${SRC_UL_MURU_DTS_PATCH}" \
@@ -3055,6 +3059,11 @@ sh -n "${UL_MU_EVIDENCE_RUNTIME_TEST}" || \
 sh "${UL_MU_EVIDENCE_RUNTIME_TEST}" | grep -qx 'ul_mu_evidence_runtime=pass' || \
 	die "client-attributed UL MU evidence contract failed"
 printf 'ul_mu_evidence_runtime=pass\n'
+sh -n "${MURU_LIVE_REFRESH_TEST}" || \
+	die "MURU live refresh test syntax failed"
+sh "${MURU_LIVE_REFRESH_TEST}" | grep -qx 'muru_live_refresh_contract=pass' || \
+	die "MURU live record refresh or strike decay contract failed"
+printf 'muru_live_refresh_contract=pass\n'
 sh -n "${EASYMESH_VERIFIER_RUNTIME_TEST}" || \
 	die "EasyMesh verifier runtime test syntax failed"
 sh "${EASYMESH_VERIFIER_RUNTIME_TEST}" | \
@@ -3319,9 +3328,9 @@ for ul_muru_policy_marker in \
 	grep -Fq "${ul_muru_policy_marker}" "${SRC_UL_MURU_STOCK_POLICY_PATCH}" || \
 		die "MediaTek-vendor UL MURU baseline patch lacks ${ul_muru_policy_marker}"
 done
-if grep -Eq 'MURU_(CFG_DLUL_LIMIT|SET_DLUL_EN)|mt7915_mcu_set_cr6608_ul_muru' \
+if grep -Eq 'MURU_SET_(BSRP_CTRL|SUTX|MUMIMO_CTRL|MANUAL_CFG|MU_DL_ACK_POLICY|TRIG_TYPE|20M_DYN_ALGO|PROT_FRAME_THR|CERT_MU_EDCA_OVERRIDE|ARB_OP_MODE)|mt7915_mcu_set_muru_cfg|mt7915_mcu_set_mu_dl_ack_policy|mt7915_mcu_set_mu_prot_frame_th|mt7915_mcu_set_cr6608_ul_muru' \
 	"${SRC_UL_MURU_STOCK_POLICY_PATCH}"; then
-	die "Unverified legacy global MURU MCU commands must not be staged"
+	die "A MediaTek-only MURU_CTRL sub-command or an unverified MURU sender must not be staged"
 fi
 grep -Fq '#define CR6608_FACTORY38_TARGET_2G' "${SRC_FACTORY38_PATCH}" &&
 	grep -Fq '0x40' "${SRC_FACTORY38_PATCH}" ||
@@ -3562,8 +3571,8 @@ mapfile -t cr6608_muru_port_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f \
 		-name 'zzzzzz-*-mt7915-cr6608-muru-*.patch' -print
 )
-[ "${#cr6608_muru_port_patches[@]}" -eq 7 ] ||
-	die "Expected exactly seven ordered MediaTek 25.12 MURU port patches"
+[ "${#cr6608_muru_port_patches[@]}" -eq 8 ] ||
+	die "Expected exactly eight ordered MediaTek 25.12 MURU port patches"
 mapfile -t cr6608_rf_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f -name '*mt7915-cr6608-rf-*.patch' -print
 )

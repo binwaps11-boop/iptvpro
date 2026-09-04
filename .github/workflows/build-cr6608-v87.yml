@@ -130,7 +130,8 @@ jobs:
                    zzzzzz-04-mt7915-cr6608-muru-telemetry-debugfs.patch \
                    zzzzzz-05-mt7915-cr6608-muru-mcu-response.patch \
                    zzzzzz-06-mt7915-cr6608-muru-fault-attribution.patch \
-                   zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch; do
+                   zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch \
+                   zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch; do
             cp -v "$KIT/patches/$p" "$DEST/$p"
           done
           ls -la "$DEST"

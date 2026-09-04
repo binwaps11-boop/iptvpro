@@ -30,3 +30,22 @@ registering its nl80211 vendor commands, and it does not remove mt76's MT7915
 HE UL-MU advertisement guard. Therefore this remains a controlled downstream
 qualification candidate until over-the-air tests and long-duration stress pass;
 the source alone is not a retail certification.
+
+## What MediaTek's mt7915 build actually runs (verified against 0099)
+
+| item | MediaTek 25.12 downstream | this kit |
+|---|---|---|
+| init default | `muru_onoff = 0xF` (0099:1960) | boot mask from the immutable profile |
+| `cfg.ofdma_dl_en` | `muru_onoff & OFDMA_DL`, every peer | bit 0, every peer (DL floor) |
+| `cfg.ofdma_ul_en` | `muru_onoff & OFDMA_UL`, every peer incl. non-HE | bit 1 |
+| `cfg.mimo_dl_en` | beamformer caps `&& MUMIMO_DL` | same |
+| `cfg.mimo_ul_en` | `muru_onoff & MUMIMO_UL`, every peer | bit 3 |
+| `mimo_ul.partial_ul_mimo` | passed through from the peer | forced 0 on mt7915 (`a2838480`) |
+| AP HE PHY CAP2 B22 | not advertised (upstream guard untouched) | advertised when bit 3 armed |
+| global MURU_CTRL at init | `PLATFORM_TYPE`=25 only (upstream's) | same |
+| MediaTek-only sub-commands (1,16,17,100,200–205) | vendor/debugfs/cert paths only | never sent; source gates reject them |
+| runtime `MU_SET` | inert on mt7915 (vendor registration skipped) | debugfs mask, one-way |
+| refresh of live peers on bitmap change | none | patch 08 replays records |
+
+The firmware blob is byte-identical between the two trees (see
+`docs/CR6608-STOCK-MURU-PORT.md`, "Upstream history").

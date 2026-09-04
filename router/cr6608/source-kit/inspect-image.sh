@@ -2994,7 +2994,7 @@ for muru_mcu_marker in \
 	grep -Fq "${muru_mcu_marker}" "${mcu_sources[0]}" || \
 		die "prepared mt7915 MCU source lacks MURU invariant: ${muru_mcu_marker}"
 done
-if grep -Eq 'MURU_(CFG_DLUL_LIMIT|SET_DLUL_EN)|mt7915_mcu_set_cr6608_ul_muru' \
+if grep -Eq 'MURU_SET_(BSRP_CTRL|SUTX|MUMIMO_CTRL|MANUAL_CFG|MU_DL_ACK_POLICY|TRIG_TYPE|20M_DYN_ALGO|PROT_FRAME_THR|CERT_MU_EDCA_OVERRIDE|ARB_OP_MODE)|mt7915_mcu_set_muru_cfg|mt7915_mcu_set_mu_dl_ack_policy|mt7915_mcu_set_mu_prot_frame_th|mt7915_mcu_set_cr6608_ul_muru' \
 	"${mcu_sources[0]}"; then
 	die "prepared mt7915 MCU source contains an unverified global MURU command"
 fi

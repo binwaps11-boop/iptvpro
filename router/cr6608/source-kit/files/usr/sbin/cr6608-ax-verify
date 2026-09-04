@@ -80,7 +80,7 @@ verify_support_manifest() {
 	result "AX capability manifest state" "valid"
 	result "official Wi-Fi stack" "OpenWrt mac80211 + mt76/mt7915e + hostapd"
 	result "declared feature set" "SU beamforming, DL MU/OFDMA, MediaTek 25.12 UL RAM or persistent forced LAB path, background CAC"
-	result "UL MURU firmware policy" "MediaTek mu_onoff bits through MT7915 STA_REC_MURU; legacy global commands not used"
+	result "UL MURU firmware policy" "MediaTek mu_onoff bits through MT7915 STA_REC_MURU; only upstream MURU_SET_PLATFORM_TYPE and RX_AIRTIME_CTRL init commands, no MediaTek-only MURU_CTRL sub-command"
 	result "UL MURU profile policy" "stable LAB/RETAIL mask 0; RAM qualification or persistent forced LAB mask 15"
 	result "STA_REC response telemetry" "synchronous command response only; not Firmware apply or OTA proof"
 	result "hardware limits" "UL scheduling requests remain LAB-only and kernel/guard fail-closed"

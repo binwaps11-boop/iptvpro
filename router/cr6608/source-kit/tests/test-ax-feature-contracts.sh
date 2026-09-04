@@ -66,9 +66,9 @@ for marker in \
 	grep -Fq "${marker}" "${UL_MURU_STOCK_POLICY_PATCH}" || \
 		fail "MediaTek-vendor UL MURU baseline patch lacks ${marker}"
 done
-if grep -Eq 'MURU_(CFG_DLUL_LIMIT|SET_DLUL_EN)|mt7915_mcu_set_cr6608_ul_muru' \
+if grep -Eq 'MURU_SET_(BSRP_CTRL|SUTX|MUMIMO_CTRL|MANUAL_CFG|MU_DL_ACK_POLICY|TRIG_TYPE|20M_DYN_ALGO|PROT_FRAME_THR|CERT_MU_EDCA_OVERRIDE|ARB_OP_MODE)|mt7915_mcu_set_muru_cfg|mt7915_mcu_set_mu_dl_ack_policy|mt7915_mcu_set_mu_prot_frame_th|mt7915_mcu_set_cr6608_ul_muru' \
 	"${UL_MURU_STOCK_POLICY_PATCH}"; then
-	fail "unverified legacy global MURU MCU commands remain in the MT7915 port"
+	fail "a MediaTek-only MURU_CTRL sub-command or unverified MURU sender is present in the MT7915 port"
 fi
 if grep -Fq 'full || partial' "${UL_MURU_STOCK_POLICY_PATCH}"; then
 	fail "partial-only peers must not be counted as MT7915 UL MU-MIMO capable"

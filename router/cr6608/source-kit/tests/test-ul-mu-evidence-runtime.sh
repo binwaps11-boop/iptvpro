@@ -118,4 +118,97 @@ run >/dev/null
 after="$(find "$WORK/debug" -type f -newer "$mask_file" | wc -l)"
 [ "$before" = "$after" ] || fail 'tool modified the debugfs tree'
 
+# ---------------------------------------------------------------------------
+# --with-firmware window mode: deltas over the window, firmware corroboration,
+# and muru_debug restored to what it was.
+
+fwstats() {
+	# fwstats <phy> <all> <mumimo> <ofdma>
+	d="$WORK/debug/$1/mt76"; mkdir -p "$d"
+	{
+		printf 'Downlink MU-MIMO\nTotal HE MU-MIMO DL PPDU count: 5\n'
+		printf 'Trigger-based Uplink MU-MIMO\n'
+		printf 'Total HE MU-MIMO UL TB PPDU count: %s\n' "$3"
+		printf 'Total HE OFDMA UL TB PPDU count: %s\n' "$4"
+		printf 'All HE UL TB PPDU count: %s\n' "$2"
+	} > "$d/muru_stats"
+}
+
+runfw() {
+	CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" \
+	CR6608_MURU_MASK_MODULE_PARAM="$mask_file" \
+	sh "$TOOL" --with-firmware --window 2
+}
+
+# 10. muru_debug must be enabled for the window and restored afterwards.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 0 0 0 0 0 0
+printf '0\n' > "$WORK/debug/phy0/mt76/muru_debug"
+fwstats phy0 0 0 0
+( sleep 1; cat "$WORK/debug/phy0/mt76/muru_debug" > "$WORK/during" ) &
+out="$(runfw)"; wait
+[ "$(cat "$WORK/during")" = 1 ] || fail 'muru_debug was not enabled during the window'
+[ "$(cat "$WORK/debug/phy0/mt76/muru_debug")" = 0 ] || fail 'muru_debug was not restored after the window'
+printf '%s\n' "$out" | grep -qx 'mode=host-plus-firmware-window' || fail 'window mode not reported'
+printf '%s\n' "$out" | grep -qx 'verdict=NO_TRIGGER_RESPONSE_OBSERVED' || fail 'idle window gave a non-idle verdict'
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_AGREES_NOTHING_SCHEDULED' || fail 'idle window: firmware corroboration wrong'
+
+# 11. Deltas, not absolutes: counters already high before the window must not
+#     count.  Only what changes during the window is reported.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 500 0 500 0 40 2
+peer phy0 aa:bb:cc:dd:ee:01 1 250 0 250 20
+peer phy0 aa:bb:cc:dd:ee:02 2 250 0 250 20
+fwstats phy0 400 40 0
+printf '1\n' > "$WORK/debug/phy0/mt76/muru_debug"
+out="$(runfw)"
+printf '%s\n' "$out" | grep -qx 'verdict=NO_TRIGGER_RESPONSE_OBSERVED' || fail 'pre-existing counters were counted as window activity'
+[ "$(cat "$WORK/debug/phy0/mt76/muru_debug")" = 1 ] || fail 'muru_debug that was already 1 was changed'
+
+# 12. Real UL MU-MIMO during the window, corroborated by firmware.
+( sleep 1
+  radio phy0 1 560 0 560 0 46 2
+  peer phy0 aa:bb:cc:dd:ee:01 1 280 0 280 26
+  peer phy0 aa:bb:cc:dd:ee:02 2 280 0 280 26
+  fwstats phy0 460 46 0 ) &
+out="$(runfw)"; wait
+printf '%s\n' "$out" | grep -qx 'verdict=UL_MUMIMO_CLIENT_ATTRIBUTED' || { printf '%s\n' "$out" >&2; fail 'window UL MU-MIMO not attributed'; }
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_CORROBORATED' || fail 'firmware corroboration missing for UL MU-MIMO'
+printf '%s\n' "$out" | grep -q '^firmware=phy0 he_ul_tb_ppdu=60 he_mumimo_ul_tb_ppdu=6 he_ofdma_ul_tb_ppdu=0 ' || fail 'firmware deltas wrong'
+printf '%s\n' "$out" | grep -q '^peer=aa:bb:cc:dd:ee:01 radio=phy0 wcid=1 he_tb_ppdu=30 ' || fail 'peer delta wrong'
+
+# 13. Host says UL OFDMA, firmware counter stays zero -> must be flagged, not
+#     silently reported as corroborated.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 0 0 0 0 0 0
+fwstats phy0 0 0 0
+printf '1\n' > "$WORK/debug/phy0/mt76/muru_debug"
+( sleep 1
+  radio phy0 1 80 80 0 7 0 2
+  peer phy0 aa:bb:cc:dd:ee:01 1 40 40 0 0
+  peer phy0 aa:bb:cc:dd:ee:02 2 40 40 0 0 ) &
+out="$(runfw)"; wait
+printf '%s\n' "$out" | grep -qx 'verdict=UL_OFDMA_CLIENT_ATTRIBUTED' || fail 'window UL OFDMA not attributed'
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_DISAGREES_OFDMA_COUNTER_ZERO' || fail 'firmware disagreement not flagged'
+printf '%s\n' "$out" | grep -q 'inconclusive' || fail 'disagreement not marked inconclusive'
+
+# 14. Firmware saw TB PPDUs but the host attributed none -> flagged.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 0 0 0 0 0 0
+fwstats phy0 0 0 0
+printf '1\n' > "$WORK/debug/phy0/mt76/muru_debug"
+( sleep 1; fwstats phy0 30 0 30 ) &
+out="$(runfw)"; wait
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_SAW_TB_PPDUS_HOST_DID_NOT' || fail 'firmware-only activity not flagged'
+
+# 15. No muru_stats at all -> unavailable, never a corroboration claim.
+rm -rf "$WORK/debug"; mkdir -p "$WORK/debug"
+radio phy0 1 0 0 0 0 0 0
+out="$(CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" CR6608_MURU_MASK_MODULE_PARAM="$mask_file" sh "$TOOL" --with-firmware --window 0)"
+printf '%s\n' "$out" | grep -qx 'firmware_corroboration=FIRMWARE_STATS_UNAVAILABLE' || fail 'missing muru_stats not reported as unavailable'
+
+# 16. Bad arguments are rejected.
+! CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" sh "$TOOL" --window abc >/dev/null 2>&1 || fail 'non-integer window accepted'
+! CR6608_UL_MURU_DEBUG_ROOT="$WORK/debug" sh "$TOOL" --bogus >/dev/null 2>&1 || fail 'unknown argument accepted'
+
 printf 'ul_mu_evidence_runtime=pass\n'

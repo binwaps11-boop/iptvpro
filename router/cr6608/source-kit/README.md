@@ -85,6 +85,11 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   only when the telemetry generation is unchanged and even, the MCU generation
   matches, the MCU result is zero, and the readback-derived power matches
   `iw dev`; it never substitutes the configured request for current power.
+- `files/usr/sbin/cr6608-ul-mu-evidence`: client-attributed uplink evidence
+  from the patch-07 per-WCID counters; `--with-firmware --window N` adds the
+  firmware's own `hetrig_*` TB PPDU statistics as an independent second source,
+  reported as deltas over the window and never allowed to override a host
+  disagreement. See `docs/CR6608-MURU-FAULT-ATTRIBUTION.md`.
 - `files/usr/sbin/cr6608-ax-verify`: separates kernel capability, generated
   hostapd configuration, and over-air scheduling that still needs compatible
   clients. It does not claim OFDMA or MU-MIMO airtime activity from UCI alone.
@@ -103,7 +108,10 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   attempted/response-ok/failed/timeout transactions (where response-ok is not
   Firmware-apply or OTA proof), and clears every scheduler bit
   through a one-way kernel fault latch before firmware recovery. Legacy global
-  commands 80/81 and the unregistered MediaTek vendor command are not used.
+  MURU_CTRL sub-commands (the MediaTek-only `BSRP_CTRL`/`SUTX`/`MUMIMO_CTRL`/
+  `MANUAL_CFG`/ack-policy/trigger-type/protection-threshold set) and the
+  unregistered MediaTek vendor command are not used; only upstream's own
+  `MURU_SET_PLATFORM_TYPE` and `RX_AIRTIME_CTRL` init commands are sent.
   See `docs/MT7915-MURU-VENDOR-BASELINE.md` and
   `docs/CR6608-STOCK-MURU-PORT.md`. A successful compile or an advertised HE
   capability is not official support or over-the-air proof; qualification still
@@ -133,6 +141,14 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   multi-user transmission: full-bandwidth UL MU-MIMO on the full operating
   bandwidth, UL OFDMA on a smaller RU. Read-only, and active only while an
   uplink bit is armed. See `docs/CR6608-MURU-FAULT-ATTRIBUTION.md`.
+- `patches/zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch`: after a verified
+  partial reset re-arm, the runtime kill switch, or a debugfs mask write,
+  replays every associated peer's station record through the standard
+  `STA_REC_UPDATE` with the same `conn_state` last sent, so the live mask
+  reaches firmware without a Wi-Fi reload. Also decays unattributed strikes
+  after fifteen minutes without a disarm, so unrelated recoveries months apart
+  can never spend the permanent latch. See
+  `docs/CR6608-MURU-FAULT-ATTRIBUTION.md`.
 - `packages/prplmesh`: pinned prplMesh Controller + Agent + IEEE1905 transport
   built against the generic NL80211 backend and the image's single
   `wpad-openssl` implementation. It is runtime-gated until all processes and

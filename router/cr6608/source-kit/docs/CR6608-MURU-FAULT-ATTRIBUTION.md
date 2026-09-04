@@ -131,3 +131,100 @@ measurement, a regulatory result, a throughput claim, or a sale approval, and
 it does not by itself clear the remaining promotion blockers in
 `docs/CR6608-STOCK-MURU-PORT.md` (long-duration stress, DFS/thermal/
 coexistence, regulatory testing, a reviewed retail profile).
+
+## Patch 08 — live record refresh and strike decay
+
+`patches/zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch` closes the two gaps
+patch 06 left open for a device that must run indefinitely without a reboot.
+
+### Live record refresh
+
+A partial firmware reset keeps the station records alive, so patch 06 only
+re-armed the host mask afterwards. Any peer that (re)associated during the
+disarm window therefore kept a DL-only `STA_REC_MURU` until it re-associated
+on its own. The same was true of the runtime kill switch and a debugfs mask
+write: the new value only reached peers that associated later, which is why
+the userspace guard followed each write with a Wi-Fi reload.
+
+The refresh replays each associated peer's full station record through the
+same `STA_REC_UPDATE` the AUTHORIZE path already sends, so the MURU TLV picks
+up the live mask in place:
+
+- `mt7915_mac_sta_event()` records the `conn_state` of the last record sent
+  (`CONNECT` on ASSOC, `PORT_SECURE` only after a *successful* AUTHORIZE send,
+  `DISCONNECT` on DISASSOC). A replay uses exactly that state; re-sending
+  `CONNECT` for a port-secure peer would downgrade it in firmware.
+- `mt7915_cr6608_muru_refresh_stations()` queues every peer of both phys
+  through the existing rate-control work (`ieee80211_iterate_stations_atomic`
+  + `dev->rc_work`), the pattern `mt7915_set_bitrate_mask()` already uses.
+  A private `msta->changed` bit outside the `IEEE80211_RC_*` space carries
+  the request.
+- `mt7915_mac_sta_rc_work()` performs the send from process context, skipping
+  peers that are gone or mid-teardown and never while `MT76_MCU_RESET` /
+  `MT76_RESET` is set.
+
+It is called from the verified-partial-reset re-arm, the runtime kill switch
+and the debugfs mask writer. It is deliberately **not** called after a full
+reset: `ieee80211_restart_hw()` makes mac80211 replay the records itself.
+
+For reference, MediaTek's own downstream (`0099-cp-mtk-mt76-mt7915-add-connac2-support.patch`,
+`mt7915_set_wireless_vif()`) stores a new `muru_onoff` bitmap and lets it apply
+to the *next* association only; it does not refresh live peers. The refresh
+here is an addition, built from a record the firmware already accepts.
+
+### Strike decay
+
+Patch 06 bounded unattributed re-arms with three strikes, but the counter
+never decayed, so three unrelated recoveries spread over months would still
+have spent the permanent latch. `mt7915_cr6608_muru_strike_decay()`, run from
+the periodic MAC work on the primary phy, resets the counter once
+`CR6608_MURU_STRIKE_DECAY` (15 minutes) has passed since the last disarm with
+no further disarm. It never runs on a latched device, never while a recovery
+is in flight, and touches neither the mask nor the ceiling. Three unrelated
+recoveries *inside* the window still latch.
+
+`cr6608_muru_last_disarm` is stamped by every disarm, in whatever context the
+disarm happens (including the tasklet path of `mt7915_reset()`), with a plain
+`WRITE_ONCE`.
+
+## Two-source on-device proof (`cr6608-ul-mu-evidence --with-firmware`)
+
+The evidence tool has two modes.
+
+`cr6608-ul-mu-evidence` (cumulative) reads the host-side per-WCID counters
+from patch 07 and answers from them alone.
+
+`cr6608-ul-mu-evidence --with-firmware [--window SECONDS]` adds the second,
+independent source: the MURU statistics the closed firmware itself reports
+through `MURU_GET_TXC_TX_STATS` (`struct mt7915_mcu_muru_stats.ul`:
+`hetrig_su_cnt`, `hetrig_2ru…gtr16ru_cnt`, `hetrig_2mu/3mu/4mu_cnt`), which
+`muru_stats` prints as `Total HE OFDMA UL TB PPDU count`, `Total HE MU-MIMO UL
+TB PPDU count` and `All HE UL TB PPDU count`. These are the firmware's own
+counts of the trigger-based PPDUs it received — that is, of the uplink
+transmissions it scheduled. The tool enables `muru_debug` for the window
+(the statistics are only produced while it is on) and restores the previous
+value on every exit path.
+
+Everything in window mode is a **delta over the window**, so counters that
+were already high before the test cannot count as activity. The verdict is
+still decided by the client-attributed host counters (two distinct peers in
+one PPDU), and the firmware counters are reported as corroboration:
+
+| host verdict | firmware delta | reported |
+|---|---|---|
+| `UL_MUMIMO_CLIENT_ATTRIBUTED` | `he_mumimo_ul_tb_ppdu > 0` | `FIRMWARE_CORROBORATED` |
+| `UL_OFDMA_CLIENT_ATTRIBUTED` | `he_ofdma_ul_tb_ppdu > 0` | `FIRMWARE_CORROBORATED` |
+| any host activity | matching counter `0` | `FIRMWARE_DISAGREES_*` + `inconclusive` |
+| no host activity | `he_ul_tb_ppdu > 0` | `FIRMWARE_SAW_TB_PPDUS_HOST_DID_NOT` + `inconclusive` |
+| no host activity | `0` | `FIRMWARE_AGREES_NOTHING_SCHEDULED` |
+| — | `muru_stats` missing | `FIRMWARE_STATS_UNAVAILABLE` |
+
+A disagreement is never resolved in favour of the stronger claim.
+
+Procedure that cannot be satisfied by one client or by downlink-only traffic:
+two HE clients that advertise full-bandwidth UL MU-MIMO, both uploading at
+the same time to the AP (e.g. `iperf3 -R` from the router side, or two
+uploads), then `cr6608-ul-mu-evidence --with-firmware --window 60`. Expected
+on a working uplink scheduler: `verdict=UL_OFDMA_CLIENT_ATTRIBUTED` or
+`verdict=UL_MUMIMO_CLIENT_ATTRIBUTED` with `firmware_corroboration=FIRMWARE_CORROBORATED`.
+Anything else is reported as exactly what it is.

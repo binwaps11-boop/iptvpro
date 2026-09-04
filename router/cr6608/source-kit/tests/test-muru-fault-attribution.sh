@@ -27,7 +27,7 @@ ULTB="$PATCH_DIR/zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch"
 for patch in "$ATTR" "$ULTB"; do
 	[ -s "$patch" ] || fail "missing $(basename "$patch")"
 	# Same storage/ABI prohibition the rest of the MURU port carries.
-	! grep -Eqi 'mtd_(write|erase)|MTD_OPS_PLACE_OOB|MURU_(CFG_DLUL_LIMIT|SET_DLUL_EN)' "$patch" ||
+	! grep -Eqi 'mtd_(write|erase)|MTD_OPS_PLACE_OOB|MURU_SET_(BSRP_CTRL|SUTX|MUMIMO_CTRL|MANUAL_CFG|MU_DL_ACK_POLICY|TRIG_TYPE|20M_DYN_ALGO|PROT_FRAME_THR|CERT_MU_EDCA_OVERRIDE|ARB_OP_MODE)|mt7915_mcu_set_muru_cfg|mt7915_mcu_set_mu_dl_ack_policy|mt7915_mcu_set_mu_prot_frame_th|mt7915_mcu_set_cr6608_ul_muru' "$patch" ||
 		fail "unsafe storage write or unverified legacy firmware ABI in $(basename "$patch")"
 	# No new firmware command surface: the whole point is that these patches
 	# are host-side only.

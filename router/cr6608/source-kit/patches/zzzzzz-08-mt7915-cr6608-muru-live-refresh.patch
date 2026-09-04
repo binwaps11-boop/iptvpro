@@ -1,0 +1,252 @@
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index 5cece9d3..f86eb31d 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -292,6 +292,10 @@ static int mt7915_cr6608_ul_muru_set(void *data, u64 val)
+ 	if (atomic_xchg(&dev->cr6608_muru_mask, 0)) {
+ 		dev_warn(dev->mt76.dev,
+ 			 "CR6608 MURU runtime kill switch cleared every scheduler bit\n");
++		/* Take the bits out of the live firmware records too, so the
++		 * switch is effective without a Wi-Fi reload.
++		 */
++		mt7915_cr6608_muru_refresh_stations(dev, "runtime kill switch");
+ 	}
+ 
+ 	return 0;
+@@ -343,10 +347,12 @@ static int mt7915_cr6608_muru_mask_set(void *data, u64 val)
+ 	 * bit; keep the floor in step with it, one-way.
+ 	 */
+ 	atomic_and((int)val & CR6608_MURU_DL_MASK, &dev->cr6608_muru_dl_floor);
+-	if (val != old)
++	if (val != old) {
+ 		dev_warn(dev->mt76.dev,
+ 			 "CR6608 MURU mask reduced from 0x%x to 0x%llx\n",
+ 			 old, val);
++		mt7915_cr6608_muru_refresh_stations(dev, "debugfs mask write");
++	}
+ 	return 0;
+ }
+ 
+diff --git a/mt7915/init.c b/mt7915/init.c
+index cd0170a0..868a6dfb 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -1360,6 +1360,7 @@ int mt7915_register_device(struct mt7915_dev *dev)
+ 	atomic_set(&dev->cr6608_muru_disarms, 0);
+ 	atomic_set(&dev->cr6608_muru_rearms, 0);
+ 	atomic_set(&dev->cr6608_muru_strikes, 0);
++	dev->cr6608_muru_last_disarm = jiffies;
+ 	atomic_set(&dev->cr6608_ul_muru_sta_rec_attempted, 0);
+ 	atomic_set(&dev->cr6608_ul_muru_sta_rec_response_ok, 0);
+ 	atomic_set(&dev->cr6608_ul_muru_sta_rec_failed, 0);
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index 196608b6..c5ae8c18 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1938,13 +1938,20 @@ restart_check:
+ 	 */
+ 	if (partial_ok) {
+ 		muru_rearmed = mt7915_cr6608_muru_rearm(dev);
+-		if (muru_rearmed)
++		if (muru_rearmed) {
+ 			dev_info(dev->mt76.dev,
+ 				 "CR6608 MURU scheduler re-armed with mask 0x%x after verified partial reset (rearms=%d strikes=%d/%d)\n",
+ 				 muru_rearmed,
+ 				 atomic_read(&dev->cr6608_muru_rearms),
+ 				 atomic_read(&dev->cr6608_muru_strikes),
+ 				 CR6608_MURU_MAX_STRIKES);
++			/* Station records survived a partial reset, but any peer
++			 * that (re)associated during the disarm window carries a
++			 * DL-only record.  Replay them now.
++			 */
++			mt7915_cr6608_muru_refresh_stations(dev,
++							    "partial reset re-arm");
++		}
+ 	}
+ 
+ 	mt7915_update_beacons(dev);
+@@ -2386,6 +2393,20 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 		if (changed & IEEE80211_RC_SMPS_CHANGED)
+ 			mt7915_mcu_add_smps(dev, vif, sta);
+ 
++		/* Replay the full record with the same conn_state that was last
++		 * sent, so the MURU TLV picks up the live mask without touching
++		 * the peer's port state.  Skip peers that are gone or mid-teardown
++		 * and never race a recovery: the replayed records after a full
++		 * reset come from mac80211 itself.
++		 */
++		if ((changed & CR6608_RC_MURU_REFRESH) &&
++		    msta->wcid.sta && !msta->wcid.sta_disabled &&
++		    msta->cr6608_conn_state != CONN_STATE_DISCONNECT &&
++		    !test_bit(MT76_MCU_RESET, &dev->mphy.state) &&
++		    !test_bit(MT76_RESET, &dev->mphy.state))
++			mt7915_mcu_add_sta(dev, vif, sta,
++					   msta->cr6608_conn_state, false);
++
+ 		spin_lock_bh(&dev->mt76.sta_poll_lock);
+ 	}
+ 
+@@ -2412,6 +2433,9 @@ void mt7915_mac_work(struct work_struct *work)
+ 
+ 		if (phy->dev->muru_debug)
+ 			mt7915_mcu_muru_debug_get(phy);
++
++		if (mphy == &phy->dev->mphy)
++			mt7915_cr6608_muru_strike_decay(phy->dev);
+ 	}
+ 
+ 	mutex_unlock(&mphy->dev->mutex);
+diff --git a/mt7915/main.c b/mt7915/main.c
+index 16062012..00f1bdc8 100644
+--- a/mt7915/main.c
++++ b/mt7915/main.c
+@@ -975,6 +975,7 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_CONNECT, true);
+ 		if (ret)
+ 			return ret;
++		msta->cr6608_conn_state = CONN_STATE_CONNECT;
+ 
+ 		addr = mt7915_mac_wtbl_lmac_addr(dev, msta->wcid.idx, 30);
+ 		mt76_rmw_field(dev, addr, GENMASK(7, 0), 0xa0);
+@@ -991,7 +992,11 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	case MT76_STA_EVENT_AUTHORIZE:
+ 		mt7915_drop_other_sta(dev, vif, sta);
+-		return mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_PORT_SECURE, false);
++		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_PORT_SECURE,
++					 false);
++		if (!ret)
++			msta->cr6608_conn_state = CONN_STATE_PORT_SECURE;
++		return ret;
+ 
+ 	case MT76_STA_EVENT_DISASSOC:
+ 		mutex_lock(&dev->mt76.mutex);
+@@ -999,6 +1004,7 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 			mt7915_mac_twt_teardown_flow(dev, msta, i);
+ 		mutex_unlock(&dev->mt76.mutex);
+ 
++		msta->cr6608_conn_state = CONN_STATE_DISCONNECT;
+ 		mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_DISCONNECT, false);
+ 		msta->wcid.sta_disabled = 1;
+ 		msta->wcid.sta = 0;
+@@ -1370,6 +1376,33 @@ static void mt7915_sta_rc_work(void *data, struct ieee80211_sta *sta)
+ 	spin_unlock_bh(&dev->mt76.sta_poll_lock);
+ }
+ 
++/* Replay every associated peer's station record so its STA_REC_MURU carries
++ * the live scheduler mask.  Reuses the rate-control work: the atomic
++ * iterator only queues peers, and mt7915_mac_sta_rc_work() does the MCU
++ * transactions from process context, exactly like a bitrate-mask change.
++ * Covers both phys of a DBDC device.
++ */
++void mt7915_cr6608_muru_refresh_stations(struct mt7915_dev *dev,
++					 const char *why)
++{
++	struct mt76_phy *ext_phy = dev->mt76.phys[MT_BAND1];
++	u32 changed = CR6608_RC_MURU_REFRESH;
++
++	if (!dev->cr6608_ul_muru_allowed)
++		return;
++
++	ieee80211_iterate_stations_atomic(mt76_hw(dev), mt7915_sta_rc_work,
++					  &changed);
++	if (ext_phy)
++		ieee80211_iterate_stations_atomic(ext_phy->hw,
++						  mt7915_sta_rc_work,
++						  &changed);
++	ieee80211_queue_work(mt76_hw(dev), &dev->rc_work);
++	dev_info(dev->mt76.dev,
++		 "CR6608 MURU station records queued for refresh (%s, mask 0x%x)\n",
++		 why, mt7915_cr6608_muru_effective_mask(dev));
++}
++
+ static void mt7915_sta_rc_update(struct ieee80211_hw *hw,
+ 				 struct ieee80211_vif *vif,
+ 				 struct ieee80211_link_sta *link_sta,
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 75e9feb7..7bd08dd4 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -161,6 +161,12 @@ struct mt7915_sta {
+ 		u32 last_ts;
+ 	} cr6608_ul;
+ 
++	/* The conn_state of the last STA_REC_UPDATE sent for this peer.  A
++	 * refresh must replay exactly that state: re-sending CONNECT for a
++	 * PORT_SECURE peer would downgrade it in firmware.
++	 */
++	u8 cr6608_conn_state;
++
+ 	struct {
+ 		u8 flowid_mask;
+ 		struct mt7915_twt_flow flow[MT7915_MAX_STA_TWT_AGRT];
+@@ -370,6 +376,7 @@ struct mt7915_dev {
+ 	atomic_t cr6608_muru_disarms;
+ 	atomic_t cr6608_muru_rearms;
+ 	atomic_t cr6608_muru_strikes;
++	unsigned long cr6608_muru_last_disarm;
+ 	atomic_t cr6608_ul_muru_sta_rec_attempted;
+ 	atomic_t cr6608_ul_muru_sta_rec_response_ok;
+ 	atomic_t cr6608_ul_muru_sta_rec_failed;
+@@ -483,6 +490,23 @@ mt7915_cr6608_muru_sta_rec_failure(struct mt7915_dev *dev, bool timed_out)
+  */
+ #define CR6608_MURU_MAX_STRIKES	3
+ 
++/* Strikes count unattributed recoveries that happened close together.  A
++ * healthy radio that later hits one more unrelated event must not inherit
++ * strikes from weeks ago, so the counter decays to zero once the radio has
++ * run this long without any disarm.  Three unrelated recoveries inside the
++ * window still end the experiment permanently.
++ */
++#define CR6608_MURU_STRIKE_DECAY	(15 * 60 * HZ)
++
++/* Private msta->changed bit, outside the IEEE80211_RC_* space, asking
++ * mt7915_mac_sta_rc_work() to replay this peer's station record so its
++ * STA_REC_MURU reflects the live mask.
++ */
++#define CR6608_RC_MURU_REFRESH		BIT(31)
++
++void mt7915_cr6608_muru_refresh_stations(struct mt7915_dev *dev,
++					 const char *why);
++
+ static inline bool mt7915_cr6608_muru_disarm(struct mt7915_dev *dev)
+ {
+ 	if (!dev->cr6608_ul_muru_allowed)
+@@ -492,10 +516,37 @@ static inline bool mt7915_cr6608_muru_disarm(struct mt7915_dev *dev)
+ 		return false;
+ 
+ 	atomic_inc(&dev->cr6608_muru_disarms);
++	WRITE_ONCE(dev->cr6608_muru_last_disarm, jiffies);
+ 
+ 	return true;
+ }
+ 
++/* Called from the periodic MAC work on the primary phy.  Decays the strike
++ * counter after a full healthy window; never touches a latched device, and
++ * never runs while a recovery is in flight.
++ */
++static inline void mt7915_cr6608_muru_strike_decay(struct mt7915_dev *dev)
++{
++	unsigned long last;
++	int strikes;
++
++	if (!dev->cr6608_ul_muru_allowed)
++		return;
++	strikes = atomic_read(&dev->cr6608_muru_strikes);
++	if (!strikes || atomic_read(&dev->cr6608_muru_fault_latched))
++		return;
++	if (test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
++	    test_bit(MT76_RESET, &dev->mphy.state))
++		return;
++	last = READ_ONCE(dev->cr6608_muru_last_disarm);
++	if (!time_after(jiffies, last + CR6608_MURU_STRIKE_DECAY))
++		return;
++	if (atomic_cmpxchg(&dev->cr6608_muru_strikes, strikes, 0) == strikes)
++		dev_info(dev->mt76.dev,
++			 "CR6608 MURU strike counter decayed from %d after %u s without a disarm\n",
++			 strikes, jiffies_to_msecs(CR6608_MURU_STRIKE_DECAY) / 1000);
++}
++
+ /* Clear every scheduler bit before firmware recovery.  The fault flag, not
+  * the previous mask value, is the one-way arbitration point so a concurrent
+  * kill-switch clear cannot hide the first real fault.  Flag and latch count

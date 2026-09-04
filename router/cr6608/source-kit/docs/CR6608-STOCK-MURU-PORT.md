@@ -22,6 +22,53 @@ controlled qualification candidate, not official product support. A successful
 compile, driver load, capability advertisement, or station-record update does
 not prove UL airtime or retail safety.
 
+## Upstream history (governing commits, verified in the mt76 tree)
+
+Every statement below was checked against the full upstream history at
+`github.com/openwrt/mt76` and against MediaTek's official 25.12 feed
+(`github.com/mediatek/mtk-openwrt-feeds` at `629dc1c1`, the commit this kit
+pins). Hashes are upstream mt76 commits.
+
+| commit | date | author | what it did | quoted rationale |
+|---|---|---|---|---|
+| `135a5085` | 2020-04-25 | Ryder Lee (MediaTek) | first HE peer support; `ofdma_dl/ofdma_ul/mimo_dl/mimo_ul` all `true` | — |
+| `75977a85` | 2020-09-29 | Felix Fietkau | removed `ofdma_ul_en` **and** `mimo_ul_en` | "The feature is not ready in firmware yet, and it leads to hangs" |
+| `cfbbd861` | 2021-10-18 | Shayne Chen (MediaTek) | restored `mimo_ul_en` for all chips and replaced a direct MIB register write with `MCU_EXT_CMD_RX_AIRTIME_CTRL` (0x4a) | "For sending trigger frames, one of the conditions fw uses is to check if mib rx airtime meets the threshold … we need to enable the register by mcu cmd" |
+| `f1f505cb` | 2021-10-18 | MediaTek | `MURU_SET_PLATFORM_TYPE` = `PERF_LEVEL_2` at init | "notify fw to init corresponding algorithm" |
+| `abd80cf6` | 2022-02-15 | MeiChia Chiu (MediaTek) | moved the `cfg.*_en` assignments above the `has_he` early return so every station carries the same bits | "The muru enable/disable are only set after the first station connection. Without this patch, the firmware couldn't enable muru if the first connected station is non-HE type." |
+| `e5228343` | 2022-06-21 | Felix Fietkau | wrapped `mimo_ul_en` and the HE PHY CAP2 `UL_MU_FULL\|PARTIAL` advertisement in `if (!is_mt7915())` | "it can produce multi-second latency spikes and tx hangs when pushing traffic. It should work better for MT7916 and MT7986" |
+| `a2838480` | 2025-05-15 | Howard Hsu (MediaTek) | removed `UL_MU_PARTIAL_MU_MIMO` family-wide; **left the `is_mt7915` guard in place** | "The firmware only supports full bandwidth UL MU-MIMO" |
+
+Facts that follow from the table and from the blobs:
+
+- `cfg.ofdma_ul_en` has never been set by upstream for **any** chip since
+  `75977a85` — not for mt7916/mt7981/mt7986 and not for mt7996 either. The only
+  precedent for bit 1 (UL OFDMA) is MediaTek's downstream default
+  `phy->muru_onoff = OFDMA_DL | OFDMA_UL | MUMIMO_DL | MUMIMO_UL` (0099 patch
+  line 1960), mapped straight into `STA_REC_MURU` (lines 3843–3845).
+- Upstream mt7996's "full UL MU support" is only the B22 advertisement plus the
+  same `STA_REC_MURU` TLV with the DL bits set; it sends no global MU command
+  that mt7915 lacks. There is no missing "UL enable" command to copy.
+- The 2022 hang report (`e5228343`) was made against the firmware of
+  `4876688c` (2022-01-11). The blob this kit pins — `mt7915_wm.bin`
+  `73ae4c95…`, firmware `20240429200502` (`6ccafa50`, 2024-08-05) — is two
+  releases newer and is **byte-identical** in OpenWrt 25.12.5's mt76 pin
+  (`39c960c3`), in MediaTek's 25.12 downstream base (`9f95baf9`) and in
+  MediaTek's legacy 5.4 release tree. MediaTek ships all four scheduler bits on,
+  for every peer, on exactly this blob; its hostapd `MU_SET` path is inert on
+  mt7915 because `mt7915_vendor_register()` returns before registering the
+  vendor commands, so the 0xF default is what their mt7915 product runs.
+- The firmware decides per WCID whether to trigger a peer. Its own log strings
+  say so: `fgTrigOn=FALSE, OMI_UL_MU_DISABLE = TRUE`,
+  `fgTrigOn=FALSE, Invalid BSR or SUCC cnt`, `fgTrigOn=TRUE, Valid BSR and SUCC
+  cnt`. Uplink scheduling therefore also depends on the client sending valid
+  BSRs and not disabling UL MU through OM control — a client-side condition no
+  host bit can override.
+- MediaTek's downstream does **not** re-advertise HE PHY CAP2 B22
+  (`UL_MU_FULL_MU_MIMO`) for mt7915 while enabling `mimo_ul_en`; this kit
+  advertises it when bit 3 is armed. That is the single capability-level
+  divergence from MediaTek and is an open over-the-air question, not a defect.
+
 ## Pinned baseline and bitmap
 
 The authoritative hashes, commits, and firmware identities are recorded in
@@ -74,7 +121,21 @@ bit can be active. The v86 patch stack then:
    MCU timeout/reset recovery is queued;
 8. exposes read-only per-phy state and per-peer eligibility through debugfs.
 
-Legacy global firmware commands 80/81 are deliberately not sent. The project
+No global MURU_CTRL command beyond upstream's own is sent. On the normal
+association path both upstream `39c960c3` and MediaTek's 25.12 downstream send
+exactly one: `MURU_SET_PLATFORM_TYPE` (25) = `PERF_LEVEL_2` at
+`mt7915_mcu_init()`, which this tree keeps, followed by `RX_AIRTIME_CTRL`
+(0x4a), the MIB rx-airtime enable that MediaTek documented as a firmware
+precondition for sending Trigger frames (commit `cfbbd861`). MediaTek's
+additional sub-commands (`BSRP_CTRL`=1, `SUTX`=16, `MUMIMO_CTRL`=17,
+`MANUAL_CFG`=100, `MU_DL_ACK_POLICY`=200, `TRIG_TYPE`=201, `20M_DYN_ALGO`=202,
+`PROT_FRAME_THR`=204, `CERT_MU_EDCA_OVERRIDE`=205) are reachable in their tree
+only from the unregistered vendor path, a debugfs knob, or the Wi-Fi Alliance
+certification path, never from association; this tree deliberately sends none
+of them, and the source gates reject any patch that adds one. (Earlier
+revisions of this document referred to "legacy global commands 80/81"; no such
+command IDs exist in MediaTek's patches, upstream mt76, or the firmware, and
+the wording was wrong.) The project
 also does not register or depend on MediaTek's currently skipped nl80211 vendor
 control. This keeps the qualification surface limited to the reviewed
 station-record path and the immutable boot profile.
