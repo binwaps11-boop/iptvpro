@@ -1,0 +1,13 @@
+# (J) NORMAL ROUTER MODE — this is the shipped default (files/etc/config/network).
+# 192.168.100.1, DHCP server on, WAN DHCP, NAT on. Nothing to apply; for reference.
+#
+# To reset WAN back to DHCP from another mode:
+uci set network.wan.proto='dhcp'
+uci -q delete network.wan.username
+uci -q delete network.wan.password
+uci -q delete network.wan.ipaddr
+uci -q delete network.wan.gateway
+uci -q delete network.wan.netmask
+uci set network.wan.peerdns='1'
+uci commit network
+/etc/init.d/network reload

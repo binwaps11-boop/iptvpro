@@ -1,0 +1,10 @@
+# (K) Static WAN. Apply with rollback safety (docs/recovery.md).
+
+uci set network.wan.proto='static'
+uci set network.wan.ipaddr='203.0.113.10'      # YOUR static IP
+uci set network.wan.netmask='255.255.255.0'    # YOUR mask
+uci set network.wan.gateway='203.0.113.1'      # YOUR gateway
+uci set network.wan.dns='1.1.1.1 9.9.9.9'      # or ISP DNS
+uci -q delete network.wan6                      # remove if no IPv6
+uci commit network
+/etc/init.d/network reload

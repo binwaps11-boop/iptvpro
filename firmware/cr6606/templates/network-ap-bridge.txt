@@ -1,0 +1,31 @@
+# (J) AP / BRIDGE MODE — turn the CR6606 into a dumb access point behind an
+# existing router. No NAT, no DHCP server here; the main router serves DHCP.
+#
+# DANGER NOTE: after this you reach the device at the IP your main router leases,
+# or the static one set below. Have docs/recovery.md (failsafe) ready.
+
+# 1) Put the WAN port into the LAN bridge (use all 4 ports as LAN), or keep wan free.
+uci -q add_list network.@device[0].ports='wan'   # @device[0] is br-lan
+
+# 2) Static management IP in your main LAN subnet (example: main router = 192.168.1.1)
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.1.2'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='192.168.1.1'
+uci set network.lan.dns='192.168.1.1'
+
+# 3) Remove WAN interfaces (not routing anymore)
+uci -q delete network.wan
+uci -q delete network.wan6
+uci commit network
+
+# 4) Disable DHCP server on lan (main router handles it)
+uci set dhcp.lan.ignore='1'
+uci commit dhcp
+
+# 5) Disable NAT/firewall masquerade (optional: stop firewall entirely in pure AP)
+/etc/init.d/firewall stop && /etc/init.d/firewall disable
+
+/etc/init.d/network reload
+/etc/init.d/dnsmasq restart
+# Wi-Fi SSIDs already bridge to 'lan' -> clients get IPs from main router.

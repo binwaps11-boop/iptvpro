@@ -1,0 +1,56 @@
+# (J) VLAN ACCESS PORT example (DSA bridge-vlan). MT7621 = DSA, so VLANs are
+# defined as bridge-vlan sections, NOT swconfig.
+#
+# Goal: split LAN into VLAN10 (main) and VLAN20 (guest). lan1/lan2 = VLAN10 access,
+# lan3 = VLAN20 access. Adjust port names to YOUR `bridge link` output.
+
+# Define VLANs on the bridge
+uci -q delete network.@bridge-vlan[0] 2>/dev/null
+add() { uci add network bridge-vlan >/dev/null; }
+
+add; uci set network.@bridge-vlan[-1].device='br-lan'; uci set network.@bridge-vlan[-1].vlan='10'
+uci add_list network.@bridge-vlan[-1].ports='lan1:u*'
+uci add_list network.@bridge-vlan[-1].ports='lan2:u*'
+
+add; uci set network.@bridge-vlan[-1].device='br-lan'; uci set network.@bridge-vlan[-1].vlan='20'
+uci add_list network.@bridge-vlan[-1].ports='lan3:u*'
+
+# Layer-3 interfaces on top of the VLANs
+uci set network.lan.device='br-lan.10'        # main subnet stays 192.168.100.1
+uci set network.guest='interface'
+uci set network.guest.device='br-lan.20'
+uci set network.guest.proto='static'
+uci set network.guest.ipaddr='192.168.20.1'
+uci set network.guest.netmask='255.255.255.0'
+uci commit network
+
+# DHCP for guest VLAN
+uci set dhcp.guest='dhcp'
+uci set dhcp.guest.interface='guest'
+uci set dhcp.guest.start='100'
+uci set dhcp.guest.limit='150'
+uci set dhcp.guest.leasetime='12h'
+uci commit dhcp
+
+# Firewall: isolate guest (own zone, internet only, no LAN access)
+uci add firewall zone >/dev/null
+uci set firewall.@zone[-1].name='guest'
+uci add_list firewall.@zone[-1].network='guest'
+uci set firewall.@zone[-1].input='REJECT'
+uci set firewall.@zone[-1].output='ACCEPT'
+uci set firewall.@zone[-1].forward='REJECT'
+uci add firewall forwarding >/dev/null
+uci set firewall.@forwarding[-1].src='guest'
+uci set firewall.@forwarding[-1].dest='wan'
+# allow DHCP+DNS from guest to router
+uci add firewall rule >/dev/null
+uci set firewall.@rule[-1].name='guest-dhcp-dns'
+uci set firewall.@rule[-1].src='guest'
+uci set firewall.@rule[-1].proto='tcp udp'
+uci set firewall.@rule[-1].dest_port='53 67 68'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci commit firewall
+
+/etc/init.d/network reload
+/etc/init.d/dnsmasq restart
+/etc/init.d/firewall restart
