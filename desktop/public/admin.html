@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>لوحة الإدارة — IPTV Pro</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo">◈</span> IPTV <b>Pro</b> · الإدارة</div>
+      <div class="actions">
+        <a class="btn ghost" href="/">بوابة العملاء</a>
+        <button id="btnLogout" class="btn ghost">خروج</button>
+      </div>
+    </header>
+
+    <div id="pwBanner" class="pw-banner hidden">
+      ⚠️ أنت تستخدم كلمة مرور المدير الافتراضية. <button id="pwBannerBtn" class="btn">غيّرها الآن</button>
+    </div>
+
+    <main class="admin-wrap">
+      <!-- إحصائيات -->
+      <section class="stats" id="stats"></section>
+
+      <div class="admin-cols">
+        <!-- المصادر -->
+        <section class="panel">
+          <h3>📥 مصادر IPTV</h3>
+          <div class="tabs">
+            <button class="tab active" data-tab="xtream">Xtream</button>
+            <button class="tab" data-tab="m3u_url">رابط M3U</button>
+            <button class="tab" data-tab="m3u_content">لصق M3U</button>
+          </div>
+          <form id="formXtream" class="tabpane" data-pane="xtream">
+            <input name="name" placeholder="اسم المصدر" />
+            <input name="server" placeholder="رابط السيرفر http://host:port" required />
+            <input name="username" placeholder="اسم المستخدم" required />
+            <input name="password" placeholder="كلمة المرور" required />
+            <button class="btn full">استيراد</button>
+          </form>
+          <form id="formUrl" class="tabpane hidden" data-pane="m3u_url">
+            <input name="name" placeholder="اسم المصدر" />
+            <input name="url" placeholder="رابط M3U/M3U8" required />
+            <button class="btn full">استيراد</button>
+          </form>
+          <form id="formContent" class="tabpane hidden" data-pane="m3u_content">
+            <input name="name" placeholder="اسم المصدر" />
+            <textarea name="content" rows="5" placeholder="#EXTM3U …" required></textarea>
+            <button class="btn full">تحليل</button>
+          </form>
+          <div id="sourcesList" class="list"></div>
+        </section>
+
+        <!-- العملاء -->
+        <section class="panel">
+          <h3>👥 العملاء (الاشتراكات)</h3>
+          <form id="formClient">
+            <div class="grid2">
+              <input name="username" placeholder="اسم المستخدم" required />
+              <input name="password" placeholder="كلمة المرور" required />
+            </div>
+            <input name="name" placeholder="اسم العميل (اختياري)" />
+            <div class="grid2">
+              <input name="days" type="number" placeholder="المدة (أيام، 0=دائم)" value="30" />
+              <input name="maxDevices" type="number" placeholder="حد الأجهزة (0=بلا حد)" value="2" />
+            </div>
+            <button class="btn full">إضافة عميل</button>
+          </form>
+          <div id="clientsList" class="list"></div>
+        </section>
+      </div>
+
+      <!-- الإعدادات -->
+      <section class="panel">
+        <h3>⚙️ الإعدادات (البروكسي/VPN و Headers)</h3>
+        <form id="formSettings">
+          <label class="row"><input type="checkbox" name="useProxy" /><span>تمرير البث عبر الخادم (يحل CORS)</span></label>
+          <div class="grid2"><input name="userAgent" placeholder="User-Agent" /><input name="referer" placeholder="Referer" /></div>
+          <fieldset class="fs">
+            <legend>بروكسي / VPN (مثلاً مكسيكي)</legend>
+            <label class="row"><input type="checkbox" name="up_enabled" /><span>تفعيل التوجيه عبر البروكسي/VPN</span></label>
+            <div class="grid2">
+              <select name="up_type"><option value="http">HTTP/HTTPS</option><option value="socks5">SOCKS5</option></select>
+              <input name="up_host" placeholder="host" />
+            </div>
+            <div class="grid2"><input name="up_port" placeholder="port" /><input name="up_username" placeholder="مستخدم (اختياري)" /></div>
+            <input name="up_password" placeholder="كلمة مرور البروكسي (اختياري)" />
+            <button type="button" id="btnTest" class="btn ghost full">اختبار وعرض IP</button>
+            <div id="testResult" class="test-result"></div>
+          </fieldset>
+          <button class="btn full">حفظ الإعدادات</button>
+        </form>
+      </section>
+
+      <!-- توجيه المكسيك (VPN) -->
+      <section class="panel">
+        <h3>🇲🇽 توجيه المكسيك — لتجاوز الحظر الجغرافي</h3>
+        <div id="vpnStatus" class="vpn-status">…</div>
+
+        <div class="auto-box">
+          <b>🆓 VPN مجاني مدمج (VPN Gate) — اختر الدولة:</b>
+          <p class="muted" style="font-size:13px;margin:6px 0">
+            يتصل بخادم VPN مجاني في الدولة المسموحة ويوجّه التطبيق عبره تلقائياً. خوادم تطوّعية
+            (قد تتغيّر/تبطئ) — إن لم تتوفّر المكسيك الآن جرّب دولة أخرى أو أعد المحاولة.
+          </p>
+          <div class="grid2">
+            <select id="freeVpnCountry">
+              <option value="MX">المكسيك (MX)</option>
+              <option value="US">الولايات المتحدة (US)</option>
+              <option value="CA">كندا (CA)</option>
+              <option value="BR">البرازيل (BR)</option>
+              <option value="ES">إسبانيا (ES)</option>
+              <option value="DE">ألمانيا (DE)</option>
+              <option value="GB">بريطانيا (GB)</option>
+              <option value="FR">فرنسا (FR)</option>
+              <option value="JP">اليابان (JP)</option>
+            </select>
+            <button id="btnFreeVpn" class="btn">🔌 اتصال VPN مجاني</button>
+          </div>
+          <button id="btnFreeVpnDown" class="btn ghost full" style="margin-top:8px">قطع الاتصال</button>
+          <div id="freeVpnResult" class="test-result"></div>
+        </div>
+
+        <div class="auto-box">
+          <b>⚡ الحل الأسرع — بحث + استيراد تلقائي (نقرة واحدة):</b>
+          <p class="muted" style="font-size:13px;margin:6px 0">
+            يبحث عن بروكسي مكسيكي مجاني يعمل، ويستورد قنواتك عبره <b>فوراً</b> قبل أن يموت، ويجرّب
+            عدة بروكسيات حتى ينجح. يتطلب وجود مصدر Xtream مُضاف. قد يستغرق دقيقة.
+          </p>
+          <button id="btnAutoImport" class="btn full">🚀 بحث + استيراد تلقائي عبر المكسيك</button>
+          <div id="autoProxyResult" class="test-result"></div>
+        </div>
+
+        <hr style="border-color:var(--line);margin:16px 0" />
+        <b>🔒 ثابت (WireGuard):</b>
+        <p class="muted" style="font-size:13px">
+          الصق محتوى ملف <b>WireGuard</b> لخادم مكسيكي (من مزوّد VPN مثل Mullvad/ProtonVPN) ثم اضغط «تفعيل».
+          يخرج التطبيق من المكسيك تلقائياً، بينما يبقى وصولك للوحة كما هو.
+        </p>
+        <textarea id="vpnConfig" rows="8" placeholder="[Interface]
+PrivateKey = ...
+Address = 10.x.x.x/32
+[Peer]
+PublicKey = ...
+Endpoint = <IP-مكسيكي>:51820
+AllowedIPs = 0.0.0.0/0"></textarea>
+        <div class="grid2">
+          <button id="btnVpnUp" class="btn">تفعيل توجيه المكسيك</button>
+          <button id="btnVpnDown" class="btn ghost">إيقاف</button>
+        </div>
+        <div id="vpnResult" class="test-result"></div>
+      </section>
+
+      <!-- كلمة المرور -->
+      <section class="panel">
+        <h3>🔒 كلمة مرور المدير</h3>
+        <form id="formPw">
+          <input name="password" type="password" placeholder="كلمة مرور جديدة (4 أحرف فأكثر)" required />
+          <button class="btn full">تغيير</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/admin.js"></script>
+  </body>
+</html>

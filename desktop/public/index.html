@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IPTV Pro — البث المباشر</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo">◈</span> IPTV <b>Pro</b></div>
+      <input id="search" class="search" type="search" placeholder="ابحث…" />
+      <div class="actions">
+        <span id="userinfo" class="viewers"></span>
+        <a id="adminLink" class="btn ghost hidden" href="/admin">لوحة الإدارة</a>
+        <button id="btnLogout" class="btn ghost">خروج</button>
+      </div>
+    </header>
+
+    <nav class="content-tabs">
+      <button class="ctab active" data-view="live">📡 المباشر</button>
+      <button class="ctab" data-view="movies">🎬 الأفلام</button>
+      <button class="ctab" data-view="series">📺 المسلسلات</button>
+    </nav>
+
+    <nav id="cats" class="cats"></nav>
+    <main id="grid" class="grid"></main>
+    <div id="empty" class="empty">
+      <h2>لا يوجد محتوى بعد</h2>
+      <p>لم يُضِف المسؤول أي قنوات حتى الآن.</p>
+    </div>
+
+    <div id="player" class="player hidden">
+      <div class="player-top">
+        <span id="nowPlaying"></span>
+        <div class="player-controls">
+          <select id="quality" class="quality"><option value="-1">جودة: تلقائي</option></select>
+          <button id="btnFullscreen" class="btn ghost">⛶ ملء الشاشة</button>
+          <button id="closePlayer" class="btn ghost">✕ إغلاق</button>
+        </div>
+      </div>
+      <video id="video" controls autoplay playsinline></video>
+      <div id="playerStatus" class="player-status"></div>
+    </div>
+
+    <div id="seriesModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head"><h3 id="seriesTitle">المسلسل</h3><button class="x" data-close>✕</button></div>
+        <div id="seriesBody" class="series-body">جارٍ التحميل…</div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/client.js"></script>
+  </body>
+</html>

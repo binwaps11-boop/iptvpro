@@ -1,0 +1,22 @@
+services:
+  iptvpro:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: iptvpro:latest
+    container_name: iptvpro
+    restart: always
+    ports:
+      - "221:221"   # بوابة العملاء
+      - "331:331"   # لوحة الإدارة
+    environment:
+      - USER_PORT=221
+      - ADMIN_PORT=331
+      - ADMIN_USER=admin
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
+      - CONFIG_DIR=/app/data
+    volumes:
+      - iptvpro_data:/app/data
+
+volumes:
+  iptvpro_data:

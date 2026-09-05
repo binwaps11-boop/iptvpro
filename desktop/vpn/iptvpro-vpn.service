@@ -1,0 +1,16 @@
+[Unit]
+Description=IPTV Pro VPN Egress (split-tunnel + kill switch + watchdog)
+After=network-online.target
+Wants=network-online.target
+Before=iptvpro.service
+
+[Service]
+Type=simple
+# يُستبدل __APP_DIR__ تلقائياً بواسطة install-vpn.sh
+ExecStart=/usr/bin/env bash __APP_DIR__/vpn/vpnctl.sh run
+ExecStop=/usr/bin/env bash __APP_DIR__/vpn/vpnctl.sh down
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

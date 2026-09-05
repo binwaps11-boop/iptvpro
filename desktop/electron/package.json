@@ -1,0 +1,28 @@
+{
+  "name": "iptv-pro",
+  "productName": "IPTV Pro",
+  "version": "1.0.0",
+  "description": "مشغّل IPTV لسطح المكتب (شبيه Jellyfin)",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:linux": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.iptvpro.desktop",
+    "productName": "IPTV Pro",
+    "files": ["main.cjs", "../server.js", "../public/**"],
+    "extraMetadata": { "main": "main.cjs" },
+    "win": { "target": ["nsis"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true },
+    "mac": { "target": ["dmg"] },
+    "linux": { "target": ["AppImage"], "category": "AudioVideo" }
+  }
+}
