@@ -257,7 +257,7 @@ fun ReportsScreen() {
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                items(rows.size) { i ->
+                items(rows.size, key = { rows[it].title }) { i ->
                     val r = rows[i]
                     GlassCard(Modifier.fillMaxWidth(), padding = 11) {
                         Row(verticalAlignment = Alignment.CenterVertically) {

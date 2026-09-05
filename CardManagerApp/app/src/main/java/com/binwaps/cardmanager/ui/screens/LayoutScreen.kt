@@ -150,11 +150,11 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
                 Spacer(Modifier.height(6.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
-                        "كرت بنكي ${com.binwaps.cardmanager.ui.components.ltr(\"85×54\")}" to (85.6f to 54f),
-                        "تذكرة ${com.binwaps.cardmanager.ui.components.ltr(\"63×33\")}" to (63f to 33f),
-                        "صغير ${com.binwaps.cardmanager.ui.components.ltr(\"63×27\")}" to (63f to 27f),
-                        "قسيمة ${com.binwaps.cardmanager.ui.components.ltr(\"48×27\")}" to (48f to 27f),
-                        "كبير ${com.binwaps.cardmanager.ui.components.ltr(\"105×74\")}" to (105f to 74f),
+                        "كرت بنكي ${com.binwaps.cardmanager.ui.components.ltr("85×54")}" to (85.6f to 54f),
+                        "تذكرة ${com.binwaps.cardmanager.ui.components.ltr("63×33")}" to (63f to 33f),
+                        "صغير ${com.binwaps.cardmanager.ui.components.ltr("63×27")}" to (63f to 27f),
+                        "قسيمة ${com.binwaps.cardmanager.ui.components.ltr("48×27")}" to (48f to 27f),
+                        "كبير ${com.binwaps.cardmanager.ui.components.ltr("105×74")}" to (105f to 74f),
                     ).forEach { (label, dims) ->
                         val on = template.widthMm == dims.first && template.heightMm == dims.second
                         Chip(label, on) {
@@ -303,11 +303,11 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
         Spacer(Modifier.height(7.dp))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf(
-                Triple("${com.binwaps.cardmanager.ui.components.ltr(\"2×5\")} — 10 كروت", 2, 5),
-                Triple("${com.binwaps.cardmanager.ui.components.ltr(\"3×8\")} — 24 كرت", 3, 8),
-                Triple("${com.binwaps.cardmanager.ui.components.ltr(\"4×10\")} — 40 كرت", 4, 10),
-                Triple("${com.binwaps.cardmanager.ui.components.ltr(\"2×4\")} — 8 كروت", 2, 4),
-                Triple("${com.binwaps.cardmanager.ui.components.ltr(\"5×13\")} — 65 كرت", 5, 13),
+                Triple("${com.binwaps.cardmanager.ui.components.ltr("2×5")} — 10 كروت", 2, 5),
+                Triple("${com.binwaps.cardmanager.ui.components.ltr("3×8")} — 24 كرت", 3, 8),
+                Triple("${com.binwaps.cardmanager.ui.components.ltr("4×10")} — 40 كرت", 4, 10),
+                Triple("${com.binwaps.cardmanager.ui.components.ltr("2×4")} — 8 كروت", 2, 4),
+                Triple("${com.binwaps.cardmanager.ui.components.ltr("5×13")} — 65 كرت", 5, 13),
             ).forEach { (label, c, r) ->
                 val on = !layout.autoFit && layout.columns == c && layout.rows == r
                 Chip(label, on) { update { it.copy(autoFit = false, columns = c, rows = r) } }
@@ -320,9 +320,9 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             // 3×16 = 48 كرت على A4 بمقاس 69.38×17.64مم — نفس ورقة سمارت كريتور بالضبط
             listOf(
-                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr(\"3×16\")} (48 كرت)", 3, 16),
-                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr(\"3×12\")} (36 كرت)", 3, 12),
-                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr(\"2×10\")} (20 كرت)", 2, 10),
+                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr("3×16")} (48 كرت)", 3, 16),
+                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr("3×12")} (36 كرت)", 3, 12),
+                Triple("A4 — ${com.binwaps.cardmanager.ui.components.ltr("2×10")} (20 كرت)", 2, 10),
             ).forEach { (label, c, r) ->
                 val on = !layout.autoFit && layout.columns == c && layout.rows == r &&
                     layout.hSpacingMm == 0f && layout.vSpacingMm == 0f

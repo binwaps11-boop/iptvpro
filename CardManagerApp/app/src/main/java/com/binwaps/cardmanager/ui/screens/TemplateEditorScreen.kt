@@ -290,20 +290,21 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                 Text("مكان العنصر في الكرت (%)", fontSize = 12.sp, color = TextLow)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppField(
-                        (selected.xFrac * 100).toInt().toString(),
-                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(xFrac = (it / 100f).coerceIn(0f, 1f))) } },
-                        "أفقي X", Modifier.weight(1f), numeric = true,
+                    // نسب مئوية صحيحة بنص مستقل — مسح الرقم كان مرفوضاً فيلتصق القديم
+                    com.binwaps.cardmanager.ui.components.NumberField(
+                        (selected.xFrac * 100).toInt().toFloat(),
+                        { updateField(selected.copy(xFrac = (it / 100f).coerceIn(0f, 1f))) },
+                        "أفقي X", Modifier.weight(1f), min = 0f, max = 100f, integer = true, key = selected.id,
                     )
-                    AppField(
-                        (selected.yFrac * 100).toInt().toString(),
-                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(yFrac = (it / 100f).coerceIn(0f, 1f))) } },
-                        "رأسي Y", Modifier.weight(1f), numeric = true,
+                    com.binwaps.cardmanager.ui.components.NumberField(
+                        (selected.yFrac * 100).toInt().toFloat(),
+                        { updateField(selected.copy(yFrac = (it / 100f).coerceIn(0f, 1f))) },
+                        "رأسي Y", Modifier.weight(1f), min = 0f, max = 100f, integer = true, key = selected.id,
                     )
-                    AppField(
-                        (selected.sizeFrac * 100).toInt().toString(),
-                        { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { updateField(selected.copy(sizeFrac = (it / 100f).coerceIn(0.02f, 0.95f))) } },
-                        "الحجم", Modifier.weight(1f), numeric = true,
+                    com.binwaps.cardmanager.ui.components.NumberField(
+                        (selected.sizeFrac * 100).toInt().toFloat(),
+                        { updateField(selected.copy(sizeFrac = (it / 100f).coerceIn(0.02f, 0.95f))) },
+                        "الحجم", Modifier.weight(1f), min = 2f, max = 95f, integer = true, key = selected.id,
                     )
                 }
                 Spacer(Modifier.height(7.dp))
@@ -376,15 +377,14 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Text("إعدادات الكرت", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(
-                    template.widthMm.toString(),
-                    { it.toMoneyOrNull()?.toFloat()?.let { v -> template = template.copy(widthMm = v.coerceIn(20f, 210f)) } },
-                    "العرض (مم)", Modifier.weight(1f), numeric = true,
+                // NumberField: كتابة «63» كانت تُنتج 20.03 لأن coerceIn تعيد كتابة النص مع كل ضغطة
+                com.binwaps.cardmanager.ui.components.NumberField(
+                    template.widthMm, { template = template.copy(widthMm = it) },
+                    "العرض (مم)", Modifier.weight(1f), min = 20f, max = 210f, key = template.id,
                 )
-                AppField(
-                    template.heightMm.toString(),
-                    { it.toMoneyOrNull()?.toFloat()?.let { v -> template = template.copy(heightMm = v.coerceIn(20f, 297f)) } },
-                    "الارتفاع (مم)", Modifier.weight(1f), numeric = true,
+                com.binwaps.cardmanager.ui.components.NumberField(
+                    template.heightMm, { template = template.copy(heightMm = it) },
+                    "الارتفاع (مم)", Modifier.weight(1f), min = 20f, max = 297f, key = template.id,
                 )
             }
             Spacer(Modifier.height(6.dp))
@@ -392,11 +392,11 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(
-                    "3 في الصف ${com.binwaps.cardmanager.ui.components.ltr(\"69×18\")}" to (69.38f to 17.64f),
-                    "كرت بنكي ${com.binwaps.cardmanager.ui.components.ltr(\"85×54\")}" to (85.6f to 54f),
-                    "تذكرة ${com.binwaps.cardmanager.ui.components.ltr(\"63×33\")}" to (63f to 33f),
-                    "صغير ${com.binwaps.cardmanager.ui.components.ltr(\"63×27\")}" to (63f to 27f),
-                    "قسيمة ${com.binwaps.cardmanager.ui.components.ltr(\"48×27\")}" to (48f to 27f),
+                    "3 في الصف ${com.binwaps.cardmanager.ui.components.ltr("69×18")}" to (69.38f to 17.64f),
+                    "كرت بنكي ${com.binwaps.cardmanager.ui.components.ltr("85×54")}" to (85.6f to 54f),
+                    "تذكرة ${com.binwaps.cardmanager.ui.components.ltr("63×33")}" to (63f to 33f),
+                    "صغير ${com.binwaps.cardmanager.ui.components.ltr("63×27")}" to (63f to 27f),
+                    "قسيمة ${com.binwaps.cardmanager.ui.components.ltr("48×27")}" to (48f to 27f),
                 ).forEach { (label, dims) ->
                     val on = template.widthMm == dims.first && template.heightMm == dims.second
                     Text(
@@ -644,10 +644,10 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                     Text("صف ${index + 1}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Neon)
                     Spacer(Modifier.width(9.dp))
                     Box(Modifier.width(96.dp)) {
-                        AppField(
-                            "%.2f".format(java.util.Locale.US, row.heightMm),
-                            { v -> v.toMoneyOrNull()?.toFloat()?.let { setRows(template.rows.map { r -> if (r.id == row.id) r.copy(heightMm = it.coerceIn(1f, 100f)) else r }) } },
-                            "ارتفاع مم", numeric = true,
+                        com.binwaps.cardmanager.ui.components.NumberField(
+                            row.heightMm,
+                            { h -> setRows(template.rows.map { r -> if (r.id == row.id) r.copy(heightMm = h) else r }) },
+                            "ارتفاع مم", min = 1f, max = 100f, key = row.id,
                         )
                     }
                     Spacer(Modifier.weight(1f))
@@ -736,15 +736,13 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
                         }
                         Spacer(Modifier.height(7.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AppField(
-                                "%.2f".format(java.util.Locale.US, cell.weight),
-                                { v -> v.toMoneyOrNull()?.toFloat()?.let { updateCell(row.id, cell.copy(weight = it.coerceIn(0.05f, 20f))) } },
-                                "عرض نسبي", Modifier.weight(1f), numeric = true,
+                            com.binwaps.cardmanager.ui.components.NumberField(
+                                cell.weight, { w -> updateCell(row.id, cell.copy(weight = w)) },
+                                "عرض نسبي", Modifier.weight(1f), min = 0.05f, max = 20f, key = cell.id,
                             )
-                            AppField(
-                                "%.1f".format(java.util.Locale.US, cell.fontSizePt),
-                                { v -> v.toMoneyOrNull()?.toFloat()?.let { updateCell(row.id, cell.copy(fontSizePt = it.coerceIn(3f, 72f))) } },
-                                "حجم الخط pt", Modifier.weight(1f), numeric = true,
+                            com.binwaps.cardmanager.ui.components.NumberField(
+                                cell.fontSizePt, { s -> updateCell(row.id, cell.copy(fontSizePt = s)) },
+                                "حجم الخط pt", Modifier.weight(1f), min = 3f, max = 72f, key = cell.id,
                             )
                         }
                         Spacer(Modifier.height(7.dp))

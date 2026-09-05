@@ -108,7 +108,7 @@ fun TemplatesScreen(navController: NavController) {
         Spacer(Modifier.height(12.dp))
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(templates.size) { i ->
+            items(templates.size, key = { templates[it].id }) { i ->
                 val t = templates[i]
                 val isDefault = t.id == defaultId
                 GlassCard(
@@ -141,9 +141,7 @@ fun TemplatesScreen(navController: NavController) {
                                 fontSize = 11.sp, color = TextLow,
                             )
                         }
-                        IconButton(onClick = { navController.navigate("editor/${t.id}") }) {
-                            Icon(Icons.Filled.Edit, "تعديل", tint = Neon, modifier = Modifier.size(19.dp))
-                        }
+                        // زر «تعديل» واحد فقط (GhostButton أسفل البطاقة) — كانت أيقونة مكرّرة لنفس الفعل
                         IconButton(onClick = {
                             Store.upsertTemplate(t.copy(id = Store.newId(), name = t.name + " (نسخة)"))
                         }) {

@@ -116,18 +116,18 @@ fun HistoryScreen() {
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
-        SectionHeader("التقارير والسجل", "${batches.size} دفعة محفوظة", Icons.Filled.Analytics)
+        SectionHeader("سجل الدفعات", "${batches.size} دفعة محفوظة", Icons.Filled.Analytics)
         Spacer(Modifier.height(14.dp))
 
         // ملخص المبيعات
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             StatTile("كروت اليوم", today.sumOf { it.users.size }.toString(), Modifier.weight(1f), Neon)
-            StatTile("مبيعات اليوم", today.sumOf { it.total }.toLong().toString(), Modifier.weight(1f), Lime, settings.currency)
+            StatTile("قيمة المطبوع اليوم", today.sumOf { it.total }.toLong().toString(), Modifier.weight(1f), Lime, settings.currency)
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             StatTile("كروت الشهر", month.sumOf { it.users.size }.toString(), Modifier.weight(1f), Violet)
-            StatTile("مبيعات الشهر", month.sumOf { it.total }.toLong().toString(), Modifier.weight(1f), Warn, settings.currency)
+            StatTile("قيمة المطبوع الشهر", month.sumOf { it.total }.toLong().toString(), Modifier.weight(1f), Warn, settings.currency)
         }
 
         // الأكثر مبيعاً

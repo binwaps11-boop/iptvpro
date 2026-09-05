@@ -75,8 +75,9 @@ fun SectionHeader(title: String, subtitle: String? = null, icon: ImageVector? = 
             Spacer(Modifier.width(10.dp))
         }
         Column {
-            Text(title, fontSize = 19.sp, fontWeight = FontWeight.Bold, color = TextHi)
-            if (subtitle != null) Text(subtitle, fontSize = 12.sp, color = TextLow)
+            Text(title, fontSize = 19.sp, fontWeight = FontWeight.Bold, color = TextHi, lineHeight = 27.sp)
+            // TextMid لا TextLow: العنوان الفرعي يحمل حالات مثل «جاري الجلب…» ورسائل فشل
+            if (subtitle != null) Text(subtitle, fontSize = 12.5.sp, color = TextMid, lineHeight = 18.sp)
         }
     }
 }
@@ -268,6 +269,54 @@ fun AppField(
             unfocusedContainerColor = Panel.copy(alpha = 0.6f),
             errorContainerColor = Panel.copy(alpha = 0.6f),
         ),
+    )
+}
+
+/**
+ * حقل رقمي يفصل النص المكتوب عن القيمة المخزّنة. الربط المباشر بالقيمة كان يعيد
+ * صياغة النص مع كل ضغطة: كتابة «85.» تصير «85.0» فوراً فلا تُكتب الكسور، ومسح
+ * الحقل يرجع الرقم القديم، وcoerceIn تقفز بالقيمة (كتابة «63» كانت تُنتج 20.03).
+ * الآن النص حرّ أثناء الكتابة، والقيمة تُثبَّت فقط عند رقمٍ صالح داخل الحدود،
+ * ويظهر الخطأ تحت الحقل نفسه بدل تجاهل الإدخال بصمت.
+ */
+@Composable
+fun NumberField(
+    value: Float,
+    onCommit: (Float) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    min: Float = 0f,
+    max: Float = Float.MAX_VALUE,
+    integer: Boolean = false,
+    /** يعيد تهيئة النص عند تغيّر العنصر المحرَّر (معرّف الحقل/الصف) */
+    key: Any? = null,
+) {
+    fun show(v: Float): String =
+        if (integer || v == v.toInt().toFloat()) v.toInt().toString()
+        else java.math.BigDecimal(v.toDouble()).setScale(2, java.math.RoundingMode.HALF_UP)
+            .stripTrailingZeros().toPlainString()
+    val text = androidx.compose.runtime.remember(key) { androidx.compose.runtime.mutableStateOf(show(value)) }
+    // تغيّر خارجي (شريط منزلق مثلاً) يحدّث النص؛ أما ما يكتبه المستخدم فلا يُعاد كتابته
+    androidx.compose.runtime.LaunchedEffect(value) {
+        val typed = text.value.replace('٫', '.').toFloatOrNull()
+        if (typed == null || kotlin.math.abs(typed - value) > 0.0001f) text.value = show(value)
+    }
+    val parsed = text.value.replace('٫', '.').toFloatOrNull()
+    val error = when {
+        text.value.isBlank() -> "أدخل رقماً"
+        parsed == null -> "رقم غير صالح"
+        parsed < min || parsed > max ->
+            if (max == Float.MAX_VALUE) "لا يقل عن ${show(min)}" else "القيمة بين ${show(min)} و ${show(max)}"
+        else -> null
+    }
+    AppField(
+        text.value,
+        { t ->
+            val clean = t.filter { it.isDigit() || (!integer && (it == '.' || it == '٫')) }
+            text.value = clean
+            clean.replace('٫', '.').toFloatOrNull()?.let { v -> if (v in min..max) onCommit(v) }
+        },
+        label, modifier, numeric = true, error = error,
     )
 }
 

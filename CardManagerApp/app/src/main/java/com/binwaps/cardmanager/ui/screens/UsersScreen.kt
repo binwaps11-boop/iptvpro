@@ -180,12 +180,16 @@ fun UsersScreen() {
         }
     }
 
-    Column(
+    // الرأس (النوع/الرفع/الجلب/البحث/التصنيف) عنصرٌ داخل القائمة نفسها فيتمرّر معها —
+    // كان ثابتاً يبتلع ثلثي الشاشة ولا يبقى للكروت إلا شريط ضيق
+    LazyColumn(
         Modifier
             .fillMaxSize()
-            .background(ScreenGradient)
-            .padding(16.dp),
+            .background(ScreenGradient),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
+        item(key = "header") { Column {
         SectionHeader("الكروت", "${users.size} كرت — يُعرض ${shown.size}", Icons.Filled.CreditCard)
         Spacer(Modifier.height(12.dp))
 
@@ -521,16 +525,19 @@ fun UsersScreen() {
             }
         }
 
+        } } // نهاية عنصر الرأس
+
         if (shown.isEmpty()) {
-            EmptyState(
-                Icons.Filled.CreditCard,
-                if (users.isEmpty()) "لا توجد كروت بعد" else "لا كروت بهذا التصنيف",
-                if (users.isEmpty()) "ولّد دفعة، أو استورد CSV، أو اجلب الكروت الموجودة من الراوتر" else "جرّب تصنيفاً آخر",
-            )
+            item(key = "empty") {
+                EmptyState(
+                    Icons.Filled.CreditCard,
+                    if (users.isEmpty()) "لا توجد كروت بعد" else "لا كروت بهذا التصنيف",
+                    if (users.isEmpty()) "ولّد دفعة، أو استورد CSV، أو اجلب الكروت الموجودة من الراوتر" else "جرّب تصنيفاً آخر",
+                )
+            }
         } else {
             val visible = if (shown.size > showLimit) shown.subList(0, showLimit) else shown
             // مفاتيح ثابتة: بدونها كان كل دمج مزامنة يعيد تركيب كل الصفوف الظاهرة بالموضع
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 items(visible.size, key = { i -> visible[i].source.name + "/" + visible[i].username }) { i ->
                     val u = visible[i]
                     val isSel = u.username in selected
@@ -627,7 +634,7 @@ fun UsersScreen() {
                     }
                 }
                 if (shown.size > showLimit) {
-                    item {
+                    item(key = "more") {
                         Text(
                             "عرض المزيد (${shown.size - showLimit} كرت متبقٍ)",
                             fontSize = 13.sp, color = Neon, fontWeight = FontWeight.Bold,
@@ -640,7 +647,6 @@ fun UsersScreen() {
                         )
                     }
                 }
-            }
         }
     }
 

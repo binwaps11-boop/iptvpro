@@ -164,22 +164,24 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             Spacer(Modifier.height(10.dp))
             AppField(settings.currency, { Store.updateSettings(settings.copy(currency = it)) }, "العملة", Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
-            AppField(
-                settings.lowStockThreshold.toString(),
-                { v -> v.filter { it.isDigit() }.toIntOrNull()?.let { Store.updateSettings(settings.copy(lowStockThreshold = it.coerceIn(0, 100000))) } },
-                "تنبيه نفاد الكروت عند بقاء (عدد)", Modifier.fillMaxWidth(), numeric = true,
+            // حقول رقمية بنص مستقل عن القيمة: كان مسح آخر رقم يُرفض فيلتصق الرقم القديم،
+            // و«3.» تصير «3.0» فوراً فلا تُكتب 3.5 أبداً
+            com.binwaps.cardmanager.ui.components.NumberField(
+                settings.lowStockThreshold.toFloat(),
+                { Store.updateSettings(settings.copy(lowStockThreshold = it.toInt())) },
+                "تنبيه نفاد الكروت عند بقاء (عدد)", Modifier.fillMaxWidth(), min = 0f, max = 100000f, integer = true,
             )
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(
-                    settings.thermalFeedMm.toString(),
-                    { it.toFloatOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalFeedMm = v)) } },
-                    "تغذية الورق (مم)", Modifier.weight(1f), numeric = true,
+                com.binwaps.cardmanager.ui.components.NumberField(
+                    settings.thermalFeedMm,
+                    { Store.updateSettings(settings.copy(thermalFeedMm = it)) },
+                    "تغذية الورق (مم)", Modifier.weight(1f), min = 0f, max = 60f,
                 )
-                AppField(
-                    settings.thermalDpi.toString(),
-                    { it.toIntOrNull()?.let { v -> Store.updateSettings(settings.copy(thermalDpi = v)) } },
-                    "دقة الطابعة DPI", Modifier.weight(1f), numeric = true,
+                com.binwaps.cardmanager.ui.components.NumberField(
+                    settings.thermalDpi.toFloat(),
+                    { Store.updateSettings(settings.copy(thermalDpi = it.toInt())) },
+                    "دقة الطابعة DPI", Modifier.weight(1f), min = 100f, max = 600f, integer = true,
                 )
             }
             Spacer(Modifier.height(9.dp))
@@ -189,10 +191,10 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                     { Store.updateSettings(settings.copy(tcpPrinterIp = it.trim())) },
                     "طابعة شبكة IP (اختياري)", Modifier.weight(2f), leading = Icons.Filled.Print, code = true,
                 )
-                AppField(
-                    settings.tcpPrinterPort.toString(),
-                    { it.toIntOrNull()?.let { v -> Store.updateSettings(settings.copy(tcpPrinterPort = v)) } },
-                    "المنفذ", Modifier.weight(1f), numeric = true,
+                com.binwaps.cardmanager.ui.components.NumberField(
+                    settings.tcpPrinterPort.toFloat(),
+                    { Store.updateSettings(settings.copy(tcpPrinterPort = it.toInt())) },
+                    "المنفذ", Modifier.weight(1f), min = 1f, max = 65535f, integer = true,
                 )
             }
             Spacer(Modifier.height(4.dp))
