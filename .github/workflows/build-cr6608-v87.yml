@@ -30,7 +30,11 @@ on:
           - retail          # 38 dBm OFF + MU-RU mask 0
 
 permissions:
-  contents: read
+  # contents: write is needed only by the final step, which publishes the
+  # images as a GitHub Release so they can be fetched from github.com
+  # (Actions artifacts live on a blob store this project's sandbox cannot
+  # reach).
+  contents: write
 
 env:
   OPENWRT_TAG: v25.12.5
@@ -368,3 +372,33 @@ jobs:
             ow/bin/targets/ramips/mt7621/sha256sums
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish the images as a GitHub Release
+        # Release assets are served from github.com/objects.githubusercontent.com,
+        # which is reachable from the project's sandbox; Actions artifacts are
+        # not.  One tag per run, on the exact commit that was built.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd ow/bin/targets/ramips/mt7621
+          TAG="cr6608-v87-${{ inputs.profile }}-run${{ github.run_number }}"
+          SUM="$(sha256sum *sysupgrade.bin | cut -d' ' -f1)"
+          {
+            echo "Engineering build of router/cr6608/source-kit at ${GITHUB_SHA}"
+            echo
+            echo "- profile: \`${{ inputs.profile }}\`"
+            echo "- OpenWrt: \`$OPENWRT_TAG\`, mt76: \`$MT76_COMMIT\`"
+            echo "- sysupgrade sha256: \`$SUM\`"
+            echo
+            echo "38 dBm and MU-RU mask 15 are non-sale LAB settings. Driver/MCU"
+            echo "acceptance is not an RF measurement or a regulatory approval."
+            echo "Not the kit's attested release pipeline (build.sh)."
+          } > /tmp/release-notes.md
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CR6608 v87 ${{ inputs.profile }} (run ${{ github.run_number }})" \
+            --notes-file /tmp/release-notes.md \
+            --prerelease \
+            *.bin *.manifest sha256sums
+          echo "release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
