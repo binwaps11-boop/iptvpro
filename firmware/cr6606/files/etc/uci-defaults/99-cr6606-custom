@@ -1,0 +1,120 @@
+#!/bin/sh
+# ==========================================================================
+# CR6606 custom first-boot defaults. Runs ONCE on first boot (uci-defaults).
+# Edits ON TOP of the board-generated DSA config (does NOT replace it) so the
+# management bridge / port mapping stays intact. Idempotent & guarded.
+#
+# Safety: touches ONLY UCI config (network/wireless/system/dhcp/firewall).
+# Never touches Bootloader / Factory / ART / EEPROM / Calibration / MAC.
+# ==========================================================================
+. /lib/functions.sh
+
+log() { logger -t cr6606-defaults "$1"; echo "cr6606-defaults: $1"; }
+
+# ---------------- System ----------------
+uci -q batch <<'EOF'
+set system.@system[0].hostname='CR6606-Custom'
+set system.@system[0].timezone='UTC'
+set system.@system[0].zonename='UTC'
+EOF
+
+# ---------------- LAN: 192.168.100.1 (do NOT recreate the bridge) ----------
+if uci -q get network.lan >/dev/null; then
+	uci -q set network.lan.ipaddr='192.168.100.1'
+	uci -q set network.lan.netmask='255.255.255.0'
+fi
+
+# ---------------- WAN: keep DHCP as default (board default) -----------------
+# PPPoE / Static are applied on demand via the Quick Setup / Broadband page.
+if uci -q get network.wan >/dev/null; then
+	uci -q set network.wan.proto='dhcp'
+fi
+
+# ---------------- DHCP server defaults --------------------------------------
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='150'
+uci -q set dhcp.lan.leasetime='12h'
+
+# ---------------- Firewall: enable software flow offloading -----------------
+# Software offload is stable on mt7621 and improves throughput/stability.
+# Hardware NAT offload is left OFF by default (can be unstable on some builds);
+# it can be toggled later from LuCI -> Firewall if desired.
+fw="$(uci -q show firewall | sed -n 's/^firewall\.\(@defaults\[0\]\)=.*/\1/p' | head -n1)"
+[ -n "$fw" ] && uci -q set firewall.@defaults[0].flow_offloading='1'
+
+# ---------------- Wi-Fi: country US, txpower 30 on ALL radios ---------------
+# Generate the radio config from board detection if it does not exist yet.
+[ -s /etc/config/wireless ] || /sbin/wifi config 2>/dev/null || true
+
+set_radio() {
+	local radio="$1"
+	local band
+	band="$(uci -q get wireless.${radio}.band)"
+	uci -q set wireless.${radio}.country='US'
+	uci -q set wireless.${radio}.txpower='30'      # REQUESTED 30 dBm (actual = min(req,reg,board); prove with verify-wifi-channels.sh)
+	uci -q set wireless.${radio}.disabled='0'
+	uci -q set wireless.${radio}.cell_density='0'
+	case "$band" in
+		2g)
+			uci -q set wireless.${radio}.htmode='HE20'   # stable 2.4G
+			uci -q set wireless.${radio}.channel='auto'  # ACS, not locked
+			;;
+		5g)
+			uci -q set wireless.${radio}.htmode='HE80'
+			uci -q set wireless.${radio}.channel='36'    # UNII-1, non-DFS, NOT locked to 149
+			;;
+		*)
+			uci -q set wireless.${radio}.channel='auto'
+			;;
+	esac
+}
+
+setup_iface() {
+	local radio="$1" ssid="$2"
+	local sec="cr6606_${radio}"
+	uci -q delete wireless.${sec} 2>/dev/null
+	uci -q set wireless.${sec}='wifi-iface'
+	uci -q set wireless.${sec}.device="$radio"
+	uci -q set wireless.${sec}.mode='ap'
+	uci -q set wireless.${sec}.network='lan'
+	uci -q set wireless.${sec}.ssid="$ssid"
+	uci -q set wireless.${sec}.encryption='psk2'
+	# Default passphrase - MUST be changed on first login (README + banner warn).
+	uci -q set wireless.${sec}.key='Cr6606-Change-Me'
+}
+
+if [ -s /etc/config/wireless ]; then
+	# Remove auto-generated default ifaces, then create clean ones per radio.
+	for r in $(uci -q show wireless | sed -n "s/^wireless\.\([a-z0-9]*\)=wifi-device/\1/p"); do
+		set_radio "$r"
+		band="$(uci -q get wireless.${r}.band)"
+		case "$band" in
+			2g) setup_iface "$r" 'CR6606-Custom' ;;
+			5g) setup_iface "$r" 'CR6606-Custom-5G' ;;
+			*)  setup_iface "$r" "CR6606-${r}" ;;
+		esac
+	done
+	# Drop any leftover default wifi-iface that points at no SSID we created.
+	for i in $(uci -q show wireless | sed -n "s/^wireless\.\(default_[a-z0-9]*\)=wifi-iface/\1/p"); do
+		uci -q delete wireless.${i}
+	done
+fi
+
+# ---------------- Enable Health Check + Port-persist services ---------------
+chmod +x /etc/init.d/cr6606-health /etc/init.d/cr6606-ports 2>/dev/null
+if [ -x /etc/init.d/cr6606-health ]; then
+	/etc/init.d/cr6606-health enable 2>/dev/null
+fi
+[ -x /etc/init.d/cr6606-ports ] && /etc/init.d/cr6606-ports enable 2>/dev/null
+
+# ---------------- Make verify scripts executable ----------------------------
+for s in verify-all verify-ports verify-wifi verify-wifi-channels verify-services; do
+	[ -f /root/${s}.sh ] && chmod +x /root/${s}.sh
+done
+[ -f /usr/libexec/rpcd/cr6606 ] && chmod +x /usr/libexec/rpcd/cr6606
+[ -f /root/cr6606-healthcheck.sh ] && chmod +x /root/cr6606-healthcheck.sh
+
+uci -q commit
+
+log "applied: LAN=192.168.100.1 host=CR6606-Custom country=US txpower=30(req) wifi=on"
+exit 0

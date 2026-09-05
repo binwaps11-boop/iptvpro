@@ -1,0 +1,273 @@
+#!/bin/sh
+# ==========================================================================
+# rpcd backend object "cr6606" - powers the custom LuCI Dashboard / Port
+# Control / Wi-Fi / Mesh views with REAL data and REAL actions.
+# Every value comes from ubus / iwinfo / ethtool / sysfs / uci - nothing faked.
+# Exposed to LuCI via /usr/share/rpcd/acl.d/luci-app-cr6606.json
+# ==========================================================================
+. /usr/share/libubox/jshn.sh 2>/dev/null
+
+PORTS_LAN="lan1 lan2 lan3"
+PORT_WAN="wan"
+
+js_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+rd() { cat "$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------- system
+m_system() {
+	json_init
+	json_add_string model "$(ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null)"
+	json_add_string release "$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_DESCRIPTION")"
+	json_add_string kernel "$(ubus call system board 2>/dev/null | jsonfilter -e '@.kernel' 2>/dev/null)"
+	# uptime + load
+	up="$(cut -d. -f1 /proc/uptime)"
+	json_add_int uptime "${up:-0}"
+	read l1 l5 l15 _ < /proc/loadavg
+	json_add_string load "$l1 $l5 $l15"
+	# memory (kB)
+	memt="$(awk '/MemTotal/{print $2}' /proc/meminfo)"
+	mema="$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
+	json_add_int mem_total "${memt:-0}"
+	json_add_int mem_avail "${mema:-0}"
+	# flash overlay
+	set -- $(df -k /overlay 2>/dev/null | awk 'NR==2{print $2" "$3" "$4}')
+	json_add_int flash_total "${1:-0}"
+	json_add_int flash_used "${2:-0}"
+	# temperature (if any thermal zone exists)
+	t=""
+	for z in /sys/class/thermal/thermal_zone*/temp; do
+		[ -f "$z" ] && { t="$(rd "$z")"; break; }
+	done
+	[ -n "$t" ] && json_add_int temp_mc "$t" || json_add_string temp_mc "n/a"
+	# services
+	json_add_object services
+	for s in network firewall dnsmasq uhttpd dropbear odhcpd rpcd nlbwmon cr6606-health; do
+		st="down"
+		[ -x /etc/init.d/$s ] && /etc/init.d/$s status >/dev/null 2>&1 && st="up"
+		[ -x /etc/init.d/$s ] || st="n/a"
+		json_add_string "$s" "$st"
+	done
+	json_close_object
+	# recent errors
+	json_add_string log_errors "$(logread 2>/dev/null | grep -iE 'error|fail|crash|panic|oom' | tail -n 8)"
+	json_add_string dmesg_tail "$(dmesg 2>/dev/null | tail -n 8)"
+	json_dump
+}
+
+# ---------------------------------------------------------------- ports
+m_ports() {
+	json_init
+	json_add_array ports
+	for p in $PORTS_LAN $PORT_WAN; do
+		[ -e /sys/class/net/$p ] || continue
+		json_add_object ""
+		json_add_string name "$p"
+		[ "$p" = "$PORT_WAN" ] && json_add_string role "wan" || json_add_string role "lan"
+		car="$(rd /sys/class/net/$p/carrier)"
+		[ "$car" = "1" ] && json_add_string link "up" || json_add_string link "down"
+		speed="-"; duplex="-"
+		if command -v ethtool >/dev/null 2>&1; then
+			e="$(ethtool $p 2>/dev/null)"
+			speed="$(echo "$e" | sed -n 's/.*Speed: \([0-9]*\)Mb.*/\1/p')"; [ -z "$speed" ] && speed="-"
+			duplex="$(echo "$e" | sed -n 's/.*Duplex: \(.*\)/\1/p')"; [ -z "$duplex" ] && duplex="-"
+		fi
+		json_add_string speed "$speed"
+		json_add_string duplex "$duplex"
+		json_add_int rx_bytes "$(rd /sys/class/net/$p/statistics/rx_bytes)"
+		json_add_int tx_bytes "$(rd /sys/class/net/$p/statistics/tx_bytes)"
+		json_add_int rx_err "$(rd /sys/class/net/$p/statistics/rx_errors)"
+		json_add_int tx_err "$(rd /sys/class/net/$p/statistics/tx_errors)"
+		json_add_int rx_drop "$(rd /sys/class/net/$p/statistics/rx_dropped)"
+		json_add_int tx_drop "$(rd /sys/class/net/$p/statistics/tx_dropped)"
+		# admin state (persisted disable)
+		dis="$(uci -q get cr6606.${p}.disabled)"
+		json_add_string admin "$([ "$dis" = "1" ] && echo disabled || echo enabled)"
+		# VLANs from bridge vlan show
+		vl="$(bridge -j vlan show 2>/dev/null | jsonfilter -e "@[@.ifname='$p'].vlans[*].vlan" 2>/dev/null | tr '\n' ',' )"
+		[ -z "$vl" ] && vl="$(bridge vlan show dev $p 2>/dev/null | awk 'NR>1{print $1}' | tr '\n' ',')"
+		json_add_string vlans "${vl%,}"
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+# ---------------------------------------------------------------- wifi
+m_wifi() {
+	json_init
+	json_add_array radios
+	for phy in $(ls /sys/class/ieee80211/ 2>/dev/null); do
+		ifc="$(ls /sys/class/ieee80211/$phy/device/net 2>/dev/null | head -n1)"
+		json_add_object ""
+		json_add_string phy "$phy"
+		# find uci radio name + band/req txpower
+		band=""; reqp=""; rname=""
+		for r in $(uci -q show wireless | sed -n 's/^wireless\.\([a-z0-9]*\)=wifi-device/\1/p'); do
+			p2="$(uci -q get wireless.$r.path)"
+			# match by phy index fallback: assume order
+			rname="$r"; band="$(uci -q get wireless.$r.band)"; reqp="$(uci -q get wireless.$r.txpower)"
+			# crude: map radio0->phy0 etc by trailing digit
+			ridx="$(echo "$r" | tr -dc 0-9)"; pidx="$(echo "$phy" | tr -dc 0-9)"
+			[ "$ridx" = "$pidx" ] && break
+		done
+		json_add_string radio "$rname"
+		json_add_string band "$band"
+		json_add_string txpower_req "${reqp:-?}"
+		if [ -n "$ifc" ]; then
+			info="$(iwinfo "$ifc" info 2>/dev/null)"
+			json_add_string iface "$ifc"
+			json_add_string ssid "$(echo "$info" | sed -n 's/.*ESSID: "\(.*\)"/\1/p')"
+			json_add_string channel "$(echo "$info" | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
+			json_add_string htmode "$(echo "$info" | grep -o 'HE[0-9]*\|VHT[0-9]*\|HT[0-9]*' | head -n1)"
+			json_add_string txpower_actual "$(echo "$info" | sed -n 's/.*Tx-Power: \([0-9]*\) dBm.*/\1/p')"
+			json_add_string noise "$(echo "$info" | sed -n 's/.*Noise: \(-*[0-9]*\) dBm.*/\1/p')"
+			# clients (mac + signal) parsed live from iwinfo assoclist
+			json_add_array clients
+			iwinfo "$ifc" assoclist 2>/dev/null | while read -r line; do
+				case "$line" in
+				[0-9A-Fa-f]*:*)
+					mac="$(echo "$line" | awk '{print $1}')"
+					sig="$(echo "$line" | sed -n 's/.* \(-[0-9]*\) dBm.*/\1/p')"
+					json_add_object ""
+					json_add_string mac "$mac"
+					json_add_string signal "$sig"
+					json_close_object
+					;;
+				esac
+			done
+			json_close_array
+			json_add_int client_count "$(iwinfo "$ifc" assoclist 2>/dev/null | grep -c 'dBm')"
+		else
+			json_add_string iface ""
+			json_add_string ssid ""
+			json_add_string txpower_actual "down"
+		fi
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+# ---------------------------------------------------------------- wan
+m_wan() {
+	json_init
+	st="$(ubus call network.interface.wan status 2>/dev/null)"
+	json_add_string proto "$(echo "$st" | jsonfilter -e '@.proto' 2>/dev/null)"
+	json_add_boolean up "$(echo "$st" | jsonfilter -e '@.up' 2>/dev/null | grep -q true && echo 1 || echo 0)"
+	json_add_string ip "$(echo "$st" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	json_add_string gateway "$(echo "$st" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)"
+	json_add_string dns "$(echo "$st" | jsonfilter -e '@["dns-server"][*]' 2>/dev/null | tr '\n' ' ')"
+	json_add_int uptime "$(echo "$st" | jsonfilter -e '@.uptime' 2>/dev/null)"
+	dev="$(echo "$st" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -z "$dev" ] && dev="wan"
+	json_add_string l3dev "$dev"
+	json_add_int rx_bytes "$(rd /sys/class/net/$dev/statistics/rx_bytes)"
+	json_add_int tx_bytes "$(rd /sys/class/net/$dev/statistics/tx_bytes)"
+	json_dump
+}
+
+# ---------------------------------------------------------------- mesh
+m_mesh() {
+	json_init
+	# CR6606 mt7915 supports 802.11s if wpad-mesh-mt76 is installed.
+	supp=0
+	(iw list 2>/dev/null | grep -q "mesh point") && supp=1
+	json_add_boolean supported "$supp"
+	json_add_string driver "mt76 / mt7915 (802.11s capable)"
+	json_add_array meshes
+	for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+		typ="$(iw dev $ifc info 2>/dev/null | awk '/type/{print $2}')"
+		[ "$typ" = "mesh" ] || continue
+		json_add_object ""
+		json_add_string iface "$ifc"
+		json_add_string mesh_id "$(iw dev $ifc info 2>/dev/null | sed -n 's/.*mesh id \(.*\)/\1/p')"
+		json_add_int peers "$(iw dev $ifc station dump 2>/dev/null | grep -c Station)"
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+# ---------------------------------------------------------------- vlans
+m_vlans() {
+	json_init
+	json_add_string bridge_vlan "$(bridge vlan show 2>/dev/null)"
+	json_dump
+}
+
+# ---------------------------------------------------------------- actions
+m_port_action() {
+	read input
+	port="$(echo "$input" | jsonfilter -e '@.port' 2>/dev/null)"
+	action="$(echo "$input" | jsonfilter -e '@.action' 2>/dev/null)"
+	json_init
+	case "$port" in lan1|lan2|lan3|wan) : ;; *) json_add_string error "invalid port"; json_dump; return ;; esac
+	case "$action" in
+		enable)
+			ip link set dev "$port" up 2>/dev/null
+			uci -q set cr6606.${port}=port; uci -q set cr6606.${port}.disabled='0'; uci -q commit cr6606
+			json_add_string result "enabled $port" ;;
+		disable)
+			ip link set dev "$port" down 2>/dev/null
+			uci -q set cr6606.${port}=port; uci -q set cr6606.${port}.disabled='1'; uci -q commit cr6606
+			json_add_string result "disabled $port" ;;
+		restart)
+			ip link set dev "$port" down 2>/dev/null; sleep 1; ip link set dev "$port" up 2>/dev/null
+			json_add_string result "restarted $port" ;;
+		*) json_add_string error "invalid action" ;;
+	esac
+	json_dump
+}
+
+m_wifi_action() {
+	read input
+	action="$(echo "$input" | jsonfilter -e '@.action' 2>/dev/null)"
+	json_init
+	case "$action" in
+		restart) wifi up >/dev/null 2>&1; json_add_string result "wifi restarted" ;;
+		down)    wifi down >/dev/null 2>&1; json_add_string result "wifi down" ;;
+		*) json_add_string error "invalid action" ;;
+	esac
+	json_dump
+}
+
+m_wan_action() {
+	read input
+	action="$(echo "$input" | jsonfilter -e '@.action' 2>/dev/null)"
+	json_init
+	case "$action" in
+		reconnect) ifup wan >/dev/null 2>&1; json_add_string result "wan reconnect triggered" ;;
+		*) json_add_string error "invalid action" ;;
+	esac
+	json_dump
+}
+
+case "$1" in
+	list)
+		json_init
+		json_add_object system; json_close_object
+		json_add_object ports; json_close_object
+		json_add_object wifi; json_close_object
+		json_add_object wan; json_close_object
+		json_add_object mesh; json_close_object
+		json_add_object vlans; json_close_object
+		json_add_object port_action; json_add_string port ""; json_add_string action ""; json_close_object
+		json_add_object wifi_action; json_add_string action ""; json_close_object
+		json_add_object wan_action;  json_add_string action ""; json_close_object
+		json_dump
+		;;
+	call)
+		case "$2" in
+			system) m_system ;;
+			ports) m_ports ;;
+			wifi) m_wifi ;;
+			wan) m_wan ;;
+			mesh) m_mesh ;;
+			vlans) m_vlans ;;
+			port_action) m_port_action ;;
+			wifi_action) m_wifi_action ;;
+			wan_action) m_wan_action ;;
+			*) echo '{"error":"unknown method"}' ;;
+		esac
+		;;
+esac

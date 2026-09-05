@@ -1,0 +1,33 @@
+{
+	"admin/cr6606": {
+		"title": "CR6606",
+		"order": 5,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-cr6606" ] }
+	},
+	"admin/cr6606/dashboard": {
+		"title": "Dashboard",
+		"order": 1,
+		"action": { "type": "view", "path": "cr6606/dashboard" }
+	},
+	"admin/cr6606/quicksetup": {
+		"title": "Quick Setup",
+		"order": 2,
+		"action": { "type": "view", "path": "cr6606/quicksetup" }
+	},
+	"admin/cr6606/portcontrol": {
+		"title": "Port Control",
+		"order": 3,
+		"action": { "type": "view", "path": "cr6606/portcontrol" }
+	},
+	"admin/cr6606/wifichannels": {
+		"title": "Wi-Fi Channels & Power",
+		"order": 4,
+		"action": { "type": "view", "path": "cr6606/wifichannels" }
+	},
+	"admin/cr6606/mesh": {
+		"title": "Mesh (802.11s)",
+		"order": 5,
+		"action": { "type": "view", "path": "cr6606/mesh" }
+	}
+}

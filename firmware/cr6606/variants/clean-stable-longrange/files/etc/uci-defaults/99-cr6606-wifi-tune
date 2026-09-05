@@ -1,0 +1,62 @@
+#!/bin/sh
+# ===========================================================================
+# VARIANT: cr6606-clean-stable-longrange
+# Clean long-range tuning. Requests the MAX power the driver/regdb allow
+# (mt76 still clamps to caldata - NO caldata/EEPROM/MAC writes here).
+# 2.4G: HE20 + best of 1/6/11 (ACS); 5G: HE80 on ch149 (UNII-3, non-DFS).
+# Full 2x2 chains (no antenna mask set = both chains used). SW+HW flow offload.
+# ===========================================================================
+. /lib/functions.sh
+COUNTRY='US'
+PW='30'        # regulatory max request; real value proven by iwinfo / wifi-perf.sh
+
+set_iface_ssid() {
+	local radio="$1" ssid="$2" sec="cr6606_${radio}"
+	uci -q delete wireless.${sec} 2>/dev/null
+	uci -q set wireless.${sec}='wifi-iface'
+	uci -q set wireless.${sec}.device="$radio"
+	uci -q set wireless.${sec}.mode='ap'
+	uci -q set wireless.${sec}.network='lan'
+	uci -q set wireless.${sec}.ssid="$ssid"
+	uci -q set wireless.${sec}.encryption='psk2'         # WPA2 (most compatible/stable)
+	uci -q set wireless.${sec}.key='Cr6606-Change-Me'    # CHANGE on first login
+}
+
+[ -s /etc/config/wireless ] || /sbin/wifi config 2>/dev/null || true
+
+for r in $(uci -q show wireless | sed -n 's/^wireless\.\([a-z0-9]*\)=wifi-device/\1/p'); do
+	band="$(uci -q get wireless.${r}.band)"
+	uci -q set wireless.${r}.country="$COUNTRY"
+	uci -q set wireless.${r}.txpower="$PW"
+	uci -q set wireless.${r}.disabled='0'
+	uci -q set wireless.${r}.cell_density='0'
+	# use ALL chains: remove any antenna/chain mask so mt76 runs full 2x2
+	uci -q delete wireless.${r}.txantenna 2>/dev/null
+	uci -q delete wireless.${r}.rxantenna 2>/dev/null
+	case "$band" in
+		2g)
+			uci -q set wireless.${r}.htmode='HE20'     # AX/N, 20MHz for range
+			uci -q set wireless.${r}.channel='auto'    # ACS picks best of 1/6/11
+			set_iface_ssid "$r" 'Xiaomi-2G'
+			;;
+		5g)
+			uci -q set wireless.${r}.htmode='HE80'
+			uci -q set wireless.${r}.channel='149'     # UNII-3, non-DFS, high power
+			set_iface_ssid "$r" 'Xiaomi-5G'
+			;;
+	esac
+done
+
+# remove leftover auto-generated default ifaces
+for i in $(uci -q show wireless | sed -n 's/^wireless\.\(default_[a-z0-9]*\)=wifi-iface/\1/p'); do
+	uci -q delete wireless.${i}
+done
+
+# Flow offloading: software + hardware (mt7621 supports HW NAT offload) for speed
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+
+uci -q commit wireless
+uci -q commit firewall
+logger -t cr6606-wifi "clean-longrange applied: country=US txpower=30(req) 2g=HE20/auto 5g=HE80/149 2x2 offload=sw+hw"
+exit 0

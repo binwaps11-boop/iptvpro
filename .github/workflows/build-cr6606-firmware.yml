@@ -1,0 +1,137 @@
+name: Build CR6606 Custom Firmware
+
+# Builds REAL flashable images for Xiaomi Mi Router CR6606 ONLY via the official
+# OpenWrt ImageBuilder (ramips/mt7621, profile xiaomi_mi-router-cr6606).
+# Two variants:
+#   - clean-stable-longrange : daily, clean max-range config (txpower 30 req)
+#   - power-test             : test only, requests txpower 35 (driver clamps),
+#                              adds CR6606-POWER-TEST dmesg marker
+# Produces per-variant sysupgrade.bin + sha256 + manifest + build log, attached
+# to a permanent GitHub Release. No fake binaries, no other device, no caldata writes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OpenWrt stable version (ImageBuilder)"
+        required: true
+        default: "24.10.0"
+  push:
+    paths:
+      - "firmware/cr6606/**"
+      - ".github/workflows/build-cr6606-firmware.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev zlib1g-dev \
+            gawk git gettext libssl-dev xsltproc rsync wget unzip python3 zstd file
+
+      - name: Resolve settings
+        id: cfg
+        run: |
+          set -e
+          VER="${{ github.event.inputs.version }}"; [ -z "$VER" ] && VER="24.10.0"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download official ImageBuilder (CR6606 target = ramips/mt7621)
+        run: |
+          set -e
+          VER="${{ steps.cfg.outputs.version }}"
+          BASE="https://downloads.openwrt.org/releases/${VER}/targets/ramips/mt7621"
+          STEM="openwrt-imagebuilder-${VER}-ramips-mt7621.Linux-x86_64"
+          if wget -q "${BASE}/${STEM}.tar.zst"; then
+            tar --use-compress-program=unzstd -xf "${STEM}.tar.zst"
+          else
+            wget -q "${BASE}/${STEM}.tar.xz"; tar -xJf "${STEM}.tar.xz"
+          fi
+          echo "IB_DIR=${STEM}" >> "$GITHUB_ENV"
+
+      - name: Verify CR6606 profile exists (safety gate)
+        working-directory: ${{ env.IB_DIR }}
+        run: |
+          set -e
+          make info 2>/dev/null | grep -q "xiaomi_mi-router-cr6606" \
+            || { echo "::error::CR6606 profile missing - aborting"; exit 1; }
+          echo "OK: xiaomi_mi-router-cr6606 present."
+
+      - name: Build both variants
+        working-directory: ${{ env.IB_DIR }}
+        run: |
+          set -e
+          PKGS="$(grep -vE '^[[:space:]]*#' ../firmware/cr6606/build/packages.txt | tr '\n' ' ')"
+          echo "Packages: $PKGS"
+          mkdir -p ../dist
+          OUT="bin/targets/ramips/mt7621"
+          for V in clean-stable-longrange power-test max-clean-measured wifi6-pro; do
+            echo "==================== building $V ===================="
+            rm -rf merged; mkdir merged
+            cp -a ../firmware/cr6606/files/. merged/
+            if [ -d "../firmware/cr6606/variants/$V/files" ]; then
+              cp -a ../firmware/cr6606/variants/$V/files/. merged/
+            fi
+            rm -f ${OUT}/openwrt-*-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin || true
+            make image PROFILE="xiaomi_mi-router-cr6606" PACKAGES="$PKGS" \
+              FILES="$PWD/merged" 2>&1 | tee "../dist/build-${V}.log"
+            SRC="$(ls ${OUT}/openwrt-*-xiaomi_mi-router-cr6606-squashfs-sysupgrade.bin)"
+            cp "$SRC" "../dist/openwrt-cr6606-${V}-sysupgrade.bin"
+            cp ${OUT}/openwrt-*-xiaomi_mi-router-cr6606.manifest "../dist/manifest-${V}.txt"
+          done
+
+      - name: Checksums + file type
+        run: |
+          set -e
+          cd dist
+          for b in openwrt-cr6606-*-sysupgrade.bin; do
+            sha256sum "$b" > "$b.sha256"
+            echo "== $b =="; cat "$b.sha256"; file "$b"
+          done
+          ls -la
+
+      - name: Upload artifacts (workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cr6606-firmware-variants
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release (permanent download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cr6606-longrange-${{ steps.cfg.outputs.version }}
+          name: CR6606 Long-Range Firmware (OpenWrt ${{ steps.cfg.outputs.version }})
+          body: |
+            Custom OpenWrt firmware for **Xiaomi Mi Router CR6606 ONLY**
+            (profile `xiaomi_mi-router-cr6606`, ramips/mt7621, mt76/mt7915, 2x2).
+
+            ## Two variants
+            - **openwrt-cr6606-clean-stable-longrange-sysupgrade.bin** — daily driver.
+              country=US, txpower 30 (regulatory max request; driver clamps to caldata),
+              2.4G HE20 best-of-1/6/11 (ACS), 5G HE80 ch149 (UNII-3), full 2x2,
+              SW+HW flow offload. SSIDs `Xiaomi-2G` / `Xiaomi-5G`.
+            - **openwrt-cr6606-power-test-sysupgrade.bin** — TEST ONLY.
+              Same config but requests txpower **35** to MEASURE if a higher
+              System/Driver number changes anything (it is clamped by caldata, so
+              real RF usually does NOT exceed the clean build). Adds a
+              `CR6606-POWER-TEST` marker in dmesg. No caldata/EEPROM/MAC writes.
+
+            Honest note: real range gains come from country/HE20/channel/2x2/offload,
+            NOT from the power number. Prove the actual value on-device:
+            `iwinfo`, `sh /root/wifi-perf.sh`, `sh /root/wifi-scan.sh`.
+
+            Flash: `sysupgrade -v -n <file>.bin`
+            Verify checksum: `sha256sum -c <file>.bin.sha256`
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: "true"
