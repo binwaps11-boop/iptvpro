@@ -300,22 +300,35 @@ jobs:
           tar -xf "$BIN" -C /tmp/imgchk
           ROOT="$(find /tmp/imgchk -name root -type f | head -1)"
           [ -n "$ROOT" ] || { echo "::error::no squashfs root in image"; exit 1; }
-          unsquashfs -q -d /tmp/imgchk/sq "$ROOT" >/dev/null
+          # The rootfs carries device nodes; unsquashfs needs root to create
+          # them and otherwise exits 2.  Hand the tree back to the runner user.
+          sudo unsquashfs -q -d /tmp/imgchk/sq "$ROOT" >/dev/null
+          sudo chown -R "$(id -u):$(id -g)" /tmp/imgchk/sq
           IMGKO="$(find /tmp/imgchk/sq -name 'mt7915e.ko*' | head -1)"
           [ -n "$IMGKO" ] || { echo "::error::mt7915e.ko not in image"; exit 1; }
-          case "$IMGKO" in *.ko.zst) zstd -dq -f "$IMGKO" -o /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;; esac
-          strings -a "$IMGKO" | grep -q '^parm=cr6608_rf_38dbm:' \
+          case "$IMGKO" in
+            *.ko.zst) zstd -dq -f "$IMGKO" -o /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;;
+            *.ko.xz)  xz -dkc "$IMGKO" > /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;;
+            *.ko.gz)  gzip -dc "$IMGKO" > /tmp/imgchk/mt7915e.ko; IMGKO=/tmp/imgchk/mt7915e.ko;;
+          esac
+          # Same proof as for the build tree: the MODULE_STRIPPED kernel drops
+          # the parm= records, the parameter name strings survive.
+          strings -a "$IMGKO" | grep -qx 'cr6608_rf_38dbm' \
             || { echo "::error::image driver lacks the 38 dBm gate"; exit 1; }
-          strings -a "$IMGKO" | grep -q '^parm=cr6608_muru_mask:' \
+          strings -a "$IMGKO" | grep -qx 'cr6608_muru_mask' \
             || { echo "::error::image driver lacks the MU-RU mask"; exit 1; }
-          strings -a "$IMGKO" | grep -q '^parm=cr6608_advertise_ul_mumimo:' \
+          strings -a "$IMGKO" | grep -qx 'cr6608_advertise_ul_mumimo' \
             || { echo "::error::image driver lacks the vendor-parity advertisement switch"; exit 1; }
-          strings -a "$IMGKO" | grep -qF ul_mumimo_multi_user_ppdus \
-            || { echo "::error::image driver lacks the uplink attribution patch"; exit 1; }
+          strings -a "$IMGKO" | grep -qF ul_mumimo_multi_user_data_ppdus \
+            || { echo "::error::image driver lacks the uplink attribution patch (v2)"; exit 1; }
           strings -a "$IMGKO" | grep -qF he_tb_ul_mumimo_shared \
             || { echo "::error::image driver lacks the per-peer debugfs nodes (MAC80211_DEBUGFS off)"; exit 1; }
-          echo "== module parameters compiled into the image driver =="
-          strings -a "$IMGKO" | grep '^parm=cr6608_' | cut -d: -f1 | sort
+          strings -a "$IMGKO" | grep -qF exercised_since_rearm \
+            || { echo "::error::image driver lacks the recovery-lifecycle patch"; exit 1; }
+          echo "== CR6608 module parameters compiled into the image driver =="
+          strings -a "$IMGKO" | grep -E '^cr6608_[a-z0-9_]+$' | sort -u || true
+          echo "== image driver sha256 =="
+          sha256sum "$IMGKO"
           echo "== module parameters inside the image =="
           cat /tmp/imgchk/sq/etc/modules.d/mt7915e
           echo "== configured txpower inside the image =="
