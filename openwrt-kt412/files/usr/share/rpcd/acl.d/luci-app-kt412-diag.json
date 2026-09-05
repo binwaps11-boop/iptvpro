@@ -1,0 +1,19 @@
+{
+	"luci-app-kt412-diag": {
+		"description": "Grant access to the KT412 MK APP diagnostic, loop-guard and switch-manager views",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"network.interface": [ "dump" ],
+				"network.wireless": [ "status" ]
+			},
+			"uci": [ "kt412", "network", "wireless", "dhcp" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			},
+			"uci": [ "kt412", "network", "wireless", "dhcp" ]
+		}
+	}
+}

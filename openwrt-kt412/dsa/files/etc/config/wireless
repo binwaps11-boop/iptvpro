@@ -1,0 +1,73 @@
+#
+# Smart AP Wi-Fi — COMPLETE final config so BOTH radios broadcast the moment the
+# device boots (no first-boot reload delay; uci-defaults no longer rewrites this).
+# 2.4G = ath9k (radio0) HT40 (40 MHz -> full 2x2 ~300 Mbit/s PHY). noscan forces
+#        the width on; ANI + clean-channel keep it stable under interference.
+# 5G   = ath10k-ct (radio1) VHT80. Non-DFS ch 11 & 149. Country US.
+# Roaming (802.11k/v) + WMM baked in here. 2.4G THROUGHPUT: short_gi_20/40 +
+# legacy_rates=0 (drop slow 802.11b CCK so airtime isn't wasted) + both chains
+# (2x2 -> up to MCS15 ~300 Mbit/s on HT40).
+# OPEN network (no password) on both bands by request. 802.11r (FT) removed
+# because Fast Transition needs a PSK/key; 11k + 11v roaming stay enabled.
+# Extreme variant: the build bumps radio0 txpower 24 -> 30.
+#
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/ahb/18100000.wmac'
+	option band '2g'
+	option channel '11'
+	# HT40 (40 MHz) on 2.4G — unlocks the FULL 2x2 rate (~300 Mbit/s PHY, MCS15
+	# SGI) instead of HT20's ~144. noscan=1 (below) forces 40 MHz even next to a
+	# neighbour BSS so the width is actually used. On ch11 the driver auto-picks
+	# HT40- (secondary below). Range is preserved (same power + basic-rate floor);
+	# ANI noise-immunity + clean-channel logic offset the slightly higher 40 MHz
+	# interference exposure. This delivers the requested "full 2.4G 300".
+	option htmode 'HT40'
+	option noscan '1'
+	option country 'US'
+	option cell_density '0'
+	option short_gi_20 '1'
+	option short_gi_40 '1'
+	option disabled '0'
+	option txpower '24'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'KT412'
+	option encryption 'none'
+	option wmm '1'
+	option legacy_rates '0'
+	# deterministic 6 Mbit OFDM mgmt/multicast floor (CCK already off): a far client
+	# still associates and stays connected; not a power change, range preserved.
+	option basic_rate '6000'
+	option disassoc_low_ack '0'
+	option ieee80211k '1'
+	option ieee80211v '1'
+	option bss_transition '1'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path 'pci0000:00/0000:00:00.0'
+	option band '5g'
+	option channel '149'
+	option htmode 'VHT80'
+	option noscan '1'
+	option country 'US'
+	option cell_density '0'
+	option disabled '0'
+	option txpower '30'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'KT412-5G'
+	option encryption 'none'
+	option wmm '1'
+	option legacy_rates '0'
+	option disassoc_low_ack '0'
+	option ieee80211k '1'
+	option ieee80211v '1'
+	option bss_transition '1'

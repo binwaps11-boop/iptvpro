@@ -1,0 +1,61 @@
+#!/bin/sh
+# First-boot defaults for KT412. Idempotent. Runs once, then deletes itself.
+# LuCI is removed; the custom purple dashboard is the only web UI. Advanced
+# access is the ttyd web terminal on :7681 (the dashboard's "advanced" button).
+
+# --- Branding ---
+uci -q set system.@system[0].hostname='KT412'
+uci -q commit system
+
+# --- Make verify scripts + dashboard API executable ---
+chmod 0755 /root/verify-*.sh 2>/dev/null
+chmod 0755 /www/cgi-bin/* 2>/dev/null
+
+# --- uhttpd: keep it light (fewer workers, no keepalive flood) ---
+uci -q set uhttpd.main.max_requests='3'
+uci -q set uhttpd.main.max_connections='30'
+uci -q commit uhttpd
+
+# --- ttyd web terminal (advanced access, replaces LuCI) on port 7681 ---
+# /bin/login prompts for the router credentials, so the terminal stays secure.
+if ! uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
+	uci -q add ttyd ttyd >/dev/null
+fi
+uci -q set ttyd.@ttyd[0].port='7681'
+uci -q set ttyd.@ttyd[0].command='/bin/login'
+uci -q delete ttyd.@ttyd[0].interface 2>/dev/null
+uci -q commit ttyd
+/etc/init.d/ttyd enable 2>/dev/null
+/etc/init.d/ttyd restart 2>/dev/null
+
+# --- performance + stability (128MB): NAT flow offloading, conntrack sizing,
+#     auto-reboot on kernel panic so it never stays hung ---
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q commit firewall
+if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-tune
+net.netfilter.nf_conntrack_max=16384
+net.ipv4.tcp_fin_timeout=30
+net.core.rmem_max=4194304
+net.core.wmem_max=4194304
+net.core.netdev_max_backlog=2000
+net.ipv4.tcp_fastopen=3
+kernel.panic=10
+kernel.panic_on_oops=1
+SYS
+fi
+sysctl -p >/dev/null 2>&1
+
+# --- service watchdog (cron, every 2 min): revive dead critical daemons ---
+mkdir -p /etc/crontabs
+if ! grep -q 'kt412-wd' /etc/crontabs/root 2>/dev/null; then
+	echo '*/2 * * * * for s in dnsmasq uhttpd rpcd; do pgrep -x "$s" >/dev/null || /etc/init.d/"$s" restart; done # kt412-wd' >> /etc/crontabs/root
+fi
+/etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
+
+# --- restart web services so the dashboard + login are live on first boot ---
+/etc/init.d/rpcd restart 2>/dev/null
+/etc/init.d/uhttpd restart 2>/dev/null
+
+exit 0

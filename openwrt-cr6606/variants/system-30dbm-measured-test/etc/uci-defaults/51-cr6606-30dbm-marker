@@ -1,0 +1,20 @@
+#!/bin/sh
+# =============================================================================
+# 51-cr6606-30dbm-marker  (VARIANT: cr6606-system-30dbm-measured-test only)
+# -----------------------------------------------------------------------------
+# Stamps grep-able markers into the kernel ring buffer (dmesg) so the power-test
+# build is unmistakably identifiable, and persists them for later reference.
+# This is a LABEL only — it does not change RF. Real output is measured by
+# /root/cr6606_all_channels_test.sh and reported by /root/cr6606_power_truth.sh.
+# =============================================================================
+M1="CR6606-SYSTEM-30DBM-MEASURED-TEST txpower=30 requested on 2.4G+5G; real RF = min(regdb,caldata) — run /root/cr6606_power_truth.sh"
+M2="CR6606-ALL-CHANNELS-30DBM-MEASURED"
+
+# emit to kernel log (shows up in dmesg); /dev/kmsg is always present on OpenWrt
+echo "$M1" > /dev/kmsg 2>/dev/null
+echo "$M2" > /dev/kmsg 2>/dev/null
+
+# persist a copy
+{ echo "$M1"; echo "$M2"; } > /root/.cr6606-30dbm-test 2>/dev/null
+
+exit 0

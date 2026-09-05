@@ -1,0 +1,105 @@
+name: Build CR6606 FAST (ImageBuilder · system-30dbm-measured-test)
+
+# Xiaomi Mi Router CR6606 — ramips/mt7621, MT7621AT + MT7915 (WiFi6 AX1800), NAND.
+# We apply NO kernel/driver/source patches (DSA is native, power is UCI-only), so the
+# official OpenWrt ImageBuilder produces a functionally IDENTICAL image to the source
+# build in ~10 min instead of ~50. Bakes the same Smart AP overlay + variant uci-defaults
+# (all audit fixes + modal fix) + the same package set. SYSUPGRADE only.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cr6606-fast-build
+  cancel-in-progress: true
+
+env:
+  VARIANT: system-30dbm-measured-test
+  TAG: cr6606-30dbm-measured
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repo (overlay)
+        uses: actions/checkout@v4
+
+      - name: Install ImageBuilder host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev zlib1g-dev gawk \
+            git gettext libssl-dev xsltproc rsync wget unzip python3 file zstd
+
+      - name: Download OpenWrt ImageBuilder (ramips/mt7621, 24.10.6)
+        run: |
+          set -eux
+          VER=24.10.6
+          IB="openwrt-imagebuilder-${VER}-ramips-mt7621.Linux-x86_64"
+          URL="https://downloads.openwrt.org/releases/${VER}/targets/ramips/mt7621/${IB}.tar.zst"
+          wget -q "$URL" -O ib.tar.zst
+          tar --zstd -xf ib.tar.zst
+          mv "$IB" ib
+
+      - name: Merge overlay (shared base + variant)
+        run: |
+          set -eux
+          MERGED="$GITHUB_WORKSPACE/merged"; rm -rf "$MERGED"; mkdir -p "$MERGED"
+          cp -a "$GITHUB_WORKSPACE/openwrt-cr6606/files/." "$MERGED/"
+          cp -a "$GITHUB_WORKSPACE/openwrt-cr6606/variants/${VARIANT}/." "$MERGED/"
+          echo "=== merged overlay ==="; find "$MERGED" -type f | sort | head -80
+          echo "=== uci-defaults ==="; ls -la "$MERGED/etc/uci-defaults/"
+
+      - name: Build cr660x family images (cr6606 + cr6608 + cr6609)
+        run: |
+          set -eux
+          cd ib
+          make info 2>/dev/null | grep -iE "cr6606|cr6608|cr6609" || { echo "FATAL: cr660x profiles not found"; exit 1; }
+          for P in xiaomi_mi-router-cr6606 xiaomi_mi-router-cr6608 xiaomi_mi-router-cr6609; do
+            echo "=== building $P ==="
+            make image \
+              PROFILE="$P" \
+              PACKAGES="luci luci-ssl luci-i18n-base-ar curl wpad-openssl -wpad-basic-mbedtls kmod-mt7915e kmod-mt7915-firmware iw iwinfo kmod-nft-offload ip-full ip-bridge irqbalance ethtool kmod-sched-cake luci-app-sqm iperf3 zram-swap" \
+              FILES="$GITHUB_WORKSPACE/merged" \
+              EXTRA_IMAGE_NAME="${VARIANT}"
+          done
+          echo "=== built images ==="
+          ls -la bin/targets/ramips/mt7621/ | grep -iE "cr660" || ls -la bin/targets/ramips/mt7621/
+
+      - name: Collect SYSUPGRADE (all cr660x) + checksum
+        run: |
+          set -eux
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          n=0
+          for b in ib/bin/targets/ramips/mt7621/*cr660*sysupgrade.bin; do
+            [ -s "$b" ] || continue
+            cp "$b" "$OUT/"; n=$((n+1))
+          done
+          test "$n" -ge 1 || { echo "NO SYSUPGRADE IMAGES"; exit 1; }
+          cd "$OUT"; ls -la
+          sha256sum *.bin > "sha256-${VARIANT}.txt"; cat "sha256-${VARIANT}.txt"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: "cr6606-${{ env.VARIANT }}-fast", path: out/*, if-no-files-found: warn }
+
+      - name: Publish to Release (sysupgrade only)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "CR660x system-30dbm-measured-test — FAST (cr6606 + cr6608 + cr6609)"
+          body: |
+            Xiaomi CR660x (ramips/mt7621, MT7915 WiFi6 AX1800 2x2/2x2). DSA native.
+            OpenWrt 24.10.6 ImageBuilder — builds ALL THREE family members
+            (cr6606 / cr6608 / cr6609; identical hardware, shared cr660x DTS).
+            Flash the bin whose name matches YOUR device (e.g. *cr6608*sysupgrade.bin).
+            Smart AP UI + LuCI + SSH + flow offload (SW) + proof scripts + all audit fixes
+            + modal dark-fix. txpower=30 request; NO regdb/caldata patch, NO MAC change.
+            Flash (no force needed): sysupgrade -n /tmp/cr6608.bin
+          files: out/*
+          fail_on_unmatched_files: false

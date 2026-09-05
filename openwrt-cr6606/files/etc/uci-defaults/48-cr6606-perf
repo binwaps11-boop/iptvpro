@@ -1,0 +1,100 @@
+#!/bin/sh
+# =============================================================================
+# 48-cr6606-perf  —  STRONG build: clean throughput/latency tuning (mt7621)
+# -----------------------------------------------------------------------------
+# Real software performance levers only — no power/regdb/caldata tricks:
+#   * packet_steering: spread network RX/TX processing across BOTH MT7621 cores
+#     (RPS) -> markedly higher routing/Wi-Fi throughput on this dual-core SoC.
+#   * software flow offloading on (hw eth/NAT offload set per-variant via the
+#     firewall defaults). NOTE: this SoC is ramips/mt7621 -- there is NO WED WLAN
+#     hardware offload (WED requires MT7622/Filogic). flow_offloading_hw only
+#     accelerates routed/NAT Ethernet traffic via the mt7621 PPE, never the Wi-Fi
+#     path -- and on 24.10 the mt7621 PPE has a conntrack bug that drops long-lived
+#     UDP (IPTV), so the variant keeps hw offload OFF (software offload + RPS only).
+# CONVERGENT (no guard): deterministic uci set + commit, so it safely RE-ASSERTS RPS /
+# software-offload / HW-offload-OFF on every boot incl. sysupgrade-with-settings. UCI only.
+# =============================================================================
+
+# RPS across both cores
+if uci -q get network.@globals[0] >/dev/null 2>&1; then
+	uci -q set network.@globals[0].packet_steering='1'
+else
+	g="$(uci add network globals)"; uci -q set network.$g.packet_steering='1'
+fi
+uci -q commit network
+
+# software flow offloading (hw offload added by the variant); harmless if repeated
+if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
+	uci -q set firewall.@defaults[0].flow_offloading='1'
+	# HW PPE offload OFF (IPTV-critical invariant, also set per-variant): mt7621 24.10 PPE
+	# drops long-lived UDP (multicast) — assert it in the shared base too so it can't slip.
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+	# drop per-packet ALG auto-helpers (FTP/SIP/PPTP/H.323) — pure CPU saving on the
+	# forwarded/NAT path; unneeded for an AP/router. (Independent of flow offload.)
+	uci -q set firewall.@defaults[0].auto_helper='0'
+	uci -q commit firewall
+fi
+
+# irqbalance: spread NIC/Wi-Fi IRQs across both MT7621 cores (pairs with RPS) for
+# higher sustained throughput. Enable if the package is present (no-op otherwise).
+if [ -x /etc/init.d/irqbalance ]; then
+	uci -q set irqbalance.irqbalance.enabled='1' 2>/dev/null
+	uci -q commit irqbalance 2>/dev/null
+	/etc/init.d/irqbalance enable >/dev/null 2>&1
+	/etc/init.d/irqbalance start >/dev/null 2>&1
+fi
+
+# Apply the network-stack tuning now so it's active on first boot without waiting
+# for a reboot. nf_conntrack must be loaded for its sysctls to exist; the firewall
+# loads it anyway, but we nudge it here so the conntrack keys are present.
+modprobe nf_conntrack 2>/dev/null
+# pin conntrack hash buckets via SYSFS (live rehash works whether the module was just
+# loaded here or preloaded by the firewall; a modprobe hashsize= param is ignored on a
+# preloaded module). 8192 buckets vs nf_conntrack_max 32768 => load factor ~4.
+if [ -w /sys/module/nf_conntrack/parameters/hashsize ]; then
+	echo 8192 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null
+fi
+if [ -f /etc/sysctl.d/99-cr6608-tuning.conf ]; then
+	sysctl -p /etc/sysctl.d/99-cr6608-tuning.conf >/dev/null 2>&1
+fi
+
+# zram swap: small compressed-RAM swap (lzo) gives the 256MB SoC headroom under load with
+# ZERO NAND wear (no flash swapfile). Set via system.@system[0] (the section the 24.10
+# zram init actually reads). No-op if the zram-swap package isn't installed.
+if [ -x /etc/init.d/zram ]; then
+	uci -q set system.@system[0].zram_size_mb='64'
+	uci -q set system.@system[0].zram_comp_algo='lzo'
+	uci -q commit system
+	/etc/init.d/zram enable >/dev/null 2>&1
+	/etc/init.d/zram start >/dev/null 2>&1
+fi
+
+# ---- MAX-THROUGHPUT levers (expert audit; all guarded + safe; HW offload stays OFF) ----
+# Applied now + re-applied after 20s (DSA leaf netdevs appear slightly after boot).
+perf_tune() {
+	# NAPI: defer hard-IRQs + GRO flush window -> fewer IRQs, more batching (lower CPU/pkt)
+	for ifc in eth0 eth1 lan1 lan2 lan3 lan4 wan br-lan; do
+		[ -e "/sys/class/net/$ifc" ] || continue
+		[ -w "/sys/class/net/$ifc/gro_flush_timeout" ] && echo 50000 > "/sys/class/net/$ifc/gro_flush_timeout" 2>/dev/null
+		[ -w "/sys/class/net/$ifc/napi_defer_hard_irqs" ] && echo 2 > "/sys/class/net/$ifc/napi_defer_hard_irqs" 2>/dev/null
+		ip link set dev "$ifc" txqueuelen 1000 2>/dev/null
+	done
+	# software batching offloads (GRO/GSO/TSO/SG/csum) — unsupported flags are ignored
+	if command -v ethtool >/dev/null 2>&1; then
+		for ifc in eth0 eth1 lan1 lan2 lan3 lan4 wan br-lan; do
+			[ -e "/sys/class/net/$ifc" ] || continue
+			for feat in gro gso tso sg rx tx rxvlan txvlan; do ethtool -K "$ifc" "$feat" on >/dev/null 2>&1 || true; done
+		done
+	fi
+	# RPS(rx)+XPS(tx) across BOTH cores on the conduit queues (belt-and-braces vs packet_steering)
+	for q in /sys/class/net/eth0/queues/rx-*/rps_cpus /sys/class/net/eth1/queues/rx-*/rps_cpus; do
+		[ -w "$q" ] && echo 3 > "$q" 2>/dev/null
+	done
+	for q in /sys/class/net/eth0/queues/tx-*/xps_cpus /sys/class/net/eth1/queues/tx-*/xps_cpus; do
+		[ -w "$q" ] && echo 3 > "$q" 2>/dev/null
+	done
+}
+perf_tune
+( sleep 20; perf_tune ) >/dev/null 2>&1 &
+
+exit 0

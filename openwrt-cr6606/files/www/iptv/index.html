@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IPTV Portal — Smart AP</title>
+<style>
+/* Lightweight, dark, no external libs. Parsing runs in the CLIENT browser, so the
+   router CPU does nothing here. Matches the Smart AP obsidian + cyan palette. */
+:root{--bg:#0A0F1C;--bg2:#111A2E;--card:#162034;--card2:#0D1426;--stroke:rgba(148,163,184,.16);
+  --txt:#F1F5F9;--txt2:#C3CEDE;--muted:#8693A8;--accent:#22D3EE;--violet:#A78BFA;--ok:#34D399;--bad:#F87171;}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);
+  font-family:'Segoe UI',Tahoma,system-ui,'Noto Sans Arabic',sans-serif}
+body{background-image:radial-gradient(900px 500px at 100% -10%,rgba(34,211,238,.08),transparent 60%),
+  radial-gradient(800px 500px at 0% -10%,rgba(167,139,250,.07),transparent 60%);min-height:100vh}
+.wrap{max-width:1200px;margin:0 auto;padding:14px}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;
+  padding:14px 16px;border-radius:16px;background:var(--card);border:1px solid var(--stroke)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:20px}
+.logo{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#22D3EE,#8b5cf6);color:#fff}
+.brand .sub{font-size:11px;color:var(--muted);font-weight:600;margin-top:2px}
+.spacer{flex:1}
+.status{font-size:12.5px;color:var(--muted)}
+.status b{color:var(--accent)}
+.search{display:flex;gap:8px;margin-bottom:12px}
+.search input{flex:1;background:var(--card2);border:1px solid var(--stroke);border-radius:11px;
+  color:var(--txt);padding:11px 14px;font-size:15px}
+.search input::placeholder{color:var(--muted)}
+.search button{background:var(--card2);border:1px solid var(--stroke);border-radius:11px;color:var(--accent);
+  font-weight:700;padding:0 16px;cursor:pointer}
+.tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.tab{flex:1;min-width:110px;text-align:center;padding:12px 10px;border-radius:12px;cursor:pointer;
+  background:var(--card2);border:1px solid var(--stroke);color:var(--txt2);font-weight:700;font-size:14px;
+  transition:all .15s ease}
+.tab .n{display:block;font-size:11px;color:var(--muted);font-weight:600;margin-top:2px;direction:ltr}
+.tab.on{background:linear-gradient(135deg,#22D3EE,#0E7490);color:#fff;border-color:transparent}
+.tab.on .n{color:rgba(255,255,255,.85)}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+.card{background:var(--card);border:1px solid var(--stroke);border-radius:13px;overflow:hidden;cursor:pointer;
+  transition:transform .15s ease,border-color .15s ease;display:flex;flex-direction:column}
+.card:hover{transform:translateY(-3px);border-color:rgba(34,211,238,.4)}
+.card .thumb{aspect-ratio:16/10;background:var(--card2);display:flex;align-items:center;justify-content:center;
+  overflow:hidden;position:relative}
+.card .thumb img{width:100%;height:100%;object-fit:cover}
+.card .thumb .ph{color:var(--muted);font-size:30px}
+.card .meta{padding:9px 10px}
+.card .t{font-size:13px;font-weight:700;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+.card .g{font-size:11px;color:var(--muted);margin-top:3px;direction:ltr;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.list .card{flex-direction:row;align-items:center}
+.list .card .thumb{width:64px;aspect-ratio:1;flex:0 0 auto;border-radius:10px;margin:8px}
+.list .card .meta{padding:8px 10px 8px 0;flex:1;min-width:0}
+.empty{text-align:center;color:var(--muted);padding:50px 16px}
+.empty .big{font-size:42px;margin-bottom:10px}
+.count{font-size:12px;color:var(--muted);margin:0 2px 10px}
+/* series → seasons → episodes */
+.series-head{display:flex;align-items:center;gap:10px;margin:6px 2px 10px;cursor:pointer}
+.season{margin:0 0 8px;border:1px solid var(--stroke);border-radius:12px;overflow:hidden;background:var(--card2)}
+.season>summary{padding:11px 14px;font-weight:700;cursor:pointer;list-style:none}
+.season>summary::-webkit-details-marker{display:none}
+.ep{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--stroke);cursor:pointer}
+.ep:hover{background:rgba(34,211,238,.08)}
+.ep .num{font-size:12px;color:var(--accent);font-weight:800;direction:ltr;min-width:46px}
+/* player modal */
+.modal{position:fixed;inset:0;background:rgba(5,8,16,.92);display:none;align-items:center;justify-content:center;
+  z-index:50;padding:14px}
+.modal.on{display:flex}
+.player{width:min(960px,100%);background:var(--card);border:1px solid var(--stroke);border-radius:14px;overflow:hidden}
+.player .bar{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--stroke)}
+.player .bar .ttl{flex:1;font-weight:700;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player .bar .x{cursor:pointer;color:var(--muted);font-size:22px;line-height:1;padding:0 4px}
+.player video{width:100%;max-height:70vh;background:#000;display:block}
+.player .note{padding:10px 14px;font-size:12.5px;color:var(--muted)}
+.player .open{display:inline-block;margin:0 14px 14px;padding:9px 14px;border-radius:10px;
+  background:linear-gradient(135deg,#22D3EE,#0E7490);color:#fff;text-decoration:none;font-weight:700;font-size:13px;direction:ltr}
+@media(max-width:600px){.grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 21h8 M9 6 5 2 M15 6l4-4"/></svg>
+    </div>
+    <div>
+      <div class="brand">IPTV Portal<span class="sub" style="display:block">Smart AP — قنواتك</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="status" id="status">جارٍ التحميل…</div>
+    <button class="search" style="display:inline-flex" onclick="reloadList()" title="تحديث">↻</button>
+  </header>
+
+  <div class="search">
+    <input id="q" type="search" placeholder="ابحث عن قناة / فيلم / مسلسل…" autocomplete="off">
+    <button onclick="document.getElementById('q').value='';render()">مسح</button>
+  </div>
+
+  <div class="tabs">
+    <div class="tab on" data-cat="live"   onclick="setTab('live')">بث مباشر<span class="n">Live TV</span></div>
+    <div class="tab"    data-cat="movies" onclick="setTab('movies')">أفلام<span class="n">Movies</span></div>
+    <div class="tab"    data-cat="series" onclick="setTab('series')">مسلسلات<span class="n">Series</span></div>
+  </div>
+
+  <div class="count" id="count"></div>
+  <div id="view"></div>
+</div>
+
+<div class="modal" id="modal" onclick="if(event.target===this)closePlayer()">
+  <div class="player">
+    <div class="bar"><span class="ttl" id="pttl"></span><span class="x" onclick="closePlayer()">×</span></div>
+    <video id="pvid" controls playsinline></video>
+    <div class="note" id="pnote"></div>
+    <a class="open" id="popen" target="_blank" rel="noopener">فتح الرابط في تطبيق خارجي ↗</a>
+  </div>
+</div>
+
+<script>
+/* ---- tiny, safe M3U parser + categorizer. Runs in the CLIENT browser. ---- */
+var DATA={live:[],movies:[],series:{}}, TAB='live';
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+function attr(line,name){var m=line.match(new RegExp(name+'="([^"]*)"','i'));return m?m[1]:'';}
+function classify(group,title){
+  var g=(group+' '+title).toLowerCase();
+  if(/(^|[^a-z])(s\d{1,2}\s?e\d{1,2}|season|episode|مسلسل|حلق|موسم|series)/i.test(g)) return 'series';
+  if(/(movie|film|vod|أفلام|فيلم|cinema)/i.test(g)) return 'movies';
+  return 'live';
+}
+/* extract "Series Name", season, episode from a title like "Show S01 E05" / "Show 1x05" */
+function seriesParts(title){
+  var name=title, se=0, ep=0;
+  var m=title.match(/^(.*?)[\s._-]*[sS](\d{1,2})[\s._-]*[eE](\d{1,3})/);
+  if(m){name=m[1].trim();se=+m[2];ep=+m[3];}
+  else{
+    m=title.match(/^(.*?)[\s._-]+(\d{1,2})[xX](\d{1,3})/);
+    if(m){name=m[1].trim();se=+m[2];ep=+m[3];}
+    else{
+      m=title.match(/(.*?)(?:موسم|الموسم)\s*(\d{1,2}).*?(?:حلقة|الحلقة)\s*(\d{1,3})/);
+      if(m){name=m[1].trim();se=+m[2];ep=+m[3];}
+    }
+  }
+  name=name.replace(/[\s._-]+$/,'')||title;
+  return {name:name,se:se||1,ep:ep||0};
+}
+function parseM3U(text){
+  var live=[],movies=[],series={},lines=text.split(/\r?\n/),cur=null;
+  for(var i=0;i<lines.length;i++){
+    var ln=lines[i];
+    if(ln.indexOf('#EXTINF')===0){
+      var title=(ln.split(',').slice(1).join(',')||'').trim();
+      cur={name:attr(ln,'tvg-name')||title,logo:attr(ln,'tvg-logo'),group:attr(ln,'group-title'),title:title};
+    } else if(ln && ln.charAt(0)!=='#' && cur){
+      cur.url=ln.trim();
+      var cat=classify(cur.group,cur.title||cur.name);
+      if(cat==='series'){
+        var sp=seriesParts(cur.name||cur.title);
+        var key=sp.name||'مسلسل';
+        (series[key]=series[key]||{name:key,logo:cur.logo,seasons:{}});
+        var ss=(series[key].seasons[sp.se]=series[key].seasons[sp.se]||[]);
+        ss.push({ep:sp.ep,name:cur.name,url:cur.url});
+        if(!series[key].logo&&cur.logo)series[key].logo=cur.logo;
+      } else if(cat==='movies'){ movies.push(cur); }
+      else { live.push(cur); }
+      cur=null;
+    }
+  }
+  return {live:live,movies:movies,series:series};
+}
+function thumb(logo,fallback){
+  if(logo) return '<div class="thumb"><img loading="lazy" src="'+esc(logo)+'" onerror="this.style.display=\'none\';this.parentNode.innerHTML=\'<span class=ph>'+fallback+'</span>\'"></div>';
+  return '<div class="thumb"><span class="ph">'+fallback+'</span></div>';
+}
+function matchq(s,q){return !q || String(s||'').toLowerCase().indexOf(q)>=0;}
+
+function render(){
+  var q=(document.getElementById('q').value||'').trim().toLowerCase();
+  var view=document.getElementById('view'), cnt=document.getElementById('count'), html='';
+  if(TAB==='live'||TAB==='movies'){
+    var arr=DATA[TAB].filter(function(x){return matchq(x.name,q)||matchq(x.group,q)||matchq(x.title,q);});
+    cnt.textContent=arr.length+(TAB==='live'?' قناة':' عنصر');
+    if(!arr.length){view.innerHTML=emptyBox(); return;}
+    var cls=TAB==='live'?'grid list':'grid', icon=TAB==='live'?'📺':'🎬';
+    html='<div class="'+cls+'">';
+    arr.slice(0,800).forEach(function(x){
+      html+='<div class="card" onclick="play('+JSON.stringify(esc(x.name)).replace(/"/g,'&quot;')+',\''+encodeURIComponent(x.url)+'\')">'
+        +thumb(x.logo,icon)+'<div class="meta"><div class="t">'+esc(x.name||x.title)+'</div>'
+        +(x.group?'<div class="g">'+esc(x.group)+'</div>':'')+'</div></div>';
+    });
+    html+='</div>';
+    if(arr.length>800) html+='<div class="count">عرض 800 من '+arr.length+' — استخدم البحث للتصفية</div>';
+  } else {
+    var keys=Object.keys(DATA.series).filter(function(k){return matchq(k,q);}).sort();
+    cnt.textContent=keys.length+' مسلسل';
+    if(!keys.length){view.innerHTML=emptyBox(); return;}
+    keys.slice(0,400).forEach(function(k){
+      var s=DATA.series[k], seasons=Object.keys(s.seasons).sort(function(a,b){return a-b;});
+      var total=0; seasons.forEach(function(se){total+=s.seasons[se].length;});
+      html+='<details class="season"><summary>'+esc(k)+' — <span style="color:var(--muted);font-weight:600">'
+        +seasons.length+' موسم · '+total+' حلقة</span></summary>';
+      seasons.forEach(function(se){
+        var eps=s.seasons[se].slice().sort(function(a,b){return a.ep-b.ep;});
+        html+='<details class="season" style="margin:8px;background:var(--card)"><summary>الموسم '+esc(se)+' ('+eps.length+' حلقة)</summary>';
+        eps.forEach(function(e){
+          html+='<div class="ep" onclick="play('+JSON.stringify(esc(e.name)).replace(/"/g,'&quot;')+',\''+encodeURIComponent(e.url)+'\')">'
+            +'<span class="num">'+(e.ep?('E'+e.ep):'•')+'</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.name)+'</span><span style="color:var(--accent)">▶</span></div>';
+        });
+        html+='</details>';
+      });
+      html+='</details>';
+    });
+  }
+  view.innerHTML=html;
+}
+function emptyBox(){return '<div class="empty"><div class="big">📭</div>لا توجد عناصر في هذا القسم.<br>أضف قائمة تشغيل من لوحة التحكم (IPTV).</div>';}
+function setTab(t){TAB=t;Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(el){el.classList.toggle('on',el.getAttribute('data-cat')===t);});render();}
+document.getElementById('q').addEventListener('input',render);
+
+function play(name,encurl){
+  var url=decodeURIComponent(encurl);
+  var m=document.getElementById('modal'),v=document.getElementById('pvid');
+  document.getElementById('pttl').textContent=name;
+  document.getElementById('popen').href=url;
+  var note=document.getElementById('pnote');
+  v.src=url;
+  note.textContent='إذا لم يبدأ التشغيل داخل المتصفح (قد يكون البث بصيغة لا يدعمها المتصفح)، استخدم زر فتح الرابط في تطبيق مثل VLC أو TiviMate.';
+  m.classList.add('on');
+  v.play().catch(function(){});
+}
+function closePlayer(){var m=document.getElementById('modal'),v=document.getElementById('pvid');v.pause();v.removeAttribute('src');v.load();m.classList.remove('on');}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closePlayer();});
+
+function reloadList(){
+  var st=document.getElementById('status'); st.textContent='جارٍ التحميل…';
+  fetch('playlist.m3u?_='+Date.now()).then(function(r){if(!r.ok)throw 0;return r.text();}).then(function(t){
+    var p=parseM3U(t); DATA=p;
+    var ns=Object.keys(p.series).length;
+    st.innerHTML='<b>'+p.live.length+'</b> قناة · <b>'+p.movies.length+'</b> فيلم · <b>'+ns+'</b> مسلسل';
+    render();
+  }).catch(function(){
+    document.getElementById('status').textContent='لا توجد قائمة تشغيل';
+    document.getElementById('view').innerHTML='<div class="empty"><div class="big">📭</div>لا توجد قائمة تشغيل محمّلة بعد.<br>افتح لوحة التحكم ← IPTV ← أضف رابطاً أو ارفع ملف M3U.</div>';
+    document.getElementById('count').textContent='';
+  });
+}
+reloadList();
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+==========================================================================
+KT412 / Dongwon DW02-412H — 2.4GHz RF CHAIN ANALYSIS (QCA9558 / ath9k / phy1)
+Honest engineering analysis. Based on the device's own EEPROM dump.
+ART / EEPROM / caldata / mtd10 are READ-ONLY here — nothing was written.
+==========================================================================
+
+1) WHAT THE HARDWARE IS
+   SoC ............... Qualcomm Atheros QCA9558 (QCA955x family), integrated
+                      2.4GHz 802.11n MAC + baseband + radio.
+   Chains ........... TX Mask = 3, RX Mask = 3  -> 2 active chains (chain0+1),
+                      i.e. 2x2 MIMO on 2.4GHz (from base_eeprom).
+   External PA ...... PRESENT. modal_eeprom shows XPA (external PA) timing fields
+                      txFrameToXpaOn=14, txEndToXpaOff, xPA Bias Level=15.
+                      So each chain drives an external 2.4G power amplifier
+                      (FEM), not just the SoC's internal driver.
+   Per-chain atten .. xatten1DB = 30 (chain0/1/2), xatten1Margin = 10.
+   Temp comp ........ Enable Tx Temp Comp = 1, Temp Slope = 56 (PA output
+                      drifts with temperature; firmware backs off when hot).
+
+2) WHERE 24 dBm COMES FROM (the EEPROM target power)
+   The EEPROM holds a per-rate "target power" table (targetPowerValT2[]) that
+   the manufacturer CALIBRATED so the conducted output stays inside the 802.11
+   spectral mask and EVM limits for THIS board's PA. On this unit that ceiling
+   is ~48 half-dB = 24.0 dBm per chain. ath9k computes:
+        regulatory->max_power_level = max(targetPowerValT2[])   (= 48 = 24 dBm)
+   and propagates it to cfg80211:
+        ieee80211_channel->max_power = 24
+   then mac80211 applies:
+        netdev txpower = min(user_power=30, chan->max_power=24) = 24
+   THAT is the exact 30->24 path. The cap is the EEPROM target table, inside
+   ath9k (ar9003_eeprom.c: ath9k_hw_ar9300_set_txpower) — NOT cfg80211/regdb
+   (the US regdomain already permits 30 on 2.4G: 2400-2472 @ 30).
+
+3) WHAT THE 30dBm PATCH ACTUALLY DOES (system/driver layer)
+   The patch forces targetPowerValT2[] >= 60 half-dB, so max_power_level => 60
+   => chan->max_power = 30 => netdev txpower = 30. iwinfo / iw phy / debugfs
+   then read 30 on every 2.4G channel. This is REAL at the driver/register
+   level — the chip is commanded to transmit at 30. It is the System/Driver
+   power, and it is genuine, not cosmetic UCI.
+
+4) WHAT THE PATCH CANNOT DO (RF/physics layer)
+   Commanding 30 does not make the external PA emit 30 dBm of CLEAN conducted
+   power. The PA was calibrated clean at ~24 dBm/chain. Driving it to 30:
+     - pushes it past P1dB into compression (gain drops, output rises only
+       ~1-2 dB, not 6),
+     - degrades EVM and causes spectral regrowth (dirty adjacent channels),
+     - raises PA current + heat -> temp-comp backs power off over time,
+     - can cause client deauth / link instability at the edge.
+   Realistic CLEAN conducted on this chain: ~24-26 dBm/chain.
+
+5) ESTIMATED RF BUDGET (typical for this class; measure to confirm)
+   Per-chain calibrated clean conducted ... ~24 dBm   (EEPROM target)
+   Per-chain max clean (into compression) . ~25-26 dBm
+   2-chain aggregate conducted ............ ~27-29 dBm (per-chain + ~3 dB)
+   Internal antenna gain .................. ~2-4 dBi (PIFA, typical)
+   Cable/connector loss ................... ~0.5-1 dB
+   => Aggregate EIRP ...................... ~29-32 dBm EIRP is plausible
+   So 30 dBm *EIRP* is realistically reachable on this hardware via the
+   2-chain sum + antenna gain. 30 dBm *clean conducted per chain* is NOT,
+   without a bigger external PA.
+
+5b) WHY iwinfo = 33 dBm WHILE iw phy / netdev = 30 dBm  (NOT a bug)
+   iw phy and debugfs netdev txpower report the PER-CHAIN regulatory/applied
+   power = 30 dBm. iwinfo (and the driver's MAX_COMBINED_POWER) report the
+   AGGREGATE across the 2 active TX chains (this board is 2x2, TX mask = 3):
+       30 dBm/chain + 10*log10(2) ~= +3 dB  =  33 dBm combined.
+   So 33 = the two-chain combined conducted figure; 30 = per chain. 33 dBm is
+   MORE total power, not a discrepancy. To make iwinfo read 30 you would have
+   to LOWER each chain to ~27 dBm (so the sum = 30), which REDUCES real output
+   — not recommended when the goal is maximum power. (Caveat from section 4:
+   the external PA still saturates ~24-26 dBm/chain clean, so the radiated
+   power does not actually reach the full 33 cleanly; the 33 is the commanded
+   aggregate, not a measured clean conducted value.)
+
+6) HONEST BOTTOM LINE
+   System/Driver power = 30  -> ACHIEVED by the patch (real register value).
+   Conducted RF (per chain) = NOT MEASURED here; PA physics caps clean output
+                              at ~24-26 dBm/chain regardless of the 30 setting.
+   EIRP = NOT MEASURED; ~30 dBm EIRP is plausible from 2 chains + antenna gain.
+   Anything claiming "30 dBm clean conducted per chain" on this exact board
+   without an external PA upgrade would be false.
+==========================================================================

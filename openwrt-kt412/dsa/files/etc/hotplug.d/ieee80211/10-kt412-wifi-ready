@@ -1,0 +1,61 @@
+#!/bin/sh
+# KT412 5G boot-race fix (root cause of the 2-3 min SSID delay).
+#
+# WHY THIS EXISTS — stock OpenWrt brings each radio up ONLY from the ieee80211
+# hotplug 'add' event (10-wifi-detect -> `wifi config` + `ubus network.wireless
+# retry`). netifd has NO independent phy listener. The QCA9880 5G (ath10k-ct)
+# firmware loads LATE (~30s cold boot), so phy0 registers after netifd already
+# tried+EXHAUSTED its 3 setup retries on radio1 (phy not there yet / "Failed to
+# open phy phy0"). Once a radio is latched retry_setup_failed, `network.wireless
+# retry` does NOT restart it (retry_setup() only acts on state==down+autostart),
+# and ath10k has NO equivalent of upstream's 11-ath12k-trigger. So 5G stays down
+# until something calls `wifi up`/reconf again — which was the 2-min cron
+# watchdog. That is exactly why the SSID appeared at 2-3 min.
+#
+# FIX — on EVERY phy 'add', immediately (no long debounce, no pre-sleep) force a
+# fresh bring-up of ANY radio whose AP iface is still missing, clearing the
+# failed-retry latch the way upstream's ath12k trigger does: `wifi config` (adds
+# the section only if absent; ours already exists) then a forceful per-radio
+# down+up via netifd. Healthy radios that already have a live AP iface are left
+# completely untouched, so a 2.4G that came up early is never bounced.
+[ "$ACTION" = add ] || exit 0
+case "$DEVPATH" in *ieee80211*) ;; *) exit 0 ;; esac
+UP="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$UP" in ''|*[!0-9]*) UP=0;; esac
+[ "$UP" -lt 240 ] || exit 0            # only act during the boot window
+
+# Serialize concurrent phy-add events (2.4G ~10s, 5G ~30s) with a short flock so
+# two handlers don't fight over netifd at once — but DO NOT skip/drop an event
+# (the old time-window debounce could let the early 2.4G event suppress the late
+# 5G one). Each event waits its turn and is fully serviced.
+LOCK=/tmp/.kt412-wifiready.lock
+_run() {
+  for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+    [ "$(uci -q get wireless.$r.disabled)" = "1" ] && continue
+    ifc="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+    # already broadcasting? leave it alone (never bounce a healthy radio)
+    [ -n "$ifc" ] && [ -e "/sys/class/net/$ifc" ] && continue
+    # AP iface missing: this radio's phy is ready now (we got its add event, or a
+    # sibling's) but netifd hasn't (re)started it. Force a clean retry-reset.
+    logger -t kt412-wifiready "radio $r AP iface missing at ${UP}s -> apply configured bring-up"
+    # IMPORTANT: do NOT `wifi config` here. When this radio's phy registered late,
+    # `wifi config` regenerates /etc/config/wireless from currently-detected phys and
+    # APPENDS a default section -> the radio comes up as the stray "OpenWrt" AP (open,
+    # "HT Mode: null") instead of our configured "KT412"/HT20. Our static config
+    # already has both radios, so we apply the EXISTING config instead of regenerating.
+    ubus call network.reload >/dev/null 2>&1                     # netifd re-reads the real config
+    ubus call network.wireless down "{\"device\":\"$r\"}" >/dev/null 2>&1
+    if   wifi reload "$r" >/dev/null 2>&1; then :                # preferred: re-read config + start configured ifaces
+    elif wifi reload      >/dev/null 2>&1; then :
+    fi
+    ubus call network.wireless up   "{\"device\":\"$r\"}" >/dev/null 2>&1
+    # belt-and-suspenders: if the targeted ubus call isn't honoured, kick netifd
+    wifi up "$r" >/dev/null 2>&1
+  done
+}
+# Serialize via flock when available (busybox ships it); fall back to plain run.
+if command -v flock >/dev/null 2>&1; then
+  ( flock 9; _run ) 9>"$LOCK" &
+else
+  ( _run ) &
+fi
+exit 0

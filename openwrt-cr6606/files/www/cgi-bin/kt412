@@ -1,0 +1,2102 @@
+#!/bin/sh
+# KT412 Dashboard API -- real commands only, no fake output.
+# Feature parity with the things LuCI does (network/VLAN/Wi-Fi modes/system/
+# logs/clients), in the custom dashboard. Auth: login with the router's root
+# password -> a ubus session token, re-validated on every privileged call.
+# The CGI runs as root (uhttpd); the only gate is our token check. Port 80 is
+# LAN-only via the firewall, same model LuCI used.
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	local want="$1" pair rest
+	local IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; urldecode "$rest"; return 0;;
+		esac
+	done
+	return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000\r\n\t'; }
+sani()     { printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._@!#%^*()+=:/-' | cut -c1-128; }
+sani_ip()  { printf '%s' "$1" | tr -cd '0-9.' | cut -c1-15; }
+sani_int() { printf '%s' "$1" | tr -cd '0-9' | cut -c1-9; }
+sani_hex() { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-32; }
+sani_word(){ printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-24; }
+fail()     { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+cookie_sid() { echo "${HTTP_COOKIE:-}" | grep -o 'sysauth[A-Za-z_]*=[A-Fa-f0-9]*' | head -1 | sed 's/^[^=]*=//'; }
+root_open() { p="$(sed -n 's/^root:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null)"; [ -z "$p" ]; }
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- login (bootstrap, no token required) ----------
+if [ "$OP" = "login" ]; then
+	PW="$(getp password)"
+	ESC="$(json_esc "$PW")"
+	SID="$(ubus call session login "{\"username\":\"root\",\"password\":\"$ESC\",\"timeout\":3600}" 2>/dev/null | jsonfilter -e '@.ubus_rpc_session' 2>/dev/null)"
+	if [ -n "$SID" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "bad_password"
+	fi
+	exit 0
+fi
+
+# ---------- adopt (bootstrap from an existing LuCI session, no password) ------
+# The Smart AP pages now live INSIDE LuCI. A LuCI page already runs under an
+# authenticated ubus session (its sysauth cookie). Instead of asking for the
+# root password again, the LuCI view passes its own session id here once; we
+# verify it is a REAL privileged session (must hold uci write access — only a
+# logged-in LuCI admin session does) and then mark it kt412ok=1 so the same id
+# works as the token for every later op. Additive: does not change any existing
+# behavior or the password-based login above.
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	root_open && { printf '{"ok":true,"token":"open"}\n'; exit 0; }
+	[ -n "$SID" ] || SID="$(sani_hex "$(cookie_sid)")"
+	[ -n "$SID" ] || fail "no_token"
+	# must be a valid session that can write uci (real authenticated LuCI admin)
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid session ----------
+# PUBLIC read-only telemetry: the dashboard's DISPLAY ops (system stats / traffic /
+# port link / client count) are non-sensitive LAN readings -> allow them WITHOUT a
+# session so the dashboard ALWAYS shows numbers, regardless of root-password / login
+# state. Every state-changing or sensitive op below stays fully gated.
+case "$OP" in summary|traffic|ports|clients) PUBLIC_READ=1;; *) PUBLIC_READ=0;; esac
+if [ "$PUBLIC_READ" != "1" ] && ! root_open; then
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || TOK="$(sani_hex "$(cookie_sid)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
+[ "$MARK" = "1" ] || { ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"; [ "$ACC" = "true" ] || fail "unauthorized"; }
+fi
+[ -n "$TOK" ] && ubus call session set "{\"ubus_rpc_session\":\"$TOK\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+
+wifi_iface_for() {  # $1 = radio  -> echoes the wifi-iface section name
+	local s d
+	for s in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+		d="$(uci -q get wireless.$s.device)"
+		[ "$d" = "$1" ] && { echo "$s"; return 0; }
+	done
+	return 1
+}
+
+# ---------- actions (state changing, POST only) ----------
+ACT="$(getp act | tr -cd 'a-z_')"
+if [ -n "$ACT" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	case "$ACT" in
+		wan_dhcp)
+			uci set network.wan.proto='dhcp'
+			uci -q delete network.wan.username; uci -q delete network.wan.password
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> DHCP"}\n';;
+		wan_pppoe)
+			u="$(getp user)"; p="$(getp pass)"   # raw (NOT sani) so & ? " in passwords survive
+			uci set network.wan.proto='pppoe'
+			uci set network.wan.username="$u"; uci set network.wan.password="$p"
+			uci set network.wan.ipv6='auto'
+			uci set network.wan.mtu='1492'   # PPPoE MTU clamp (avoid large-packet blackhole)
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> PPPoE (%s)"}\n' "$(json_esc "$u")";;
+		wan_static)
+			ip="$(sani_ip "$(getp ip)")"; mask="$(sani_ip "$(getp mask)")"
+			gw="$(sani_ip "$(getp gw)")"; dns="$(sani_ip "$(getp dns)")"
+			[ -n "$ip" ] || fail "no_ip"
+			uci set network.wan.proto='static'
+			uci set network.wan.ipaddr="$ip"
+			uci set network.wan.netmask="${mask:-255.255.255.0}"
+			[ -n "$gw" ] && uci set network.wan.gateway="$gw"
+			[ -n "$dns" ] && uci set network.wan.dns="$dns"
+			uci commit network; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN -> Static"}\n';;
+		wan_reconnect)
+			ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN reconnecting"}\n';;
+		wan_apbridge)
+			# TRUE Access Point passthrough: bridge the WAN uplink port INTO br-lan so
+			# a cable plugged into the WAN socket feeds internet to every LAN + Wi-Fi
+			# client (the upstream router serves DHCP/internet). The device keeps its
+			# STATIC management IP (always reachable -> no lockout) AND gets its own
+			# upstream IP via a DHCP alias so it can ping / reach the internet too.
+			# Local DHCP server is silenced so it doesn't fight the upstream one.
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			wandev="$(uci -q get network.wan.device)"; [ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname)"; [ -n "$wandev" ] || wandev="wan"
+			uci -q get network.$brsec.ports | grep -qw "$wandev" || uci add_list network.$brsec.ports="$wandev"
+			uci -q delete network.wan; uci -q delete network.wan6
+			uci -q set network.wanalias=interface; uci -q set network.wanalias.device='br-lan'; uci -q set network.wanalias.proto='dhcp'
+			uci -q set dhcp.lan.ignore='1'
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"وضع نقطة الوصول: الكابل في WAN يمرّر الإنترنت لكل الأجهزة (DHCP من المصدر). الإدارة تبقى على %s"}\n' "$(json_esc "$(uci -q get network.lan.ipaddr)")";;
+		wan_gateway)
+			# Revert to ROUTER/GATEWAY: take the WAN port back out of br-lan, restore a
+			# routed WAN (DHCP client + NAT from the wan firewall zone) and re-enable
+			# the local DHCP server. Use this when the device IS the main router.
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			for p in wan eth1 wan1; do uci -q del_list network.$brsec.ports="$p" 2>/dev/null; done
+			uci -q delete network.wanalias
+			uci -q set network.wan=interface; uci -q set network.wan.device='wan'; uci -q set network.wan.proto='dhcp'
+			uci -q delete dhcp.lan.ignore
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"وضع الراوتر: WAN عبر DHCP + NAT، خادم DHCP المحلي مُفعّل"}\n';;
+		wan_vlan)
+			vid="$(sani_int "$(getp vid)")"
+			[ -n "$vid" ] || fail "no_vid"
+			if command -v swconfig >/dev/null 2>&1 && swconfig dev switch0 show >/dev/null 2>&1; then
+				# swconfig: retag the WAN switch_vlan + point wan at eth0.<vid>
+				for v in $(uci show network 2>/dev/null | sed -n "s/^network\.\(@switch_vlan\[[0-9]*\]\)\.ports=.*/\1/p"); do
+					pr="$(uci -q get network.$v.ports)"
+					case "$pr" in *"1 "*|*" 1"*|"1"*) uci set network.$v.vlan="$vid";; esac
+				done
+				uci set network.wan.ifname="eth0.$vid"
+				uci -q set network.wan.device="eth0.$vid"
+				uci -q set network.wan6.ifname="eth0.$vid"
+			else
+				# DSA: tag the wan netdev
+				uci set network.wan.device="wan.$vid"
+				uci -q set network.wan6.device="wan.$vid"
+			fi
+			uci commit network
+			/etc/init.d/network reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"WAN VLAN tag = %s"}\n' "$vid";;
+		net_mode)
+			mode="$(getp mode | tr -cd 'a-z')"
+			wandev="$(uci -q get network.wan.device 2>/dev/null)"; [ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname 2>/dev/null)"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"
+				i=$((i+1))
+			done
+			case "$mode" in
+				ap)
+					# dumb AP / switch: bridge WAN port into LAN, DHCP server off,
+					# keep mgmt 192.168.1.1 so access is never lost. PPPoE stays WAN-only.
+					if [ -n "$brsec" ] && [ -n "$wandev" ]; then
+						uci -q del_list network.$brsec.ports="$wandev"
+						uci -q add_list network.$brsec.ports="$wandev"
+					elif [ -n "$wandev" ]; then
+						cur="$(uci -q get network.lan.ifname 2>/dev/null)"
+						case " $cur " in *" $wandev "*) :;; *) uci -q set network.lan.ifname="${cur:+$cur }$wandev";; esac
+					fi
+					uci -q set network.wan.disabled='1'; uci -q set network.wan.auto='0'
+					uci -q set dhcp.lan.ignore='1'
+					uci commit
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+					printf '{"ok":true,"msg":"Access Point: كل المنافذ موصولة، DHCP معطّل، الإدارة تبقى 192.168.1.1"}\n';;
+				router)
+					if [ -n "$brsec" ] && [ -n "$wandev" ]; then uci -q del_list network.$brsec.ports="$wandev"; fi
+					if [ -n "$wandev" ]; then
+						cur="$(uci -q get network.lan.ifname 2>/dev/null)"
+						[ -n "$cur" ] && uci -q set network.lan.ifname="$(echo "$cur" | sed "s/ *$wandev//")"
+					fi
+					uci -q delete network.wan.disabled; uci -q delete network.wan.auto
+					# DHCP stays as-is (off by default); control it from LAN > خادم DHCP.
+					uci commit
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+					printf '{"ok":true,"msg":"Router: WAN إنترنت + NAT (DHCP حسب الزر في LAN)"}\n';;
+				*) fail "bad_mode";;
+			esac;;
+		vlan_add)
+			vid="$(sani_int "$(getp vid)")"; ip="$(sani_ip "$(getp ip)")"; dh="$(getp dhcp | tr -cd '01')"
+			routing="$(getp routing | tr -cd 'a-z')"; [ -n "$routing" ] || routing=internet   # KT412-VLAN-INTER
+			allowv="$(getp allow_vids | tr -cd '0-9,')"
+			dnsm="$(getp dns_mode | tr -cd 'a-z')"; [ -n "$dnsm" ] || dnsm=auto                # KT412-VLAN-DNS
+			dns1="$(sani_ip "$(getp dns1)")"; dns2="$(sani_ip "$(getp dns2)")"
+			nat="$(getp nat | tr -cd 'a-z')"; [ -n "$nat" ] || nat=on                          # KT412-VLAN-NAT
+			[ -n "$vid" ] && [ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			vip="${ip:-192.168.$vid.1}"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			uci -q set network.$brsec.vlan_filtering='1'
+			# default VLAN 1 untagged + pvid on lan ports so MANAGEMENT survives filtering
+			if ! uci show network 2>/dev/null | grep -q "vlan='1'"; then
+				v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
+				for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done
+			fi
+			vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
+			for pp in lan1 lan2 lan3 lan4; do uci add_list network.$vs.ports="$pp:t"; done
+			uci set network.vlan$vid=interface; uci set network.vlan$vid.device="br-lan.$vid"
+			uci set network.vlan$vid.proto='static'; uci set network.vlan$vid.ipaddr="$vip"; uci set network.vlan$vid.netmask='255.255.255.0'
+			if [ "$dh" = "1" ]; then
+				uci set dhcp.vlan$vid=dhcp; uci set dhcp.vlan$vid.interface="vlan$vid"
+				uci set dhcp.vlan$vid.start='100'; uci set dhcp.vlan$vid.limit='150'; uci set dhcp.vlan$vid.leasetime='12h'
+				case "$dnsm" in   # DNS per VLAN via DHCP option 6
+					router|forced) uci add_list dhcp.vlan$vid.dhcp_option="6,$vip";;
+					manual) o="6,${dns1:-1.1.1.1}"; [ -n "$dns2" ] && o="$o,$dns2"; uci add_list dhcp.vlan$vid.dhcp_option="$o";;
+				esac
+			fi
+			z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"
+			uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'
+			case "$routing" in inter) uci set firewall.$z.forward='ACCEPT';; *) uci set firewall.$z.forward='REJECT';; esac
+			# internet via WAN NAT, unless nat=off or routing=isolated
+			if [ "$nat" != "off" ] && [ "$routing" != "isolated" ]; then
+				fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			fi
+			if [ "$routing" = "inter" ]; then           # full inter-VLAN (with mgmt LAN)
+				f2="$(uci add firewall forwarding)"; uci set firewall.$f2.src="vlan$vid"; uci set firewall.$f2.dest='lan'
+				f3="$(uci add firewall forwarding)"; uci set firewall.$f3.src='lan'; uci set firewall.$f3.dest="vlan$vid"
+			elif [ "$routing" = "selected" ] && [ -n "$allowv" ]; then   # route to selected VLANs only
+				oIFS="$IFS"; IFS=','; for t in $allowv; do t="$(printf '%s' "$t" | tr -cd '0-9')"; [ -n "$t" ] || continue
+					fa="$(uci add firewall forwarding)"; uci set firewall.$fa.src="vlan$vid"; uci set firewall.$fa.dest="vlan$t"
+					fb="$(uci add firewall forwarding)"; uci set firewall.$fb.src="vlan$t"; uci set firewall.$fb.dest="vlan$vid"
+				done; IFS="$oIFS"
+			fi
+			if [ "$dnsm" = "forced" ]; then             # force clients to router DNS (hijack 53)
+				rd="$(uci add firewall redirect)"; uci set firewall.$rd.name="vlan$vid-dns"; uci set firewall.$rd.src="vlan$vid"
+				uci set firewall.$rd.proto='tcp udp'; uci set firewall.$rd.src_dport='53'; uci set firewall.$rd.dest_ip="$vip"; uci set firewall.$rd.dest_port='53'; uci set firewall.$rd.target='DNAT'
+			fi
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"VLAN %s: routing=%s NAT=%s DNS=%s IP %s"}\n' "$vid" "$routing" "$nat" "$dnsm" "$(json_esc "$vip")";;
+		vlan_import)
+			data="$(getp config)"; [ -n "$data" ] || fail "no_data"
+			dec="$(printf '%s' "$data" | base64 -d 2>/dev/null)"
+			printf '%s' "$dec" | grep -q 'vlan' || fail "invalid_config"   # validate before apply
+			printf '%s\n' "$dec" | while IFS= read -r line; do
+				case "$line" in
+					network.*vlan*=*|dhcp.*vlan*=*|firewall.*vlan*=*) uci set "$line" 2>/dev/null;;
+				esac
+			done
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم استيراد إعداد VLAN (محمي بـ Safe Apply)"}\n';;
+		vlan_del)
+			vid="$(sani_int "$(getp vid)")"; [ -n "$vid" ] && [ "$vid" != "1" ] || fail "protected_vid"
+			i=0; while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+				if [ "$(uci -q get network.@bridge-vlan[$i].vlan)" = "$vid" ]; then uci delete network.@bridge-vlan[$i]; else i=$((i+1)); fi
+			done
+			uci -q delete network.vlan$vid; uci -q delete dhcp.vlan$vid
+			j=0; while uci -q get firewall.@zone[$j] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@zone[$j].name)" = "vlan$vid" ]; then uci delete firewall.@zone[$j]; else j=$((j+1)); fi
+			done
+			k=0; while uci -q get firewall.@forwarding[$k] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@forwarding[$k].src)" = "vlan$vid" ]; then uci delete firewall.@forwarding[$k]; else k=$((k+1)); fi
+			done
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"VLAN %s حُذف"}\n' "$vid";;
+		vlan_port)
+			vid="$(sani_int "$(getp vid)")"; port="$(sani_word "$(getp port)")"; mode="$(getp mode | tr -cd 'a-z')"
+			[ -n "$vid" ] && [ -n "$port" ] || fail "missing"
+			i=0; sec=""
+			while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@bridge-vlan[$i].vlan)" = "$vid" ] && sec="@bridge-vlan[$i]"; i=$((i+1))
+			done
+			[ -n "$sec" ] || fail "no_vlan"
+			# remove any existing entry for this port, then add new
+			for e in $(uci -q get network.$sec.ports); do
+				case "$e" in "$port"|"$port:"*) uci -q del_list network.$sec.ports="$e";; esac
+			done
+			case "$mode" in
+				untagged) uci add_list network.$sec.ports="$port:u*";;
+				tagged)   uci add_list network.$sec.ports="$port:t";;
+				off)      : ;;  # leave removed
+				*)        uci add_list network.$sec.ports="$port:t";;
+			esac
+			uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"المنفذ %s -> VLAN %s (%s)"}\n' "$port" "$vid" "${mode:-tagged}";;
+		vlan_ssid)
+			sec="$(sani_word "$(getp ssid)")"; vid="$(sani_int "$(getp vid)")"
+			[ -n "$sec" ] || fail "no_ssid"
+			if [ -z "$vid" ] || [ "$vid" = "1" ]; then uci set wireless.$sec.network='lan'; else uci set wireless.$sec.network="vlan$vid"; fi
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"SSID -> %s"}\n' "$([ -z "$vid" ] || [ "$vid" = 1 ] && echo lan || echo vlan$vid)";;
+		vlan_all|vlan_flex)
+			# FLEXIBLE VLAN: choose EXACTLY what joins VLAN X — any subset of LAN
+			# ports, all ports, none; plus optionally all Wi-Fi (AP) and/or Mesh.
+			# Inputs:
+			#   vid   : 2..4094 to apply; empty or 1 => remove VLAN (all back to LAN)
+			#   ports : csv of lan1..lan4 that join VLAN X (empty = no wired port)
+			#   mode  : 'tag' (trunk: port keeps untagged LAN1 + tagged X)  [default]
+			#         | 'access' (port is untagged PVID X; leaves the LAN bridge)
+            #   wifi  : 1 => bind every AP SSID (both bands) to VLAN X
+            #   mesh  : 1 => bind every Mesh iface to VLAN X
+            # RECOVERY-SAFE: VLAN X is a routed subnet with its own DHCP + gateway
+            # IP, so even an 'access' client always gets an IP and can reach the
+            # device at the VLAN gateway — no hard lockout. Non-selected ports stay
+            # untagged LAN (management).
+			vid="$(sani_int "$(getp vid)")"
+			pmode="$(getp mode | tr -cd 'a-z')"; [ "$pmode" = "access" ] || pmode=tag
+			wifi="$(getp wifi | tr -cd '01')"; mesh="$(getp mesh | tr -cd '01')"
+			praw="$(getp ports | tr 'A-Z' 'a-z' | tr -cd 'lanw0-9,')"
+			SELP=""; OLDIFS="$IFS"; IFS=','
+			for t in $praw; do case "$t" in lan1|lan2|lan3|lan4|wan) case " $SELP " in *" $t "*) :;; *) SELP="$SELP $t";; esac;; esac; done
+			IFS="$OLDIFS"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			# ----- always clear prior VLAN artifacts first (idempotent rebuild) -----
+			# Drop any prior WAN-port bridge membership; it is re-added below only if the
+			# operator selected 'wan' this time, so the WAN role is restored otherwise.
+			uci -q del_list network.$brsec.ports='wan' 2>/dev/null
+			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
+			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done
+			for d in $(uci show dhcp 2>/dev/null | sed -n "s/^dhcp\.\(vlan[0-9]*\)=dhcp/\1/p"); do uci -q delete dhcp.$d; done
+			j=0; while uci -q get firewall.@zone[$j] >/dev/null 2>&1; do case "$(uci -q get firewall.@zone[$j].name)" in vlan[0-9]*) uci delete firewall.@zone[$j];; *) j=$((j+1));; esac; done
+			k=0; while uci -q get firewall.@forwarding[$k] >/dev/null 2>&1; do case "$(uci -q get firewall.@forwarding[$k].src)" in vlan[0-9]*) uci delete firewall.@forwarding[$k];; *) k=$((k+1));; esac; done
+			if [ -z "$vid" ] || [ "$vid" = "1" ]; then
+				for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do uci -q set wireless.$wif.network='lan'; done
+				uci -q delete network.$brsec.vlan_filtering
+				uci commit; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"تم إلغاء VLAN — الكل على LAN"}\n'; exit 0
+			fi
+			[ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			vip="10.$(( (vid/250)%250 )).$(( vid%250 )).1"
+			uci -q set network.$brsec.vlan_filtering='1'
+			# If the operator picked the WAN port, fold it into br-lan as a bridge port
+			# (it is a standalone DSA port by default) so it can carry the VLAN like a
+			# LAN port. Mirrors the wan_apbridge precedent; reverted on VLAN reset.
+			case " $SELP " in *" wan "*)
+				cur="$(uci -q get network.$brsec.ports 2>/dev/null)"
+				case " $cur " in *" wan "*) :;; *) uci -q add_list network.$brsec.ports='wan';; esac
+				MGMTP="lan1 lan2 lan3 lan4 wan";;
+			*) MGMTP="lan1 lan2 lan3 lan4";;
+			esac
+			# VLAN 1 (management) untagged on every port EXCEPT access-mode VLAN-X ports
+			v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
+			for pp in $MGMTP; do
+				skip=0
+				if [ "$pmode" = "access" ]; then case " $SELP " in *" $pp "*) skip=1;; esac; fi
+				[ "$skip" = 0 ] && uci add_list network.$v1.ports="$pp:u*"
+			done
+			# VLAN X on the SELECTED ports (tagged trunk, or untagged access)
+			if [ -n "$SELP" ]; then
+				vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
+				for pp in $SELP; do [ "$pmode" = "access" ] && uci add_list network.$vs.ports="$pp:u*" || uci add_list network.$vs.ports="$pp:t"; done
+			else
+				# wifi/mesh-only VLAN still needs the X bridge-vlan to exist for br-lan.X
+				vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"; uci set network.$vs.local='1'
+			fi
+			uci -q set network.vlan$vid=interface; uci -q set network.vlan$vid.device="br-lan.$vid"
+			uci -q set network.vlan$vid.proto='static'; uci -q set network.vlan$vid.ipaddr="$vip"; uci -q set network.vlan$vid.netmask='255.255.255.0'
+			uci -q set dhcp.vlan$vid=dhcp; uci -q set dhcp.vlan$vid.interface="vlan$vid"; uci -q set dhcp.vlan$vid.start='100'; uci -q set dhcp.vlan$vid.limit='150'; uci -q set dhcp.vlan$vid.leasetime='12h'
+			z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"; uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'; uci set firewall.$z.forward='REJECT'
+			fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			# Wi-Fi binding: AP ifaces if wifi=1, Mesh ifaces if mesh=1; others -> LAN
+			for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+				wm="$(uci -q get wireless.$wif.mode)"
+				if [ "$wm" = "mesh" ]; then [ "$mesh" = "1" ] && uci -q set wireless.$wif.network="vlan$vid" || uci -q set wireless.$wif.network='lan'
+				else [ "$wifi" = "1" ] && uci -q set wireless.$wif.network="vlan$vid" || uci -q set wireless.$wif.network='lan'; fi
+			done
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"VLAN %s طُبّق (منافذ:%s%s%s) — الإدارة آمنة على %s"}\n' "$vid" "${SELP:- لا شيء}" "$([ "$wifi" = 1 ] && echo ' +واي‑فاي')" "$([ "$mesh" = 1 ] && echo ' +ميش')" "$vip";;
+		mesh_vlan)
+			# MESH on a chosen radio + that radio ALSO serves clients (phones) on the
+			# SAME band, all on VLAN X. The mesh forwards (mesh_fwding) so traffic is
+			# relayed; the AP iface on the same radio accepts client traffic both ways.
+			vid="$(sani_int "$(getp vid)")"
+			radio="$(sani_word "$(getp radio)")"
+			mid="$(printf '%s' "$(getp mesh_id)" | tr -cd 'A-Za-z0-9 _-' | cut -c1-32)"
+			mkey="$(sani "$(getp key)")"
+			[ -n "$radio" ] || fail "no_radio"
+			[ -n "$mid" ] || fail "no_mesh_id"
+			[ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+			[ "$(uci -q get wireless.$radio 2>/dev/null)" = "wifi-device" ] || fail "bad_radio"
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] || fail "no_bridge"
+			uci -q set network.$brsec.vlan_filtering='1'
+			# ensure VLAN 1 (mgmt) untagged on all lan ports so admin is never lost
+			uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='1'" || {
+				v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'
+				for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done
+			}
+			# VLAN X bridge-vlan (for br-lan.X) if missing
+			uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='$vid'" || {
+				vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"
+			}
+			vip="10.$(( (vid/250)%250 )).$(( vid%250 )).1"
+			uci -q set network.vlan$vid=interface; uci -q set network.vlan$vid.device="br-lan.$vid"
+			uci -q set network.vlan$vid.proto='static'; uci -q set network.vlan$vid.ipaddr="$vip"; uci -q set network.vlan$vid.netmask='255.255.255.0'
+			uci -q set dhcp.vlan$vid=dhcp; uci -q set dhcp.vlan$vid.interface="vlan$vid"; uci -q set dhcp.vlan$vid.start='100'; uci -q set dhcp.vlan$vid.limit='150'; uci -q set dhcp.vlan$vid.leasetime='12h'
+			uci show firewall 2>/dev/null | grep -q "name='vlan$vid'" || {
+				z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"; uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'; uci set firewall.$z.forward='REJECT'
+				fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'
+			}
+			# AP iface on this radio serves clients on the VLAN (both directions)
+			apsec="$(wifi_iface_for "$radio")"
+			[ -n "$apsec" ] && uci -q set wireless.$apsec.network="vlan$vid"
+			# mesh iface on the SAME radio (reuse existing or create), on the VLAN
+			msec=""
+			for w in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+				[ "$(uci -q get wireless.$w.device)" = "$radio" ] && [ "$(uci -q get wireless.$w.mode)" = "mesh" ] && msec="$w"
+			done
+			[ -n "$msec" ] || { msec="kt412mesh${radio}"; uci -q set wireless.$msec=wifi-iface; uci -q set wireless.$msec.device="$radio"; }
+			uci -q set wireless.$msec.mode='mesh'
+			uci -q set wireless.$msec.mesh_id="$mid"
+			uci -q set wireless.$msec.mesh_fwding='1'
+			uci -q set wireless.$msec.network="vlan$vid"
+			if [ -n "$mkey" ] && [ "${#mkey}" -ge 8 ]; then uci -q set wireless.$msec.encryption='sae'; uci -q set wireless.$msec.key="$mkey"
+			else uci -q set wireless.$msec.encryption='none'; uci -q delete wireless.$msec.key; fi
+			uci -q delete wireless.$radio.disabled
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Mesh \"%s\" على %s + خدمة العملاء على VLAN %s (بوابة %s)"}\n' "$(json_esc "$mid")" "$(json_esc "$radio")" "$vid" "$vip";;
+		program_mode)
+			# AL-MALAKI-style unified "وضع البرمجة": ONE mode drives the whole device.
+			# Modes: ap, ap_vlan, mesh, mesh_vlan, wds_tx, wds_tx_vlan, wds_rx,
+			#        wds_rx_vlan, broadband. Plus IP / channels / password / wipe.
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			pm="$(getp mode | tr -cd 'a-z_')"; [ -n "$pm" ] || fail "no_mode"
+			ipa="$(sani_ip "$(getp ip)")"; vid="$(sani_int "$(getp vid)")"
+			ssid="$(sani "$(getp ssid)")"; key="$(sani "$(getp key)")"
+			ch24="$(sani_int "$(getp ch24)")"; ch5="$(sani_int "$(getp ch5)")"
+			mid="$(printf '%s' "$(getp mesh_id)" | tr -cd 'A-Za-z0-9 _-' | cut -c1-32)"
+			mkey="$(sani "$(getp mesh_key)")"
+			radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || radio="radio1"
+			ussid="$(sani "$(getp up_ssid)")"; ubss="$(getp up_bssid | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"
+			np="$(getp newpass | tr -d '\r\n' | cut -c1-64)"; wipe="$(getp wipe | tr -cd '01')"
+			safe="$(getp safe | tr -cd '01')"
+			# broadband (router) WAN credentials: PPPoE user/pass (optional; blank = DHCP)
+			bbu="$(getp pppoe_user | tr -d '\r\n' | cut -c1-128)"; bbp="$(getp pppoe_pass | tr -d '\r\n' | cut -c1-128)"
+			# SAFE APPLY (auto-rollback): snapshot config BEFORE we touch anything, so a
+			# detached watcher can restore it if the operator never confirms (e.g. a bad
+			# IP/VLAN locked them out). Mirrors LuCI's "apply unchecked → confirm" flow.
+			# NEVER reboots — it only restores /etc/config and reloads services.
+			if [ "$safe" = "1" ]; then
+				RB=/tmp/kt412-rbp; rm -rf "$RB" 2>/dev/null; mkdir -p "$RB"
+				for cf in network wireless dhcp firewall luci; do cp "/etc/config/$cf" "$RB/$cf" 2>/dev/null; done
+				rm -f /tmp/kt412-confirm 2>/dev/null
+			fi
+			# optional "حذف الإعدادات السابقة": clear prior VLAN scaffolding + our mesh
+			# ifaces for a clean slate, WITHOUT touching LAN/management (lockout-safe).
+			if [ "$wipe" = "1" ]; then
+				n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
+				for nn in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$nn; done
+				for dd in $(uci show dhcp 2>/dev/null | sed -n "s/^dhcp\.\(vlan[0-9]*\)=dhcp/\1/p"); do uci -q delete dhcp.$dd; done
+				jj=0; while uci -q get firewall.@zone[$jj] >/dev/null 2>&1; do case "$(uci -q get firewall.@zone[$jj].name)" in vlan[0-9]*) uci delete firewall.@zone[$jj];; *) jj=$((jj+1));; esac; done
+				kk=0; while uci -q get firewall.@forwarding[$kk] >/dev/null 2>&1; do case "$(uci -q get firewall.@forwarding[$kk].src)" in vlan[0-9]*) uci delete firewall.@forwarding[$kk];; *) kk=$((kk+1));; esac; done
+				for ws in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\(kt412mesh[^.=]*\)=wifi-iface/\1/p"); do uci -q delete wireless.$ws; done
+				bb=""; ii=0; while uci -q get network.@device[$ii] >/dev/null 2>&1; do [ "$(uci -q get network.@device[$ii].name)" = "br-lan" ] && bb="@device[$ii]"; ii=$((ii+1)); done
+				[ -n "$bb" ] && uci -q delete network.$bb.vlan_filtering
+			fi
+			ap0="$(wifi_iface_for radio0)"; ap1="$(wifi_iface_for radio1)"
+			# channels (best-effort; invalid ones simply ignored by netifd)
+			[ -n "$ch24" ] && uci -q set wireless.radio0.channel="$ch24"
+			[ -n "$ch5" ]  && uci -q set wireless.radio1.channel="$ch5"
+			# target network: lan, or vlanX for *_vlan modes
+			net="lan"
+			case "$pm" in *vlan*) [ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"; net="vlan$vid";; esac
+			# (re)build the VLAN routed network when a *_vlan mode is chosen
+			if [ "$net" != "lan" ]; then
+				brsec=""; i=0
+				while uci -q get network.@device[$i] >/dev/null 2>&1; do
+					[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+				done
+				[ -n "$brsec" ] || fail "no_bridge"
+				uci -q set network.$brsec.vlan_filtering='1'
+				uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='1'" || { v1="$(uci add network bridge-vlan)"; uci set network.$v1.device='br-lan'; uci set network.$v1.vlan='1'; for pp in lan1 lan2 lan3 lan4; do uci add_list network.$v1.ports="$pp:u*"; done; }
+				uci show network 2>/dev/null | grep -Eq "bridge-vlan\[[0-9]+\]\.vlan='$vid'" || { vs="$(uci add network bridge-vlan)"; uci set network.$vs.device='br-lan'; uci set network.$vs.vlan="$vid"; for pp in lan1 lan2 lan3 lan4; do uci add_list network.$vs.ports="$pp:t"; done; }
+				vip="10.$(( (vid/250)%250 )).$(( vid%250 )).1"
+				uci -q set network.vlan$vid=interface; uci -q set network.vlan$vid.device="br-lan.$vid"
+				uci -q set network.vlan$vid.proto='static'; uci -q set network.vlan$vid.ipaddr="$vip"; uci -q set network.vlan$vid.netmask='255.255.255.0'
+				uci -q set dhcp.vlan$vid=dhcp; uci -q set dhcp.vlan$vid.interface="vlan$vid"; uci -q set dhcp.vlan$vid.start='100'; uci -q set dhcp.vlan$vid.limit='150'; uci -q set dhcp.vlan$vid.leasetime='12h'
+				uci show firewall 2>/dev/null | grep -q "name='vlan$vid'" || { z="$(uci add firewall zone)"; uci set firewall.$z.name="vlan$vid"; uci add_list firewall.$z.network="vlan$vid"; uci set firewall.$z.input='ACCEPT'; uci set firewall.$z.output='ACCEPT'; uci set firewall.$z.forward='REJECT'; fwd="$(uci add firewall forwarding)"; uci set firewall.$fwd.src="vlan$vid"; uci set firewall.$fwd.dest='wan'; }
+			fi
+			# per-mode wireless setup
+			case "$pm" in
+				ap|ap_vlan|broadband|wds_tx|wds_tx_vlan)
+					for s in "$ap0:radio0" "$ap1:radio1"; do
+						si="${s%%:*}"; ri="${s##*:}"; [ -n "$si" ] || continue
+						uci -q set wireless.$si.mode='ap'; uci -q set wireless.$si.network="$net"
+						[ -n "$ssid" ] && uci -q set wireless.$si.ssid="$ssid"
+						if [ -n "$key" ] && [ "${#key}" -ge 8 ]; then uci -q set wireless.$si.encryption='psk2'; uci -q set wireless.$si.key="$key"; else uci -q set wireless.$si.encryption='none'; uci -q delete wireless.$si.key; fi
+						uci -q delete wireless.$si.bssid; uci -q delete wireless.$si.mesh_id
+						case "$pm" in wds_tx*) uci -q set wireless.$si.wds='1';; *) uci -q delete wireless.$si.wds;; esac
+						uci -q delete wireless.$ri.disabled
+					done
+					;;
+				wds_rx|wds_rx_vlan)
+					rs="$(wifi_iface_for "$radio")"; [ -n "$rs" ] || fail "radio_not_found"
+					uci -q set wireless.$rs.mode='sta'; uci -q set wireless.$rs.wds='1'; uci -q set wireless.$rs.network="$net"
+					[ -n "$ussid" ] && uci -q set wireless.$rs.ssid="$ussid"
+					[ -n "$ubss" ] && uci -q set wireless.$rs.bssid="$ubss" || uci -q delete wireless.$rs.bssid
+					if [ -n "$key" ]; then uci -q set wireless.$rs.encryption='psk2'; uci -q set wireless.$rs.key="$key"; else uci -q set wireless.$rs.encryption='none'; fi
+					uci -q delete wireless.$radio.disabled
+					;;
+				mesh|mesh_vlan)
+					ms=""; for w in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do [ "$(uci -q get wireless.$w.device)" = "$radio" ] && [ "$(uci -q get wireless.$w.mode)" = "mesh" ] && ms="$w"; done
+					[ -n "$ms" ] || { ms="kt412mesh${radio}"; uci -q set wireless.$ms=wifi-iface; uci -q set wireless.$ms.device="$radio"; }
+					uci -q set wireless.$ms.mode='mesh'; uci -q set wireless.$ms.mesh_id="${mid:-kt412-mesh}"; uci -q set wireless.$ms.mesh_fwding='1'; uci -q set wireless.$ms.network="$net"
+					if [ -n "$mkey" ] && [ "${#mkey}" -ge 8 ]; then uci -q set wireless.$ms.encryption='sae'; uci -q set wireless.$ms.key="$mkey"; else uci -q set wireless.$ms.encryption='none'; uci -q delete wireless.$ms.key; fi
+					aps="$(wifi_iface_for "$radio")"
+					if [ -n "$aps" ]; then uci -q set wireless.$aps.mode='ap'; uci -q set wireless.$aps.network="$net"; [ -n "$ssid" ] && uci -q set wireless.$aps.ssid="$ssid"; if [ -n "$key" ] && [ "${#key}" -ge 8 ]; then uci -q set wireless.$aps.encryption='psk2'; uci -q set wireless.$aps.key="$key"; else uci -q set wireless.$aps.encryption='none'; fi; fi
+					uci -q delete wireless.$radio.disabled
+					;;
+				*) fail "bad_mode";;
+			esac
+			# broadband = router mode: WAN active + NAT; otherwise pure AP.
+			# If PPPoE user given -> PPPoE (username/password + MTU clamp), else DHCP.
+			if [ "$pm" = "broadband" ] && uci -q get network.wan >/dev/null 2>&1; then
+				if [ -n "$bbu" ]; then
+					uci -q set network.wan.proto='pppoe'
+					uci -q set network.wan.username="$bbu"
+					uci -q set network.wan.password="$bbp"
+					uci -q set network.wan.mtu='1492'
+					uci -q delete network.wan.ipaddr; uci -q delete network.wan.netmask; uci -q delete network.wan.gateway
+				else
+					uci -q set network.wan.proto='dhcp'
+					uci -q delete network.wan.username; uci -q delete network.wan.password
+				fi
+			fi
+			# optional LAN IP change (applied last; operator reconnects on the new IP)
+			[ -n "$ipa" ] && uci -q set network.lan.ipaddr="$ipa"
+			uci commit
+			# optional device (root) password change
+			[ -n "$np" ] && printf '%s\n%s\n' "$np" "$np" | passwd root >/dev/null 2>&1
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			# arm the auto-rollback watcher (detached so it survives this CGI exit and the
+			# network reload). If /tmp/kt412-confirm is not created within 90s, restore.
+			if [ "$safe" = "1" ]; then
+				setsid sh -c '
+					i=0; while [ $i -lt 90 ]; do [ -f /tmp/kt412-confirm ] && exit 0; sleep 1; i=$((i+1)); done
+					[ -f /tmp/kt412-confirm ] && exit 0
+					for cf in network wireless dhcp firewall luci; do cp "/tmp/kt412-rbp/$cf" "/etc/config/$cf" 2>/dev/null; done
+					/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+					logger -t kt412-prog "auto-rollback: program_mode reverted (no confirm in 90s)"
+				' >/dev/null 2>&1 </dev/null &
+			fi
+			printf '{"ok":true,"safe":"%s","msg":"تم تطبيق وضع البرمجة: %s%s%s"}\n' "${safe:-0}" "$(json_esc "$pm")" "$([ -n "$ipa" ] && echo " — IP $ipa")" "$([ "$net" != lan ] && echo " — VLAN $vid")";;
+		program_confirm)
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			: > /tmp/kt412-confirm
+			rm -rf /tmp/kt412-rbp 2>/dev/null
+			printf '{"ok":true,"msg":"تم تثبيت الإعدادات (أُلغي التراجع التلقائي)"}\n';;
+		vlan_reset)
+			n=0; while [ "$n" -lt 64 ] && uci -q delete network.@bridge-vlan[0] 2>/dev/null; do n=$((n+1)); done
+			for n in $(uci show network 2>/dev/null | sed -n "s/^network\.\(vlan[0-9]*\)=interface/\1/p"); do uci -q delete network.$n; done
+			for d in $(uci show dhcp 2>/dev/null | sed -n "s/^dhcp\.\(vlan[0-9]*\)=dhcp/\1/p"); do uci -q delete dhcp.$d; done
+			j=0; while uci -q get firewall.@zone[$j] >/dev/null 2>&1; do
+				case "$(uci -q get firewall.@zone[$j].name)" in vlan[0-9]*) uci delete firewall.@zone[$j];; *) j=$((j+1));; esac
+			done
+			k=0; while uci -q get firewall.@forwarding[$k] >/dev/null 2>&1; do
+				case "$(uci -q get firewall.@forwarding[$k].src)" in vlan[0-9]*) uci delete firewall.@forwarding[$k];; *) k=$((k+1));; esac
+			done
+			brsec=""; i=0; while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1)); done
+			[ -n "$brsec" ] && uci -q delete network.$brsec.vlan_filtering
+			uci commit
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تمت إعادة ضبط VLAN (الإدارة سليمة)"}\n';;
+		wifi_apply)
+			radio="$(sani_word "$(getp radio)")"
+			ssid="$(sani "$(getp ssid)")"; key="$(sani "$(getp key)")"
+			mode="$(printf '%s' "$(getp mode)" | tr -cd 'a-z-')"
+			chan="$(sani_word "$(getp channel)")"; htmode="$(sani_word "$(getp htmode)")"
+			country="$(printf '%s' "$(getp country)" | tr -cd 'A-Za-z' | cut -c1-2 | tr a-z A-Z)"
+			hidden="$(getp hidden | tr -cd '01')"
+			keepkey="$(getp keepkey | tr -cd '01')"
+			[ -n "$radio" ] || fail "no_radio"
+			ifsec="$(wifi_iface_for "$radio")"
+			[ -n "$ifsec" ] || fail "radio_not_found"
+			[ -n "$mode" ] || mode=ap
+			# reset mode-specific options first
+			uci -q delete wireless.$ifsec.wds
+			uci -q delete wireless.$ifsec.mesh_id
+			uci -q delete wireless.$ifsec.mesh_fwding
+			# Encryption/key policy (fixes the WPA2->open downgrade):
+			#  - keepkey=1  -> the user left the key blank on a secured network: leave
+			#    the EXISTING encryption + key exactly as-is (lets them change channel
+			#    /mode/SSID without retyping the password).
+			#  - else key given -> set WPA2 (sae for mesh) with that key.
+			#  - else (user explicitly chose open: key empty AND keepkey unset) -> open.
+			set_enc() {  # $1 = wpa mode for a present key (psk2|sae)
+				if [ "$keepkey" = "1" ]; then return 0; fi
+				if [ -n "$key" ]; then uci set wireless.$ifsec.encryption="$1"; uci set wireless.$ifsec.key="$key"
+				else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi
+			}
+			case "$mode" in
+				mesh)
+					uci set wireless.$ifsec.mode='mesh'
+					uci set wireless.$ifsec.mesh_id="${ssid:-kt412-mesh}"
+					uci set wireless.$ifsec.mesh_fwding='1'
+					uci set wireless.$ifsec.network='lan'   # bridge the mesh into LAN so peers pass traffic
+					uci -q delete wireless.$ifsec.ssid
+					# mesh needs >=8 char key for sae; too-short non-empty key falls back to open
+					if [ "$keepkey" != "1" ] && [ -n "$key" ] && [ "${#key}" -lt 8 ]; then key=""; fi
+					set_enc sae;;
+				sta)
+					uci set wireless.$ifsec.mode='sta'
+					uci set wireless.$ifsec.ssid="$ssid"
+					set_enc psk2;;
+				ap-wds)
+					uci set wireless.$ifsec.mode='ap'; uci set wireless.$ifsec.wds='1'
+					uci set wireless.$ifsec.ssid="$ssid"
+					set_enc psk2;;
+				*)
+					uci set wireless.$ifsec.mode='ap'
+					uci set wireless.$ifsec.ssid="$ssid"
+					set_enc psk2;;
+			esac
+			[ -n "$hidden" ] && uci set wireless.$ifsec.hidden="$hidden"
+			[ -n "$chan" ] && uci set wireless.$radio.channel="$chan"
+			[ -n "$htmode" ] && uci set wireless.$radio.htmode="$htmode"
+			[ -n "$country" ] && uci set wireless.$radio.country="$country"
+			uci -q delete wireless.$radio.disabled
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Wi-Fi updated (%s)"}\n' "$mode";;
+		station_uplink)   # WISP/repeater: chosen radio -> sta client locked to a scanned AP, bridged to LAN via relayd
+			radio="$(sani_word "$(getp radio)")"
+			ssid="$(getp ssid)"; key="$(getp key)"               # raw: keys may contain spaces/&/"
+			bssid="$(getp bssid | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"
+			[ -n "$radio" ] && [ -n "$ssid" ] || fail "radio_ssid_required"
+			ifsec="$(wifi_iface_for "$radio")"; [ -n "$ifsec" ] || fail "radio_not_found"
+			# 1) make the radio iface a station on its own 'wwan' network, locked to the picked BSSID
+			uci -q delete wireless.$ifsec.wds; uci -q delete wireless.$ifsec.mesh_id; uci -q delete wireless.$ifsec.mesh_fwding
+			uci set wireless.$ifsec.mode='sta'
+			uci set wireless.$ifsec.network='wwan'
+			uci set wireless.$ifsec.ssid="$ssid"
+			[ -n "$bssid" ] && uci set wireless.$ifsec.bssid="$bssid" || uci -q delete wireless.$ifsec.bssid
+			if [ -n "$key" ]; then uci set wireless.$ifsec.encryption='psk2'; uci set wireless.$ifsec.key="$key"
+			else uci set wireless.$ifsec.encryption='none'; uci -q delete wireless.$ifsec.key; fi
+			uci -q delete wireless.$radio.disabled
+			# 2) wwan = DHCP client on the uplink AP
+			uci set network.wwan=interface; uci set network.wwan.proto='dhcp'
+			# 3) relayd pseudo-bridge wwan <-> lan (one flat L2 so LAN clients share the uplink)
+			uci -q delete network.wwanbridge
+			uci set network.wwanbridge=interface; uci set network.wwanbridge.proto='relay'
+			uci set network.wwanbridge.network='lan wwan'
+			uci set network.wwanbridge.ipaddr="$(uci -q get network.lan.ipaddr)"
+			# 4) firewall: put wwan in the wan zone so traffic is allowed out
+			zi=0; while uci -q get firewall.@zone[$zi] >/dev/null 2>&1; do
+				if [ "$(uci -q get firewall.@zone[$zi].name)" = "wan" ]; then
+					uci -q del_list firewall.@zone[$zi].network='wwan'
+					uci -q add_list firewall.@zone[$zi].network='wwan'; fi
+				zi=$((zi+1)); done
+			uci commit
+			wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"Station uplink -> %s (relayd bridge to LAN)"}\n' "$(json_esc "$ssid")";;
+		wifi_toggle)
+			radio="$(sani_word "$(getp radio)")"; on="$(getp on | tr -cd '01')"
+			[ -n "$radio" ] || fail "no_radio"
+			if [ "$on" = "1" ]; then uci -q delete wireless.$radio.disabled; else uci set wireless.$radio.disabled='1'; fi
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"radio %s"}\n' "$([ "$on" = 1 ] && echo on || echo off)";;
+		txpower)
+			radio="$(sani_word "$(getp radio)")"; dbm="$(sani_int "$(getp dbm)")"
+			[ -n "$radio" ] && [ -n "$dbm" ] || fail "missing_params"
+			# clamp to the allowed range 0..30 (Max allowed = 30, Min = 0)
+			[ "$dbm" -gt 30 ] 2>/dev/null && dbm=30
+			[ "$dbm" -lt 0 ] 2>/dev/null && dbm=0
+			uci set wireless.$radio.txpower="$dbm"; uci commit wireless
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			# resolve the REAL phy + live iface via ubus (phy index != radio index here)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			iw phy "phy${phyn:-0}" set txpower fixed "$((dbm*100))" >/dev/null 2>&1
+			wifi reload >/dev/null 2>&1
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			actp="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+			printf '{"ok":true,"requested":%s,"actual":%s}\n' "${dbm:-0}" "${actp:-0}";;
+		quick_setup)   # one-shot device setup: mode + SSID + pass + country + txpower + channels + LAN IP
+			ssid="$(getp ssid)"; pass="$(getp pass)"; ctry="$(sani_word "$(getp country)")"
+			tp="$(sani_int "$(getp txpower)")"; lip="$(sani_ip "$(getp lan_ip)")"
+			qmode="$(getp mode | tr -cd 'a-z')"; pu="$(getp pppoe_user)"; pp="$(getp pppoe_pass)"
+			ch24="$(sani_int "$(getp ch24)")"; ch5="$(sani_int "$(getp ch5)")"
+			openw="$(getp open | tr -cd '01')"
+			hidden="$(getp hidden | tr -cd '01')"
+			ht24="$(getp ht24 | tr -cd 'A-Za-z0-9')"; ht5="$(getp ht5 | tr -cd 'A-Za-z0-9')"
+			en24="$(getp en24 | tr -cd '01')"; en5="$(getp en5 | tr -cd '01')"
+			if [ -n "$tp" ]; then [ "$tp" -gt 30 ] 2>/dev/null && tp=30; [ "$tp" -lt 0 ] 2>/dev/null && tp=0; fi
+			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+				bd="$(uci -q get wireless.$r.band)"
+				# per-radio enable/disable (default: keep enabled)
+				if [ "$bd" = "5g" ]; then [ "$en5" = "0" ] && uci -q set wireless.$r.disabled='1' || uci -q set wireless.$r.disabled='0'
+				else [ "$en24" = "0" ] && uci -q set wireless.$r.disabled='1' || uci -q set wireless.$r.disabled='0'; fi
+				[ -n "$ctry" ] && uci -q set wireless.$r.country="$ctry"
+				[ -n "$tp" ] && uci -q set wireless.$r.txpower="$tp"
+				if [ "$bd" = "5g" ]; then [ -n "$ch5" ] && uci -q set wireless.$r.channel="$ch5"; [ -n "$ht5" ] && uci -q set wireless.$r.htmode="$ht5"
+				else [ -n "$ch24" ] && uci -q set wireless.$r.channel="$ch24"; [ -n "$ht24" ] && uci -q set wireless.$r.htmode="$ht24"; fi
+			done
+			for i in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+				dv="$(uci -q get wireless.$i.device)"; bd="$(uci -q get wireless.$dv.band)"
+				[ -n "$hidden" ] && uci -q set wireless.$i.hidden="$hidden"
+				if [ -n "$ssid" ]; then
+					if [ "$bd" = "5g" ]; then uci -q set wireless.$i.ssid="${ssid}-5G"; else uci -q set wireless.$i.ssid="$ssid"; fi
+				fi
+				if [ "$openw" = "1" ]; then
+					# open network: NEVER leave WPA with an empty key (that breaks hostapd)
+					uci -q set wireless.$i.encryption='none'; uci -q delete wireless.$i.key
+				elif [ -n "$pass" ] && [ "${#pass}" -ge 8 ]; then
+					uci -q set wireless.$i.encryption='psk2'; uci -q set wireless.$i.key="$pass"
+				fi
+			done
+			uci -q commit wireless
+			[ -n "$lip" ] && { uci -q set network.lan.ipaddr="$lip"; uci -q commit network; }
+			# device mode: access (AP/router, default) | pppoe (WAN PPPoE) | station (5G client)
+			case "$qmode" in
+				pppoe)
+					uci -q set network.wan.proto='pppoe'
+					[ -n "$pu" ] && uci -q set network.wan.username="$pu"
+					[ -n "$pp" ] && uci -q set network.wan.password="$pp"
+					uci -q commit network;;
+				station)
+					for d in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+						[ "$(uci -q get wireless.$d.band)" = "5g" ] || continue
+						si="$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)\.device=['\"]\?$d['\"]\?\$/\1/p" | head -1)"
+						[ -n "$si" ] && [ -n "$ssid" ] || continue
+						uci -q set wireless.$si.mode='sta'; uci -q set wireless.$si.network='wan'
+						uci -q set wireless.$si.ssid="$ssid"
+						[ -n "$pass" ] && { uci -q set wireless.$si.encryption='psk2'; uci -q set wireless.$si.key="$pass"; }
+						uci -q commit wireless
+					done;;
+				*) : ;;
+			esac
+			wifi reload >/dev/null 2>&1; /etc/init.d/network reload >/dev/null 2>&1
+			msg="تم تطبيق الإعداد السريع"
+			[ -n "$pass" ] && [ "${#pass}" -lt 8 ] && msg="طُبّق — لكن كلمة المرور تجاهلت (يجب 8 أحرف+)"
+			printf '{"ok":true,"msg":"%s"}\n' "$msg";;
+		wifi_restart)
+			wifi reload >/dev/null 2>&1; printf '{"ok":true,"msg":"Wi-Fi restarted"}\n';;
+		wifi_optimize)
+			radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || fail "no_radio"
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			band="$(uci -q get wireless.$radio.band)"
+			# 2.4G: evaluate ALL channels 1..11 weighted by adjacent overlap (+-2);
+			# 5G: exact non-DFS channels.
+			if [ "$band" = "5g" ]; then cand="36 40 44 48 149 153 157 161"; ov=0; else cand="1 2 3 4 5 6 7 8 9 10 11"; ov=2; fi
+			counts="$(iwinfo "$dev" scan 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')"
+			best=""; bestn=999999
+			for c in $cand; do
+				lo=$((c-ov)); hi=$((c+ov)); w=0
+				for ch in $counts; do
+					[ "$ch" -ge "$lo" ] 2>/dev/null && [ "$ch" -le "$hi" ] 2>/dev/null && w=$((w+1))
+				done
+				[ "$w" -lt "$bestn" ] && { bestn="$w"; best="$c"; }
+			done
+			[ -n "$best" ] || best=1
+			uci set wireless.$radio.channel="$best"
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"channel":"%s","neighbors":%s}\n' "$best" "${bestn:-0}";;
+		wifi_autochan)
+			radio="$(sani_word "$(getp radio)")"; on="$(getp on | tr -cd '01')"; ch="$(sani_word "$(getp channel)")"
+			[ -n "$radio" ] || fail "no_radio"
+			if [ "$on" = "1" ]; then
+				uci set wireless.$radio.channel='auto'
+			else
+				if [ -z "$ch" ] || [ "$ch" = "auto" ]; then
+					[ "$(uci -q get wireless.$radio.band)" = "5g" ] && ch=149 || ch=6
+				fi
+				uci set wireless.$radio.channel="$ch"
+			fi
+			uci commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"auto":"%s","channel":"%s"}\n' "${on:-0}" "$(uci -q get wireless.$radio.channel)";;
+		port_toggle)
+			port="$(sani_word "$(getp port)")"; on="$(getp on | tr -cd '01')"
+			[ -n "$port" ] || fail "no_port"
+			[ -e "/sys/class/net/$port" ] || fail "no_such_port"
+			if [ "$on" = "1" ]; then ip link set "$port" up 2>/dev/null; else ip link set "$port" down 2>/dev/null; fi
+			printf '{"ok":true,"port":"%s","state":"%s"}\n' "$port" "$([ "$on" = 1 ] && echo up || echo down)";;
+		power_profile)
+			radio="$(sani_word "$(getp radio)")"; mode="$(getp mode | tr -cd 'a-z')"
+			[ -n "$radio" ] || fail "no_radio"
+			case "$mode" in safe) d=24;; max) d=26;; extreme) d=30;; *) d=24; mode=safe;; esac
+			uci set wireless.$radio.txpower="$d"; uci commit wireless
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			# resolve the REAL phy via ubus (phy index != radio index on this board)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			iw phy "phy${phyn:-0}" set txpower fixed "$((d*100))" >/dev/null 2>&1
+			wifi reload >/dev/null 2>&1
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+			printf '{"ok":true,"mode":"%s","requested":%s,"applied":%s}\n' "$mode" "$d" "${ap:-0}";;
+		lan_set)
+			ip="$(sani_ip "$(getp ip)")"; mask="$(sani_ip "$(getp mask)")"
+			dh="$(getp dhcp | tr -cd '01')"; st="$(sani_int "$(getp start)")"
+			lim="$(sani_int "$(getp limit)")"; lt="$(sani "$(getp lease)")"
+			[ -n "$ip" ] && uci set network.lan.ipaddr="$ip"
+			[ -n "$mask" ] && uci set network.lan.netmask="$mask"
+			uci commit network
+			if [ "$dh" = "0" ]; then uci set dhcp.lan.ignore='1'; else uci -q delete dhcp.lan.ignore; fi
+			[ -n "$st" ] && uci set dhcp.lan.start="$st"
+			[ -n "$lim" ] && uci set dhcp.lan.limit="$lim"
+			[ -n "$lt" ] && uci set dhcp.lan.leasetime="$lt"
+			uci commit dhcp
+			/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"LAN saved -> reconnect at %s"}\n' "$(json_esc "$ip")";;
+		sqm)
+			en="$(getp enabled | tr -cd '01')"
+			dn="$(sani_int "$(getp down)")"; up="$(sani_int "$(getp up)")"
+			sec="$(uci show sqm 2>/dev/null | sed -n 's/^sqm\.\([^.=]*\)=queue/\1/p' | head -1)"
+			[ -n "$sec" ] || sec="wan"
+			# shape on the real WAN egress (pppoe-wan if PPPoE, else wan device)
+			wif="$(uci -q get network.wan.device)"; [ "$(uci -q get network.wan.proto)" = "pppoe" ] && wif="pppoe-wan"
+			[ -n "$wif" ] || wif="eth0"
+			uci set sqm.$sec=queue
+			uci set sqm.$sec.interface="$wif"
+			[ -n "$dn" ] && uci set sqm.$sec.download="$dn"
+			[ -n "$up" ] && uci set sqm.$sec.upload="$up"
+			uci set sqm.$sec.qdisc='cake'
+			# layer_cake + per-host fairness (dual-srchost/dual-dsthost) so one device
+			# can't starve the others under load, and DiffServ4 keeps IPTV/VoIP ahead
+			# of bulk — better than plain piece_of_cake for a multi-client AP.
+			uci set sqm.$sec.script='layer_cake.qos'
+			uci set sqm.$sec.linklayer='ethernet'; uci set sqm.$sec.overhead='44'
+			uci set sqm.$sec.qdisc_advanced='1'; uci set sqm.$sec.egress_ecn='NOECN'; uci set sqm.$sec.ingress_ecn='ECN'
+			uci set sqm.$sec.iqdisc_opts='nat dual-dsthost ingress'; uci set sqm.$sec.eqdisc_opts='nat dual-srchost'
+			uci set sqm.$sec.enabled="${en:-0}"
+			uci commit sqm
+			# CRITICAL: software flow-offload BYPASSES the qdisc -> cake shapes nothing.
+			# Turn flow_offloading OFF while SQM is enabled, back ON when disabled.
+			if [ "$en" = "1" ]; then uci -q set firewall.@defaults[0].flow_offloading='0'
+			else uci -q set firewall.@defaults[0].flow_offloading='1'; fi
+			uci -q commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			/etc/init.d/sqm enable >/dev/null 2>&1; /etc/init.d/sqm restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"SQM %s (cake على %s)"}\n' "$([ "$en" = 1 ] && echo مُفعّل || echo معطّل)" "$wif";;
+		sys_hostname)
+			h="$(sani_word "$(getp hostname)")"; [ -n "$h" ] || fail "no_hostname"
+			uci set system.@system[0].hostname="$h"; uci commit system
+			echo "$h" > /proc/sys/kernel/hostname 2>/dev/null
+			/etc/init.d/system reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"hostname = %s"}\n' "$(json_esc "$h")";;
+		sys_timezone)
+			tz="$(getp tz | tr -cd 'A-Za-z0-9_/+:-' | cut -c1-40)"
+			[ -n "$tz" ] || fail "no_tz"
+			uci set system.@system[0].timezone="$tz"; uci commit system
+			/etc/init.d/system reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"timezone = %s"}\n' "$(json_esc "$tz")";;
+		sys_passwd)
+			np="$(getp newpass | tr -d '\r\n' | cut -c1-64)"
+			[ -n "$np" ] || fail "empty_password"
+			if printf '%s\n%s\n' "$np" "$np" | passwd root >/dev/null 2>&1; then
+				printf '{"ok":true,"msg":"password changed"}\n'
+			else
+				fail "passwd_failed"
+			fi;;
+		reboot)
+			printf '{"ok":true,"msg":"Rebooting..."}\n'; reboot >/dev/null 2>&1;;
+		factory)
+			printf '{"ok":true,"msg":"Factory reset + reboot..."}\n'
+			(sleep 1; jffs2reset -y >/dev/null 2>&1; reboot) >/dev/null 2>&1 &;;
+		safe_arm)
+			RB=/tmp/kt412-rb
+			[ -f "$RB.pid" ] && kill "$(cat "$RB.pid")" 2>/dev/null
+			rm -rf "$RB"; mkdir -p "$RB"
+			for c in network wireless dhcp firewall; do cp "/etc/config/$c" "$RB/$c" 2>/dev/null; done
+			rm -f /tmp/kt412-confirmed
+			( sleep 80
+			  [ -f /tmp/kt412-confirmed ] && exit 0
+			  for c in network wireless dhcp firewall; do cp "$RB/$c" "/etc/config/$c" 2>/dev/null; done
+			  /etc/init.d/network reload; wifi reload; /etc/init.d/dnsmasq restart 2>/dev/null; /etc/init.d/firewall reload 2>/dev/null
+			) >/dev/null 2>&1 &
+			echo $! > "$RB.pid"
+			printf '{"ok":true,"timeout":80}\n';;
+		safe_confirm)
+			touch /tmp/kt412-confirmed
+			[ -f /tmp/kt412-rb.pid ] && kill "$(cat /tmp/kt412-rb.pid)" 2>/dev/null
+			rm -f /tmp/kt412-rb.pid
+			printf '{"ok":true,"msg":"تم التأكيد — الإعدادات محفوظة"}\n';;
+		safe_restore)
+			RB=/tmp/kt412-rb
+			[ -d "$RB" ] || fail "no_backup"
+			for c in network wireless dhcp firewall; do cp "$RB/$c" "/etc/config/$c" 2>/dev/null; done
+			/etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+			/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم استرجاع آخر إعداد عامل"}\n';;
+		super_check)
+			rm -f /tmp/kt412-sc-done
+			( sh /root/kt412-super-check.sh >/tmp/kt412-sc.out 2>&1; touch /tmp/kt412-sc-done ) >/dev/null 2>&1 &
+			printf '{"ok":true,"msg":"بدأ الفحص الشامل (~2-3 دقائق)"}\n';;
+
+		# ===================== FIREWALL: port-forward / DMZ =====================
+		fw_forward)   # name proto sport dip dport  -> DNAT from WAN to a LAN host
+			nm="$(sani_word "$(getp name)")"; pr="$(getp proto | tr -cd 'a-z')"
+			sp="$(sani_int "$(getp sport)")"; di="$(sani_ip "$(getp dip)")"; dp="$(sani_int "$(getp dport)")"
+			[ -n "$nm" ] && [ -n "$sp" ] && [ -n "$di" ] || fail "missing_fields"
+			case "$pr" in tcp|udp) :;; *) pr="tcp udp";; esac
+			uci -q delete firewall.kt_$nm 2>/dev/null
+			uci set firewall.kt_$nm=redirect
+			uci set firewall.kt_$nm.name="kt-$nm"
+			uci set firewall.kt_$nm.target='DNAT'
+			uci set firewall.kt_$nm.src='wan'
+			uci set firewall.kt_$nm.dest='lan'
+			uci set firewall.kt_$nm.proto="$pr"
+			uci set firewall.kt_$nm.src_dport="$sp"
+			uci set firewall.kt_$nm.dest_ip="$di"
+			[ -n "$dp" ] && uci set firewall.kt_$nm.dest_port="$dp"
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم توجيه المنفذ %s -> %s"}\n' "$sp" "$(json_esc "$di")";;
+		fw_forward_del)
+			nm="$(sani_word "$(getp name)")"; [ -n "$nm" ] || fail "no_name"
+			uci -q delete firewall.kt_$nm; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف التوجيه"}\n';;
+		fw_dmz)        # ip='' to disable, otherwise expose one host fully
+			di="$(sani_ip "$(getp ip)")"
+			uci -q delete firewall.kt_dmz 2>/dev/null
+			if [ -n "$di" ]; then
+				uci set firewall.kt_dmz=redirect; uci set firewall.kt_dmz.name='kt-DMZ'
+				uci set firewall.kt_dmz.target='DNAT'; uci set firewall.kt_dmz.src='wan'
+				uci set firewall.kt_dmz.dest='lan'; uci set firewall.kt_dmz.proto='all'
+				uci set firewall.kt_dmz.dest_ip="$di"
+				m="DMZ مفعّل على $di"
+			else m="DMZ معطّل"; fi
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"%s"}\n' "$(json_esc "$m")";;
+
+		# ===================== STATIC DHCP LEASES =====================
+		lease_add)     # mac ip name -> fixed IP for a device
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; ip="$(sani_ip "$(getp ip)")"; nm="$(sani_word "$(getp name)")"
+			[ -n "$mac" ] && [ -n "$ip" ] || fail "mac_ip_required"
+			id="h_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci set dhcp.$id=host; uci set dhcp.$id.mac="$mac"; uci set dhcp.$id.ip="$ip"
+			[ -n "$nm" ] && uci set dhcp.$id.name="$nm"
+			uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حجز %s -> %s"}\n' "$(json_esc "$mac")" "$(json_esc "$ip")";;
+		lease_del)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="h_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci -q delete dhcp.$id; uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف الحجز"}\n';;
+
+		# ===================== CUSTOM DNS =====================
+		dns_set)       # dns1 dns2 force(0/1) -> upstream DNS for the whole network
+			d1="$(sani_ip "$(getp dns1)")"; d2="$(sani_ip "$(getp dns2)")"; fr="$(getp force | tr -cd '01')"
+			sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"; [ -n "$sec" ] || sec="@dnsmasq[0]"
+			uci -q delete dhcp.$sec.server 2>/dev/null
+			[ -n "$d1" ] && uci add_list dhcp.$sec.server="$d1"
+			[ -n "$d2" ] && uci add_list dhcp.$sec.server="$d2"
+			if [ "$fr" = "1" ] && [ -n "$d1" ]; then uci set dhcp.$sec.noresolv='1'; else uci -q delete dhcp.$sec.noresolv; fi
+			uci commit dhcp; /etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"DNS مُحدّث (%s %s)"}\n' "$(json_esc "$d1")" "$(json_esc "$d2")";;
+
+		# ===================== STATIC ROUTES =====================
+		route_add)     # target mask gw iface
+			tg="$(sani_ip "$(getp target)")"; mk="$(sani_ip "$(getp mask)")"; gw="$(sani_ip "$(getp gw)")"; ifc="$(sani_word "$(getp iface)")"
+			[ -n "$tg" ] && [ -n "$gw" ] || fail "target_gw_required"
+			id="r_$(printf '%s' "$tg" | tr -cd '0-9')"
+			uci set network.$id=route; uci set network.$id.target="$tg"
+			uci set network.$id.netmask="${mk:-255.255.255.0}"; uci set network.$id.gateway="$gw"
+			uci set network.$id.interface="${ifc:-lan}"
+			uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"مسار %s عبر %s"}\n' "$(json_esc "$tg")" "$(json_esc "$gw")";;
+		route_del)
+			tg="$(sani_ip "$(getp target)")"; [ -n "$tg" ] || fail "no_target"
+			id="r_$(printf '%s' "$tg" | tr -cd '0-9')"
+			uci -q delete network.$id; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُذف المسار"}\n';;
+
+		# ===================== SERVICES (init.d) =====================
+		svc_toggle)    # name do(enable|disable|start|stop|restart)
+			nm="$(sani_word "$(getp name)")"; dx="$(getp do | tr -cd 'a-z')"
+			[ -n "$nm" ] && [ -x "/etc/init.d/$nm" ] || fail "no_service"
+			case "$dx" in enable|disable|start|stop|restart) /etc/init.d/$nm $dx >/dev/null 2>&1;; *) fail "bad_op";; esac
+			printf '{"ok":true,"msg":"%s: %s"}\n' "$(json_esc "$nm")" "$(json_esc "$dx")";;
+
+		# ===================== CRON =====================
+		cron_set)      # body (base64) -> crontab
+			b="$(getp body)"; txt="$(printf '%s' "$b" | base64 -d 2>/dev/null)"
+			mkdir -p /etc/crontabs
+			# HARD no-reboot guarantee: strip any reboot/poweroff/halt cron the user
+			# pastes in, BEFORE it is written — closes the runtime bypass of the
+			# never-auto-reboot rule (the soft smartap-wd line below has no such verb).
+			printf '%s\n' "$txt" | sed '/reboot/d; /poweroff/d; /halt/d' > /etc/crontabs/root
+			# never let a user crontab edit delete the Smart AP self-heal watchdog line
+			grep -q 'smartap-wd' /etc/crontabs/root || echo '*/2 * * * * /root/smartap-watchdog.sh # smartap-wd' >> /etc/crontabs/root
+			# re-assert the optional user scheduled-reboot line (managed separately)
+			[ -x /usr/sbin/kt412-reboot-sched ] && /usr/sbin/kt412-reboot-sched >/dev/null 2>&1
+			/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"تم حفظ المهام المجدولة"}\n';;
+		sched_reboot)
+			# OPTIONAL scheduled reboot — OFF by default (device never reboots itself).
+			# enable=1 + interval + unit(hours|days) installs ONE tagged cron line via
+			# /usr/sbin/kt412-reboot-sched; enable=0 removes it. The no-reboot guard
+			# preserves ONLY this tagged line, so accidental reboots stay impossible.
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			en="$(getp enable | tr -cd '01')"; iv="$(sani_int "$(getp interval)")"; un="$(getp unit | tr -cd 'a-z')"
+			[ -f /etc/config/kt412 ] || : > /etc/config/kt412
+			uci -q get kt412.reboot >/dev/null 2>&1 || uci -q set kt412.reboot=reboot
+			uci -q set kt412.reboot.enabled="${en:-0}"
+			[ -n "$iv" ] && uci -q set kt412.reboot.interval="$iv"
+			case "$un" in hours|days) uci -q set kt412.reboot.unit="$un";; esac
+			uci -q commit kt412
+			/usr/sbin/kt412-reboot-sched >/dev/null 2>&1
+			if [ "$en" = "1" ]; then
+				printf '{"ok":true,"msg":"إعادة التشغيل المجدولة مُفعّلة: كل %s %s"}\n' "$(json_esc "$(uci -q get kt412.reboot.interval)")" "$([ "$(uci -q get kt412.reboot.unit)" = hours ] && echo ساعة || echo يوم)"
+			else
+				printf '{"ok":true,"msg":"إعادة التشغيل المجدولة مُطفأة — الجهاز يظل شغّالاً ولا يعيد التشغيل"}\n'
+			fi;;
+
+		iptv_save)
+			# IPTV playlist: accept an M3U/M3U8 URL (fetched via curl) OR an uploaded
+			# file (sent base64 in 'body'). Saved to /www/iptv/playlist.m3u, served by
+			# uhttpd at http://<lan-ip>/iptv/playlist.m3u for any player (TiviMate/VLC).
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			url="$(getp url | tr -cd 'A-Za-z0-9:/._%?=&~+-' | cut -c1-1024)"
+			mkdir -p /www/iptv 2>/dev/null
+			DST=/www/iptv/playlist.m3u
+			if [ -n "$url" ]; then
+				curl -fsSL --max-time 30 -A 'KT412-IPTV' -o "$DST.tmp" "$url" 2>/dev/null && [ -s "$DST.tmp" ] \
+					&& mv -f "$DST.tmp" "$DST" || { rm -f "$DST.tmp" 2>/dev/null; fail "fetch_failed"; }
+				src="url"
+			else
+				b="$(getp body)"; [ -n "$b" ] || fail "no_data"
+				printf '%s' "$b" | base64 -d > "$DST.tmp" 2>/dev/null && [ -s "$DST.tmp" ] \
+					&& mv -f "$DST.tmp" "$DST" || { rm -f "$DST.tmp" 2>/dev/null; fail "decode_failed"; }
+				src="upload"
+			fi
+			cnt="$(grep -ci '#EXTINF' "$DST" 2>/dev/null)"; case "$cnt" in ''|*[!0-9]*) cnt=0;; esac
+			lip="$(uci -q get network.lan.ipaddr)"
+			printf '{"ok":true,"src":"%s","channels":%s,"url":"http://%s/iptv/playlist.m3u"}\n' "$src" "$cnt" "$(json_esc "$lip")";;
+		iptv_clear)
+			[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+			rm -f /www/iptv/playlist.m3u 2>/dev/null
+			printf '{"ok":true,"msg":"تم حذف قائمة التشغيل"}\n';;
+
+		# ===================== PACKAGES (apk) =====================
+		pkg_install)
+			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
+			out="$( (apk add "$nm" 2>&1 || opkg install "$nm" 2>&1) | tail -8 )"
+			b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+			printf '{"ok":true,"msg":"تثبيت %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;
+		pkg_remove)
+			nm="$(printf '%s' "$(getp name)" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)"; [ -n "$nm" ] || fail "no_pkg"
+			# NEVER remove packages whose loss bricks the dashboard or a radio (no UI recovery)
+			case "$nm" in
+				uhttpd|uhttpd-mod-ubus|libuhttpd*|rpcd|rpcd-mod-*|ubus*|ubusd|libubox*|uci|libuci*|netifd|procd*|\
+				busybox|dropbear|mtd|fwtool|jsonfilter|libjson*|\
+				kmod-ath9k|kmod-ath10k-ct|ath10k-firmware-*|kmod-mac80211|kmod-cfg80211|wpad*|hostapd*|wireless-regdb|\
+				kmod-nft-*|nftables|firewall4|dnsmasq*|odhcpd*|kmod-qca8k*|kmod-mdio*)
+					fail "protected_pkg";;
+			esac
+			out="$( (apk del "$nm" 2>&1 || opkg remove "$nm" 2>&1) | tail -8 )"
+			b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+			printf '{"ok":true,"msg":"إزالة %s","log":"%s"}\n' "$(json_esc "$nm")" "$b";;
+
+		# ===================== SERVICES TOGGLES (ddns/upnp/adblock) =====================
+		ddns_set)      # domain provider user pass
+			dm="$(sani "$(getp domain)")"; pv="$(sani_word "$(getp provider)")"; u="$(sani "$(getp user)")"; p="$(sani "$(getp pass)")"
+			[ -n "$dm" ] || fail "no_domain"
+			uci set ddns.kt=service; uci set ddns.kt.enabled='1'
+			uci set ddns.kt.service_name="${pv:-dyndns.org}"; uci set ddns.kt.domain="$dm"
+			[ -n "$u" ] && uci set ddns.kt.username="$u"; [ -n "$p" ] && uci set ddns.kt.password="$p"
+			uci set ddns.kt.ip_source='network'; uci set ddns.kt.ip_network='wan'
+			uci commit ddns; /etc/init.d/ddns enable >/dev/null 2>&1; /etc/init.d/ddns restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"DDNS مفعّل لـ %s"}\n' "$(json_esc "$dm")";;
+		upnp_toggle)
+			en="$(getp enabled | tr -cd '01')"
+			uci -q get upnpd.config >/dev/null 2>&1 || { uci set upnpd.config=upnpd; }
+			uci set upnpd.config.enabled="${en:-0}"
+			uci commit upnpd
+			if [ "$en" = "1" ]; then /etc/init.d/miniupnpd enable >/dev/null 2>&1; /etc/init.d/miniupnpd restart >/dev/null 2>&1
+			else /etc/init.d/miniupnpd stop >/dev/null 2>&1; /etc/init.d/miniupnpd disable >/dev/null 2>&1; fi
+			printf '{"ok":true,"msg":"UPnP: %s"}\n' "$( [ "$en" = "1" ] && echo مفعّل || echo معطّل )";;
+		adblock_toggle)
+			en="$(getp enabled | tr -cd '01')"
+			uci -q get adblock.global >/dev/null 2>&1 || uci set adblock.global=adblock
+			uci set adblock.global.adb_enabled="${en:-0}"; uci commit adblock
+			if [ "$en" = "1" ]; then /etc/init.d/adblock enable >/dev/null 2>&1; /etc/init.d/adblock restart >/dev/null 2>&1
+			else /etc/init.d/adblock stop >/dev/null 2>&1; /etc/init.d/adblock disable >/dev/null 2>&1; fi
+			printf '{"ok":true,"msg":"حجب الإعلانات: %s"}\n' "$( [ "$en" = "1" ] && echo مفعّل || echo معطّل )";;
+
+		# ===================== GUEST WIFI (one-click, isolated) =====================
+		guest_wifi)    # enabled ssid key  -> isolated SSID + subnet 192.168.180.0/24 + WAN-only
+			en="$(getp enabled | tr -cd '01')"; ss="$(sani "$(getp ssid)")"; ky="$(sani "$(getp key)")"
+			if [ "$en" = "1" ]; then
+				[ -n "$ss" ] || ss="KT412-Guest"
+				uci set network.guest=interface; uci set network.guest.proto='static'
+				uci set network.guest.ipaddr='192.168.180.1'; uci set network.guest.netmask='255.255.255.0'
+				uci set dhcp.guest=dhcp; uci set dhcp.guest.interface='guest'
+				uci set dhcp.guest.start='100'; uci set dhcp.guest.limit='100'; uci set dhcp.guest.leasetime='4h'
+				uci -q delete dhcp.guest.ignore
+				for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+					gi="guest_$r"
+					uci set wireless.$gi=wifi-iface; uci set wireless.$gi.device="$r"
+					uci set wireless.$gi.mode='ap'; uci set wireless.$gi.network='guest'
+					uci set wireless.$gi.ssid="$ss"; uci set wireless.$gi.isolate='1'
+					if [ -n "$ky" ]; then uci set wireless.$gi.encryption='psk2'; uci set wireless.$gi.key="$ky"
+					else uci set wireless.$gi.encryption='none'; fi
+				done
+				uci set firewall.guest=zone; uci set firewall.guest.name='guest'
+				uci set firewall.guest.network='guest'; uci set firewall.guest.input='REJECT'
+				uci set firewall.guest.output='ACCEPT'; uci set firewall.guest.forward='REJECT'
+				uci set firewall.guest_fw=forwarding; uci set firewall.guest_fw.src='guest'; uci set firewall.guest_fw.dest='wan'
+				uci set firewall.guest_dns=rule; uci set firewall.guest_dns.name='guest-dns'; uci set firewall.guest_dns.src='guest'
+				uci set firewall.guest_dns.dest_port='53'; uci set firewall.guest_dns.target='ACCEPT'
+				uci set firewall.guest_dh=rule; uci set firewall.guest_dh.name='guest-dhcp'; uci set firewall.guest_dh.src='guest'
+				uci set firewall.guest_dh.dest_port='67'; uci set firewall.guest_dh.target='ACCEPT'
+				uci commit; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+				/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"شبكة الضيوف مفعّلة: %s (معزولة)"}\n' "$(json_esc "$ss")"
+			else
+				for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\(guest_[^.=]*\)=wifi-iface/\1/p'); do uci -q delete wireless.$s; done
+				uci -q delete network.guest; uci -q delete dhcp.guest
+				uci -q delete firewall.guest; uci -q delete firewall.guest_fw
+				uci -q delete firewall.guest_dns; uci -q delete firewall.guest_dh
+				uci commit; /etc/init.d/network reload >/dev/null 2>&1; wifi reload >/dev/null 2>&1
+				/etc/init.d/dnsmasq restart >/dev/null 2>&1; /etc/init.d/firewall reload >/dev/null 2>&1
+				printf '{"ok":true,"msg":"شبكة الضيوف معطّلة"}\n'
+			fi;;
+
+		# ===================== RESTORE CONFIG (from backup) =====================
+		restore_cfg)   # body = base64 of a tar.gz of etc/config
+			b="$(getp body)"
+			printf '%s' "$b" | base64 -d 2>/dev/null > /tmp/kt-restore.tgz || fail "bad_data"
+			tar tzf /tmp/kt-restore.tgz >/dev/null 2>&1 || fail "bad_archive"
+			cp -a /etc/config /etc/config.bak.$$ 2>/dev/null
+			tar xzf /tmp/kt-restore.tgz -C / 2>/dev/null && { uci commit; for s in network dhcp firewall wireless system; do /etc/init.d/$s reload >/dev/null 2>&1; done; printf '{"ok":true,"msg":"تمت استعادة الإعدادات (نسخة احتياطية محفوظة)"}\n'; } || fail "restore_failed"
+			rm -f /tmp/kt-restore.tgz;;
+
+		# ===================== INTERFACES (enable/disable + MTU) =====================
+		iface_toggle)
+			ifc="$(sani_word "$(getp iface)")"; on="$(getp on | tr -cd '01')"; [ -n "$ifc" ] || fail "no_iface"
+			if [ "$on" = "0" ]; then uci -q set network.$ifc.disabled='1'; ifdown "$ifc" >/dev/null 2>&1
+			else uci -q delete network.$ifc.disabled; ifup "$ifc" >/dev/null 2>&1; fi
+			uci commit network
+			printf '{"ok":true,"msg":"%s: %s"}\n' "$(json_esc "$ifc")" "$( [ "$on" = "0" ] && echo معطّل || echo مفعّل )";;
+		iface_mtu)
+			ifc="$(sani_word "$(getp iface)")"; mtu="$(sani_int "$(getp mtu)")"
+			[ -n "$ifc" ] && [ -n "$mtu" ] || fail "iface_mtu_required"
+			uci set network.$ifc.mtu="$mtu"; uci commit network; /etc/init.d/network reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"MTU %s = %s"}\n' "$(json_esc "$ifc")" "$mtu";;
+
+		# ===================== FIREWALL zones / masquerade / restart =====================
+		fw_masq)
+			z="$(sani_word "$(getp zone)")"; on="$(getp on | tr -cd '01')"; [ -n "$z" ] || fail "no_zone"
+			i=0; sec=""
+			while uci -q get firewall.@zone[$i] >/dev/null 2>&1; do [ "$(uci -q get firewall.@zone[$i].name)" = "$z" ] && sec="@zone[$i]"; i=$((i+1)); done
+			[ -n "$sec" ] || fail "zone_not_found"
+			uci set firewall.$sec.masq="${on:-0}"; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"masquerade %s: %s"}\n' "$(json_esc "$z")" "${on:-0}";;
+		fw_restart)
+			/etc/init.d/firewall restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"أُعيد تشغيل الجدار الناري"}\n';;
+
+		# ===================== CLIENT block / unblock (by MAC) =====================
+		client_block)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="blk_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci set firewall.$id=rule; uci set firewall.$id.name="kt-block-$mac"
+			uci set firewall.$id.src='lan'; uci set firewall.$id.src_mac="$mac"
+			uci set firewall.$id.dest='*'; uci set firewall.$id.target='REJECT'
+			uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"حُظر %s من الإنترنت"}\n' "$(json_esc "$mac")";;
+		client_unblock)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17)"; [ -n "$mac" ] || fail "no_mac"
+			id="blk_$(printf '%s' "$mac" | tr -cd 'A-Fa-f0-9')"
+			uci -q delete firewall.$id; uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"رُفع الحظر عن %s"}\n' "$(json_esc "$mac")";;
+
+		# ===================== NTP servers =====================
+		ntp_set)
+			s1="$(printf '%s' "$(getp ntp1)" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+			s2="$(printf '%s' "$(getp ntp2)" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+			uci -q get system.ntp >/dev/null 2>&1 || uci set system.ntp=timeserver
+			uci -q delete system.ntp.server
+			[ -n "$s1" ] && uci add_list system.ntp.server="$s1"
+			[ -n "$s2" ] && uci add_list system.ntp.server="$s2"
+			uci set system.ntp.enabled='1'; uci set system.ntp.enable_server='0'
+			uci commit system; /etc/init.d/sysntpd restart >/dev/null 2>&1
+			printf '{"ok":true,"msg":"خوادم NTP محدّثة"}\n';;
+
+		# ===================== DSA: choose WAN port =====================
+		wan_port)
+			pt="$(sani_word "$(getp port)")"; [ -n "$pt" ] || fail "no_port"
+			[ -e "/sys/class/net/$pt" ] || fail "port_not_found"
+			uci set network.wan.device="$pt"; uci -q set network.wan6.device="$pt"; uci commit network
+			/etc/init.d/network reload >/dev/null 2>&1; ifup wan >/dev/null 2>&1
+			printf '{"ok":true,"msg":"منفذ WAN = %s"}\n' "$(json_esc "$pt")";;
+
+		# ===================== DEVICE CONTROL: block / unblock a client =====================
+		block|unblock)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17 | tr 'A-F' 'a-f')"
+			[ -n "$mac" ] && [ "${#mac}" = 17 ] || fail "bad_mac"
+			for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+				[ "$(uci -q get wireless.$s.mode)" = "ap" ] || continue
+				if [ "$ACT" = "block" ]; then
+					uci -q set wireless.$s.macfilter='deny'
+					uci -q del_list wireless.$s.maclist="$mac"
+					uci -q add_list wireless.$s.maclist="$mac"
+				else
+					uci -q del_list wireless.$s.maclist="$mac"
+					# no more blocked MACs on this iface -> drop the filter entirely
+					uci -q get wireless.$s.maclist >/dev/null 2>&1 || uci -q delete wireless.$s.macfilter
+				fi
+			done
+			uci -q commit wireless
+			# immediate kick (deauth) from every live AP iface
+			for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+				ubus call hostapd.$i del_client "{\"addr\":\"$mac\",\"reason\":1,\"deauth\":true,\"ban_time\":60000}" >/dev/null 2>&1
+				iw dev "$i" station del "$mac" >/dev/null 2>&1
+			done
+			wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"mac":"%s","blocked":%s}\n' "$mac" "$([ "$ACT" = block ] && echo true || echo false)";;
+
+		# ===================== NAME / RENAME a device (custom label by MAC) =====================
+		# Stored in /etc/kt412-names as "mac<TAB>name" (persists across reboot). Empty
+		# name clears the label. Name is kept raw (allows Arabic) minus tabs/newlines.
+		set_label)
+			mac="$(getp mac | tr -cd 'A-Fa-f0-9:' | cut -c1-17 | tr 'A-F' 'a-f')"
+			name="$(getp name | tr -d '\t\r\n' | cut -c1-48)"
+			[ -n "$mac" ] && [ "${#mac}" = 17 ] || fail "bad_mac"
+			NMF=/etc/kt412-names; touch "$NMF"
+			awk -F'\t' -v m="$mac" 'tolower($1)!=m' "$NMF" > "$NMF.tmp" 2>/dev/null; mv -f "$NMF.tmp" "$NMF"
+			[ -n "$name" ] && printf '%s\t%s\n' "$mac" "$name" >> "$NMF"
+			printf '{"ok":true,"mac":"%s","name":"%s"}\n' "$mac" "$(json_esc "$name")";;
+
+		# ===================== WIFI SCHEDULE (cron: off at night / on in morning) =====================
+		wifi_sched)
+			en="$(getp enabled | tr -cd '01')"
+			offh="$(sani_int "$(getp off_h)")"; onh="$(sani_int "$(getp on_h)")"
+			CR=/etc/crontabs/root; touch "$CR"
+			sed -i '/# kt412-sched/d' "$CR" 2>/dev/null
+			if [ "$en" = "1" ] && [ -n "$offh" ] && [ -n "$onh" ] \
+			   && [ "$offh" -ge 0 ] 2>/dev/null && [ "$offh" -le 23 ] 2>/dev/null \
+			   && [ "$onh" -ge 0 ] 2>/dev/null && [ "$onh" -le 23 ] 2>/dev/null; then
+				printf '0 %s * * * /sbin/wifi down # kt412-sched\n' "$offh" >> "$CR"
+				printf '0 %s * * * /sbin/wifi up # kt412-sched\n'   "$onh"  >> "$CR"
+				/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
+				printf '{"ok":true,"msg":"الجدولة مفعّلة: إطفاء %s:00 — تشغيل %s:00"}\n' "$offh" "$onh"
+			else
+				/etc/init.d/cron restart >/dev/null 2>&1
+				printf '{"ok":true,"msg":"الجدولة موقّفة"}\n'
+			fi;;
+
+		# ===================== GUEST SSID (isolated clients) =====================
+		guest)
+			en="$(getp enabled | tr -cd '01')"
+			gssid="$(sani "$(getp ssid)")"; [ -n "$gssid" ] || gssid="KT412-Guest"
+			gkey="$(sani "$(getp key)")"
+			gr=""
+			for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+				[ "$(uci -q get wireless.$r.band)" = "2g" ] && { gr="$r"; break; }
+			done
+			[ -n "$gr" ] || gr="radio0"
+			sec="kt412guest"
+			if [ "$en" = "1" ]; then
+				uci -q set wireless.$sec=wifi-iface
+				uci -q set wireless.$sec.device="$gr"
+				uci -q set wireless.$sec.mode='ap'
+				uci -q set wireless.$sec.network='lan'
+				uci -q set wireless.$sec.ssid="$gssid"
+				uci -q set wireless.$sec.isolate='1'
+				if [ -n "$gkey" ] && [ "${#gkey}" -ge 8 ]; then
+					uci -q set wireless.$sec.encryption='psk2'; uci -q set wireless.$sec.key="$gkey"
+				else
+					uci -q set wireless.$sec.encryption='none'; uci -q delete wireless.$sec.key
+				fi
+			else
+				uci -q delete wireless.$sec
+			fi
+			uci -q commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"msg":"شبكة الضيوف %s"}\n' "$([ "$en" = 1 ] && echo "مفعّلة ($gssid)" || echo "موقّفة")";;
+
+		# ===================== SPEEDTEST (download throughput, backgrounded) =====================
+		speedtest)
+			szp="$(getp size | tr -cd '0-9')"; case "$szp" in 10|50|100) :;; *) szp=10;; esac
+			F=/tmp/kt412-spd; rm -f "$F.done" "$F.out"
+			( url="http://speedtest.tele2.net/${szp}MB.zip"
+			  bytes=$((szp*1024*1024))
+			  t0="$(date +%s)"
+			  timeout 60 uclient-fetch -q -O /dev/null "$url" >/dev/null 2>&1 \
+			    || timeout 60 wget -q -O /dev/null "$url" >/dev/null 2>&1
+			  rc=$?
+			  t1="$(date +%s)"; dt=$((t1-t0)); [ "$dt" -lt 1 ] && dt=1
+			  if [ "$rc" = "0" ]; then mbps=$(( bytes*8/dt/1000000 )); echo "$mbps" > "$F.out"
+			  else echo "-1" > "$F.out"; fi
+			  touch "$F.done"
+			) >/dev/null 2>&1 &
+			printf '{"ok":true,"msg":"بدأ اختبار السرعة (%sMB)","size":%s}\n' "$szp" "$szp";;
+
+		*) fail "unknown_action";;
+	esac
+	exit 0
+fi
+
+# ---------- read-only data ops ----------
+case "$OP" in
+	summary)
+		BRD="$(ubus call system board 2>/dev/null)"
+		INF="$(ubus call system info 2>/dev/null)"
+		gv(){ printf '%s' "$1" | jsonfilter -e "$2" 2>/dev/null; }
+		model="$(gv "$BRD" '@.model')"; host="$(gv "$BRD" '@.hostname')"
+		kern="$(gv "$BRD" '@.kernel')"; rel="$(gv "$BRD" '@.release.description')"
+		up="$(gv "$INF" '@.uptime')"; l1="$(gv "$INF" '@.load[0]')"
+		mt="$(gv "$INF" '@.memory.total')"; mf="$(gv "$INF" '@.memory.free')"
+		mb="$(gv "$INF" '@.memory.buffered')"
+		# REAL available RAM (kernel estimate incl. reclaimable cache), kB -> bytes.
+		# Linux uses free RAM as cache by design, so total-free overstates usage;
+		# the truthful "RAM used" = total - MemAvailable.
+		ma="$(awk '/^MemAvailable:/{print $2*1024; exit}' /proc/meminfo 2>/dev/null)"
+		case "$ma" in ''|*[!0-9]*) ma=0;; esac
+		ncpu="$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)"; [ -n "$ncpu" ] || ncpu=1
+		# REAL CPU% from the /proc/stat delta vs a stored baseline (in /tmp).
+		# CRITICAL: only ADVANCE the baseline when the measured window is >= 2s.
+		# The old code re-wrote the baseline on EVERY call, so two summary polls
+		# arriving close together (the dashboard fetches summary+traffic+ports at
+		# once, and LuCI re-renders) produced a sub-second window where the idle
+		# delta rounded to 0 -> a bogus 100%. Now a too-short window REUSES the
+		# last computed value and keeps the old baseline, so every real
+		# measurement spans the full ~10s poll interval -> stable, truthful %.
+		now_s="$(cut -d. -f1 /proc/uptime 2>/dev/null)"; case "$now_s" in ''|*[!0-9]*) now_s=0;; esac
+		set -- $(awk '/^cpu /{i=$5+$6; t=0; for(n=2;n<=NF;n++)t+=$n; print i, t; exit}' /proc/stat 2>/dev/null)
+		cpu_idle="${1:-0}"; cpu_total="${2:-0}"; cpu_pct=-1   # -1 = warming up (UI shows "--"), never a fake value
+		CPF=/tmp/kt_cpustat
+		if [ -f "$CPF" ]; then
+			read pi pt pts ppct < "$CPF" 2>/dev/null
+			dt=$(( cpu_total - ${pt:-0} )); di=$(( cpu_idle - ${pi:-0} ))
+			win=$(( now_s - ${pts:-0} ))
+			if [ "$dt" -gt 0 ] && [ "$win" -ge 2 ]; then
+				cpu_pct=$(( (100 * (dt - di)) / dt ))
+				[ "$cpu_pct" -lt 0 ] && cpu_pct=0; [ "$cpu_pct" -gt 100 ] && cpu_pct=100
+				echo "$cpu_idle $cpu_total $now_s $cpu_pct" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
+			else
+				# window too short (or clock went backwards): reuse last %, keep baseline
+				cpu_pct="${ppct:-0}"; case "$cpu_pct" in ''|-1) cpu_pct=-1;; *[!0-9]*) cpu_pct=-1;; esac
+			fi
+		else
+			echo "$cpu_idle $cpu_total $now_s -1" > "$CPF.$$" 2>/dev/null; mv -f "$CPF.$$" "$CPF" 2>/dev/null
+		fi
+		# PREFER the background sampler's TRUE 1-minute-averaged CPU% (/tmp/kt412-hist,
+		# written by kt412-sampler via cron). It is measured independently of the
+		# dashboard's own polling, so it reflects real device load — not the cost of
+		# the gauge measuring itself on the single core (which inflated it to ~76%).
+		if [ -f /tmp/kt412-hist ]; then
+			hline="$(tail -n1 /tmp/kt412-hist 2>/dev/null)"
+			hts="${hline%% *}"; hcpu="$(printf '%s' "$hline" | awk '{print $2}')"
+			now2="$(date +%s 2>/dev/null || echo 0)"
+			case "$hts" in ''|*[!0-9]*) hts=0;; esac
+			case "$hcpu" in ''|*[!0-9]*) hcpu="";; esac
+			[ -n "$hcpu" ] && [ $((now2 - hts)) -lt 150 ] 2>/dev/null && cpu_pct="$hcpu"
+		fi
+		# WRITABLE space = the overlay (rootfs_data), not the read-only squashfs /rom
+		# (which is always ~100% full). Parse by NF so a wrapped device name doesn't shift columns.
+		ovl="$(df -k /overlay 2>/dev/null | awk 'NR>1 && NF>=5 {print $(NF-4)","$(NF-3); exit}')"
+		[ -n "$ovl" ] && [ "${ovl%,*}" != "0" ] || ovl="$(df -k /overlay 2>/dev/null | awk 'NR>1 && NF>=4 {print $(NF-4)","$(NF-3); exit}')"
+		[ -n "$ovl" ] || ovl="$(df -k / 2>/dev/null | awk 'NR>1 && NF>=5 {print $(NF-4)","$(NF-3); exit}')"
+		fs_total="${ovl%,*}"; fs_used="${ovl#*,}"
+		case "$fs_total" in ''|*[!0-9]*) fs_total=0;; esac; case "$fs_used" in ''|*[!0-9]*) fs_used=0;; esac
+		# REAL connected-client count: unique associated Wi-Fi station MACs across ALL
+		# radios + distinct wired neighbours on br-lan, deduplicated. (The dashboard
+		# used to show the RADIO count — so one phone read as "2"; this is the truth.)
+		# CACHED to /tmp/kt412-clients (<=30s old): the iwinfo assoclist sweep is the
+		# single most expensive thing in op=summary, and the dashboard polls often —
+		# running it every poll pinned the single CPU core. Recompute only when stale.
+		CC=/tmp/kt412-clients; now="$(date +%s 2>/dev/null || echo 0)"; clients=""
+		if [ -f "$CC" ]; then
+			cts="$(sed -n 1p "$CC" 2>/dev/null)"; cval="$(sed -n 2p "$CC" 2>/dev/null)"
+			case "$cts" in ''|*[!0-9]*) cts=0;; esac
+			[ $((now - cts)) -lt 30 ] 2>/dev/null && case "$cval" in ''|*[!0-9]*) :;; *) clients="$cval";; esac
+		fi
+		if [ -z "$clients" ]; then
+			clients="$( { for d in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID.*/\1/p'); do iwinfo "$d" assoclist 2>/dev/null; done; \
+				ip neigh show dev br-lan 2>/dev/null | grep -iE 'REACHABLE|STALE'; } \
+				| grep -oiE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | tr 'a-f' 'A-F' | sort -u | grep -c . )"
+			case "$clients" in ''|*[!0-9]*) clients=0;; esac
+			printf '%s\n%s\n' "$now" "$clients" > "$CC" 2>/dev/null
+		fi
+		case "$clients" in ''|*[!0-9]*) clients=0;; esac
+		printf '{"ok":true,"model":"%s","host":"%s","kernel":"%s","release":"%s","uptime":%s,"load":%s,"mem_total":%s,"mem_free":%s,"mem_buf":%s,"mem_avail":%s,"ncpu":%s,"fs_total":%s,"fs_used":%s,"cpu_idle":%s,"cpu_total":%s,"cpu_pct":%s,"clients":%s}\n' \
+			"$(json_esc "$model")" "$(json_esc "$host")" "$(json_esc "$kern")" "$(json_esc "$rel")" \
+			"${up:-0}" "${l1:-0}" "${mt:-0}" "${mf:-0}" "${mb:-0}" "${ma:-0}" "${ncpu:-1}" "${fs_total:-0}" "${fs_used:-0}" "${cpu_idle:-0}" "${cpu_total:-0}" "${cpu_pct:-0}" "${clients:-0}";;
+	wan)
+		S="$(ubus call network.interface.wan status 2>/dev/null)"
+		gv(){ printf '%s' "$S" | jsonfilter -e "$1" 2>/dev/null; }
+		up="$(gv '@.up')"; proto="$(gv '@.proto')"; dev="$(gv '@.l3_device')"
+		ip="$(gv '@["ipv4-address"][0].address')"; mask="$(gv '@["ipv4-address"][0].mask')"
+		gw="$(gv '@.route[0].nexthop')"; upt="$(gv '@.uptime')"; dns="$(gv '@["dns-server"][0]')"
+		wandev="$(uci -q get network.wan.device || uci -q get network.wan.ifname)"
+		vid="$(printf '%s' "$wandev" | sed -n 's/.*\.\([0-9]*\)$/\1/p')"
+		printf '{"ok":true,"up":%s,"proto":"%s","device":"%s","ip":"%s","mask":%s,"gateway":"%s","dns":"%s","uptime":%s,"vlan":"%s"}\n' \
+			"${up:-false}" "$(json_esc "$proto")" "$(json_esc "$dev")" "$(json_esc "$ip")" \
+			"${mask:-0}" "$(json_esc "$gw")" "$(json_esc "$dns")" "${upt:-0}" "$(json_esc "$vid")";;
+	iptv_status)
+		DST=/www/iptv/playlist.m3u; ex=false; cnt=0
+		if [ -f "$DST" ]; then ex=true; cnt="$(grep -ci '#EXTINF' "$DST" 2>/dev/null)"; case "$cnt" in ''|*[!0-9]*) cnt=0;; esac; fi
+		lip="$(uci -q get network.lan.ipaddr)"
+		printf '{"ok":true,"exists":%s,"channels":%s,"url":"http://%s/iptv/playlist.m3u"}\n' "$ex" "$cnt" "$(json_esc "$lip")";;
+	lan)
+		ip="$(uci -q get network.lan.ipaddr)"; mask="$(uci -q get network.lan.netmask)"
+		ign="$(uci -q get dhcp.lan.ignore)"; st="$(uci -q get dhcp.lan.start)"
+		lim="$(uci -q get dhcp.lan.limit)"; lt="$(uci -q get dhcp.lan.leasetime)"
+		dh=true; [ "$ign" = "1" ] && dh=false
+		printf '{"ok":true,"ip":"%s","mask":"%s","dhcp":%s,"start":"%s","limit":"%s","lease":"%s"}\n' \
+			"$(json_esc "$ip")" "$(json_esc "$mask")" "$dh" "$(json_esc "${st:-100}")" "$(json_esc "${lim:-150}")" "$(json_esc "${lt:-12h}")";;
+	netmode)
+		dis="$(uci -q get network.wan.disabled)"
+		# AP = WAN bridged into LAN. DHCP on/off is an INDEPENDENT toggle now
+		# (off by default), so it no longer flips the detected mode.
+		mode="router"; [ "$dis" = "1" ] && mode="ap"
+		printf '{"ok":true,"mode":"%s"}\n' "$mode";;
+	wifi)
+		out=""; first=1
+		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			info="$(iwinfo "$dev" info 2>/dev/null)"
+			essid="$(printf '%s' "$info" | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)"
+			chan="$(printf '%s' "$info" | sed -n 's/.*Channel: \([0-9]*\).*/\1/p' | head -1)"
+			txp="$(printf '%s' "$info" | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+			sig="$(printf '%s' "$info" | sed -n 's/.*Signal: \(-\{0,1\}[0-9]*\).*/\1/p' | head -1)"
+			enc="$(printf '%s' "$info" | sed -n 's/.*Encryption: \(.*\)/\1/p' | head -1)"
+			modev="$(printf '%s' "$info" | sed -n 's/.*Mode: \([A-Za-z/]*\).*/\1/p' | head -1)"
+			cnt="$(iwinfo "$dev" assoclist 2>/dev/null | grep -c 'SNR')"
+			band="2.4 GHz"; [ -n "$chan" ] && [ "$chan" -gt 14 ] 2>/dev/null && band="5 GHz"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"dev":"%s","essid":"%s","channel":%s,"band":"%s","txpower":%s,"signal":%s,"enc":"%s","mode":"%s","clients":%s}' \
+				"$(json_esc "$dev")" "$(json_esc "$essid")" "${chan:-0}" "$band" "${txp:-0}" "${sig:-0}" "$(json_esc "$enc")" "$(json_esc "$modev")" "${cnt:-0}")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	wifi_radios)
+		out=""; first=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			band="$(uci -q get wireless.$r.band)"; ch="$(uci -q get wireless.$r.channel)"
+			ht="$(uci -q get wireless.$r.htmode)"; cc="$(uci -q get wireless.$r.country)"
+			tp="$(uci -q get wireless.$r.txpower)"; dis="$(uci -q get wireless.$r.disabled)"
+			ssid=""; mode="ap"; hidden="0"; enc=""; haskey=false
+			s="$(wifi_iface_for "$r")"
+			if [ -n "$s" ]; then
+				mode="$(uci -q get wireless.$s.mode)"; hidden="$(uci -q get wireless.$s.hidden)"
+				ssid="$(uci -q get wireless.$s.ssid)"; [ -z "$ssid" ] && ssid="$(uci -q get wireless.$s.mesh_id)"
+				[ "$(uci -q get wireless.$s.wds)" = "1" ] && [ "$mode" = "ap" ] && mode="ap-wds"
+				# expose the CURRENT encryption + whether a key already exists, so the
+				# wizard can preselect WPA2 and let the user keep the existing key
+				# (apply a channel change without retyping) instead of forcing psk2
+				# with an empty field (which silently downgraded WPA2 -> open).
+				# NEVER expose the plaintext key itself.
+				enc="$(uci -q get wireless.$s.encryption)"
+				[ -n "$(uci -q get wireless.$s.key)" ] && haskey=true
+			fi
+			en=true; [ "$dis" = "1" ] && en=false
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"radio":"%s","band":"%s","channel":"%s","htmode":"%s","country":"%s","ssid":"%s","mode":"%s","hidden":"%s","txpower":"%s","enabled":%s,"iface":"%s","encryption":"%s","has_key":%s}' \
+				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$ch")" "$(json_esc "$ht")" "$(json_esc "$cc")" \
+				"$(json_esc "$ssid")" "$(json_esc "${mode:-ap}")" "$(json_esc "${hidden:-0}")" "$(json_esc "$tp")" "$en" "$(json_esc "$s")" "$(json_esc "$enc")" "$haskey")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	ports)
+		# DSA build (PR #21837): swconfig does NOT exist. Enumerate the qca8k DSA ports
+		# from sysfs only (wan standalone + lan1-4 in br-lan).
+		out=""; first=1
+		for p in wan lan1 lan2 lan3 lan4; do
+			[ -e "/sys/class/net/$p" ] || continue
+			st="$(cat /sys/class/net/$p/operstate 2>/dev/null)"
+			sp="$(cat /sys/class/net/$p/speed 2>/dev/null)"; case "$sp" in ''|*[!0-9]*) sp=0;; esac
+			dx="$(cat /sys/class/net/$p/duplex 2>/dev/null)"
+			mst="$(readlink /sys/class/net/$p/master 2>/dev/null | sed 's#.*/##')"
+			lk=down; [ "$st" = "up" ] && lk=up
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","link":"%s","speed":%s,"duplex":"%s","master":"%s"}' "$p" "$lk" "${sp:-0}" "$(json_esc "$dx")" "$(json_esc "${mst:-}")")"
+		done
+		printf '{"ok":true,"ports":[%s]}\n' "$out";;
+	clients)
+		out=""; first=1
+		if [ -f /tmp/dhcp.leases ]; then
+			while read -r exp mac ip name rest; do
+				[ -n "$mac" ] || continue
+				[ "$first" -eq 1 ] || out="$out,"; first=0
+				out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s"}' "$(json_esc "$mac")" "$(json_esc "$ip")" "$(json_esc "${name:-*}")")"
+			done < /tmp/dhcp.leases
+		fi
+		printf '{"ok":true,"clients":[%s]}\n' "$out";;
+	health)
+		# CPU: ping is the heaviest recurring CGI on the 720MHz core. Cache 15s and use
+		# a single probe so the 10s dashboard timer hits the cache on most ticks.
+		HC=/tmp/kt_health.json
+		if [ -f "$HC" ]; then ha=$(( $(date +%s) - $(stat -c %Y "$HC" 2>/dev/null || echo 0) )); [ "$ha" -ge 0 ] && [ "$ha" -lt 15 ] && { cat "$HC"; exit 0; }; fi
+		pl(){ printf '%s' "$1" | sed -n 's/.*, \([0-9]*\)% packet loss.*/\1/p' | head -1; }
+		rt(){ printf '%s' "$1" | sed -n 's#.* = [0-9.]*/\([0-9.]*\)/.*#\1#p' | head -1; }
+		a="$(ping -c1 -W1 1.1.1.1 2>/dev/null)"; b="$(ping -c1 -W1 8.8.8.8 2>/dev/null)"
+		la="$(pl "$a")"; ra="$(rt "$a")"; lb="$(pl "$b")"; rb="$(rt "$b")"
+		mw="$(mwan3 status 2>/dev/null | grep -c 'is online')"
+		printf '{"ok":true,"cf":{"loss":%s,"rtt":%s},"goog":{"loss":%s,"rtt":%s},"mwan_online":%s}\n' \
+			"${la:-100}" "${ra:-0}" "${lb:-100}" "${rb:-0}" "${mw:-0}" > "$HC.$$" 2>/dev/null
+		mv -f "$HC.$$" "$HC" 2>/dev/null; cat "$HC";;
+	traffic)
+		out=""; first=1
+		while IFS= read -r line; do
+			case "$line" in
+				*:*)
+					name="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/:.*//')"
+					case "$name" in lo|''|Inter-*|*face*) continue;; esac
+					rest="${line#*:}"
+					# /proc/net/dev RX cols 1-8: bytes pkts errs drop ...; TX cols 9-16: bytes pkts errs drop ...
+					set -- $(printf '%s' "$rest" | awk '{print $1+0, $3+0, $4+0, $9+0, $11+0, $12+0}')
+					rx="${1:-0}"; rxe="${2:-0}"; rxd="${3:-0}"; tx="${4:-0}"; txe="${5:-0}"; txd="${6:-0}"
+					[ "$first" -eq 1 ] || out="$out,"; first=0
+					out="$out$(printf '{"if":"%s","rx":%s,"tx":%s,"rx_err":%s,"rx_drop":%s,"tx_err":%s,"tx_drop":%s}' "$(json_esc "$name")" "$rx" "$tx" "$rxe" "$rxd" "$txe" "$txd")"
+					;;
+			esac
+		done < /proc/net/dev
+		# best-effort brown-out / under-voltage signature from the kernel ring buffer
+		uv=0; dmesg 2>/dev/null | grep -qiE 'under.?volt|brownout|brown-out' && uv=1
+		printf '{"ok":true,"ts":%s,"undervolt":%s,"ifaces":[%s]}\n' "$(date +%s)" "$uv" "$out";;
+	system)
+		host="$(uci -q get system.@system[0].hostname)"; tz="$(uci -q get system.@system[0].timezone)"
+		now="$(date '+%Y-%m-%d %H:%M:%S')"
+		rel="$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)"
+		rootpw="$(awk -F: '/^root:/{print $2}' /etc/shadow 2>/dev/null)"
+		hp=true; case "$rootpw" in ''|'!'|'*'|'!*') hp=false;; esac
+		ntp="$(uci -q get system.ntp.server | tr '\n' ' ')"
+		printf '{"ok":true,"host":"%s","tz":"%s","time":"%s","release":"%s","has_password":%s,"ntp":"%s"}\n' \
+			"$(json_esc "$host")" "$(json_esc "$tz")" "$(json_esc "$now")" "$(json_esc "$rel")" "$hp" "$(json_esc "$ntp")";;
+	logs)
+		# optional service filter: wifi|firewall|dhcp|pppoe (grep on logread)
+		flt="$(getp filter | tr -cd 'a-z]|[')"
+		case "$flt" in
+			wifi)     pat='hostapd\|wlan\|ath9k\|ath10k\|wpa\|80211';;
+			firewall) pat='firewall\|nft\|DROP\|REJECT';;
+			dhcp)     pat='dnsmasq\|DHCP\|dhcp';;
+			pppoe)    pat='ppp\|pppoe\|pppd\|chat';;
+			*)        pat='';;
+		esac
+		if [ -n "$pat" ]; then sys="$(logread 2>/dev/null | grep -i "$pat" | tail -n 160 | base64 2>/dev/null | tr -d '\n')"
+		else sys="$(logread 2>/dev/null | tail -n 160 | base64 2>/dev/null | tr -d '\n')"; fi
+		ker="$(dmesg 2>/dev/null | tail -n 100 | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"sys":"%s","ker":"%s"}\n' "$sys" "$ker";;
+	chanlist)
+		# real available channels per radio from `iw phy` (excludes disabled; flags DFS/radar)
+		out=""; first=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			idx="$(printf '%s' "$r" | tr -cd '0-9')"; band="$(uci -q get wireless.$r.band)"
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+			phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+			chans="$(iw phy "phy$phyn" info 2>/dev/null | awk '
+				/MHz \[/ {
+					line=$0; ch=line; sub(/.*\[/,"",ch); sub(/\].*/,"",ch);
+					if (ch ~ /^[0-9]+$/) {
+						dis=(line ~ /disabled/)?1:0; dfs=(line ~ /radar|DFS/)?1:0;
+						if (!dis) printf "%s{\"ch\":\"%s\",\"dfs\":%d}", (n++?",":""), ch, dfs;
+					}
+				}')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"radio":"%s","band":"%s","phy":"%s","channels":[%s]}' "$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$phyn")" "$chans")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	mesh_status)
+		# live 802.11s mesh status: peers + signal + rates + mpaths, per mesh iface
+		out=""; first=1
+		for i in $(iw dev 2>/dev/null | sed -n 's/.*Interface \(.*\)/\1/p'); do
+			iw dev "$i" info 2>/dev/null | grep -qi 'type mesh' || continue
+			mid="$(iw dev "$i" info 2>/dev/null | sed -n 's/.*mesh id \(.*\)/\1/p' | head -1)"
+			peers="$(iw dev "$i" station dump 2>/dev/null | awk '
+				function emit(){ if(mac!="") printf "%s{\"mac\":\"%s\",\"signal\":\"%s\",\"rxrate\":\"%s\",\"txrate\":\"%s\"}", (n++?",":""), mac, sig, rxr, txr; mac="";sig="";rxr="";txr="" }
+				/^Station /{ emit(); mac=tolower($2) }
+				/signal:/{ sig=$2 } /rx bitrate:/{ rxr=$3 } /tx bitrate:/{ txr=$3 }
+				END{ emit() }')"
+			pc="$(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"iface":"%s","mesh_id":"%s","peer_count":%s,"peers":[%s]}' "$(json_esc "$i")" "$(json_esc "$mid")" "${pc:-0}" "$peers")"
+		done
+		printf '{"ok":true,"mesh":[%s]}\n' "$out";;
+	power)
+		mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+		out=""; first=1
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			idx="$(printf '%s' "$r" | tr -cd '0-9')"
+			band="$(uci -q get wireless.$r.band)"; req="$(uci -q get wireless.$r.txpower)"
+			dis="$(uci -q get wireless.$r.disabled)"
+			# resolve the LIVE ap iface + its REAL phy from the system (phy index != radio index)
+			dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+			[ -n "$dev" ] || dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+			status="up"; reason=""; phyn=""; ap=""; lim=""; up=""; nd=""; chains=""
+			if [ "$dis" = "1" ]; then status="disabled"; reason="الراديو معطّل (disabled=1)"
+			elif [ -z "$dev" ] || [ ! -e "/sys/class/net/$dev" ]; then status="down"; reason="الواجهة غير جاهزة: phy لم يفتح / hostapd فشل / firmware قيد التحميل"
+			else
+				phyn="$(cat /sys/class/net/$dev/phy80211/index 2>/dev/null)"; [ -n "$phyn" ] || phyn="$idx"
+				ap="$(iwinfo "$dev" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9]*\).*/\1/p' | head -1)"
+				lim="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*MHz.*(\([0-9]*\)\.[0-9]* dBm).*/\1/p' | sort -rn | head -1)"
+				up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/ath10k/*user* /sys/kernel/debug/ieee80211/phy$phyn/ath9k/*user* 2>/dev/null | head -1 | tr -cd '0-9')"
+				[ -n "$up" ] || up="$(cat /sys/kernel/debug/ieee80211/phy$phyn/user_power 2>/dev/null | tr -cd '0-9')"
+				nd="$(cat /sys/kernel/debug/ieee80211/phy$phyn/netdev:$dev/txpower 2>/dev/null | tr -cd '0-9')"
+				# active TX chain mask (0x3 = 2 chains) for the iwinfo-aggregate explanation
+				m="$(iw phy "phy$phyn" info 2>/dev/null | sed -n 's/.*Configured Antennas: TX \(0x[0-9a-fA-F]*\).*/\1/p' | head -1)"
+				case "$m" in 0x7|0x3f) chains=3;; 0x3) chains=2;; 0x1|0x2|0x4) chains=1;; *) chains="";; esac
+			fi
+			chip="QCA9880"; [ "$band" = "2g" ] && chip="QCA9550"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"radio":"%s","band":"%s","phy":"%s","iface":"%s","chip":"%s","chains":"%s","status":"%s","reason":"%s","requested":"%s","applied":"%s","phy_limit":"%s","user_power":"%s","netdev":"%s"}' \
+				"$(json_esc "$r")" "$(json_esc "$band")" "$(json_esc "$phyn")" "$(json_esc "$dev")" "$chip" "$(json_esc "$chains")" "$status" "$(json_esc "$reason")" "$(json_esc "${req:-?}")" "$(json_esc "${ap:-?}")" "$(json_esc "${lim:-?}")" "$(json_esc "${up:-?}")" "$(json_esc "${nd:-?}")")"
+		done
+		printf '{"ok":true,"radios":[%s]}\n' "$out";;
+	scan)
+		out=""; first=1
+		for dev in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			# scanning while the AP radio is busy often returns a thin list -> retry once
+			raw="$(iwinfo "$dev" scan 2>/dev/null)"
+			[ -z "$raw" ] && raw="$(iwinfo "$dev" scan 2>/dev/null)"
+			cells="$(printf '%s\n' "$raw" | awk '
+				BEGIN{RS="Cell ";n=0}
+				NR>1{
+					essid="";ch="";sig="";enc="";bssid="";
+					m=split($0,L,"\n");
+					for(i=1;i<=m;i++){
+						if(L[i] ~ /Address:/){t=L[i];sub(/.*Address: /,"",t);sub(/[^0-9A-Fa-f:].*/,"",t);bssid=t}
+						else if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
+						else if(L[i] ~ /Channel:/){t=L[i];sub(/.*Channel: /,"",t);sub(/[^0-9].*/,"",t);ch=t}
+						else if(L[i] ~ /Signal:/){t=L[i];sub(/.*Signal: /,"",t);sub(/ .*/,"",t);sig=t}
+						else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);enc=t}
+					}
+					gsub(/[\\"]/,"",essid); gsub(/[\\"]/,"",enc); gsub(/\r/,"",enc);
+					if(ch!=""){ printf "%s{\"essid\":\"%s\",\"bssid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,bssid,ch,sig,substr(enc,1,24) }
+				}')"
+			[ -n "$cells" ] && { [ "$first" -eq 1 ] || out="$out,"; first=0; out="$out$cells"; }
+		done
+		printf '{"ok":true,"nets":[%s]}\n' "$out";;
+	vlan_state)
+		# READ-BACK of the ACTUAL applied VLAN config (proves the apply is real,
+		# not a fake success): bridge vlan_filtering flag, every bridge-vlan
+		# (vlan + ports) and every Wi-Fi iface's bound network.
+		brsec=""; i=0
+		while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+		done
+		flt="$(uci -q get network.$brsec.vlan_filtering)"; [ -n "$flt" ] || flt="0"
+		printf '{"ok":true,"filtering":"%s","vlans":[' "$flt"
+		i=0; f=1
+		while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+			v="$(uci -q get network.@bridge-vlan[$i].vlan)"
+			p="$(uci -q get network.@bridge-vlan[$i].ports 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/ *$//')"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"vlan":"%s","ports":"%s"}' "$(json_esc "$v")" "$(json_esc "$p")"
+			i=$((i+1))
+		done
+		printf '],"wifi":['
+		f=1
+		for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+			nw="$(uci -q get wireless.$wif.network)"; wm="$(uci -q get wireless.$wif.mode)"
+			ss="$(uci -q get wireless.$wif.ssid)"; [ -n "$ss" ] || ss="$(uci -q get wireless.$wif.mesh_id)"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"mode":"%s","ssid":"%s","network":"%s"}' "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "${nw:-lan}")"
+		done
+		printf ']}\n';;
+	sched_reboot)
+		# read-back of the optional scheduled-reboot setting (default: disabled)
+		en="$(uci -q get kt412.reboot.enabled)"; [ -n "$en" ] || en="0"
+		iv="$(uci -q get kt412.reboot.interval)"; [ -n "$iv" ] || iv="1"
+		un="$(uci -q get kt412.reboot.unit)"; [ -n "$un" ] || un="days"
+		printf '{"ok":true,"enabled":"%s","interval":"%s","unit":"%s"}\n' "$en" "$iv" "$(json_esc "$un")";;
+	program_state)
+		# READ-BACK of the ACTUAL device role after program_mode (real, not fake):
+		# LAN IP, WAN proto, vlan_filtering, and each radio's mode/ssid/channel/network.
+		lanip="$(uci -q get network.lan.ipaddr)"; wanp="$(uci -q get network.wan.proto)"
+		brsec=""; i=0; while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1)); done
+		flt="$(uci -q get network.$brsec.vlan_filtering)"; [ -n "$flt" ] || flt="0"
+		confirm=false; [ -d /tmp/kt412-rbp ] && [ ! -f /tmp/kt412-confirm ] && confirm=true
+		printf '{"ok":true,"lan_ip":"%s","wan_proto":"%s","filtering":"%s","pending_rollback":%s,"radios":[' \
+			"$(json_esc "$lanip")" "$(json_esc "${wanp:-none}")" "$flt" "$confirm"
+		f=1
+		for wif in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+			dev="$(uci -q get wireless.$wif.device)"; wm="$(uci -q get wireless.$wif.mode)"
+			ss="$(uci -q get wireless.$wif.ssid)"; [ -n "$ss" ] || ss="$(uci -q get wireless.$wif.mesh_id)"
+			nw="$(uci -q get wireless.$wif.network)"; ch="$(uci -q get wireless.$dev.channel)"
+			[ "$f" = 1 ] || printf ','; f=0
+			printf '{"radio":"%s","mode":"%s","ssid":"%s","channel":"%s","network":"%s"}' \
+				"$(json_esc "$dev")" "$(json_esc "$wm")" "$(json_esc "$ss")" "$(json_esc "$ch")" "$(json_esc "${nw:-lan}")"
+		done
+		printf ']}\n';;
+	wscan)   # scan on ONE radio's iface (for the Station uplink picker); returns {ssid,bssid,ch,sig,enc}
+		radio="$(sani_word "$(getp radio)")"; [ -n "$radio" ] || fail "no_radio"
+		dev="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$radio.interfaces[0].ifname" 2>/dev/null)"
+		if [ -z "$dev" ]; then
+			idx="$(printf '%s' "$radio" | tr -cd '0-9')"
+			dev="$(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p' | sed -n "$((idx+1))p")"
+		fi
+		[ -n "$dev" ] || fail "no_iface"
+		raw="$(iwinfo "$dev" scan 2>/dev/null)"; [ -z "$raw" ] && raw="$(iwinfo "$dev" scan 2>/dev/null)"
+		cells="$(printf '%s\n' "$raw" | awk '
+			BEGIN{RS="Cell ";n=0}
+			NR>1{
+				essid="";bssid="";ch="";sig="";enc="";
+				m=split($0,L,"\n");
+				for(i=1;i<=m;i++){
+					if(L[i] ~ /Address:/){t=L[i];sub(/.*Address: /,"",t);sub(/[^0-9A-Fa-f:].*/,"",t);bssid=t}
+					else if(L[i] ~ /ESSID:/){t=L[i];sub(/.*ESSID: "/,"",t);sub(/".*/,"",t);essid=t}
+					else if(L[i] ~ /Channel:/){t=L[i];sub(/.*Channel: /,"",t);sub(/[^0-9].*/,"",t);ch=t}
+					else if(L[i] ~ /Signal:/){t=L[i];sub(/.*Signal: /,"",t);sub(/ .*/,"",t);sig=t}
+					else if(L[i] ~ /Encryption:/){t=L[i];sub(/.*Encryption: /,"",t);enc=t}
+				}
+				gsub(/[\\"]/,"",essid); gsub(/[\\"]/,"",enc); gsub(/\r/,"",enc);
+				if(ch!=""){ printf "%s{\"essid\":\"%s\",\"bssid\":\"%s\",\"ch\":\"%s\",\"sig\":\"%s\",\"enc\":\"%s\"}", (n++?",":""), essid,bssid,ch,sig,substr(enc,1,24) }
+			}')"
+		printf '{"ok":true,"nets":[%s]}\n' "$cells";;
+	super_status)
+		dn=false; [ -f /tmp/kt412-sc-done ] && dn=true
+		rep="$(ls -t /tmp/kt412-super-check-*/report.txt 2>/dev/null | head -1)"
+		b64="$(tail -n 250 "$rep" 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
+		bundle="$(ls -t /tmp/kt412-super-check-*.tar.gz 2>/dev/null | head -1)"
+		printf '{"ok":true,"done":%s,"report":"%s","bundle":"%s"}\n' "$dn" "$b64" "$(json_esc "$bundle")";;
+	vlan_list)
+		out=""; first=1; i=0
+		while uci -q get network.@bridge-vlan[$i] >/dev/null 2>&1; do
+			v="$(uci -q get network.@bridge-vlan[$i].vlan)"
+			ports="$(uci -q get network.@bridge-vlan[$i].ports | tr '\n' ' ')"
+			ip="$(uci -q get network.vlan$v.ipaddr)"
+			dh=false; uci -q get dhcp.vlan$v >/dev/null 2>&1 && dh=true
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"vid":"%s","ports":"%s","ip":"%s","dhcp":%s}' "$v" "$(json_esc "$ports")" "$(json_esc "$ip")" "$dh")"
+			i=$((i+1))
+		done
+		printf '{"ok":true,"vlans":[%s]}\n' "$out";;
+	vlan_export)
+		d="$( { uci show network 2>/dev/null | grep -E 'bridge-vlan|\.vlan[0-9]'; uci show dhcp 2>/dev/null | grep 'vlan[0-9]'; uci show firewall 2>/dev/null | grep 'vlan[0-9]'; } | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"config":"%s"}\n' "$d";;
+	readfile)
+		ff="$(getp f | tr -cd 'A-Za-z-')"
+		case "$ff" in
+			POWER-REPORT) pp=/root/POWER-REPORT.txt;;
+			RF-SOLUTION)  pp=/root/RF-SOLUTION.txt;;
+			*) fail "bad_file";;
+		esac
+		b64="$(base64 < "$pp" 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"content":"%s"}\n' "$b64";;
+	# ===================== DIAGNOSTICS (ping/traceroute/dns) =====================
+	diag)
+		ty="$(getp type | tr -cd 'a-z')"; tg="$(printf '%s' "$(getp target)" | tr -cd 'A-Za-z0-9._:-' | cut -c1-64)"
+		[ -n "$tg" ] || fail "no_target"
+		case "$ty" in
+			ping)  out="$(ping -c4 -W2 "$tg" 2>&1)";;
+			trace) out="$( (traceroute -w2 -m15 "$tg" 2>&1 || busybox traceroute "$tg" 2>&1) | head -25 )";;
+			dns)   out="$(nslookup "$tg" 2>&1 | head -20)";;
+			*) fail "bad_type";;
+		esac
+		b="$(printf '%s' "$out" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	fw_list)
+		out=""; first=1
+		for s in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(kt_[^.=]*\)=redirect/\1/p'); do
+			[ "$s" = "kt_dmz" ] && continue
+			nm="$(uci -q get firewall.$s.name)"; sp="$(uci -q get firewall.$s.src_dport)"
+			di="$(uci -q get firewall.$s.dest_ip)"; dp="$(uci -q get firewall.$s.dest_port)"; pr="$(uci -q get firewall.$s.proto)"
+			key="${s#kt_}"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"id":"%s","name":"%s","proto":"%s","sport":"%s","dip":"%s","dport":"%s"}' "$(json_esc "$key")" "$(json_esc "$nm")" "$(json_esc "$pr")" "$(json_esc "$sp")" "$(json_esc "$di")" "$(json_esc "$dp")")"
+		done
+		dmz="$(uci -q get firewall.kt_dmz.dest_ip)"
+		printf '{"ok":true,"rules":[%s],"dmz":"%s"}\n' "$out" "$(json_esc "$dmz")";;
+	lease_list)
+		out=""; first=1
+		for s in $(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\(h_[^.=]*\)=host/\1/p'); do
+			mac="$(uci -q get dhcp.$s.mac)"; ip="$(uci -q get dhcp.$s.ip)"; nm="$(uci -q get dhcp.$s.name)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"mac":"%s","ip":"%s","name":"%s"}' "$(json_esc "$mac")" "$(json_esc "$ip")" "$(json_esc "$nm")")"
+		done
+		printf '{"ok":true,"leases":[%s]}\n' "$out";;
+	dns_get)
+		sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"; [ -n "$sec" ] || sec="@dnsmasq[0]"
+		srv="$(uci -q get dhcp.$sec.server | tr '\n' ' ')"; nr="$(uci -q get dhcp.$sec.noresolv)"
+		set -- $srv
+		printf '{"ok":true,"dns1":"%s","dns2":"%s","force":%s}\n' "$(json_esc "$1")" "$(json_esc "$2")" "$( [ "$nr" = "1" ] && echo true || echo false )";;
+	route_list)
+		out=""; first=1
+		for s in $(uci show network 2>/dev/null | sed -n 's/^network\.\(r_[^.=]*\)=route/\1/p'); do
+			tg="$(uci -q get network.$s.target)"; mk="$(uci -q get network.$s.netmask)"; gw="$(uci -q get network.$s.gateway)"; ifc="$(uci -q get network.$s.interface)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"target":"%s","mask":"%s","gw":"%s","iface":"%s"}' "$(json_esc "$tg")" "$(json_esc "$mk")" "$(json_esc "$gw")" "$(json_esc "$ifc")")"
+		done
+		printf '{"ok":true,"routes":[%s]}\n' "$out";;
+	svc_list)
+		out=""; first=1
+		for s in dnsmasq firewall network odhcpd uhttpd cron dropbear sqm mwan3 ddns miniupnpd adblock nlbwmon sysntpd; do
+			[ -x "/etc/init.d/$s" ] || continue
+			en=false; /etc/init.d/$s enabled 2>/dev/null && en=true
+			rn=false; pgrep -f "$s" >/dev/null 2>&1 && rn=true
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","enabled":%s,"running":%s}' "$s" "$en" "$rn")"
+		done
+		printf '{"ok":true,"services":[%s]}\n' "$out";;
+	cron_get)
+		b="$(base64 < /etc/crontabs/root 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"body":"%s"}\n' "$b";;
+	pkg_list)
+		lst="$( (apk list --installed 2>/dev/null | awk '{print $1}' | sed 's/-[0-9].*//' || opkg list-installed 2>/dev/null | awk '{print $1}') | sort -u | head -400 )"
+		b="$(printf '%s' "$lst" | base64 2>/dev/null | tr -d '\n')"
+		mgr="opkg"; command -v apk >/dev/null 2>&1 && mgr="apk"
+		printf '{"ok":true,"mgr":"%s","list":"%s"}\n' "$mgr" "$b";;
+	svc_states)
+		up="$(uci -q get upnpd.config.enabled)"; ab="$(uci -q get adblock.global.adb_enabled)"; dd="$(uci -q get ddns.kt.enabled)"
+		ddm="$(uci -q get ddns.kt.domain)"
+		gw=false; uci -q get network.guest >/dev/null 2>&1 && gw=true
+		printf '{"ok":true,"upnp":%s,"adblock":%s,"ddns":%s,"ddns_domain":"%s","guest":%s}\n' \
+			"$( [ "$up" = "1" ] && echo true || echo false )" \
+			"$( [ "$ab" = "1" ] && echo true || echo false )" \
+			"$( [ "$dd" = "1" ] && echo true || echo false )" \
+			"$(json_esc "$ddm")" "$gw";;
+	backup_make)
+		b="$(tar czf - -C / etc/config 2>/dev/null | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"data":"%s"}\n' "$b";;
+
+	# ===================== LIVE MONITOR (LuCI Status parity) =====================
+	conns)
+		cnt="$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
+		mx="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+		lst="$(awk '{p="";s="";d="";for(i=1;i<=NF;i++){if($i ~ /^(tcp|udp|icmp)$/&&p=="")p=$i;if($i ~ /^src=/&&s=="")s=substr($i,5);if($i ~ /^dst=/&&d=="")d=substr($i,5)} if(s!=""&&d!="")print p" "s" -> "d}' /proc/net/nf_conntrack 2>/dev/null | sort | uniq -c | sort -rn | head -25)"
+		b="$(printf '%s' "$lst" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"count":"%s","max":"%s","top":"%s"}\n' "${cnt:-0}" "${mx:-0}" "$b";;
+	routes)
+		b="$( { echo '== IPv4 =='; ip route 2>/dev/null; echo; echo '== IPv6 =='; ip -6 route 2>/dev/null | head -20; } | head -60 | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	stations)
+		txt=""
+		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			txt="$txt== $i ==
+$(iwinfo "$i" assoclist 2>/dev/null)
+"
+		done
+		b="$(printf '%s' "$txt" | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	procs)
+		b="$( (top -bn1 2>/dev/null | head -24 || ps w 2>/dev/null | head -24) | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+	usage)
+		b="$( (nlbw -c show 2>/dev/null | head -30 || echo 'nlbwmon لم يجمع بيانات بعد') | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$b";;
+
+	# ===================== INTERFACES overview =====================
+	ifaces)
+		out=""; first=1
+		for s in $(uci show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=interface/\1/p'); do
+			case "$s" in loopback) continue;; esac
+			dev="$(uci -q get network.$s.device)"
+			[ -n "$dev" ] || dev="$(ubus call network.interface.$s status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+			proto="$(uci -q get network.$s.proto)"; mtu="$(cat /sys/class/net/$dev/mtu 2>/dev/null)"
+			mac="$(cat /sys/class/net/$dev/address 2>/dev/null)"; oper="$(cat /sys/class/net/$dev/operstate 2>/dev/null)"
+			rx="$(cat /sys/class/net/$dev/statistics/rx_bytes 2>/dev/null)"; tx="$(cat /sys/class/net/$dev/statistics/tx_bytes 2>/dev/null)"
+			ip="$(ubus call network.interface.$s status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+			dis="$(uci -q get network.$s.disabled)"; en=true; [ "$dis" = "1" ] && en=false
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","device":"%s","proto":"%s","ip":"%s","mtu":"%s","mac":"%s","link":"%s","rx":"%s","tx":"%s","enabled":%s}' "$(json_esc "$s")" "$(json_esc "$dev")" "$(json_esc "$proto")" "$(json_esc "$ip")" "$(json_esc "$mtu")" "$(json_esc "$mac")" "$(json_esc "$oper")" "${rx:-0}" "${tx:-0}" "$en")"
+		done
+		printf '{"ok":true,"ifaces":[%s]}\n' "$out";;
+
+	# ===================== FIREWALL zones =====================
+	fw_zones)
+		out=""; first=1; i=0
+		while uci -q get firewall.@zone[$i] >/dev/null 2>&1; do
+			nm="$(uci -q get firewall.@zone[$i].name)"; inp="$(uci -q get firewall.@zone[$i].input)"
+			fwd="$(uci -q get firewall.@zone[$i].forward)"; outp="$(uci -q get firewall.@zone[$i].output)"
+			mq="$(uci -q get firewall.@zone[$i].masq)"; net="$(uci -q get firewall.@zone[$i].network | tr '\n' ' ')"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"name":"%s","input":"%s","output":"%s","forward":"%s","masq":"%s","network":"%s"}' "$(json_esc "$nm")" "$(json_esc "$inp")" "$(json_esc "$outp")" "$(json_esc "$fwd")" "$(json_esc "${mq:-0}")" "$(json_esc "$net")")"
+			i=$((i+1))
+		done
+		printf '{"ok":true,"zones":[%s]}\n' "$out";;
+
+	# ===================== BLOCKED clients =====================
+	blocklist)
+		out=""; first=1
+		for s in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(blk_[^.=]*\)=rule/\1/p'); do
+			mac="$(uci -q get firewall.$s.src_mac)"
+			[ "$first" -eq 1 ] || out="$out,"; first=0
+			out="$out$(printf '{"mac":"%s"}' "$(json_esc "$mac")")"
+		done
+		printf '{"ok":true,"blocked":[%s]}\n' "$out";;
+
+	# ===================== SPEED TEST (download) =====================
+	speedtest)
+		url="http://speedtest.tele2.net/10MB.zip"
+		sp="$(curl -s -m25 -o /dev/null -w '%{speed_download}' "$url" 2>/dev/null)"
+		[ -n "$sp" ] && [ "$sp" != "0" ] || { wget -q -O /dev/null "$url" 2>/dev/null; sp=0; }
+		printf '{"ok":true,"bps":"%s"}\n' "${sp:-0}";;
+
+	# ===================== UNIFIED DEVICES (bridge: DHCP + ARP + WiFi) =====================
+	devices)
+		# CPU: serve a 5s cache so rapid/multiple refreshes don't re-fork. The whole
+		# merge is ONE awk pass (no per-MAC subprocess loop) to keep the single core idle.
+		C=/tmp/kt_devices.json
+		if [ -f "$C" ]; then a=$(( $(date +%s) - $(stat -c %Y "$C" 2>/dev/null || echo 0) )); [ "$a" -ge 0 ] && [ "$a" -lt 5 ] && { cat "$C"; exit 0; }; fi
+		L=/tmp/kt_l.$$; S=/tmp/kt_s.$$; N=/tmp/kt_n.$$; : >"$L"; : >"$S"; : >"$N"
+		[ -f /tmp/dhcp.leases ] && awk '{print tolower($2)"\t"$3"\t"$4}' /tmp/dhcp.leases >"$L" 2>/dev/null
+		ip neigh show 2>/dev/null | awk '/lladdr/{print tolower($5)"\t"$3"\t"$1}' >"$N" 2>/dev/null
+		# WiFi stations (authoritative for "online"): mac sig rxr txr band conn bytes
+		for i in $(iwinfo 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) *ESSID:.*/\1/p'); do
+			bnd=2g; iwinfo "$i" info 2>/dev/null | grep -qi '5\.[0-9]* GHz' && bnd=5g
+			iw dev "$i" station dump 2>/dev/null | awk -v b="$bnd" '
+				function emit(){ if(mac!="") print mac"\t"sig"\t"rxr"\t"txr"\t"b"\t"conn"\t"rxb"\t"txb; mac="";sig="";rxr="";txr="";conn="";rxb=0;txb=0 }
+				/^Station /{ emit(); mac=tolower($2) }
+				/signal:/{ sig=$2 } /rx bytes:/{ rxb=$3 } /tx bytes:/{ txb=$3 }
+				/rx bitrate:/{ rxr=$3 } /tx bitrate:/{ txr=$3 } /connected time:/{ conn=$3 }
+				END{ emit() }' >>"$S" 2>/dev/null
+		done
+		# per-device LIVE speed: diff bytes vs the previous sample (mac rxb txb ts)
+		NOW="$(date +%s)"; R=/tmp/kt_devrate; [ -f "$R" ] || : >"$R"
+		# Single awk merges leases+neigh+stations(+prev-rate) -> JSON.
+		awk -F'\t' -v Lf="$L" -v Sf="$S" -v Nf="$N" -v Rf="$R" -v now="$NOW" '
+			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+			FILENAME==Rf { prx[$1]=$2+0; ptx[$1]=$3+0; pts[$1]=$4+0; next }
+			FILENAME==Lf { m=$1; ip[m]=$2; nm[m]=$3; seen[m]=1; next }
+			FILENAME==Sf { m=$1; sig[m]=$2; rxr[m]=$3; txr[m]=$4; bnd[m]=$5; conn[m]=$6; rxb[m]=$7+0; txb[m]=$8+0; byt[m]=$7+$8; sta[m]=1; seen[m]=1; next }
+			FILENAME==Nf { m=$1; ndev[m]=$2; if(ip[m]=="")ip[m]=$3; seen[m]=1; next }
+			END {
+				out=""; first=1; b24=0; b5=0;
+				for(m in seen){
+					if(m !~ /^[0-9a-f:][0-9a-f:]+$/ || length(m)!=17) continue;
+					online = (m in sta)?1:0;
+					if(m in sta){ kind=(bnd[m]=="5g")?"wifi5g":"wifi2g"; if(bnd[m]=="5g")b5+=byt[m]; else b24+=byt[m]; }
+					else kind="lan";
+					name=nm[m]; if(name=="*")name="";
+					s=sig[m]+0; pct=0; dist="";
+					if(online && sig[m]!=""){
+						pct=2*(s+100); if(pct>100)pct=100; if(pct<0)pct=0;
+						if(s>=-50)dist="قريب جداً"; else if(s>=-60)dist="قريب";
+						else if(s>=-70)dist="متوسط"; else if(s>=-80)dist="بعيد"; else dist="ضعيف جداً";
+					}
+					# live speed (bytes/s): AP rx=client upload, AP tx=client download
+					dl=0; ul=0;
+					if((m in sta) && (m in pts) && pts[m]>0){ dt=now-pts[m];
+						if(dt>0){ ul=(rxb[m]-prx[m])/dt; dl=(txb[m]-ptx[m])/dt; if(ul<0)ul=0; if(dl<0)dl=0; } }
+					sep=(first?"":","); first=0;
+					out=out sep "{\"mac\":\"" m "\",\"ip\":\"" jesc(ip[m]) "\",\"name\":\"" jesc(name) "\",\"kind\":\"" kind "\",\"online\":" online ",\"signal\":\"" jesc(sig[m]) "\",\"sigpct\":" pct ",\"dist\":\"" dist "\",\"rxrate\":\"" jesc(rxr[m]) "\",\"txrate\":\"" jesc(txr[m]) "\",\"dev\":\"" jesc(ndev[m]) "\",\"conn\":\"" jesc(conn[m]) "\",\"rx_bytes\":\"" (rxb[m]+0) "\",\"tx_bytes\":\"" (txb[m]+0) "\",\"bytes\":\"" (byt[m]+0) "\",\"dl_bps\":" int(dl) ",\"ul_bps\":" int(ul) "}";
+				}
+				printf "{\"ok\":true,\"band24\":%d,\"band5\":%d,\"devices\":[%s]}\n", b24, b5, out;
+			}' "$R" "$L" "$S" "$N" > "$C.$$" 2>/dev/null
+		mv -f "$C.$$" "$C" 2>/dev/null
+		# save this sample as the baseline for the next speed diff
+		awk -F'\t' -v now="$NOW" 'NF>=8{print $1"\t"$7"\t"$8"\t"now}' "$S" > "$R.$$" 2>/dev/null; mv -f "$R.$$" "$R" 2>/dev/null
+		rm -f "$L" "$S" "$N" "$C.$$" "$R.$$"
+		cat "$C";;
+
+	# ===================== SMART AP HEALTH / SELF-HEAL (read-only) =====================
+	selfheal)
+		t="$( { echo '=== Smart AP — الصحة والشفاء الذاتي ==='; uptime 2>/dev/null
+			echo; echo '## conntrack (المستخدم/الأقصى)'
+			echo "$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+			echo; echo '## الذاكرة (MB)'; free -m 2>/dev/null | head -2
+			echo; echo '## الراديوهات'; iwinfo 2>/dev/null | grep -iE 'ESSID|Tx-Power|Mode|Bit Rate' | head -12
+			echo; echo '## أحداث الشفاء الذاتي (آخر 30)'
+			logread 2>/dev/null | grep smartap-wd | tail -30 || true
+			logread 2>/dev/null | grep smartap-wd >/dev/null 2>&1 || echo '(لا أحداث — الجهاز مستقر، لم يحتج تدخّلاً)'
+			echo; echo '## watchdog العتاد (procd)'; ubus call system watchdog 2>/dev/null
+			echo; echo '## مدّة عمل الخدمات الحرجة'
+			for s in dnsmasq uhttpd rpcd netifd; do echo -n "$s: "; pidof "$s" >/dev/null 2>&1 && echo يعمل || echo متوقف; done
+		} | base64 2>/dev/null | tr -d '\n')"
+		printf '{"ok":true,"out":"%s"}\n' "$t";;
+
+	# ===================== blocked MAC list (for the clients view) =====================
+	blocked)
+		out=""; first=1
+		for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+			[ "$(uci -q get wireless.$s.macfilter)" = "deny" ] || continue
+			for m in $(uci -q get wireless.$s.maclist 2>/dev/null); do
+				m="$(printf '%s' "$m" | tr 'A-F' 'a-f')"
+				case ",$out," in *",$m,"*) continue;; esac
+				sep=$([ "$first" = 1 ] && echo "" || echo ","); first=0
+				out="$out$sep\"$m\""
+			done
+		done
+		printf '{"ok":true,"blocked":[%s]}\n' "$out";;
+
+	# ===================== wifi schedule (current cron state) =====================
+	sched_get)
+		offh="$(sed -n 's/^0 \([0-9]*\) .*wifi down # kt412-sched/\1/p' /etc/crontabs/root 2>/dev/null | head -1)"
+		onh="$(sed -n 's/^0 \([0-9]*\) .*wifi up # kt412-sched/\1/p' /etc/crontabs/root 2>/dev/null | head -1)"
+		en=$([ -n "$offh" ] && echo 1 || echo 0)
+		printf '{"ok":true,"enabled":%s,"off_h":"%s","on_h":"%s"}\n' "$en" "${offh:-}" "${onh:-}";;
+
+	# ===================== guest ssid (current state) =====================
+	guest_get)
+		if uci -q get wireless.kt412guest >/dev/null 2>&1; then
+			gs="$(uci -q get wireless.kt412guest.ssid)"; ge="$(uci -q get wireless.kt412guest.encryption)"
+			printf '{"ok":true,"enabled":1,"ssid":"%s","secure":%s}\n' "$(json_esc "$gs")" "$([ "$ge" = none ] || [ -z "$ge" ] && echo false || echo true)"
+		else
+			printf '{"ok":true,"enabled":0,"ssid":"KT412-Guest","secure":false}\n'
+		fi;;
+
+	# ===================== speedtest result (poll) =====================
+	spd)
+		F=/tmp/kt412-spd
+		if [ -f "$F.done" ]; then printf '{"ok":true,"done":true,"mbps":"%s"}\n' "$(cat "$F.out" 2>/dev/null)"
+		else printf '{"ok":true,"done":false}\n'; fi;;
+
+	# ===================== resource history (sampler ring buffer) =====================
+	history)
+		F=/tmp/kt412-hist
+		if [ -f "$F" ]; then
+			out="$(awk 'BEGIN{f=1} NF>=5{ s=(f?"":","); f=0; printf "%s{\"t\":%s,\"cpu\":%s,\"mem\":%s,\"rx\":%s,\"tx\":%s}", s,$1,$2,$3,$4,$5 }' "$F" 2>/dev/null)"
+			printf '{"ok":true,"samples":[%s]}\n' "$out"
+		else
+			printf '{"ok":true,"samples":[]}\n'
+		fi;;
+
+	# ===================== NEIGHBORS: kernel ARP/ND table + resolved name =====================
+	# Name resolution (MikroTik-style): custom label (/etc/kt412-names: mac<TAB>name)
+	# wins, else the DHCP lease hostname, else empty. custom=true marks user-named.
+	neighbors)
+		# Only ACTIVE devices on the LAN bridge (same L2 segment) — like a MikroTik
+		# neighbour list. Filter to the lan bridge device and drop FAILED/INCOMPLETE
+		# (stale ARP that isn't actually present). De-dup by MAC (one row per device,
+		# preferring an IPv4 address).
+		BR="$(uci -q get network.lan.device 2>/dev/null)"; [ -n "$BR" ] || BR=br-lan
+		NGF="/tmp/kt_neigh.$$"
+		{ ip neigh show 2>/dev/null; ip -6 neigh show 2>/dev/null; } > "$NGF"
+		NMF=/etc/kt412-names; [ -f "$NMF" ] || NMF=/dev/null
+		LSF=/tmp/dhcp.leases; [ -f "$LSF" ] || LSF=/dev/null
+		js="$(awk -v NMF="$NMF" -v LSF="$LSF" -v NGF="$NGF" -v BR="$BR" '
+			function jesc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+			function isv4(a){ return (a ~ /\./) }
+			FILENAME==NMF { ti=index($0,"\t"); if(ti>1){ m=tolower(substr($0,1,ti-1)); cname[m]=substr($0,ti+1) } next }
+			FILENAME==LSF { m=tolower($2); if($4!="" && $4!="*") dname[m]=$4; next }
+			FILENAME==NGF {
+				if($0 !~ /lladdr/) next;
+				nip=$1; dv=""; mac=""; st=$NF;
+				for(i=1;i<=NF;i++){ if($i=="dev") dv=$(i+1); if($i=="lladdr") mac=tolower($(i+1)); }
+				if(mac=="") next;
+				if(dv!=BR) next;                                  # only the LAN bridge
+				if(st=="FAILED" || st=="INCOMPLETE" || st=="NOARP") next;  # not present
+				# one row per MAC; prefer an IPv4 address as the shown IP
+				if(!(mac in seen) || (isv4(nip) && !isv4(rip[mac]))){
+					seen[mac]=1; rip[mac]=nip; rdv[mac]=dv; rst[mac]=st;
+				}
+			}
+			END{
+				first=1;
+				for(mac in seen){
+					nm=""; cust="false";
+					if(mac in cname){ nm=cname[mac]; cust="true" } else if(mac in dname){ nm=dname[mac] }
+					printf "%s{\"ip\":\"%s\",\"mac\":\"%s\",\"dev\":\"%s\",\"state\":\"%s\",\"name\":\"%s\",\"custom\":%s}", (first?"":","), jesc(rip[mac]), jesc(mac), jesc(rdv[mac]), jesc(rst[mac]), jesc(nm), cust;
+					first=0;
+				}
+			}' "$NMF" "$LSF" "$NGF")"
+		rm -f "$NGF"
+		printf '{"ok":true,"neighbors":[%s]}\n' "$js";;
+
+	*)
+		fail "unknown_op";;
+esac
+exit 0

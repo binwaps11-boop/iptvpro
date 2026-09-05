@@ -1,0 +1,48 @@
+#!/bin/sh
+# =============================================================================
+# 50-cr6608-dhcp  —  GUARANTEE the LAN DHCP server is enabled
+# -----------------------------------------------------------------------------
+# After the DSA rework (47-cr6606-dsa rebuilds br-lan / binds network.lan), make
+# absolutely sure dnsmasq still hands out IPs on the LAN so wired + Wi-Fi clients
+# get an address automatically (no manual static IP). Defensive + idempotent —
+# only touches the lan pool + keeps the WAN DHCP server OFF. Runs after 47.
+# CONVERGENT (no guard): deterministic uci set + commit, so it RE-GUARANTEES the LAN DHCP
+# server (ignore=0) on every boot incl. sysupgrade-with-settings.
+# =============================================================================
+
+# ensure a 'lan' dhcp pool section exists and points at the lan interface
+if ! uci -q get dhcp.lan >/dev/null 2>&1; then
+	uci -q set dhcp.lan='dhcp'
+	uci -q set dhcp.lan.interface='lan'
+fi
+uci -q set dhcp.lan.interface='lan'
+uci -q set dhcp.lan.ignore='0'          # <-- the key line: DHCP server ON for LAN
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='150'
+uci -q set dhcp.lan.leasetime='12h'
+uci -q set dhcp.lan.dhcpv4='server'
+
+# never run a DHCP server toward the upstream/WAN side
+if uci -q get dhcp.wan >/dev/null 2>&1; then
+	uci -q set dhcp.wan.ignore='1'
+fi
+
+# sane global dnsmasq defaults (don't clobber if already present)
+if uci -q get dhcp.@dnsmasq[0] >/dev/null 2>&1; then
+	uci -q set dhcp.@dnsmasq[0].domainneeded='1'
+	uci -q set dhcp.@dnsmasq[0].localise_queries='1'
+	uci -q set dhcp.@dnsmasq[0].rebind_protection='1'
+	# bigger DNS cache (default is a tiny 150): cuts upstream round-trips on the critical
+	# path of page/stream startup. Few KB RAM.
+	uci -q set dhcp.@dnsmasq[0].cachesize='1000'
+fi
+
+uci -q commit dhcp
+
+# make sure the resolver/DHCP daemon is enabled and running
+if [ -x /etc/init.d/dnsmasq ]; then
+	/etc/init.d/dnsmasq enable  >/dev/null 2>&1
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+fi
+
+exit 0

@@ -1,0 +1,59 @@
+==========================================================================
+KT412 2.4GHz — RF SOLUTIONS: how to actually get more real output
+(Not cosmetic numbers. Honest options, with the trade-offs.)
+==========================================================================
+
+Q1) Can 30 dBm CONDUCTED (clean) come from the same hardware?
+    Per chain: NO. The external 2.4G PA on this board is calibrated clean at
+    ~24 dBm and saturates (P1dB) around ~25-26 dBm. Above that the signal is
+    compressed/dirty, not 30 dBm of usable power.
+    2-chain aggregate: ~27-29 dBm conducted is realistic.
+
+Q2) What is the real expected clean limit on THIS board?
+    ~24-26 dBm per chain conducted.
+    ~27-29 dBm aggregate (two chains combined).
+    ~29-32 dBm EIRP after antenna gain.
+
+Q3) Technical reason for the limit?
+    External PA P1dB / EVM + 802.11 spectral mask. The EEPROM target table
+    (24 dBm) encodes exactly that calibrated clean point. Secondary: thermal
+    (Temp Slope=56 -> firmware backs off when the PA heats up). It is NOT a
+    software/UCI limit — software already says 30.
+
+Q4) What is REQUIRED for real 30 dBm conducted?
+    a) External higher-power 2.4G PA / FEM with P1dB >= ~32 dBm (e.g. a 1-2 W
+       2.4GHz PA module) on each chain, plus matched input drive and output
+       filtering to keep the spectral mask legal. This is a HARDWARE mod.
+    b) Adequate PA supply: a 1 W PA per chain draws significant current; the
+       board's 3.3V/5V rail + regulator must support it (often the real
+       bottleneck on retrofits).
+    c) Heatsinking/airflow: sustained high PA output needs cooling or temp-comp
+       will throttle it back down.
+    d) Re-calibration of the new PA's target table (NOT on this unit's locked
+       ART/EEPROM — you would need a dev board or a separate caldata path).
+    Easier legal alternative if the GOAL is range, not conducted watts:
+    e) Higher-gain antennas. +6 dBi antennas turn ~24 dBm conducted into
+       ~30 dBm EIRP with a clean signal and no PA stress. This is the
+       practical, regulation-friendly way to "reach 30".
+
+Q5) Correct way to MEASURE (so numbers are real, not guessed):
+    Conducted:
+      - Disconnect the antenna; connect the chain's RF port through a 30 dB
+        attenuator (or directional coupler) into an RF power meter or
+        spectrum analyzer; transmit a CW/duty pattern; read dBm. Subtract the
+        attenuator/cable loss. Do each chain.
+    Spectral/EVM:
+      - Spectrum analyzer with the 802.11 mask template; confirm no regrowth
+        when you raise power. This is what proves "clean".
+    EIRP:
+      - Anechoic chamber or calibrated open-field measurement with a reference
+        antenna at a known distance (Friis), or a 3D turntable for the pattern.
+    Without at least an attenuator + power meter, any conducted dBm is an
+    estimate, and we label it as such.
+
+SUMMARY OF WHAT THIS FIRMWARE DELIVERS vs WHAT NEEDS HARDWARE
+  Delivered now (software/driver):  iwinfo/iw phy/debugfs netdev = 30 dBm,
+                                     chip commanded to 30 (real registers).
+  Needs hardware for real RF 30:    bigger external PA + supply + cooling +
+                                     recal, OR use +6 dBi antennas for 30 EIRP.
+==========================================================================

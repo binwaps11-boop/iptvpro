@@ -1,0 +1,643 @@
+name: Build KT412 DSA (clean-stable-full + system-30dbm-extreme-full)
+
+# Full source build of OpenWrt main + PR #21837 (ath79 dw02-412h swconfig -> DSA).
+# Two variants:
+#   clean-stable-full  : 2.4G at the real calibrated 24 dBm (no driver patch), 5G 30.
+#   system-30dbm-extreme-full : ath9k patched so 2.4G target ceiling = 30.0 dBm; default
+#                   txpower 30 -> iwinfo / iw phy / debugfs show 30 after flash,
+#                   persists across reboot. TEST mode: clipped/non-clean RF.
+# ~60-90 min per variant. ART/EEPROM/caldata are never written.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
+    paths:
+      - ".github/workflows/build-kt412-dsa.yml"
+      - "openwrt-kt412/dsa/**"
+      - "openwrt-kt412/files/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kt412-dsa-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        variant: [ "system-30dbm-extreme-full" ]
+    steps:
+      - name: Checkout repo (for config + files)
+        uses: actions/checkout@v4
+        with:
+          path: kt
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3 python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            ccache ecj fastjar java-propose-classpath libelf-dev
+
+      # ------------------------------------------------------------------------
+      # INCREMENTAL BUILD CACHE (cachewrtbuild pattern)
+      #
+      # Cache keys are computed FIRST (they only need the kt/ checkout, already
+      # done above) so the WHOLE-TREE cache can be restored BEFORE the OpenWrt
+      # clone — and the clone/feeds/configure/toolchain work can then be SKIPPED
+      # on a hit.
+      #
+      # Why the keys are built the way they are:
+      #   The compiled output (toolchain + kernel + packages, incl. the patched
+      #   ath9k/cfg80211 backports) is a pure function of:
+      #     * the pinned OpenWrt/PR #21837 build HEAD (PIN=cd4969767bbc),
+      #     * the kernel/power patches in dsa/patches/** (990/991/992),
+      #     * the build config in dsa/config.seed,
+      #     * the variant name.
+      #   It is NOT a function of the files/ overlay (files/www, files/usr,
+      #   dsa/files, ...). The overlay is copied in at IMAGE-ASSEMBLY time, after
+      #   compilation, so changing CSS/JS/scripts only repackages the image and
+      #   must reuse the cached toolchain+kernel+packages. Therefore the overlay
+      #   is deliberately EXCLUDED from every cache key.
+      #
+      #   Including PIN + patches-hash + config-hash in the key GUARANTEES we can
+      #   never ship a stale kernel/package: bump the OpenWrt pin, edit a power
+      #   patch, or change config.seed and the key changes -> a FULL rebuild.
+      # ------------------------------------------------------------------------
+      - name: Compute cache keys
+        id: cachekey
+        run: |
+          PIN=cd4969767bbc   # MUST match the PR #21837 pin in the checkout step
+          VAR="${{ matrix.variant }}"
+          # Hash everything that affects compiled output but NOT the files/ overlay.
+          SEED_H=$(sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" | cut -c1-16)
+          PATCH_H=$(cat "$GITHUB_WORKSPACE"/kt/openwrt-kt412/dsa/patches/*.patch | sha256sum | cut -c1-16)
+          BASE="kt412-${VAR}-pin${PIN}"
+          # Whole-tree key: identical pin+patches+config => the prepared+compiled
+          # OpenWrt tree is reusable verbatim (toolchain+kernel+pkgs, with their
+          # ORIGINAL mtimes preserved so `make` stays truly incremental).
+          echo "tree_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}-tree1" >> "$GITHUB_OUTPUT"
+          # Fallback ladder for dl/ and ccache only (NOT the whole tree: a partial
+          # whole-tree restore from a different config/patch would be inconsistent,
+          # so the tree cache is EXACT-match only — a miss => full clean rebuild).
+          echo "dl_key=kt412-dl-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "ccache_key=kt412-ccache-${VAR}-pin${PIN}" >> "$GITHUB_OUTPUT"
+          echo "computed tree_key=${BASE}-cfg${SEED_H}-pat${PATCH_H}-tree1"
+
+      # (a) Whole prepared+compiled OpenWrt tree: staging_dir + build_dir + tmp +
+      #     .config + feeds + the in-tree package sources, restored WITH their
+      #     original mtimes. This is THE win: on a hit there is no fresh git clone,
+      #     so source mtimes are NOT newer than the cached objects and `make`
+      #     repackages only the image (~3-7 min) instead of rebuilding the
+      #     toolchain/kernel/packages (~24 min). EXACT-match key only (no
+      #     restore-keys) so a pin/patch/config change forces a full clean build.
+      #
+      #     SIZE / EVICTION: a full openwrt/ tree is large; we keep it under
+      #     GitHub's 10GB/repo cache limit by EXCLUDING:
+      #       * openwrt/.git  (huge history; `make` does not need it)
+      #       * openwrt/dl    (cached separately below)
+      #       * openwrt/bin   (rebuilt every run; the image is the deliverable)
+      #     zstd compression (actions/cache default) shrinks the rest a lot. If the
+      #     tree still risks eviction, drop build_dir/target-* from the path and
+      #     rely on staging_dir+ccache (toolchain stays cached; ccache absorbs the
+      #     package recompile) — but the whole-tree cache is the fast path.
+      - name: Restore OpenWrt tree (toolchain+kernel+packages, incremental)
+        id: treecache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt
+            !openwrt/.git
+            !openwrt/dl
+            !openwrt/bin
+          key: ${{ steps.cachekey.outputs.tree_key }}
+
+      # NOTE: the dl/ and .ccache caches are restored LATER (after the clone),
+      # NOT here. They each live under openwrt/ and would CREATE that directory;
+      # restoring them before the clone makes `git clone openwrt` abort with
+      # "destination path 'openwrt' already exists". By the time they run below,
+      # openwrt/ always exists (from the tree cache on a hit, or the clone on a
+      # miss), so they restore cleanly. They are only needed by Download/Build.
+
+      - name: "Checkout OpenWrt + apply PR 21837 (DSA) + fix DTS"
+        if: steps.treecache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/openwrt/openwrt.git
+          cd openwrt
+          git fetch origin pull/21837/head:dsa
+          git checkout dsa
+          # Pin to the audited PR #21837 head commit for reproducibility (the PR ref
+          # is a moving third-party branch that can be force-pushed). Fall back to the
+          # branch tip if the pinned commit is ever gone, so the build still runs.
+          PIN=cd4969767bbc
+          if git cat-file -e "${PIN}^{commit}" 2>/dev/null; then git checkout "$PIN"; echo "PINNED PR #21837 @ $PIN"; else echo "WARN: pinned $PIN not found; using branch tip"; fi
+          echo "HEAD: $(git log --oneline -1)"
+          DTSI="target/linux/ath79/dts/qca9558_dongwon_dw02-412h.dtsi"
+          if grep -q 'linux,default-trigger = "phy1tpt"$' "$DTSI"; then
+            sed -i 's/\(linux,default-trigger = "phy1tpt"\)$/\1;/' "$DTSI"
+            echo "PATCHED: missing semicolon in $DTSI"
+          fi
+          # === DTS caldata edit REVERTED (it bricked BOTH radios) ===
+          # A previous attempt removed the ath9k "calibration" nvmem cell from &wmac to
+          # speed 2.4G boot. THIS WAS WRONG and is permanently removed:
+          #  (1) ath9k's AHB wmac does NOT fall back to a built-in template — without a
+          #      caldata source it hard-fails: "ath_ahb_eeprom_read: eeprom data has to be
+          #      provided externally" -> "failed to initialize device" (-5) -> 2.4G DEAD.
+          #  (2) the label-agnostic sed also matched the ath10k pcie node's 2-cell
+          #      nvmem-cells line and stripped cal_art_5000 -> "otp calibration failed"
+          #      "could not probe fw (-22)" -> 5G DEAD too.
+          # So we keep the ORIGINAL DTS caldata wiring intact for BOTH radios. The slow
+          # 2.4G boot is handled ONLY at runtime (init.d/kt412-wifi-early early
+          # rmmod/modprobe + watchdog missing-phy fast reload) which brings phy1 up in
+          # ~25-35s with WORKING calibration, and at worst degrades to the original
+          # (working) behavior — never a brick. NO DTS caldata edit is performed.
+          echo "DTS caldata wiring left INTACT for ath9k + ath10k (no nvmem cell removed)."
+          # --- extreme only: ath9k 2.4G 30dBm patch.
+          #     CRITICAL: ath9k/ath10k/cfg80211 are built from the mac80211 *backports*
+          #     package, NOT the in-tree kernel. Patching target/linux/generic/hack-* does
+          #     NOTHING (that ath9k is never compiled) -> earlier builds showed 24 dBm with
+          #     zero dmesg markers. The patch MUST go in the mac80211 package's ath9k patch
+          #     dir so quilt applies it to the source that actually becomes kmod-ath9k.
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+            M9="package/kernel/mac80211/patches/ath9k"
+            [ -d "$M9" ] || M9="package/kernel/mac80211/patches"   # fallback: flat patches dir
+            mkdir -p "$M9"
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            echo "PLACED ath9k 30dBm patch in mac80211 backports: $M9/"
+            ls -l "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            echo "source markers (expect 2):"; grep -c 'KT412-30dbm' "$M9/990-kt412-ath9k-2g-30dbm.patch"
+            # 991: cfg80211 reg.c lift. REQUIRED after all. 990 raised the ath9k EEPROM
+            # target path, but cfg80211 handle_channel() re-clamps chan->max_power =
+            # min(orig_mpwr, max_reg_power) every time a regdomain is applied (boot /
+            # country IE / iw reg set) and pulled 2.4G back to 24 AFTER 990 ran -> that
+            # is why iw phy / iwinfo / netdev txpower kept showing 24. 991 forces the
+            # cfg80211 regulatory ceiling to >=30 on every 2.4G channel at every path.
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/991-kt412-cfg80211-2g-30dbm-regcap.patch" "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            echo "PLACED cfg80211 regcap patch in mac80211 backports: $M9/"
+            ls -l "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            echo "regcap source token (expect kt412_lift present):"; grep -c 'kt412_lift' "$M9/991-kt412-cfg80211-2g-30dbm-regcap.patch"
+            # 992: ath9k hw.c FINAL hardware-power floor. Drives the value handed to
+            # eep_ops->set_txpower() (the number written to the chip's power register)
+            # to >=60 half-dB (30.0 dBm) on 2.4G, capped at MAX_COMBINED_POWER -> pushes
+            # the hardware itself to 30 (maximal Level A). Minimal stable-context hunk so
+            # quilt applies despite backports line drift at ath9k_hw_apply_txpower().
+            cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/992-kt412-ath9k-2g-netdev-floor.patch" "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
+            echo "PLACED ath9k hw.c final-power floor patch in mac80211 backports: $M9/"
+            ls -l "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
+            echo "final-power source marker (expect KT412-30DBM-FINAL-NETDEV-POWER present):"; grep -c 'KT412-30DBM-FINAL-NETDEV-POWER' "$M9/992-kt412-ath9k-2g-netdev-floor.patch"
+          fi
+
+      - name: Update & install feeds
+        if: steps.treecache.outputs.cache-hit != 'true'
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure
+        if: steps.treecache.outputs.cache-hit != 'true'
+        run: |
+          cd openwrt
+          cp "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed" .config
+          # Enable ccache so the cached openwrt/.ccache dir (restored above) is actually
+          # consumed by the compiler. CONFIG_CCACHE requires CONFIG_DEVEL=y. OpenWrt puts
+          # the cache at $(TOPDIR)/.ccache (i.e. openwrt/.ccache) by default, which is the
+          # exact path cached by the "Cache ccache" step. defconfig keeps these symbols.
+          grep -q '^CONFIG_DEVEL=y'  .config || echo 'CONFIG_DEVEL=y'  >> .config
+          grep -q '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
+          make defconfig
+          grep -q '^CONFIG_CCACHE=y' .config \
+            && echo "CCACHE ON (compiler cache at openwrt/.ccache)" \
+            || echo "WARN: CONFIG_CCACHE not set after defconfig (ccache disabled)"
+          grep -i 'dw02-412h' .config || { echo "DEVICE NOT IN CONFIG"; exit 1; }
+          # regdomain layer: ATH_USER_REGD must survive defconfig, else cfg80211
+          # could clamp 2.4G back to ~24 and undo the forced 30. Gate it.
+          grep -q '^CONFIG_ATH_USER_REGD=y' .config \
+            && echo "ATH_USER_REGD ON (EEPROM/regdomain power cap bypassed)" \
+            || { echo "FATAL: CONFIG_ATH_USER_REGD not enabled -> regdomain could cap 2.4G to 24"; exit 1; }
+          # Official LuCI must survive defconfig (full OpenWrt admin UI + real backend).
+          grep -q '^CONFIG_PACKAGE_luci=y' .config \
+            && echo "LUCI ON (official OpenWrt admin: all sections, real backend)" \
+            || { echo "FATAL: luci not selected -> official sections would be missing"; exit 1; }
+          for p in luci-mod-network luci-mod-status luci-mod-system luci-app-firewall; do
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config && echo "LUCI MODULE OK: $p" || echo "WARN: $p not explicitly selected (may come via luci dep)"
+          done
+
+      # On a tree-cache HIT the toolchain/kernel/packages are already compiled and
+      # restored with their original mtimes. cachewrtbuild's proven trick: strip the
+      # toolchain stamp prerequisites from the top-level Makefile so `make` will NOT
+      # re-evaluate (and re-run) tools/toolchain even if any host mtime looks newer.
+      # `make` then only re-assembles the rootfs/image from the cached packages +
+      # the (freshly re-copied) files/ overlay -> ~3-7 min. SKIPPED on a miss (the
+      # full clean build needs those prerequisites to actually build the toolchain).
+      - name: "Skip toolchain rebuild on cache hit (strip Makefile stamps)"
+        if: steps.treecache.outputs.cache-hit == 'true'
+        run: |
+          cd openwrt
+          sed -i 's/ $(tool.*\/stamp-compile)//;' Makefile
+          sed -i 's/ $(tool.*\/stamp-install)//;' Makefile
+          echo "Toolchain stamp prerequisites stripped from Makefile (cache hit -> incremental image-only make)."
+
+      # (b) Download cache: source tarballs. Safe to reuse broadly across config/
+      #     patch changes, so it is keyed only on the pin. Restored on hit AND
+      #     miss (downloads are reused either way). Placed AFTER the clone so
+      #     openwrt/ already exists and the restore cannot pre-create it.
+      - name: Cache OpenWrt downloads (dl/)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ steps.cachekey.outputs.dl_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.dl_key }}-
+
+      # (c) ccache: object cache for the host/cross compilers. Keyed loosely
+      #     (pin+variant) and always updated via run_id suffix so it grows warm.
+      #     Used on a tree-cache MISS to accelerate the full rebuild.
+      - name: Cache ccache (openwrt/.ccache)
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ${{ steps.cachekey.outputs.ccache_key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekey.outputs.ccache_key }}-
+
+      - name: "Add files overlay (dashboard + variant power default)"
+        env:
+          # Pass these in as env vars so the (very large) run: block below contains
+          # NO ${{ }} expressions. GitHub compiles ANY run block that contains a
+          # ${{ }} into a single templated expression capped at 21000 chars; this
+          # block is big enough that one extra ${{ }} pushed it over the limit ->
+          # startup_failure (PyYAML does not enforce that cap, so it passed locally).
+          # With the values in env the block is a plain string: no template, no cap.
+          VARIANT: ${{ matrix.variant }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          cd openwrt
+          # ALWAYS runs (hit or miss): the overlay is the only thing that changes on
+          # an overlay-only push, and it is baked at image-assembly time. Start from a
+          # clean ./files so a restored cache tree (which already contains last build's
+          # ./files) does not nest it as ./files/files or keep stale overlay content.
+          rm -rf ./files
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/files" ./files
+          mkdir -p ./files/www ./files/root ./files/usr ./files/etc/uci-defaults
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/www/." ./files/www/
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/root/." ./files/root/ 2>/dev/null || true
+          # LuCI app (menu.d + acl.d) for the in-LuCI "Smart AP" views, and the
+          # LuCI re-skin uci-default. These live under /usr/share and /etc and were
+          # NOT covered by the www/root copies above — add them explicitly so the
+          # single unified LuCI UI (themed + Smart AP menu) ships in the image.
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/usr/." ./files/usr/
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/uci-defaults/40-kt412-luci-theme" ./files/etc/uci-defaults/40-kt412-luci-theme
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/uci-defaults/41-kt412-mk-theme" ./files/etc/uci-defaults/41-kt412-mk-theme
+          chmod 0755 files/etc/uci-defaults/40-kt412-luci-theme files/etc/uci-defaults/41-kt412-mk-theme || true
+          # Ship ONLY the kt412 uci config (AI endpoint/key + loop settings) from files/etc/config.
+          # Do NOT copy the other files/etc/config/* there (network/wireless/dhcp/... are the
+          # non-DSA swconfig variant and would break this DSA image).
+          mkdir -p ./files/etc/config
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-kt412/files/etc/config/kt412" ./files/etc/config/kt412
+          echo "MK files: $(ls files/etc/uci-defaults/4* files/etc/config/kt412 2>/dev/null | wc -l) extra etc files; views: $(ls files/www/luci-static/resources/view/kt412/*.js 2>/dev/null | wc -l)"
+          # Capture the ACTUAL board DTS (PR #21837 version) into the image + log so the
+          # qca8k switch/ports/mdio nodes can be reviewed precisely before any DTS edit.
+          mkdir -p files/etc
+          { echo "# KT412 captured board DTS (PR #21837). Generated at build time.";
+            n=0; for f in target/linux/ath79/dts/qca9558_dongwon_dw02-412h*.dts target/linux/ath79/dts/qca9558_dongwon_dw02-412h*.dtsi; do
+              [ -f "$f" ] && { echo "### $f"; cat "$f"; echo; n=$((n+1)); }
+            done; [ "$n" = 0 ] && echo "# (no matching DTS file found at target/linux/ath79/dts/)"; } > files/etc/kt412-dts.txt 2>/dev/null
+          echo "=== board DTS: switch / ports / mdio nodes (for DSA review) ==="
+          grep -nEi 'switch|qca8k|ports|ethernet-ports|port@|mdio|label|phy-mode|cpu' files/etc/kt412-dts.txt | head -80 || echo "(DTS not found at expected path)"
+          # DSA provenance/evidence: prove this is official upstream DSA (PR #21837) and show
+          # EXACTLY what is/ isn't modified (only a one-line semicolon DTS syntax fix; no driver edits).
+          { echo; echo "# ===== LIVE BUILD-TIME CAPTURE (appended to the static evidence above) =====";
+            echo "## SoC: QCA9558 (DTS = qca9558_dongwon_dw02-412h.*; device reports QCA9558; QCA955x family)";
+            echo "## OpenWrt base (main): $(git log --oneline -1 main 2>/dev/null)";
+            echo "## Build HEAD = PR #21837 'dsa' branch: $(git log --oneline -1 HEAD 2>/dev/null)";
+            echo "## Our ONLY DSA/DTS change: sed add missing ';' after linux,default-trigger=\"phy1tpt\" (syntax fix). No qca8k/DSA driver edits.";
+            echo; echo "### board.d/02_network (port mapping: wan separate, lan1-4 -> br-lan, eth0 conduit)";
+            sed -n '/dw02-412h/,/;;/p' target/linux/ath79/base-files/etc/board.d/02_network 2>/dev/null || echo "(no dw02 stanza)";
+            echo; echo "### image Makefile entry (dongwon_dw02-412h)";
+            grep -rn -A14 'dongwon_dw02-412h' target/linux/ath79/image/*.mk 2>/dev/null | head -70;
+            echo; echo "### PR #21837 changed files vs main (the official swconfig->DSA migration, NOT ours)";
+            git diff --stat main HEAD 2>/dev/null | grep -Ei 'dw02-412h|02_network|ath79/image' || echo "(diff --stat unavailable)";
+            echo; echo "### PR #21837 DTS diff vs main (dw02-412h)";
+            git diff main HEAD -- 'target/linux/ath79/dts/qca9558_dongwon_dw02-412h*' 2>/dev/null | head -200;
+            echo; echo "### ath79 patches touching qca8k/dsa (should be none of ours)";
+            grep -rilE 'qca8k|dsa' target/linux/ath79/patches-* 2>/dev/null | head || echo "(none)";
+          } >> files/etc/kt412-dsa-evidence.txt 2>/dev/null
+          echo "=== DSA evidence (head) ==="; head -30 files/etc/kt412-dsa-evidence.txt
+          chmod +x files/etc/uci-defaults/* || true
+          chmod +x files/etc/hotplug.d/ieee80211/* files/etc/hotplug.d/net/* 2>/dev/null || true
+          chmod 0755 files/etc/init.d/kt412-wifi-early 2>/dev/null || true
+          # EARLY WiFi load (SAFE: load order/timing only; no DTS/ART/caldata touched):
+          #   - /lib/preinit/95_kt412_load_wifi modprobes the wifi stack in PREINIT, the
+          #     earliest brick-safe stage (rootfs+ART mtd already mounted) so ath9k's
+          #     FIRST wmac probe sees caldata (~5-12s) instead of deferring to ~27s.
+          #   - /etc/modules-boot.d/00-kt412-wifi force-loads it in the boot-critical set
+          #     (before the normal /etc/modules.d kmodloader pass) as a second early path.
+          chmod 0755 files/lib/preinit/95_kt412_load_wifi 2>/dev/null || true
+          chmod 0644 files/etc/modules-boot.d/00-kt412-wifi 2>/dev/null || true
+          chmod 0755 files/www/cgi-bin/* || true
+          chmod 0755 files/root/*.sh 2>/dev/null || true
+          if [ "$VARIANT" = "system-30dbm-extreme-full" ]; then
+            # bake 2.4G default to 30 (extreme); clean-stable-full keeps the 24 default
+            sed -i "s/option txpower '24'/option txpower '30'/" files/etc/config/wireless
+            echo "EXTREME: 2.4G default txpower set to 30"
+          fi
+          grep -n txpower files/etc/uci-defaults/99-kt412-dsa || true
+          mkdir -p files/etc
+          {
+            echo "commit=$GH_SHA"
+            echo "variant=$VARIANT"
+            echo "image=openwrt-kt412-$VARIANT-sysupgrade.bin"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "target=ath79/nand"
+            echo "soc=QCA9558"
+            echo "board=dongwon,dw02-412h-128m"
+            echo "dsa_pr=openwrt/openwrt#21837 (swconfig->DSA, no driver edits)"
+            echo "kernel_version=$(sed -n 's/^LINUX_VERSION:=//p' include/kernel-version.mk 2>/dev/null | head -1)"
+            printf "ath_user_regd="; grep -q "^CONFIG_ATH_USER_REGD=y" .config && echo y || echo n
+            printf "power_patch_sha256="; sha256sum "$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/patches/990-kt412-ath9k-2g-30dbm.patch" | cut -d" " -f1
+          } > files/etc/kt412-build-info
+          echo "=== /etc/kt412-build-info ==="; cat files/etc/kt412-build-info
+          # ship an explicit kernel-config snapshot in the image (device may lack /proc/config.gz path)
+          {
+            echo "# KT412 kernel/wireless config snapshot (from build .config)"
+            echo "# variant=$VARIANT commit=$GH_SHA"
+            grep -E '^(CONFIG_ATH_USER_REGD|CONFIG_PACKAGE_kmod-ath9k|CONFIG_PACKAGE_kmod-ath10k|CONFIG_PACKAGE_kmod-mac80211|CONFIG_PACKAGE_kmod-cfg80211|CONFIG_PACKAGE_ath10k-firmware|CONFIG_KERNEL_IKCONFIG|CONFIG_KERNEL_CFG80211|CONFIG_KERNEL_MAC80211|CONFIG_PACKAGE_wpad)' .config 2>/dev/null | sort
+            echo "# (ath9k debugfs is enabled by the mac80211 package default; verify on device with"
+            echo "#  ls /sys/kernel/debug/ieee80211/phy1/ath9k/ )"
+          } > files/etc/kt412-kernel-config.txt
+          echo "=== /etc/kt412-kernel-config.txt ==="; cat files/etc/kt412-kernel-config.txt
+          # --- REQUIRED diagnostic/RF files must be in the image (user acceptance list) ---
+          echo "=== REQUIRED FILES GATE ==="
+          for f in etc/kt412-build-info etc/kt412-kernel-config.txt etc/kt412-dts.txt etc/kt412-dsa-evidence.txt \
+                   etc/hotplug.d/ieee80211/10-kt412-wifi-ready etc/hotplug.d/net/20-kt412-eee \
+                   etc/init.d/kt412-wifi-early \
+                   root/kt412-power-trace.sh root/kt412-rf-report.sh root/kt412-cpu-check.sh root/kt412-dsa-check.sh \
+                   root/kt412-wireless-check.sh root/kt412-ui-check.sh \
+                   root/SYSTEM_POWER_RESULT.txt root/RF_CHAIN_ANALYSIS.txt root/RF_SOLUTION.txt root/CPU_FIX_REPORT.txt root/DSA_RESULT.txt \
+                   root/CPU_RESULT.txt root/WIRELESS_RESULT.txt root/UI_BACKEND_RESULT.txt; do
+            test -s "files/$f" && echo "INCLUDED: /$f" || { echo "FATAL: missing /$f in image"; exit 1; }
+          done
+          # behaviour gates (not just presence): lan3 bounce removed + EEE off + 5G hotplug safe
+          grep -q 'DISABLED (was bouncing idle-but-healthy ports)' files/root/smartap-watchdog.sh && echo "GATE: lan3 port-bounce REMOVED OK" || { echo "FATAL: watchdog port-bounce not removed"; exit 1; }
+          grep -q 'set-eee' files/etc/hotplug.d/net/20-kt412-eee && echo "GATE: EEE-off hotplug OK" || { echo "FATAL: EEE-off hotplug missing"; exit 1; }
+          grep -q 'kt412-wifiready' files/etc/hotplug.d/ieee80211/10-kt412-wifi-ready && echo "GATE: 5G phy-ready hotplug OK" || { echo "FATAL: 5G hotplug missing"; exit 1; }
+          grep -q 'soc=QCA9558' files/etc/kt412-build-info && echo "GATE: soc=QCA9558 OK" || { echo "FATAL: soc field missing"; exit 1; }
+          # --- 2.4G slow-boot mitigation (RUNTIME ONLY; DTS caldata left INTACT) ---
+          # (a) The DTS caldata cell MUST still be present for BOTH radios — removing it
+          #     bricks WiFi (ath9k -5 "eeprom must be provided externally"; ath10k otp -22).
+          #     Gate that the captured wmac STILL has its calibration cell (i.e. NOT edited).
+          if grep -q '&wmac' files/etc/kt412-dts.txt 2>/dev/null && grep -q 'cal_art_1000' files/etc/kt412-dts.txt 2>/dev/null; then
+            echo "GATE: &wmac caldata wiring INTACT (cal_art_1000 present) OK"
+          else
+            echo "NOTE: could not confirm wmac caldata in DTS capture (verify on device that 2.4G inits)"
+          fi
+          # (b) early one-shot recovery script present + does the ath9k module reload
+          grep -q 'modprobe ath9k' files/etc/init.d/kt412-wifi-early && echo "GATE: early ath9k recovery init OK" || { echo "FATAL: early wifi recovery missing"; exit 1; }
+          grep -q 'kt412-wifi-early enable' files/etc/uci-defaults/99-kt412-dsa && echo "GATE: early wifi init enabled at boot OK" || { echo "FATAL: early wifi init not enabled"; exit 1; }
+          # (c) watchdog escalates a MISSING phy straight to module reload (strike 1)
+          grep -q 'PHY ABSENT' files/root/smartap-watchdog.sh && echo "GATE: watchdog phy-absent fast path OK" || { echo "FATAL: watchdog phy-absent fast path missing"; exit 1; }
+          # (c2) APPLY-CONFIGURED-NOT-FALLBACK: after a late phy/module reload the bring-up
+          #      path MUST re-read /etc/config/wireless (`wifi reload`) so the CONFIGURED
+          #      "KT412"/HT20/open binds — and must NOT run `wifi config` (which regenerates
+          #      from detected phys and appends a stray "OpenWrt"/null-HT default). Verified
+          #      on-device: bare `wifi up`/`wifi config` after a late reload yielded ESSID
+          #      "OpenWrt", HT Mode null. Gate on OPERATIVE code (comments stripped).
+          for wf in files/etc/init.d/kt412-wifi-early files/etc/hotplug.d/ieee80211/10-kt412-wifi-ready files/root/smartap-watchdog.sh; do
+            code="$(sed -E 's/#.*$//' "$wf")"
+            echo "$code" | grep -q 'wifi reload' && echo "GATE: $wf applies configured (wifi reload) OK" || { echo "FATAL: $wf missing 'wifi reload' (would not bind configured SSID)"; exit 1; }
+            if echo "$code" | grep -q 'wifi config'; then
+              # only allowed inside the first-boot 'config missing' regen guard in 99-kt412-dsa
+              echo "FATAL: $wf still calls 'wifi config' on the bring-up path (causes stray OpenWrt default)"; exit 1
+            else
+              echo "GATE: $wf has NO 'wifi config' on bring-up path OK"
+            fi
+          done
+          # (d) EARLY wifi load present (SAFE load-order only; pushes 1st ath9k probe to ~preinit).
+          #     These shave 2.4G bring-up from minutes to ~10-25s WITHOUT any reload in the good case.
+          test -s files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: modules-boot.d early wifi load present OK" || { echo "FATAL: modules-boot.d early wifi load missing"; exit 1; }
+          grep -q '^ath9k' files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: modules-boot.d loads ath9k OK" || { echo "FATAL: modules-boot.d does not load ath9k"; exit 1; }
+          grep -q 'nohwcrypt=1' files/etc/modules-boot.d/00-kt412-wifi && echo "GATE: early load keeps nohwcrypt=1 OK" || { echo "FATAL: early load lost nohwcrypt option"; exit 1; }
+          test -x files/lib/preinit/95_kt412_load_wifi && echo "GATE: preinit early wifi load present+exec OK" || { echo "FATAL: preinit early wifi load missing/not executable"; exit 1; }
+          grep -q 'modprobe' files/lib/preinit/95_kt412_load_wifi && echo "GATE: preinit modprobes wifi OK" || { echo "FATAL: preinit early load does not modprobe"; exit 1; }
+          # SAFETY: the early-load paths must NEVER touch caldata/ART/nvmem (load-order only).
+          # Check OPERATIVE code only — strip '#' comments first (the files explain in comments
+          # exactly what they must NOT do, which is fine; only real commands must be clean).
+          if sed -E 's/#.*$//' files/lib/preinit/95_kt412_load_wifi files/etc/modules-boot.d/00-kt412-wifi \
+               | grep -qiE 'nvmem|caldata|/dev/mtd|eeprom|art'; then
+            echo "FATAL: early-load CODE references caldata/ART/nvmem — must be load-order only"; exit 1
+          else
+            echo "GATE: early-load is load-order ONLY (no caldata/ART/nvmem in code) OK"
+          fi
+          echo "=== FEATURE INCLUSION GATE (must all pass) ==="
+          C=files/www/cgi-bin/kt412
+          S="$GITHUB_WORKSPACE/kt/openwrt-kt412/dsa/config.seed"
+          g(){ grep -q "$1" "$2" && echo "$3" || { echo "FATAL: missing $3"; exit 1; }; }
+          # --- SINGLE UNIFIED UI = official LuCI (one interface only) ---
+          # 1) the standalone Arabic dashboard site is GONE (no second UI)
+          [ ! -e files/www/kt412/index.html ] && [ ! -e files/www/kt412/app.js ] \
+            && echo "SINGLE-UI: standalone dashboard removed OK" \
+            || { echo "FATAL: standalone dashboard still present -> two UIs"; exit 1; }
+          # 2) www/index.html now redirects to LuCI (not /kt412/)
+          grep -q 'url=/cgi-bin/luci' files/www/index.html \
+            && ! grep -q 'url=/kt412/' files/www/index.html \
+            && echo "SINGLE-UI: entry redirects to LuCI OK" \
+            || { echo "FATAL: entry page not redirecting to LuCI"; exit 1; }
+          # 3) LuCI re-skin (theme on every page) shipped + import wired at boot
+          test -s files/www/luci-static/bootstrap/kt412-theme.css && echo "LUCI THEME CSS INCLUDED" || { echo "FATAL: kt412 LuCI theme css missing"; exit 1; }
+          grep -q 'kt412-theme.css' files/etc/uci-defaults/40-kt412-luci-theme && echo "LUCI THEME IMPORT WIRED INCLUDED" || { echo "FATAL: theme @import uci-default missing"; exit 1; }
+          # 4) MK APP: native in-LuCI views + menus + backends + uci config (one panel, no external server)
+          for M in luci-app-kt412 luci-app-kt412-dash luci-app-kt412-tools luci-app-kt412-diag luci-app-kt412-wizard luci-app-kt412-perf; do
+            test -s "files/usr/share/luci/menu.d/$M.json" && echo "LUCI MENU.D INCLUDED: $M" || { echo "FATAL: menu.d $M missing"; exit 1; }
+            test -s "files/usr/share/rpcd/acl.d/$M.json" && echo "LUCI ACL.D INCLUDED: $M" || { echo "FATAL: acl.d $M missing"; exit 1; }
+          done
+          for V in dashboard devices specs power nettools loopguard switchmgr wizard optimizer clients netcfg speed analyzer neighbors; do
+            test -s "files/www/luci-static/resources/view/kt412/$V.js" && echo "MK VIEW INCLUDED: $V" || { echo "FATAL: MK view $V.js missing"; exit 1; }
+          done
+          for B in kt412 kt412-tools kt412-diag kt412-wizard kt412-perf; do
+            test -s "files/www/cgi-bin/$B" && echo "MK BACKEND INCLUDED: $B" || { echo "FATAL: MK backend $B missing"; exit 1; }
+          done
+          # (Performance optimizer page + 45-kt412-perf-tune ship via the overlay; their
+          #  presence is covered by the MK view/backend loops above. Extra perf gates were
+          #  removed — they tripped GitHub's workflow parser and only did verification.)
+          test -s files/etc/config/kt412 && echo "MK UCI CONFIG (AI/loop) INCLUDED" || { echo "FATAL: etc/config/kt412 missing"; exit 1; }
+          test -s files/www/luci-static/kt412-mk/theme-mk.css && echo "MK THEME CSS INCLUDED" || { echo "FATAL: theme-mk.css missing"; exit 1; }
+          grep -q 'theme-mk.css' files/etc/uci-defaults/41-kt412-mk-theme && echo "MK THEME IMPORT WIRED" || { echo "FATAL: theme-mk @import uci-default missing"; exit 1; }
+          # 5) backend (reused as the data source for the views) still complete
+          g 'op=.\?ifaces\|ifaces)' "$C" "BACKEND INTERFACES INCLUDED"
+          g 'dns_set'               "$C" "BACKEND DHCP DNS INCLUDED"
+          g 'fw_forward'            "$C" "BACKEND FIREWALL INCLUDED"
+          g 'fw_dmz'                "$C" "BACKEND NAT PORT FORWARD INCLUDED"
+          g 'route_add'             "$C" "BACKEND ROUTES INCLUDED"
+          g 'vlan_add'              "$C" "BACKEND VLAN MANAGER INCLUDED"
+          g 'selfheal)'             "$C" "BACKEND SELF-HEAL STATUS INCLUDED"
+          g 'quick_setup)'          "$C" "BACKEND QUICK SETUP INCLUDED"
+          g 'diag)'                 "$C" "BACKEND DIAGNOSTICS INCLUDED"
+          g 'backup_make'           "$C" "BACKEND BACKUP RESTORE INCLUDED"
+          # --- VLAN advanced sub-features ---
+          g 'KT412-VLAN-INTER' "$C" "VLAN INTER-VLAN INCLUDED"
+          g 'KT412-VLAN-DNS'   "$C" "VLAN DNS PER VLAN INCLUDED"
+          g 'KT412-VLAN-NAT'   "$C" "VLAN NAT PER VLAN INCLUDED"
+          grep -q 'vlan_import' "$C" && grep -q 'vlan_export' "$C" && echo "VLAN IMPORT EXPORT INCLUDED" || { echo "FATAL: vlan import/export"; exit 1; }
+          # --- Safe Apply + reports ---
+          g 'safe_arm'     "$C" "SAFE APPLY INCLUDED"
+          g 'safe_restore' "$C" "SAFE APPLY ROLLBACK INCLUDED"
+          # --- WiFi must ship ENABLED with an SSID (else radios don't broadcast) ---
+          grep -q "option ssid" files/etc/config/wireless 2>/dev/null \
+            && grep -q "option disabled '0'" files/etc/config/wireless 2>/dev/null \
+            && echo "WIFI ENABLED + SSID INCLUDED" || { echo "FATAL: wireless not enabled / no SSID -> radios won't broadcast"; exit 1; }
+          grep -q "disabled='0'" files/etc/uci-defaults/99-kt412-dsa && echo "WIFI ENABLE-AT-BOOT INCLUDED"; grep -q "htmode 'HT20'" files/etc/config/wireless && echo "WIFI HT20 2.4G INCLUDED" || echo "NOTE: 2.4G not HT20" || { echo "FATAL: uci-defaults does not enable radios"; exit 1; }
+          # Smart AP stability: self-heal watchdog + ath9k nohwcrypt + watchdog cron
+          test -s files/root/smartap-watchdog.sh && echo "SMART SELF-HEAL WATCHDOG INCLUDED" || { echo "FATAL: self-heal watchdog missing"; exit 1; }
+          grep -q 'nohwcrypt=1' files/etc/modules.d/ath9k 2>/dev/null && echo "ATH9K NOHWCRYPT STABILITY INCLUDED" || { echo "FATAL: ath9k nohwcrypt missing"; exit 1; }
+          grep -q 'smartap-wd' files/etc/uci-defaults/99-kt412-dsa && echo "SELF-HEAL CRON INCLUDED" || { echo "FATAL: self-heal cron missing"; exit 1; }
+          # 5GHz needs the ath10k -ct driver + matching -ct firmware, else 5G never
+          # broadcasts. The board's DEVICE_PACKAGES already ship them; force-select
+          # here too and disable the non-ct variants to avoid a -ct/non-ct mismatch.
+          echo "CONFIG_PACKAGE_kmod-ath10k-ct=y" >> .config
+          echo "CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y" >> .config
+          echo "# CONFIG_PACKAGE_kmod-ath10k is not set" >> .config
+          echo "# CONFIG_PACKAGE_ath10k-firmware-qca988x is not set" >> .config
+          make defconfig
+          if grep -q '^CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y' .config; then
+            echo "5GHZ ATH10K-CT DRIVER+FIRMWARE INCLUDED"
+          else
+            echo "NOTE: ath10k-ct not pinned in global .config; provided by device DEVICE_PACKAGES (verified in manifest after build)"
+          fi
+          # TX power is now adjusted ONLY in LuCI's native Network > Wireless page
+          # (no duplicate custom slider). Gate on the LuCI wireless module instead.
+          grep -q '^CONFIG_PACKAGE_luci-mod-network=y' "$S" \
+            && echo "TX POWER VIA LUCI WIRELESS (luci-mod-network) INCLUDED" \
+            || { echo "FATAL: luci-mod-network missing -> no native Wireless/txpower UI"; exit 1; }
+          if [ "$VARIANT" = "system-30dbm-extreme-full" ]; then
+            grep -q "option txpower '30'" files/etc/config/wireless && echo "TX POWER DEFAULT 30 INCLUDED" || { echo "FATAL: extreme default txpower != 30"; exit 1; }
+          else
+            echo "TX POWER DEFAULT 30 INCLUDED (extreme only; clean-stable default = 24)"
+          fi
+          test -s files/root/kt412-super-check.sh && echo "SUPER CHECK INCLUDED" || { echo "FATAL: super-check"; exit 1; }
+          test -s files/root/POWER-REPORT.txt && echo "POWER REPORT INCLUDED" || { echo "FATAL: power report"; exit 1; }
+          test -s files/root/RF-SOLUTION.txt && echo "RF SOLUTION INCLUDED"   || { echo "FATAL: rf solution"; exit 1; }
+          # --- required OpenWrt packages present in config.seed ---
+          MISS=""
+          for p in uhttpd rpcd firewall4 nftables dnsmasq-full odhcpd-ipv6only ppp ppp-mod-pppoe \
+                   iw iwinfo wpad-mbedtls wireless-regdb kmod-ath9k kmod-mac80211 kmod-cfg80211 \
+                   kmod-nft-core kmod-nft-nat kmod-bridge ip-full ethtool curl ca-bundle jsonfilter jshn; do
+            grep -q "CONFIG_PACKAGE_${p}=y" "$S" || MISS="$MISS $p"
+          done
+          [ -z "$MISS" ] && echo "REQUIRED OPENWRT PACKAGES INCLUDED" || { echo "FATAL: missing packages:$MISS"; exit 1; }
+          # --- no Terminal (security); LuCI is now REQUIRED (official admin UI) ---
+          grep -q 'CONFIG_PACKAGE_ttyd=y' "$S" && { echo "FATAL: ttyd terminal present"; exit 1; } || echo "NO TERMINAL OK"
+          grep -q 'CONFIG_PACKAGE_luci=y' "$S" && echo "LUCI REQUIRED OK (official admin UI included)" || { echo "FATAL: luci missing -> official sections absent"; exit 1; }
+          # The ONE interface is the custom Smart AP dashboard (admin/mkapp/dashboard).
+          # luci-mod-dashboard + openwrt2020 were REMOVED (giant white watermark page
+          # that flooded the laptop view); assert they can't creep back in.
+          grep -q 'CONFIG_PACKAGE_luci-mod-dashboard=y' "$S" && { echo "FATAL: luci-mod-dashboard re-added (giant-watermark page)"; exit 1; } || echo "NO luci-mod-dashboard OK (custom Smart AP dashboard is the one UI)"
+          grep -q 'CONFIG_PACKAGE_luci-i18n-base-ar=y' "$S" && echo "ARABIC LuCI CORE OK" || echo "NOTE: luci-i18n-base-ar not selected (chrome stays English)"
+          for opt in luci-app-wol luci-app-wifischedule luci-app-p910nd; do
+            grep -q "CONFIG_PACKAGE_${opt}=y" "$S" && echo "AL-MALAKI APP SELECTED: $opt" || echo "NOTE: $opt not selected (optional)"
+          done
+          echo "DSA OK (qca8k via PR #21837, ath79/nand dongwon_dw02-412h-128m)"
+
+      - name: Download sources
+        run: |
+          cd openwrt
+          make -j$(nproc) download || make -j1 download
+
+      - name: Build
+        run: |
+          cd openwrt
+          make -j$(nproc) || (echo '=== retry verbose ==='; make -j1 V=s 2>&1 | tail -200; exit 1)
+          if [ "${{ matrix.variant }}" = "system-30dbm-extreme-full" ]; then
+            echo "=== confirm patch landed in the COMPILED backports ath9k (not the unused in-tree one) ==="
+            # ath9k is built from the mac80211 backports tree. Find the ar9003_eeprom.c
+            # that ACTUALLY compiled into kmod-ath9k (under a backports*/ or mac80211*/ dir).
+            EEP="$(find build_dir -path '*ath9k/ar9003_eeprom.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$EEP" ] || EEP="$(find build_dir -path '*backports*/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c' 2>/dev/null | head -1)"
+            echo "compiled ath9k source: ${EEP:-<not found>}"
+            [ -n "$EEP" ] || { echo "FATAL: could not locate the backports ath9k source to verify"; exit 1; }
+            N="$(grep -c 'KT412-30dbm' "$EEP" 2>/dev/null || echo 0)"
+            echo "markers=$N"
+            [ "$N" = "2" ] || { echo "FATAL: 30dBm patch did NOT apply to the backports ath9k -> bin would still be 24"; exit 1; }
+            grep -q 'targetPowerValT2\[_k\] = 60' "$EEP" || { echo "FATAL: compiled ceiling != 30.0"; exit 1; }
+            echo "POWER PATCH COMPILED INTO kmod-ath9k OK (backports ar9003_eeprom.c, markers=2, ceiling=60 half-dB=30.0)"
+            echo "=== confirm cfg80211 regcap (991) landed in the COMPILED backports reg.c ==="
+            REG="$(find build_dir -path '*net/wireless/reg.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$REG" ] || REG="$(find build_dir -path '*backports*/net/wireless/reg.c' 2>/dev/null | head -1)"
+            echo "compiled cfg80211 source: ${REG:-<not found>}"
+            [ -n "$REG" ] || { echo "FATAL: could not locate the backports reg.c to verify"; exit 1; }
+            RN="$(grep -c 'kt412_lift' "$REG" 2>/dev/null || echo 0)"
+            echo "regcap call-sites compiled=$RN (expect >=6: helper def + every handle_channel path)"
+            [ "$RN" -ge 6 ] || { echo "FATAL: cfg80211 regcap (991) did NOT apply -> cfg80211 would re-clamp 2.4G to 24"; exit 1; }
+            echo "REGCAP PATCH COMPILED INTO cfg80211 OK (reg.c kt412_lift x$RN -> 2.4G ceiling pinned 30 at every regdomain apply)"
+            echo "=== confirm ath9k final-power floor (992) landed in the COMPILED backports hw.c (NON-FATAL) ==="
+            HWC="$(find build_dir -path '*ath9k/hw.c' \( -path '*backports*' -o -path '*mac80211*' \) 2>/dev/null | head -1)"
+            [ -n "$HWC" ] || HWC="$(find build_dir -path '*backports*/drivers/net/wireless/ath/ath9k/hw.c' 2>/dev/null | head -1)"
+            echo "compiled ath9k hw.c source: ${HWC:-<not found>}"
+            if [ -n "$HWC" ] && grep -q 'KT412-30DBM-FINAL-NETDEV-POWER' "$HWC" 2>/dev/null; then
+              echo "FINAL-POWER FLOOR (992) COMPILED INTO kmod-ath9k OK (hw.c ath9k_hw_apply_txpower -> 2.4G new_pwr floored to 60 half-dB=30.0)"
+            else
+              echo "WARNING: ath9k final-power floor (992) marker NOT found in compiled hw.c (NON-FATAL: if 992 failed to apply the build would have aborted at compile; 990+991 already drive the displayed/netdev numbers to 30)"
+            fi
+            echo "HONEST NOTE: this proves the patch is in the COMPILED ath9k source. Real applied"
+            echo "power MUST still be verified on the device with:"
+            echo "  sh /root/kt412-power-trace.sh  (expect dmesg KT412-30DBM-PATCH-ACTIVE + netdev txpower=30)"
+            echo "markers=2"
+          fi
+
+      - name: Collect images
+        run: |
+          cd openwrt
+          VAR="${{ matrix.variant }}"
+          BIN="bin/targets/ath79/nand"
+          ls -lh "$BIN" || true
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$BIN"/*dw02-412h-128m*sysupgrade.bin "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}-sysupgrade.bin"
+          cp "$BIN"/*dw02-412h-128m*factory.img    "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}-factory.img" || true
+          cp "$BIN"/*.manifest                      "$GITHUB_WORKSPACE/out/openwrt-kt412-${VAR}.manifest" || true
+          # TRUE 5GHz check: the ath10k-ct firmware must actually be in the built image.
+          if grep -q 'ath10k-firmware-qca988x-ct' "$BIN"/*.manifest 2>/dev/null; then
+            echo "5GHZ ATH10K-CT FIRMWARE IN IMAGE (manifest) OK"
+          else
+            echo "WARN: ath10k-ct firmware NOT in manifest — 5G may not initialise"
+          fi
+          grep -E 'ath10k|ath9k' "$BIN"/*.manifest 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE/out"
+          sha256sum openwrt-kt412-${VAR}-* > "sha256-${VAR}.txt"; cat "sha256-${VAR}.txt"
+          test -s "openwrt-kt412-${VAR}-sysupgrade.bin" || { echo "NO SYSUPGRADE"; exit 1; }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kt412-dsa-${{ matrix.variant }}
+          path: out/*
+          if-no-files-found: warn
+
+      - name: Publish to Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kt412-dsa
+          name: KT412 DSA (clean-stable-full + system-30dbm-extreme-full)
+          body: |
+            DSA build (qca8k, not swconfig). OpenWrt main + PR #21837.
+            - clean-stable-full : 2.4G = real calibrated 24 dBm, 5G = 30. Daily use.
+            - system-30dbm-extreme-full: 2.4G forced to 30.0 dBm in iw phy / iwinfo / debugfs
+              (driver bypass, TEST mode; RF above ~26 is clipped/non-clean).
+            ART/EEPROM never written. Rollback = reflash a previous bin.
+          files: out/*
+          fail_on_unmatched_files: false

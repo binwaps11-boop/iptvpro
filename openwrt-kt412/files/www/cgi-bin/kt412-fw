@@ -1,0 +1,53 @@
+#!/bin/sh
+# KT412 firmware upload + flash endpoint (separate from the JSON API because it
+# streams a raw binary body). Token (ubus session) is passed in the QUERY_STRING,
+# the request BODY is the raw firmware image. Guarded the same way as the API.
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n\r\n'
+
+QS="$QUERY_STRING"
+getq() {
+	local want="$1" pair IFS='&'
+	for pair in $QS; do
+		case "$pair" in "$want="*) printf '%s' "${pair#*=}"; return 0;; esac
+	done
+	return 1
+}
+fail() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+TOK="$(getq token | tr -cd 'a-f0-9' | cut -c1-32)"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
+[ "$MARK" = "1" ] || fail "unauthorized"
+
+ACT="$(getq act | tr -cd 'a-z_')"
+IMG="/tmp/kt412_firmware.img"
+
+case "$ACT" in
+	upload)
+		[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+		CL="${CONTENT_LENGTH:-0}"; case "$CL" in ''|*[!0-9]*) CL=0;; esac
+		[ "$CL" -gt 100000 ] || fail "too_small"          # < 100 KB = not a firmware
+		[ "$CL" -lt 33554432 ] || fail "too_big"          # > 32 MB = reject
+		rm -f "$IMG"
+		head -c "$CL" > "$IMG" 2>/dev/null                # binary-safe write of the body
+		SZ="$(wc -c < "$IMG" 2>/dev/null)"
+		[ "$SZ" = "$CL" ] || fail "incomplete_upload"
+		# validate the image is for THIS device (board metadata) before allowing flash
+		if sysupgrade -T "$IMG" >/tmp/kt412_fwtest 2>&1; then VALID=true; else VALID=false; fi
+		MSG="$(tr -d '\r\n"' < /tmp/kt412_fwtest 2>/dev/null | cut -c1-160)"
+		printf '{"ok":true,"size":%s,"valid":%s,"detail":"%s"}\n' "${SZ:-0}" "$VALID" "$MSG";;
+	flash)
+		[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+		[ -s "$IMG" ] || fail "no_image"
+		keep="$(getq keep | tr -cd '01')"
+		force="$(getq force | tr -cd '01')"
+		OPT="-n"; [ "$keep" = "1" ] && OPT=""
+		[ "$force" = "1" ] && OPT="$OPT -F"
+		printf '{"ok":true,"msg":"flashing — device reboots in ~3 min, reconnect at 192.168.1.1"}\n'
+		# detach so the response is delivered before the box reboots
+		(sleep 1; sysupgrade $OPT "$IMG") >/dev/null 2>&1 &
+		;;
+	*) fail "unknown_action";;
+esac
+exit 0

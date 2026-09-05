@@ -1,0 +1,57 @@
+#!/bin/sh
+# =============================================================================
+# 47-cr6606-dsa  —  enforce DSA topology on the CR6606 (Cold Code, first boot)
+# -----------------------------------------------------------------------------
+# CR6606 (mt7621/mt7530) is DSA-native on OpenWrt 24.10. This script ENFORCES the
+# DSA layout idempotently and SAFELY: it edits the EXISTING br-lan device section
+# instead of creating a second one (a duplicate 'br-lan' would put the same port
+# in two bridges and KILL LAN/management). Ports: lan1-3 -> br-lan; wan standalone.
+# Runs once via uci-defaults (frozen in SquashFS), then is removed on exit 0.
+# =============================================================================
+[ -f /etc/cr6606-dsa.done ] && exit 0
+
+# 1) drop any legacy swconfig sections (no-op on a pure-DSA build, kept for safety)
+while uci -q delete network.@switch_vlan[0]; do :; done
+while uci -q delete network.@switch[0]; do :; done
+
+# 2) locate the existing br-lan 'device' section; create ONE only if missing
+brsec=""
+i=0
+while uci -q get network.@device[$i] >/dev/null 2>&1; do
+	if [ "$(uci -q get network.@device[$i].name)" = "br-lan" ]; then
+		brsec="@device[$i]"
+		break
+	fi
+	i=$((i+1))
+done
+if [ -z "$brsec" ]; then
+	brsec="$(uci add network device)"
+	uci set network.$brsec.name='br-lan'
+fi
+
+# 3) define the bridge + its LAN member ports (replace, never duplicate)
+uci set network.$brsec.type='bridge'
+uci -q delete network.$brsec.ports
+uci add_list network.$brsec.ports='lan1'
+uci add_list network.$brsec.ports='lan2'
+uci add_list network.$brsec.ports='lan3'
+
+# 4) bind the logical LAN to the bridge; WAN stays a standalone DSA port
+uci set network.lan.device='br-lan'
+uci set network.wan.device='wan'
+
+# 5) IGMP snooping on br-lan: keep IPTV multicast off ports that didn't join the
+#    group (efficient wired IPTV; pairs with Wi-Fi multicast_to_unicast).
+uci set network.$brsec.igmp_snooping='1'
+# multicast querier: keep the IGMP-snooping MDB populated so wired IPTV multicast keeps
+# flowing (snooping without a querier lets group state time out). Bridge default is off.
+uci set network.$brsec.multicast_querier='1'
+# Optional loop protection (opt-in): uncomment for classic STP with a short forward-delay
+# so a freshly plugged port blacks out only ~2-4s (default ~30s would hurt management):
+#   uci set network.$brsec.stp='1'
+#   uci set network.$brsec.forward_delay='2'
+
+uci commit network
+# guard: don't re-run on sysupgrade-with-settings (would clobber user bridge/port edits)
+touch /etc/cr6606-dsa.done
+exit 0

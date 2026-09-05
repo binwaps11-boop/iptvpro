@@ -1,0 +1,19 @@
+{
+	"luci-app-kt412-tools": {
+		"description": "Grant access to the KT412 MK APP tools (specs / power / network tools) views",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"network.wireless": [ "status" ],
+				"system": [ "info", "board" ]
+			},
+			"uci": [ "wireless", "system" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			},
+			"uci": [ "wireless" ]
+		}
+	}
+}

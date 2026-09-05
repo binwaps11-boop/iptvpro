@@ -1,0 +1,20 @@
+#!/bin/sh
+# Start the resource-history sampler as a procd DAEMON (samples every 3s) for the
+# dashboard CPU/RAM/traffic history + the true-CPU gauge. This replaces the old
+# once-a-minute cron so the UI updates live without a page reload. Idempotent.
+SAMP=/usr/sbin/kt412-sampler
+[ -x "$SAMP" ] || chmod 0755 "$SAMP" 2>/dev/null
+
+# Remove any legacy cron entry from earlier builds (the daemon supersedes it).
+CR=/etc/crontabs/root
+if [ -f "$CR" ] && grep -q 'kt412-sampler' "$CR" 2>/dev/null; then
+	grep -v 'kt412-sampler' "$CR" > "$CR.t" 2>/dev/null && mv "$CR.t" "$CR"
+	/etc/init.d/cron restart >/dev/null 2>&1
+fi
+
+# Enable + (re)start the procd sampler service.
+if [ -x /etc/init.d/kt412-sampler ]; then
+	/etc/init.d/kt412-sampler enable  >/dev/null 2>&1
+	/etc/init.d/kt412-sampler restart >/dev/null 2>&1
+fi
+exit 0

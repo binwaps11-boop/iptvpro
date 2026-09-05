@@ -1,0 +1,343 @@
+#!/bin/sh
+# KT412 Quick Config Wizard API (إعدادات سريعة) -- OWN CGI, separate from kt412.
+# Applies one of 4 pre-baked UCI profiles: ap | mesh | wds | pppoe.
+# Auth model is identical to /cgi-bin/kt412: a LuCI admin session id is "adopted"
+# (must hold uci write access) -> marked kt412ok=1 -> reused as the token. Runs as
+# root under uhttpd; port 80 is LAN-only via firewall (same gate LuCI used).
+# POSIX sh. Idempotent profiles. All inputs sanitized.
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	want="$1"; pair=""; rest=""
+	oIFS="$IFS"; IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; IFS="$oIFS"; urldecode "$rest"; return 0;;
+		esac
+	done
+	IFS="$oIFS"; return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+sani()      { printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._@!#%^*()+=:/-' | cut -c1-128; }
+sani_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-32; }
+sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-32; }
+fail()      { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+cookie_sid() { echo "${HTTP_COOKIE:-}" | grep -o 'sysauth[A-Za-z_]*=[A-Fa-f0-9]*' | head -1 | sed 's/^[^=]*=//'; }
+root_open() { p="$(sed -n 's/^root:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null)"; [ -z "$p" ]; }
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- adopt the caller's LuCI session as our token (no password) ----------
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	root_open && { printf '{"ok":true,"token":"open"}\n'; exit 0; }
+	[ -n "$SID" ] || SID="$(sani_hex "$(cookie_sid)")"
+	[ -n "$SID" ] || fail "no_token"
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412ok\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid kt412ok session ----------
+if ! root_open; then
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || TOK="$(sani_hex "$(cookie_sid)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412ok' 2>/dev/null)"
+[ "$MARK" = "1" ] || { ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"; [ "$ACC" = "true" ] || fail "unauthorized"; }
+fi
+
+# ---- helpers ---------------------------------------------------------------
+radio_for_band() {  # $1 = 2g|5g  -> echoes wifi-device section
+	for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		[ "$(uci -q get wireless.$r.band)" = "$1" ] && { echo "$r"; return 0; }
+	done
+	return 1
+}
+iface_for_radio() {  # $1 = radio section -> first AP wifi-iface on it
+	for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+		[ "$(uci -q get wireless.$s.device)" = "$1" ] && { echo "$s"; return 0; }
+	done
+	return 1
+}
+wan_zone() {  # echoes firewall zone section whose name=wan
+	zi=0
+	while uci -q get firewall.@zone[$zi] >/dev/null 2>&1; do
+		[ "$(uci -q get firewall.@zone[$zi].name)" = "wan" ] && { echo "@zone[$zi]"; return 0; }
+		zi=$((zi+1))
+	done
+	return 1
+}
+# remove any existing wizard-created mesh/wds vifs so re-applying is idempotent
+purge_wizard_vifs() {
+	for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+		case "$s" in kt412_mesh|kt412_wds) uci -q delete wireless.$s;; esac
+	done
+}
+
+# ---------- getmode: report the current effective mode ----------
+if [ "$OP" = "getmode" ]; then
+	m="ap"
+	if [ "$(uci -q get network.wan.proto)" = "pppoe" ]; then m="pppoe"; fi
+	if uci -q get wireless.kt412_mesh >/dev/null 2>&1; then
+		m="mesh"
+		[ "$(uci -q get wireless.kt412_mesh.network)" = "kt412mesh" ] && m="mesh-batman"
+	fi
+	if uci -q get wireless.kt412_wds >/dev/null 2>&1; then m="wds"; fi
+	for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+		[ "$(uci -q get wireless.$s.mode)" = "ap" ] && [ "$(uci -q get wireless.$s.wds)" = "1" ] && m="wds"
+	done
+	printf '{"ok":true,"mode":"%s","wan_proto":"%s"}\n' "$m" "$(json_esc "$(uci -q get network.wan.proto)")"
+	exit 0
+fi
+
+# ---------- setmode: apply a pre-baked profile (POST only) ----------
+if [ "$OP" = "setmode" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	MODE="$(getp mode | tr -cd 'a-z]')"
+	case "$MODE" in
+	# ===================== AP MODE =====================
+	# Pure access point: DHCP server off, WAN unused, bridge LAN ports, high power.
+	# Matches the shipped AP design (br-lan over lan1-4 + wan reused as a LAN port).
+	ap)
+		purge_wizard_vifs
+		# DHCP server off (never conflict with upstream router)
+		uci -q set dhcp.lan.ignore='1'
+		uci -q set dhcp.lan.dhcpv6='disabled'
+		uci -q set dhcp.lan.ra='disabled'
+		# WAN unused: disable it and fold its port into br-lan so all 5 ports = LAN
+		wandev="$(uci -q get network.wan.device)"; [ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname)"
+		brsec=""; i=0
+		while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+		done
+		if [ -n "$brsec" ] && [ -n "$wandev" ]; then
+			uci -q del_list network.$brsec.ports="$wandev"
+			uci -q add_list network.$brsec.ports="$wandev"
+		fi
+		uci -q set network.wan.disabled='1'; uci -q set network.wan.auto='0'
+		# wifi: AP mode on both radios, full configured txpower
+		for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+			uci -q delete wireless.$r.disabled
+		done
+		for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+			[ "$(uci -q get wireless.$s.mode)" = "sta" ] && continue
+			uci -q set wireless.$s.mode='ap'; uci -q set wireless.$s.network='lan'
+			uci -q delete wireless.$s.wds
+		done
+		uci -q commit
+		/etc/init.d/network reload >/dev/null 2>&1
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+		wifi reload >/dev/null 2>&1
+		printf '{"ok":true,"mode":"ap","msg":"وضع نقطة وصول: DHCP معطّل، كل المنافذ LAN، الإدارة 192.168.1.1"}\n'
+		;;
+	# ===================== MESH (802.11s / batman-adv) =====================
+	# Hidden 5G mesh backhaul (mode=mesh) layered on radio1; AP SSIDs are KEPT.
+	# backhaul=11s  -> native 802.11s mesh_fwding into LAN (key optional but advised)
+	# backhaul=batman -> batman-adv: mesh_fwding=0, vif on its own 'mesh0' netifd
+	#   network, bat0 routed L2; encryption is FORCED (key required, refuse empty).
+	# NEEDS: wpad-mesh-mbedtls (mesh + SAE); batman adds kmod-batman-adv + batctl.
+	mesh)
+		mid="$(sani_word "$(getp mesh_id)")"; [ -n "$mid" ] || mid="kt412-mesh"
+		key="$(getp key)"   # raw: SAE key may contain symbols
+		backhaul="$(getp backhaul | tr -cd 'a-z0-9]')"; [ "$backhaul" = "batman" ] || backhaul="11s"
+		enc="$(getp enc | tr -cd 'a-z-]')"             # sae | sae-mixed | psk2
+		r5="$(radio_for_band 5g)"; [ -n "$r5" ] || fail "no_5g_radio"
+		# batman-adv MUST be encrypted so neighbors can't sniff/leech the backhaul
+		if [ "$backhaul" = "batman" ]; then
+			[ -n "$key" ] && [ "${#key}" -ge 8 ] || fail "batman_key_required"
+		fi
+		# validate any provided key
+		[ -n "$key" ] && [ "${#key}" -lt 8 ] && fail "key_too_short"
+		case "$enc" in sae|sae-mixed|psk2) :;; *) enc="sae";; esac
+		purge_wizard_vifs
+		uci -q delete wireless.$r5.disabled
+		# new dedicated mesh vif; keeps the existing AP iface untouched
+		uci -q set wireless.kt412_mesh=wifi-iface
+		uci -q set wireless.kt412_mesh.device="$r5"
+		uci -q set wireless.kt412_mesh.mode='mesh'
+		uci -q set wireless.kt412_mesh.mesh_id="$mid"
+		if [ -n "$key" ]; then
+			uci -q set wireless.kt412_mesh.encryption="$enc"
+			uci -q set wireless.kt412_mesh.key="$key"
+		else
+			uci -q set wireless.kt412_mesh.encryption='none'
+			uci -q delete wireless.kt412_mesh.key
+		fi
+		if [ "$backhaul" = "batman" ]; then
+			# batman-adv: let batman do the forwarding, not native 11s
+			uci -q set wireless.kt412_mesh.mesh_fwding='0'
+			uci -q set wireless.kt412_mesh.network='kt412mesh'
+			# netifd batadv: mesh0 (the 11s iface) is a hardif member of bat0
+			uci -q set network.kt412mesh=interface
+			uci -q set network.kt412mesh.proto='batadv_hardif'
+			uci -q set network.kt412mesh.master='bat0'
+			uci -q set network.kt412bat=interface
+			uci -q set network.kt412bat.proto='batadv'
+			uci -q set network.kt412bat.routing_algo='BATMAN_IV'
+			# fold bat0 into br-lan so mesh traffic reaches the LAN bridge
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] && { uci -q del_list network.$brsec.ports='bat0'; uci -q add_list network.$brsec.ports='bat0'; }
+			uci -q commit network
+		else
+			uci -q set wireless.kt412_mesh.mesh_fwding='1'
+			uci -q set wireless.kt412_mesh.network='lan'   # fold native 11s into LAN L2
+			# clean any stale batman sections from a previous batman apply
+			uci -q delete network.kt412mesh; uci -q delete network.kt412bat
+			brsec=""; i=0
+			while uci -q get network.@device[$i] >/dev/null 2>&1; do
+				[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+			done
+			[ -n "$brsec" ] && uci -q del_list network.$brsec.ports='bat0'
+			uci -q commit network
+		fi
+		uci -q commit wireless
+		/etc/init.d/network reload >/dev/null 2>&1
+		wifi reload >/dev/null 2>&1
+		printf '{"ok":true,"mode":"mesh","backhaul":"%s","mesh_id":"%s","secured":%s,"msg":"تم تفعيل Mesh (%s) على 5G"}\n' \
+			"$backhaul" "$(json_esc "$mid")" "$([ -n "$key" ] && echo true || echo false)" "$backhaul"
+		;;
+	# ===================== VLAN-per-SSID mapping =====================
+	# Map a chosen SSID (radio's AP iface) to a tagged VLAN over the DSA bridge,
+	# or back to untagged LAN. Creates a br-lan bridge-vlan (lan1-4 tagged) + a
+	# VLAN interface, then points the wifi-iface 'network' at it. id 1 / blank = LAN.
+	vlan)
+		band="$(getp band | tr -cd 'g0-9')"; [ "$band" = "2g" ] || band="5g"
+		vid="$(getp vid | tr -cd '0-9')"
+		rdev="$(radio_for_band "$band")"; [ -n "$rdev" ] || fail "no_radio_for_band"
+		ifsec="$(iface_for_radio "$rdev")"; [ -n "$ifsec" ] || fail "no_ap_iface"
+		# blank or 1 -> revert this SSID to the plain LAN bridge
+		if [ -z "$vid" ] || [ "$vid" = "1" ]; then
+			uci -q set wireless.$ifsec.network='lan'
+			uci -q commit wireless; wifi reload >/dev/null 2>&1
+			printf '{"ok":true,"mode":"vlan","band":"%s","vid":"untagged","msg":"SSID %s -> LAN (untagged)"}\n' "$band" "$band"
+			exit 0
+		fi
+		[ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null || fail "bad_vid"
+		# ensure the bridge filters VLANs, with VLAN 1 untagged on the LAN ports so
+		# management never drops when filtering turns on
+		brsec=""; i=0
+		while uci -q get network.@device[$i] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && brsec="@device[$i]"; i=$((i+1))
+		done
+		[ -n "$brsec" ] || fail "no_bridge"
+		uci -q set network.$brsec.vlan_filtering='1'
+		if ! uci show network 2>/dev/null | grep -q "bridge-vlan.*\.vlan='1'"; then
+			v1="$(uci -q add network bridge-vlan)"; uci -q set network.$v1.device='br-lan'; uci -q set network.$v1.vlan='1'
+			for pp in lan1 lan2 lan3 lan4; do uci -q add_list network.$v1.ports="$pp:u*"; done
+		fi
+		# create the tagged bridge-vlan for $vid if absent (idempotent)
+		have=0; j=0
+		while uci -q get network.@bridge-vlan[$j] >/dev/null 2>&1; do
+			[ "$(uci -q get network.@bridge-vlan[$j].vlan)" = "$vid" ] && have=1; j=$((j+1))
+		done
+		if [ "$have" = "0" ]; then
+			vs="$(uci -q add network bridge-vlan)"; uci -q set network.$vs.device='br-lan'; uci -q set network.$vs.vlan="$vid"
+			for pp in lan1 lan2 lan3 lan4; do uci -q add_list network.$vs.ports="$pp:t"; done
+		fi
+		# VLAN L3 interface (idempotent): a bridged L2 segment for this SSID + ports
+		uci -q set network.vlan$vid=interface
+		uci -q set network.vlan$vid.device="br-lan.$vid"
+		uci -q set network.vlan$vid.proto='static'
+		[ -n "$(uci -q get network.vlan$vid.ipaddr)" ] || uci -q set network.vlan$vid.ipaddr="192.168.$((vid % 254)).1"
+		uci -q set network.vlan$vid.netmask='255.255.255.0'
+		# point this SSID at the VLAN
+		uci -q set wireless.$ifsec.network="vlan$vid"
+		uci -q commit network
+		uci -q commit wireless
+		/etc/init.d/network reload >/dev/null 2>&1
+		wifi reload >/dev/null 2>&1
+		printf '{"ok":true,"mode":"vlan","band":"%s","vid":"%s","msg":"SSID %s -> VLAN %s (موسوم على lan1-4)"}\n' "$band" "$vid" "$band" "$vid"
+		;;
+	# ===================== WDS (transparent L2 bridge) =====================
+	# Point-to-point: this unit is wds-ap (root) or wds-sta (leaf) on a chosen band.
+	# Same SSID+key MUST be set on both ends. 4-address WDS = transparent bridge.
+	wds)
+		role="$(getp role | tr -cd 'a-z')"; [ "$role" = "sta" ] || role="ap"
+		band="$(getp band | tr -cd 'g0-9')"; [ "$band" = "2g" ] || band="5g"
+		ssid="$(sani "$(getp ssid)")"; [ -n "$ssid" ] || fail "no_ssid"
+		key="$(getp key)"
+		rdev="$(radio_for_band "$band")"; [ -n "$rdev" ] || fail "no_radio_for_band"
+		purge_wizard_vifs
+		uci -q delete wireless.$rdev.disabled
+		uci -q set wireless.kt412_wds=wifi-iface
+		uci -q set wireless.kt412_wds.device="$rdev"
+		uci -q set wireless.kt412_wds.network='lan'
+		uci -q set wireless.kt412_wds.ssid="$ssid"
+		uci -q set wireless.kt412_wds.wds='1'
+		if [ "$role" = "sta" ]; then
+			uci -q set wireless.kt412_wds.mode='sta'
+		else
+			uci -q set wireless.kt412_wds.mode='ap'
+		fi
+		if [ -n "$key" ] && [ "${#key}" -ge 8 ]; then
+			uci -q set wireless.kt412_wds.encryption='psk2'
+			uci -q set wireless.kt412_wds.key="$key"
+		else
+			[ -n "$key" ] && fail "key_too_short"
+			uci -q set wireless.kt412_wds.encryption='none'
+			uci -q delete wireless.kt412_wds.key
+		fi
+		uci -q commit wireless
+		wifi reload >/dev/null 2>&1
+		printf '{"ok":true,"mode":"wds","role":"%s","band":"%s","msg":"WDS %s على %s — اضبط الطرف الآخر بنفس SSID/المفتاح"}\n' \
+			"$role" "$band" "$role" "$band"
+		;;
+	# ===================== PPPoE CLIENT =====================
+	# WAN = pppoe with user/pass + WAN isolation (firewall wan zone REJECT in,
+	# masquerade out). MTU clamped to 1492 (PPPoE 8-byte overhead).
+	pppoe)
+		u="$(getp user)"; p="$(getp pass)"   # raw: creds may contain symbols
+		[ -n "$u" ] || fail "no_user"
+		purge_wizard_vifs
+		uci -q delete network.wan.disabled; uci -q delete network.wan.auto
+		uci -q set network.wan.proto='pppoe'
+		uci -q set network.wan.username="$u"
+		uci -q set network.wan.password="$p"
+		uci -q set network.wan.ipv6='auto'
+		uci -q set network.wan.mtu='1492'
+		# WAN isolation in firewall: wan zone = input REJECT, forward REJECT, masq on
+		z="$(wan_zone)"
+		if [ -n "$z" ]; then
+			uci -q set firewall.$z.input='REJECT'
+			uci -q set firewall.$z.output='ACCEPT'
+			uci -q set firewall.$z.forward='REJECT'
+			uci -q set firewall.$z.masq='1'
+			uci -q set firewall.$z.mtu_fix='1'
+		fi
+		uci -q commit network
+		uci -q commit firewall
+		/etc/init.d/network reload >/dev/null 2>&1
+		/etc/init.d/firewall reload >/dev/null 2>&1
+		ifup wan >/dev/null 2>&1
+		printf '{"ok":true,"mode":"pppoe","user":"%s","msg":"WAN -> PPPoE مع عزل WAN"}\n' "$(json_esc "$u")"
+		;;
+	*) fail "bad_mode";;
+	esac
+	exit 0
+fi
+
+fail "bad_op"

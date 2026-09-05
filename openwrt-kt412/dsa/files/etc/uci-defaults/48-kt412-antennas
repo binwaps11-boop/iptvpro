@@ -1,0 +1,16 @@
+#!/bin/sh
+# KT412 — install the 2x2 antenna-pin + diagnostic scripts, run the pin once now,
+# and re-pin on every boot via rc.local (busybox crond has no @reboot). Idempotent.
+# Touches ONLY debugfs at runtime + rc.local; never ART/EEPROM/caldata/MAC.
+chmod 0755 /root/kt412-antennas.sh /root/kt412_check.sh 2>/dev/null
+
+# run the chainmask pin now (detached; harmless if the phy isn't up yet)
+( sleep 8; /root/kt412-antennas.sh ) >/dev/null 2>&1 &
+
+# re-pin at every boot (after wifi has come up)
+RC=/etc/rc.local
+[ -f "$RC" ] || printf '#!/bin/sh\nexit 0\n' > "$RC"
+if ! grep -q 'kt412-antennas' "$RC" 2>/dev/null; then
+	sed -i '/^exit 0/i (sleep 20; /root/kt412-antennas.sh) >/dev/null 2>&1 &' "$RC"
+fi
+exit 0

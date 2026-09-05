@@ -1,0 +1,108 @@
+#!/bin/sh
+# 43-kt412-maint  -- KT412 maintenance & stability (first boot).
+#   1. SOFT ping-recovery only (NEVER reboots) + disables any rebooting watchcat
+#   2. NO scheduled reboot (removed — it was a spontaneous-reboot cause)
+#   3. channel optimization / lock (2.4G -> 1..11 only; 5G -> stable plan)
+#
+# Idempotent. Uses DISTINCT guard markers so it never fights 99-kt412-dsa /
+# 99-kt412-perf (which own flow-offload, sysctl, the smartap watchdog cron, etc).
+# POSIX sh.
+
+MARK=/etc/kt412-maint.done
+[ -f "$MARK" ] && exit 0
+
+mkdir -p /etc/crontabs
+
+# ============================================================================
+# 1) PING RECOVERY -- SOFT ONLY. The device must NEVER reboot itself.
+# ============================================================================
+# ROOT-CAUSE FIX for spurious "it was working then rebooted on its own":
+#   * native watchcat in mode='ping_reboot' REBOOTS the whole device when the
+#     ping host is unreachable for the period -- on a pure AP (or any upstream
+#     blip) that is a spontaneous reboot, sometimes a loop. We DISABLE it.
+#   * We replace it with our own cron watchdog that does a SOFT recovery only
+#     (bounce WAN / wifi up) and NEVER reboots.
+# Self-healing: also strips any rebooting watchcat section / reboot cron that a
+# previous firmware left in the persisted config on a settings-kept sysupgrade.
+if [ -f /etc/init.d/watchcat ]; then
+	/etc/init.d/watchcat stop >/dev/null 2>&1
+	/etc/init.d/watchcat disable >/dev/null 2>&1
+	# remove every existing watchcat section so no ping_reboot/periodic_reboot survives
+	while uci -q delete watchcat.@watchcat[0] >/dev/null 2>&1; do :; done
+	uci -q commit watchcat >/dev/null 2>&1
+fi
+# our own SOFT ping watchdog (no reboot, ever): bounces WAN on sustained loss
+chmod 0755 /root/kt412-watchcat.sh 2>/dev/null
+if ! grep -q 'kt412-watchcat' /etc/crontabs/root 2>/dev/null; then
+	echo '*/5 * * * * ACTION=ifdown FAIL_MINUTES=10 /root/kt412-watchcat.sh # kt412-watchcat' >> /etc/crontabs/root
+fi
+
+# ============================================================================
+# 2) NO SCHEDULED REBOOT. A healthy device does not need one, and a 12h cron
+#    reboot is exactly the "rebooted by itself while working" symptom. Remove
+#    any scheduled-reboot cron a previous firmware installed (self-healing).
+# ============================================================================
+sed -i '/# kt412-maint-reboot/d' /etc/crontabs/root 2>/dev/null
+
+/etc/init.d/cron enable >/dev/null 2>&1
+/etc/init.d/cron restart >/dev/null 2>&1
+
+# ============================================================================
+# 3) CHANNEL OPTIMIZATION / LOCK
+# ============================================================================
+# 2.4G: NEVER use channel 12/13. Many phones (US/JP regdomain) treat 12/13 as
+#       no-go and report "connected, no internet". Lock to 1/6/11 (non-overlap).
+#       If the current channel is empty/auto/12/13 -> force 6. Country US already
+#       caps to 1-11, but we belt-and-suspenders it on the uci channel too.
+# 5G:   "Stable 160MHz" reality check ------------------------------------------
+#       * 160MHz needs a CONTIGUOUS 160MHz block. On 5GHz that is ONLY:
+#           ch 36-64  (36/40/44/48/52/56/60/64)  -> control ch 36 or 50, and
+#           ch 100-128 -> both blocks include DFS channels (52-64, 100-128).
+#       * ch 36/40/44/48 ALONE = an 80MHz (VHT80) block, NOT 160MHz.
+#       * The ONLY non-DFS 5GHz channels are 36-48 and 149-165; neither is wide
+#         enough for a clean non-DFS 160MHz. A real 160MHz REQUIRES DFS (radar
+#         detection, CAC delay, possible mid-session channel moves) -> NOT
+#         "stable" for an always-on AP, and ath10k 160MHz support on QCA988x is
+#         flaky. So the STABLE choice we lock is:
+#           channel 149 + VHT80 (80MHz, non-DFS, no radar, rock solid).
+#       This is deliberately 80MHz, not 160MHz, for stability. To actually run
+#       160MHz, an operator must pick a DFS block (e.g. ch 36 + HE160/VHT160) and
+#       accept DFS — left as a manual choice, not the default.
+for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+	band="$(uci -q get wireless.$r.band)"
+	if [ "$band" = "2g" ]; then
+		uci -q set wireless.$r.country='US'
+		ch="$(uci -q get wireless.$r.channel)"
+		case "$ch" in
+			''|auto|12|13|1[4-9]|[2-9][0-9]*) uci -q set wireless.$r.channel='6';;
+			1[0-1]|[1-9]) : ;;   # 1..11 already valid
+			*) uci -q set wireless.$r.channel='6';;
+		esac
+	elif [ "$band" = "5g" ]; then
+		uci -q set wireless.$r.country='US'
+		ch="$(uci -q get wireless.$r.channel)"
+		htm="$(uci -q get wireless.$r.htmode)"
+		# stable non-DFS 80MHz lock if unset/auto/DFS-range chosen
+		case "$ch" in
+			''|auto) uci -q set wireless.$r.channel='149';;
+		esac
+		# if a DFS channel (52..144) is set, prefer the stable non-DFS 149 to avoid
+		# radar lockouts; otherwise keep the operator's non-DFS choice.
+		case "$ch" in
+			5[2-9]|6[0-4]|10[0-9]|11[0-9]|12[0-8]|13[0-9]|14[0-4])
+				uci -q set wireless.$r.channel='149';;
+		esac
+		# clamp htmode to VHT80 for stability (no DFS-dependent 160MHz default)
+		case "$htm" in
+			VHT160|HE160|VHT80|HE80|VHT40|HE40|VHT20|HE20) : ;;
+			*) uci -q set wireless.$r.htmode='VHT80';;
+		esac
+	fi
+done
+uci -q commit wireless
+
+# apply wireless channel changes once (background so boot is not delayed)
+( sleep 8; wifi reload >/dev/null 2>&1 ) >/dev/null 2>&1 &
+
+touch "$MARK"
+exit 0

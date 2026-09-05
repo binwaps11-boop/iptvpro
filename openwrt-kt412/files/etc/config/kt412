@@ -1,0 +1,9 @@
+
+config ai 'ai'
+	option provider 'anthropic'
+	option endpoint 'https://api.anthropic.com/v1/messages'
+	option model 'claude-opus-4-8'
+	option apikey ''
+
+config settings 'loop'
+	option port_isolate '0'

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Disable EEE (Energy-Efficient Ethernet) on the DSA port that JUST linked up.
+#
+# ROOT-CAUSE FIX (reboot on repeated LAN cable unplug/replug): the previous version
+# ran `ethtool --set-eee` on ALL 5 ports on EVERY single port's hotplug event. Setting
+# EEE renegotiates the link, so touching ports B-E when only port A changed made THEM
+# blip -> more hotplug events -> touch all ports again -> a feedback STORM. On rapid
+# replug that storm pegged the single-core CPU long enough to trip the 30s hardware
+# watchdog -> spontaneous reboot.
+#
+# Now: act ONLY on the event's own port, ONLY on link-up (add), and DEBOUNCE per port
+# (ignore repeat events within 8s) so a flapping cable can never cascade or ping-pong.
+DEV="${INTERFACE:-${DEVICENAME:-$DEVICE}}"
+case "$DEV" in lan1|lan2|lan3|lan4|wan) ;; *) exit 0 ;; esac
+[ "$ACTION" = add ] || exit 0
+[ -e "/sys/class/net/$DEV" ] || exit 0
+
+L="/tmp/kt412-eee.$DEV"
+now="$(date +%s 2>/dev/null)"; case "$now" in ''|*[!0-9]*) now=0;; esac
+if [ -f "$L" ]; then
+	last="$(cat "$L" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last=0;; esac
+	[ $(( now - last )) -lt 8 ] && exit 0      # debounce: ignore flaps within 8s
+fi
+echo "$now" > "$L"
+
+ethtool --set-eee "$DEV" eee off >/dev/null 2>&1
+exit 0

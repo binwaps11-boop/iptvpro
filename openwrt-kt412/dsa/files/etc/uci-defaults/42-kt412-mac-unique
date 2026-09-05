@@ -1,0 +1,50 @@
+#!/bin/sh
+# 42-kt412-mac-unique -- KT412: GENUINE (vendor-OUI) MAC addresses.
+#
+# User wants the device MACs to be the genuine "وكالة" ones, NOT locally-administered
+# (02:..) generated addresses. So:
+#   * WIRED ports (eth0 / wan / lan1-4 / br-lan): left ENTIRELY on their FACTORY MACs
+#     (DSA/board.d already assigns the real vendor MACs from the label/ART).
+#   * WIRELESS vifs: ath9k/ath10k can come up on a default template MAC
+#     (00:02:03:04:05:06) or collide, so we pin them to distinct addresses that keep
+#     the unit's GENUINE OUI (first 5 octets of the real eth0 MAC) and the genuine
+#     low-byte pattern -- for this unit (eth0 ...:7a) that restores 2.4G ...:7b and
+#     5G ...:7e, i.e. the real factory wireless MACs. NO locally-administered bit.
+#
+# Idempotent (new marker so it re-applies once even on a settings-kept sysupgrade
+# that still carries the old 02:.. addresses). POSIX sh.
+MARK=/etc/kt412-mac-genuine.done
+[ -f "$MARK" ] && exit 0
+
+# genuine base MAC of the unit (real eth0 / label MAC, vendor OUI)
+BASE="$(cat /sys/class/net/eth0/address 2>/dev/null)"
+case "$BASE" in [0-9A-Fa-f][0-9A-Fa-f]:*) : ;; *) BASE="00:07:89:43:67:7a";; esac
+PREFIX="$(echo "$BASE" | cut -d: -f1-5)"          # genuine OUI + (first 5 octets)
+BL="$(echo "$BASE" | cut -d: -f6)"; bld=$(( 0x$BL ))
+
+# distinct GENUINE-OUI low bytes for the wireless vifs (NO 0x02 LAA flip).
+# offsets chosen so eth0 ...:7a -> 2.4G ...:7b (+1) and 5G ...:7e (+4) = the unit's
+# real factory wireless MACs.
+gmac() { printf '%s:%02x\n' "$PREFIX" $(( (bld + $1) & 255 )); }
+W24_MAC="$(gmac 1)"    # 2.4G
+W5G_MAC="$(gmac 4)"    # 5G
+MESH_MAC="$(gmac 5)"   # mesh vif (only applied if/when a mesh vif exists)
+
+# WIRED interfaces are intentionally NOT touched -> they keep their factory MACs.
+
+for s in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface/\1/p'); do
+	dev="$(uci -q get wireless.$s.device)"
+	band="$(uci -q get wireless.$dev.band)"
+	case "$s" in
+		kt412guest) : ;;   # guest BSS: let hostapd derive a distinct MAC from the 2.4G vif
+		kt412_mesh) uci -q set wireless.$s.macaddr="$MESH_MAC";;
+		*)
+			if [ "$band" = "5g" ]; then uci -q set wireless.$s.macaddr="$W5G_MAC"
+			elif [ "$band" = "2g" ]; then uci -q set wireless.$s.macaddr="$W24_MAC"; fi
+			;;
+	esac
+done
+uci -q commit wireless
+
+touch "$MARK"
+exit 0

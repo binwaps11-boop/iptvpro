@@ -1,0 +1,147 @@
+CONFIG_TARGET_ath79=y
+CONFIG_TARGET_ath79_nand=y
+CONFIG_TARGET_ath79_nand_DEVICE_dongwon_dw02-412h-128m=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
+CONFIG_PACKAGE_rpcd=y
+CONFIG_PACKAGE_rpcd-mod-file=y
+CONFIG_PACKAGE_rpcd-mod-iwinfo=y
+# --- Official LuCI = the ONE AND ONLY web UI ---
+# Single unified interface: official LuCI is the BASE, re-skinned with the
+# custom purple-glass design via an overlay CSS (/www/luci-static/bootstrap/
+# kt412-theme.css, @import-ed into luci-theme-bootstrap on every page by
+# /etc/uci-defaults/40-kt412-luci-theme). The Smart AP dashboard features ship
+# as LuCI views under a "Smart AP" menu group (menu.d/acl.d + resources/view/
+# kt412/*.js) that reuse the existing /cgi-bin/kt412 backend. The standalone
+# Arabic dashboard site is removed; / redirects to /cgi-bin/luci. Default
+# landing stays the standard OpenWrt Status page (themed).
+# luci-theme-bootstrap is the selected/default theme (mediaurlbase) — the
+# re-skin is an overlay CSS layered on top of it, NOT a separate theme package
+# (more robust: no header/footer template to track LuCI layout changes).
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-base=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-mod-admin-full=y
+CONFIG_PACKAGE_luci-mod-network=y
+CONFIG_PACKAGE_luci-mod-status=y
+CONFIG_PACKAGE_luci-mod-system=y
+CONFIG_PACKAGE_luci-app-firewall=y
+CONFIG_PACKAGE_luci-app-package-manager=y
+CONFIG_PACKAGE_luci-proto-ppp=y
+CONFIG_PACKAGE_luci-proto-ipv6=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+# Arabic translation for the LuCI chrome (menus/labels). Best-effort: the custom
+# CSS already forces RTL; if this package is unavailable the UI stays English-RTL.
+CONFIG_PACKAGE_luci-i18n-base-ar=y
+# --- REMOVED: luci-mod-dashboard + openwrt-2020 theme. The official LuCI
+#     dashboard renders a giant white Wi-Fi watermark page that floods the screen
+#     on a laptop (the user's "ابيض/رسومات سيئة" complaint) and adds a redundant
+#     English "Dashboard" menu. The ONE interface is the custom Smart AP dashboard
+#     (/admin/mkapp/dashboard, the landing). Dropping both also frees flash.
+#     (luci-theme-bootstrap stays as the active theme carrying our @import skin.)
+# functional apps copied from the AL-MALAKI package set (user-requested):
+#   WoL (wake devices), Wi-Fi schedule, USB printer server.
+CONFIG_PACKAGE_luci-app-wol=y
+CONFIG_PACKAGE_etherwake=y
+CONFIG_PACKAGE_luci-app-wifischedule=y
+CONFIG_PACKAGE_wifischedule=y
+CONFIG_PACKAGE_luci-app-p910nd=y
+CONFIG_PACKAGE_p910nd=y
+CONFIG_PACKAGE_kmod-usb-printer=y
+# --- MORE of the AL-MALAKI toolset (from its installed-package list in the dump
+#     the user provided). All standard feed packages; safe + useful for a WISP/AP.
+#   * lldpd + luci-app-lldpd : LLDP neighbor discovery (the "LLDP" menu in AL-MALAKI;
+#     also powers a MikroTik-style neighbors view — real link-layer neighbors).
+#   * eoip + luci-app-eoip   : Ethernet-over-IP tunnels (AL-MALAKI "eoip").
+#   * mikrotik-btest         : MikroTik bandwidth-test server (AL-MALAKI ships it;
+#     lets a MikroTik run a btest against this AP).
+#   * iperf3 + htop          : standard throughput test + live process monitor.
+CONFIG_PACKAGE_lldpd=y
+CONFIG_PACKAGE_luci-app-lldpd=y
+CONFIG_PACKAGE_eoip=y
+CONFIG_PACKAGE_luci-app-eoip=y
+CONFIG_PACKAGE_mikrotik-btest=y
+CONFIG_PACKAGE_iperf3=y
+CONFIG_PACKAGE_htop=y
+CONFIG_PACKAGE_rpcd-mod-rrdns=y
+CONFIG_PACKAGE_iwinfo=y
+CONFIG_PACKAGE_iw=y
+CONFIG_PACKAGE_jsonfilter=y
+CONFIG_PACKAGE_jshn=y
+CONFIG_PACKAGE_mwan3=y
+CONFIG_PACKAGE_ppp=y
+CONFIG_PACKAGE_ppp-mod-pppoe=y
+# --- required OpenWrt core (no Terminal/ttyd; no LuCI) ---
+CONFIG_PACKAGE_firewall4=y
+CONFIG_PACKAGE_nftables=y
+# CONFIG_PACKAGE_dnsmasq is not set
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_odhcpd-ipv6only=y
+CONFIG_PACKAGE_wireless-regdb=y
+CONFIG_PACKAGE_kmod-ath9k=y
+# 5GHz radio = PCIe QCA9882 (QCA988x). MUST use the -ct (Candela) driver AND the
+# matching -ct firmware; mixing -ct/non-ct = "firmware load failed -2" and 5G never
+# comes up. Without these the 5GHz radio has no driver at all (was missing).
+CONFIG_PACKAGE_kmod-ath10k-ct=y
+CONFIG_PACKAGE_ath10k-firmware-qca988x-ct=y
+# Ignore the EEPROM-burned (Korean) regdomain so cfg80211 cannot pull 2.4G
+# channel max_reg_power back down to ~24 and undo the forced 30 dBm ceiling.
+CONFIG_ATH_USER_REGD=y
+CONFIG_PACKAGE_kmod-mac80211=y
+CONFIG_PACKAGE_kmod-cfg80211=y
+CONFIG_PACKAGE_kmod-bridge=y
+CONFIG_PACKAGE_kmod-nft-core=y
+CONFIG_PACKAGE_kmod-nft-nat=y
+CONFIG_PACKAGE_kmod-nft-offload=y
+CONFIG_PACKAGE_ethtool=y
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_sqm-scripts=y
+CONFIG_PACKAGE_kmod-sched-cake=y
+# BBR TCP congestion control — best-in-class for throughput over lossy / far /
+# interference-prone links. Applies to the device's OWN TCP (built-in speed
+# test, downloads, proxied traffic). Tiny module; enabled via sysctl at boot.
+CONFIG_PACKAGE_kmod-tcp-bbr=y
+# WPA3 + 802.11r/k/v (full wpad instead of basic)
+# CONFIG_PACKAGE_wpad-basic-mbedtls is not set
+CONFIG_PACKAGE_wpad-mbedtls=y
+CONFIG_PACKAGE_px5g-mbedtls=y
+# --- MK APP feature packages (Network Tools / AI / mesh / maintenance) ---
+CONFIG_PACKAGE_iperf3=y
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_arping=y
+CONFIG_PACKAGE_watchcat=y
+CONFIG_PACKAGE_kmod-batman-adv=y
+CONFIG_PACKAGE_batctl-default=y
+# --- KT412 pro feature pack (admin parity + services) ---
+CONFIG_PACKAGE_ddns-scripts=y
+CONFIG_PACKAGE_miniupnpd-nftables=y
+CONFIG_PACKAGE_nlbwmon=y
+CONFIG_PACKAGE_adblock=y
+CONFIG_PACKAGE_wireguard-tools=y
+CONFIG_PACKAGE_kmod-wireguard=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_traceroute=y
+# relayd: pseudo-bridge for Station/WISP uplink (flat L2 wwan<->lan in the dashboard)
+CONFIG_PACKAGE_relayd=y
+CONFIG_KERNEL_IKCONFIG=y
+CONFIG_KERNEL_IKCONFIG_PROC=y
+# --- IPTV / multicast pack (the box's core purpose: iptvpro) — all small, in feeds ---
+#   udpxy   : multicast->HTTP unicast relay (~50-80KB) — flagship; :4022 status XML.
+#   igmpproxy: pull provider IGMP multicast onto the LAN/bridge (~30-40KB).
+#   IGMP snooping on br-lan is in-kernel (kmod-bridge, already present) — enabled
+#   at boot by 47-kt412-iptv so multicast does not flood WiFi.
+#   mtr     : per-hop loss/jitter to the IPTV head-end (freezing = upstream loss).
+#   socat   : time-boxed multicast reachability probe ("is the stream arriving?").
+CONFIG_PACKAGE_udpxy=y
+CONFIG_PACKAGE_luci-app-udpxy=y
+CONFIG_PACKAGE_igmpproxy=y
+CONFIG_PACKAGE_mtr=y
+CONFIG_PACKAGE_mtr-packet=y
+CONFIG_PACKAGE_socat=y
+# --- Captive-portal / hotspot billing (user's FUTURE_NET168 coova-chilli stack) ---
+#   TUN-based UAM captive portal + RADIUS auth/accounting/quota. ~150-250KB + tun.
+#   Bind to a dedicated guest VLAN/bridge; keep mgmt VLAN out of the portal.
+CONFIG_PACKAGE_coova-chilli=y
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_luci-app-coovachilli=y

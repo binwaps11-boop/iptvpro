@@ -1,0 +1,13 @@
+{
+	"admin/mkapp/iptv": {
+		"title": "IPTV",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "kt412/iptv"
+		},
+		"depends": {
+			"acl": [ "luci-app-kt412-plus" ]
+		}
+	}
+}

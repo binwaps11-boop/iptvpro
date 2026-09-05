@@ -1,0 +1,175 @@
+#!/bin/sh
+# KT412 DSA build first-boot defaults. DSA generates its own network config
+# (br-lan over lan1-4 + wan), so we ONLY set the management IP here.
+# LuCI is removed AND no web terminal (ttyd): the custom Arabic dashboard is
+# the ONLY web UI, covering OpenWrt/LuCI core functions with a real backend.
+uci -q set network.lan.ipaddr='192.168.1.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q set system.@system[0].hostname='Smart-AP'
+uci -q commit
+
+# --- DHCP SERVER OFF BY DEFAULT ---------------------------------------------
+# The device ships with its DHCP server DISABLED (ignore=1) so it never hands
+# out IPs and can't conflict / loop with an upstream router's DHCP. Mgmt IP
+# (192.168.1.1) stays reachable by setting a static IP on your PC, or enable
+# DHCP from the dashboard: الشبكة > LAN > خادم DHCP (زر اختياري).
+uci -q set dhcp.lan.ignore='1'
+# IPv6 on a dumb AP: we do NOT run an IPv6 server here. Instead, with the WAN port
+# bridged into br-lan (below), the upstream router's IPv6 (RA/DHCPv6/NDP) passes
+# THROUGH the bridge to every client natively. odhcpd stays off so it never
+# conflicts with the real router. (To make the device itself route IPv6, switch to
+# Router mode in the wizard.)
+uci -q set dhcp.lan.dhcpv6='disabled'
+uci -q set dhcp.lan.ra='disabled'
+uci -q commit dhcp
+
+# ============================================================================
+# ALL-PORTS-LAN (dumb AP): bridge the WAN port INTO br-lan so the internet uplink
+# can be plugged into ANY of the 5 ports (WAN + LAN1-4) — the WAN port then accepts
+# internet exactly like a LAN port. Also turn OFF bridge multicast snooping so IPv6
+# RA/ND (and mDNS) flow cleanly across the bridge to clients.
+# ============================================================================
+wandev="$(uci -q get network.wan.device 2>/dev/null)"
+[ -n "$wandev" ] || wandev="$(uci -q get network.wan.ifname 2>/dev/null)"
+brsec=""; i=0
+while uci -q get network.@device[$i] >/dev/null 2>&1; do
+	[ "$(uci -q get network.@device[$i].name)" = "br-lan" ] && { brsec="@device[$i]"; break; }
+	i=$((i+1))
+done
+if [ -n "$brsec" ]; then
+	uci -q set network.$brsec.igmp_snooping='0'      # let IPv6 RA/ND + mDNS pass
+	if [ -n "$wandev" ]; then
+		uci -q del_list network.$brsec.ports="$wandev"
+		uci -q add_list network.$brsec.ports="$wandev"
+		uci -q set network.wan.disabled='1'          # no separate WAN; it's a LAN port now
+		uci -q set network.wan.auto='0'
+	fi
+	uci -q commit network
+fi
+
+# --- custom purple-glass dashboard: make the API CGI executable ---
+chmod 0755 /www/cgi-bin/* 2>/dev/null
+
+# --- WIRELESS: a COMPLETE static /etc/config/wireless ships (both radios enabled,
+#     HT20 2.4G + VHT80 5G + SSID + WPA2 + roaming) so both bands broadcast the
+#     INSTANT the device boots. Do NOT rewrite it here (rewriting + wifi reload
+#     caused the first-boot appearance delay). Only regenerate if it is missing. ---
+if ! uci -q show wireless 2>/dev/null | grep -q '=wifi-device'; then
+	wifi config >/dev/null 2>&1
+	for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		uci -q set wireless.$r.disabled='0'; uci -q set wireless.$r.country='US'
+	done
+	uci -q commit wireless
+fi
+
+# --- force the configured txpower ~35s after boot (driver may negotiate back to the
+#     calibrated ceiling, so iwinfo shows 24 even when uci=30). Backgrounded so it
+#     never delays boot. The self-heal watchdog re-pins it every 2 min thereafter. ---
+( sleep 35
+  for r in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+    tp="$(uci -q get wireless.$r.txpower)"
+    ifc="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.interfaces[0].ifname" 2>/dev/null)"
+    phyn="$(cat /sys/class/net/$ifc/phy80211/index 2>/dev/null)"
+    [ -n "$tp" ] && [ -n "$phyn" ] && iw phy "phy$phyn" set txpower fixed "$((tp*100))" >/dev/null 2>&1
+  done ) >/dev/null 2>&1 &
+
+# --- NO web terminal (ttyd removed): the custom dashboard is the only UI ---
+/etc/init.d/ttyd disable 2>/dev/null; /etc/init.d/ttyd stop 2>/dev/null
+
+# --- performance + stability: software flow offload + packet steering ---
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'   # no HW offload on ath79
+uci -q set firewall.@defaults[0].auto_helper='0'          # drop conntrack ALG helpers => per-packet CPU saver
+uci -q set firewall.@defaults[0].synflood_protect='1'   # don't hang under SYN flood
+uci -q commit firewall
+# quieter kernel console logging => fewer log interrupts / CPU on noisy events
+uci -q set system.@system[0].conloglevel='4'
+uci -q commit system
+uci -q set network.@globals[0].packet_steering='1' 2>/dev/null || { uci -q add network globals >/dev/null 2>&1; uci -q set network.@globals[0].packet_steering='1'; }
+uci -q commit network
+
+# --- DNS for many clients: bigger cache + more parallel forwards ---
+dns_sec="$(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq/\1/p' | head -1)"
+[ -n "$dns_sec" ] && { uci -q set dhcp.$dns_sec.cachesize='10000'; uci -q set dhcp.$dns_sec.dnsforwardmax='1000'; uci -q commit dhcp; }
+
+# (WiFi range/roaming/QoS are baked into the static /etc/config/wireless.)
+
+# --- kernel tuning: high connection count + anti-hang (recycle conntrack fast,
+#     guard memory so the box never OOM-locks). IMPORTANT: panic_on_oops is 0 so a
+#     transient/recoverable driver oops (ath9k/ath10k/qca8k) is LOGGED and the box
+#     keeps running, instead of being escalated to a full panic+reboot (that was a
+#     cause of "runs a while then suddenly reboots"). A genuine panic still reboots
+#     after 10s (kernel.panic=10) so the device can self-recover. ---
+if ! grep -q 'kt412-tune' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-tune
+net.core.default_qdisc=fq_codel
+net.netfilter.nf_conntrack_max=16384
+net.netfilter.nf_conntrack_tcp_timeout_established=7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait=30
+net.netfilter.nf_conntrack_udp_timeout=30
+net.netfilter.nf_conntrack_udp_timeout_stream=60
+net.netfilter.nf_conntrack_generic_timeout=120
+net.ipv4.tcp_fin_timeout=20
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_max_syn_backlog=2048
+net.ipv4.tcp_fastopen=3
+net.core.somaxconn=2048
+net.core.rmem_max=4194304
+net.core.wmem_max=4194304
+net.core.netdev_max_backlog=3000
+fs.file-max=32768
+vm.min_free_kbytes=16384
+vm.panic_on_oom=0
+kernel.panic=10
+kernel.panic_on_oops=0
+kernel.hung_task_panic=0
+SYS
+fi
+# SELF-HEAL: an earlier firmware shipped kernel.panic_on_oops=1 (reboots on every
+# recoverable driver oops). On a settings-kept sysupgrade the guard above won't
+# rewrite the file, so force the safe values in-place and apply them live now.
+sed -i 's/^kernel\.panic_on_oops=1/kernel.panic_on_oops=0/' /etc/sysctl.conf 2>/dev/null
+sed -i 's/^vm\.min_free_kbytes=8192/vm.min_free_kbytes=16384/' /etc/sysctl.conf 2>/dev/null
+sysctl -w kernel.panic_on_oops=0 >/dev/null 2>&1
+sysctl -p >/dev/null 2>&1
+# enlarge conntrack hash buckets (=max/4) to keep lookups O(1) under load
+echo 4096 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+
+# --- Smart AP self-heal watchdog (cron every 2 min): soft-recovers wedged WiFi
+#     radios (ath10k goes WEDGED after 4 self-restarts) + stuck DSA ports +
+#     conntrack/memory, WITHOUT rebooting. The procd HW /dev/watchdog (30s) stays
+#     the ONLY reboot path, for true kernel hangs — no naive load-reboot cron. ---
+chmod 0755 /root/smartap-watchdog.sh 2>/dev/null
+mkdir -p /etc/crontabs
+sed -i '/kt412-wd/d;/kt412-loadwd/d' /etc/crontabs/root 2>/dev/null
+if ! grep -q 'smartap-wd' /etc/crontabs/root 2>/dev/null; then
+	echo '*/2 * * * * /root/smartap-watchdog.sh # smartap-wd' >> /etc/crontabs/root
+fi
+/etc/init.d/cron enable 2>/dev/null; /etc/init.d/cron restart 2>/dev/null
+
+# --- EARLY WiFi safety net: enable the fast (~25-35s) one-shot bring-up/recovery
+#     init script. With the DTS caldata fix, ath9k registers phy1 at first probe;
+#     this script is the BACKSTOP that does an early module reload if a radio's phy
+#     is still absent ~25s in (turning the old 7-min watchdog recovery into ~30s). ---
+if [ -x /etc/init.d/kt412-wifi-early ]; then
+	/etc/init.d/kt412-wifi-early enable 2>/dev/null
+fi
+
+# --- NO-AUTO-REBOOT GUARANTEE: enable the every-boot guard that strips any reboot
+#     cron and disables watchcat, so the device can NEVER reboot itself. ---
+if [ -x /etc/init.d/kt412-noreboot ]; then
+	/etc/init.d/kt412-noreboot enable 2>/dev/null
+	/etc/init.d/kt412-noreboot start 2>/dev/null
+fi
+
+# --- logging to RAM only (protect flash; keep crash history for the watchdog) ---
+uci -q set system.@system[0].log_buffer_size='64'
+uci -q set system.@system[0].cronloglevel='8'
+uci -q commit system
+
+/etc/init.d/rpcd restart 2>/dev/null
+/etc/init.d/uhttpd restart 2>/dev/null
+exit 0

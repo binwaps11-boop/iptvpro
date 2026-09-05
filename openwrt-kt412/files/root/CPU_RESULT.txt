@@ -1,0 +1,4 @@
+KT412 CPU_RESULT (template) — run /root/kt412-cpu-check.sh to fill with live values.
+Targets: idle <25% · UI open <40% · with clients <60% · sustained 100% = FAIL.
+Fixes shipped: UI polling 5s/10s, op=devices single-awk + atomic 5s cache,
+op=health 15s cache + single ping, no background diagnostic scripts, hotplugs debounced.

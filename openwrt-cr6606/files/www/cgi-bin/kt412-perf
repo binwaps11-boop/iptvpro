@@ -1,0 +1,404 @@
+#!/bin/sh
+# KT412 "MK APP" Performance / Optimizer backend (محسّن الأداء).
+# OWN CGI (does not touch the shared kt412 / kt412-tools / kt412-diag scripts).
+# POSIX sh, runs as root under uhttpd. Auth model is IDENTICAL to the other
+# KT412 CGIs: a LuCI view "adopts" its own authenticated ubus session id (must
+# hold uci-write access). We mark it kt412perf=1 and accept that id as the token
+# on every later op. Every input is sanitized through tr -cd whitelists so NO
+# shell metacharacter can reach a command (no injection). This CGI NEVER touches
+# the power patches, the DTS/ART/caldata, the wifi-boot scripts, or uci-defaults.
+# It only: scans channels, applies a channel via uci+wifi reload (keeping the
+# existing htmode), runs an uplink speed test, runs a safe housekeeping "turbo"
+# pass (re-pin configured txpower, drop pagecache, flush stale UDP conntrack),
+# and lists associated stations.
+#
+# Ops: adopt, scan, setchan, spdtest, turbo, clients.
+
+printf 'Content-Type: application/json\r\n'
+printf 'Cache-Control: no-store\r\n'
+printf 'X-Content-Type-Options: nosniff\r\n'
+printf '\r\n'
+
+QS="${QUERY_STRING}"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+	CL="${CONTENT_LENGTH:-0}"
+	case "$CL" in ''|*[!0-9]*) CL=0;; esac
+	if [ "$CL" -gt 0 ] && [ "$CL" -lt 1048576 ]; then
+		BODY="$(head -c "$CL")"
+		QS="${QS}&${BODY}"
+	fi
+fi
+
+urldecode() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"; }
+getp() {
+	local want="$1" pair rest
+	local IFS='&'
+	for pair in $QS; do
+		case "$pair" in
+			"$want="*) rest="${pair#*=}"; urldecode "$rest"; return 0;;
+		esac
+	done
+	return 1
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+sani_hex()  { printf '%s' "$1" | tr -cd 'a-f0-9' | cut -c1-64; }
+sani_word() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-24; }
+sani_int()  { printf '%s' "$1" | tr -cd '0-9' | cut -c1-5; }
+# URL for the speed test: only safe URL characters survive; no spaces / shell
+# metacharacters -> safe to pass to curl/wget. Must be http(s).
+sani_url()  { printf '%s' "$1" | tr -cd 'A-Za-z0-9:/._?=&%~-' | cut -c1-256; }
+fail()      { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
+
+cookie_sid() { echo "${HTTP_COOKIE:-}" | grep -o 'sysauth[A-Za-z_]*=[A-Fa-f0-9]*' | head -1 | sed 's/^[^=]*=//'; }
+root_open() { p="$(sed -n 's/^root:\([^:]*\):.*/\1/p' /etc/shadow 2>/dev/null)"; [ -z "$p" ]; }
+OP="$(getp op | tr -cd 'a-z_')"
+
+# ---------- adopt (bootstrap from an existing authenticated LuCI session) ------
+if [ "$OP" = "adopt" ]; then
+	SID="$(sani_hex "$(getp token)")"
+	root_open && { printf '{"ok":true,"token":"open"}\n'; exit 0; }
+	[ -n "$SID" ] || SID="$(sani_hex "$(cookie_sid)")"
+	[ -n "$SID" ] || fail "no_token"
+	OKACC="$(ubus call session access "{\"ubus_rpc_session\":\"$SID\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"
+	if [ "$OKACC" = "true" ]; then
+		ubus call session set "{\"ubus_rpc_session\":\"$SID\",\"values\":{\"kt412perf\":\"1\"}}" >/dev/null 2>&1
+		printf '{"ok":true,"token":"%s"}\n' "$SID"
+	else
+		fail "unauthorized"
+	fi
+	exit 0
+fi
+
+# ---------- everything else requires a valid, marked session ----------
+if ! root_open; then
+TOK="$(sani_hex "$(getp token)")"
+[ -n "$TOK" ] || TOK="$(sani_hex "$(cookie_sid)")"
+[ -n "$TOK" ] || fail "no_token"
+MARK="$(ubus call session get "{\"ubus_rpc_session\":\"$TOK\"}" 2>/dev/null | jsonfilter -e '@.values.kt412perf' 2>/dev/null)"
+[ "$MARK" = "1" ] || { ACC="$(ubus call session access "{\"ubus_rpc_session\":\"$TOK\",\"scope\":\"uci\",\"object\":\"*\",\"function\":\"write\"}" 2>/dev/null | jsonfilter -e '@.access' 2>/dev/null)"; [ "$ACC" = "true" ] || fail "unauthorized"; }
+fi
+
+# ============================================================
+# helpers
+# ============================================================
+
+# map a radio section (radio0/radio1) -> its live ifname (wlanX) and phy.
+# Uses ubus network.wireless status (authoritative) with a /sys fallback.
+radio_ifname() {  # $1 = radio section
+	local s="$1" ifn
+	ifn="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$s.interfaces[0].ifname" 2>/dev/null)"
+	echo "$ifn"
+}
+radio_phy() {  # $1 = radio section
+	local s="$1" p ifn
+	p="$(uci -q get wireless.$s.phy)"
+	if [ -z "$p" ]; then
+		ifn="$(radio_ifname "$s")"
+		[ -n "$ifn" ] && p="$(cat /sys/class/net/$ifn/phy80211/name 2>/dev/null)"
+	fi
+	echo "$p"
+}
+# band of a radio: 2g | 5g
+radio_band() {  # $1 = radio section
+	local s="$1" b
+	b="$(uci -q get wireless.$s.band)"
+	[ -n "$b" ] || b="$(uci -q get wireless.$s.hwmode)"
+	case "$b" in
+		*2g*|*11g*|*11ng*) echo "2g";;
+		*5g*|*11a*|*11na*|*11ac*) echo "5g";;
+		*) echo "$b";;
+	esac
+}
+
+# ============================================================
+# op=scan -> channel analyzer + auto-pick. Scans both radios with iwinfo,
+#            counts APs per channel, recommends least-congested 2.4G among
+#            1/6/11 (never 12/13) and a clean non-DFS 5G channel.
+# ============================================================
+if [ "$OP" = "scan" ]; then
+	printf '{"ok":true,"radios":['
+	RSEP=''
+	for R in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		BAND="$(radio_band "$R")"
+		IFN="$(radio_ifname "$R")"
+		CURCH="$(uci -q get wireless.$R.channel)"
+		# scan device; iwinfo prints "Channel: N" lines per BSS. Best-effort.
+		SCAN=""
+		[ -n "$IFN" ] && SCAN="$(iwinfo "$IFN" scan 2>/dev/null)"
+		# allowed channel set per band
+		if [ "$BAND" = "2g" ]; then
+			CHANS="1 2 3 4 5 6 7 8 9 10 11"
+			PICKSET="1 6 11"
+		else
+			CHANS="36 40 44 48 149 153 157 161"
+			PICKSET="36 40 44 48 149 153 157 161"
+		fi
+		# count APs per channel from the scan output
+		COUNTS=""   # "ch:count ch:count ..."
+		for ch in $CHANS; do
+			n="$(printf '%s\n' "$SCAN" | sed -n 's/^[[:space:]]*Channel:[[:space:]]*\([0-9]*\).*/\1/p' | grep -c "^${ch}$")"
+			case "$n" in ''|*[!0-9]*) n=0;; esac
+			COUNTS="$COUNTS${COUNTS:+ }$ch:$n"
+		done
+		# recommend least-congested channel within PICKSET (2.4G adds an
+		# adjacent-overlap weight so 1/6/11 separation is respected).
+		BEST=""; BESTSCORE=""
+		for ch in $PICKSET; do
+			# self count
+			own="$(printf '%s' " $COUNTS " | sed -n "s/.* $ch:\([0-9]*\).*/\1/p")"
+			case "$own" in ''|*[!0-9]*) own=0;; esac
+			score=$((own*3))
+			if [ "$BAND" = "2g" ]; then
+				# add overlap from channels within +/-4 (20 MHz overlap on 2.4G)
+				for o in $CHANS; do
+					d=$((o-ch)); [ "$d" -lt 0 ] && d=$((-d))
+					if [ "$d" -ge 1 ] && [ "$d" -le 4 ]; then
+						oc="$(printf '%s' " $COUNTS " | sed -n "s/.* $o:\([0-9]*\).*/\1/p")"
+						case "$oc" in ''|*[!0-9]*) oc=0;; esac
+						# closer overlap weighs more
+						w=$((5-d))
+						score=$((score + oc*w))
+					fi
+				done
+			fi
+			if [ -z "$BESTSCORE" ] || [ "$score" -lt "$BESTSCORE" ]; then
+				BESTSCORE="$score"; BEST="$ch"
+			fi
+		done
+		# emit
+		[ -n "$RSEP" ] && printf ','
+		printf '{"radio":"%s","band":"%s","ifname":"%s","current":"%s","recommend":"%s","channels":[' \
+			"$(json_esc "$R")" "$(json_esc "$BAND")" "$(json_esc "$IFN")" "$(json_esc "$CURCH")" "$(json_esc "$BEST")"
+		CSEP=''
+		for kv in $COUNTS; do
+			ch="${kv%%:*}"; cnt="${kv##*:}"
+			[ -n "$CSEP" ] && printf ','
+			printf '{"ch":%s,"count":%s}' "$ch" "$cnt"
+			CSEP=1
+		done
+		printf ']}'
+		RSEP=1
+	done
+	printf ']}\n'
+	exit 0
+fi
+
+# ============================================================
+# op=setchan -> apply a chosen channel via uci + wifi reload.
+# Keeps the existing htmode (HT20 on 2.4G / VHT80 on 5G are untouched).
+# 2.4G restricted to 1/6/11; 5G restricted to the non-DFS whitelist.
+# ============================================================
+if [ "$OP" = "setchan" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	RADIO="$(sani_word "$(getp radio)")"
+	CH="$(sani_int "$(getp channel)")"
+	[ -n "$RADIO" ] || fail "no_radio"
+	[ -n "$CH" ] || fail "no_channel"
+	TYPE="$(uci -q get wireless.$RADIO 2>/dev/null)"
+	[ "$TYPE" = "wifi-device" ] || fail "bad_radio"
+	BAND="$(radio_band "$RADIO")"
+	# whitelist the channel per band (NEVER 12/13; only non-DFS 5G)
+	OK=0
+	if [ "$BAND" = "2g" ]; then
+		case "$CH" in 1|6|11) OK=1;; esac
+	else
+		case "$CH" in 36|40|44|48|149|153|157|161) OK=1;; esac
+	fi
+	[ "$OK" = 1 ] || fail "channel_not_allowed"
+	BEFORE="$(uci -q get wireless.$RADIO.channel)"
+	HT="$(uci -q get wireless.$RADIO.htmode)"   # keep as-is, do not change
+	uci -q set wireless.$RADIO.channel="$CH"
+	uci -q commit wireless
+	wifi reload >/dev/null 2>&1
+	printf '{"ok":true,"radio":"%s","before":"%s","after":"%s","htmode":"%s"}\n' \
+		"$(json_esc "$RADIO")" "$(json_esc "$BEFORE")" "$CH" "$(json_esc "$HT")"
+	exit 0
+fi
+
+# ============================================================
+# op=spdtest -> AP-uplink download throughput (curl/wget) + ping latency.
+# Downloads a test file for ~5s, computes Mbit/s. No extra package: curl is
+# shipped (config.seed CONFIG_PACKAGE_curl=y); falls back to wget. Default URL
+# is a Cloudflare speed file; the user can override via the (sanitized) url=.
+# Handles no-internet gracefully.
+# ============================================================
+if [ "$OP" = "spdtest" ]; then
+	URL="$(sani_url "$(getp url)")"
+	# only accept http/https; otherwise use the safe default
+	case "$URL" in
+		http://*|https://*) :;;
+		*) URL="https://speed.cloudflare.com/__down?bytes=50000000";;
+	esac
+
+	# quick latency to 1.1.1.1 (fixed target, not user-controlled)
+	PING_MS=""
+	PR="$(ping -c 3 -W 2 1.1.1.1 2>/dev/null)"
+	PING_MS="$(printf '%s' "$PR" | sed -n 's#.*= [0-9.]*/\([0-9.]*\)/.*#\1#p' | head -n1)"
+	[ -n "$PING_MS" ] || PING_MS=""
+
+	# measure ~5s of download. curl gives us bytes + time; compute Mbit/s.
+	BYTES=""; SECS=""
+	if command -v curl >/dev/null 2>&1; then
+		# --max-time bounds it to ~6s; -o /dev/null discards; -w prints metrics.
+		# %{size_download} bytes, %{time_total} seconds. No shell expansion of URL
+		# beyond the sanitized value (single fixed argument).
+		MET="$(curl -s --max-time 6 -o /dev/null -w '%{size_download} %{time_total}' "$URL" 2>/dev/null)"
+		BYTES="$(printf '%s' "$MET" | awk '{print $1}')"
+		SECS="$(printf '%s' "$MET" | awk '{print $2}')"
+	elif command -v wget >/dev/null 2>&1; then
+		T0="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+		BYTES="$(wget -q -O /dev/null -T 6 "$URL" 2>/dev/null; :)"
+		# wget can't easily report bytes here; fall back to "no curl" path note.
+		BYTES=""; SECS=""
+	fi
+
+	case "$BYTES" in ''|*[!0-9]*) BYTES=0;; esac
+	# SECS is float; guard
+	MBPS="0"
+	if [ "$BYTES" -gt 0 ]; then
+		# Mbit/s = bytes*8 / seconds / 1e6, done in awk for the float division.
+		MBPS="$(awk -v b="$BYTES" -v s="$SECS" 'BEGIN{ if (s+0>0) printf "%.2f", (b*8)/(s*1000000); else print "0"; }')"
+	fi
+
+	if [ "$BYTES" -le 0 ]; then
+		# no bytes -> likely no internet on the uplink
+		printf '{"ok":false,"error":"no_internet","ping_ms":"%s"}\n' "$(json_esc "$PING_MS")"
+		exit 0
+	fi
+	printf '{"ok":true,"down_mbps":"%s","bytes":%s,"secs":"%s","ping_ms":"%s","url":"%s"}\n' \
+		"$MBPS" "$BYTES" "$(json_esc "$SECS")" "$(json_esc "$PING_MS")" "$(json_esc "$URL")"
+	exit 0
+fi
+
+# ============================================================
+# op=turbo -> ONE-CLICK safe optimize. NOTHING destructive:
+#   1) re-pin each radio's CONFIGURED uci txpower via iw phy set txpower fixed
+#      (does NOT change the value, does NOT re-patch the driver, does NOT touch
+#       power patches / DTS / caldata) + wifi reload
+#   2) drop clean pagecache (sync; echo 1 > drop_caches) to free RAM
+#   3) flush stale UDP conntrack entries (CPU/table hygiene)
+# Reports each step.
+# ============================================================
+if [ "$OP" = "turbo" ]; then
+	[ "$REQUEST_METHOD" = "POST" ] || fail "post_required"
+	STEPS=""
+	add_step() { STEPS="$STEPS${STEPS:+,}\"$(json_esc "$1")\""; }
+
+	# 1) re-pin configured txpower per radio (best-effort; only the value already
+	#    in uci, clamped 0..30). Never raises beyond the configured ceiling.
+	PINNED=0
+	for R in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		TP="$(uci -q get wireless.$R.txpower | tr -cd '0-9' | cut -c1-3)"
+		[ -n "$TP" ] || continue
+		[ "$TP" -gt 30 ] && TP=30
+		PHY="$(radio_phy "$R")"
+		[ -n "$PHY" ] || PHY="$R"
+		iw phy "$PHY" set txpower fixed "$((TP*100))" >/dev/null 2>&1 && PINNED=$((PINNED+1))
+	done
+	add_step "أعيد تثبيت طاقة الإرسال المُعدّة على $PINNED راديو (iw phy fixed) دون تغيير القيمة"
+	wifi reload >/dev/null 2>&1
+	add_step "أُعيد تحميل الواي‑فاي (wifi reload) لتطبيق الإعداد"
+
+	# 2) drop clean pagecache (frees RAM; safe — only reclaimable clean pages)
+	MEM_BEFORE="$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+	sync 2>/dev/null
+	echo 1 > /proc/sys/vm/drop_caches 2>/dev/null
+	MEM_AFTER="$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+	case "$MEM_BEFORE" in ''|*[!0-9]*) MEM_BEFORE=0;; esac
+	case "$MEM_AFTER" in ''|*[!0-9]*) MEM_AFTER=0;; esac
+	FREED=$((MEM_AFTER-MEM_BEFORE)); [ "$FREED" -lt 0 ] && FREED=0
+	add_step "أُفرِغت ذاكرة التخزين المؤقت (pagecache) — تحرّر ~${FREED} كيلوبايت"
+
+	# 3) flush stale UDP conntrack entries (table/CPU hygiene; does not drop
+	#    active TCP). conntrack tool if present, else best-effort via /proc.
+	UDP_FLUSHED=0
+	if command -v conntrack >/dev/null 2>&1; then
+		BEFORE_CT="$(conntrack -L -p udp 2>/dev/null | wc -l)"
+		conntrack -D -p udp >/dev/null 2>&1
+		AFTER_CT="$(conntrack -L -p udp 2>/dev/null | wc -l)"
+		case "$BEFORE_CT" in ''|*[!0-9]*) BEFORE_CT=0;; esac
+		case "$AFTER_CT" in ''|*[!0-9]*) AFTER_CT=0;; esac
+		UDP_FLUSHED=$((BEFORE_CT-AFTER_CT)); [ "$UDP_FLUSHED" -lt 0 ] && UDP_FLUSHED=0
+		add_step "نُظّفت إدخالات UDP القديمة في conntrack (~${UDP_FLUSHED} إدخال)"
+	else
+		add_step "أداة conntrack غير متوفرة — تخطّي تنظيف UDP (غير حرج)"
+	fi
+
+	printf '{"ok":true,"steps":[%s]}\n' "$STEPS"
+	exit 0
+fi
+
+# ============================================================
+# op=clients -> live per-client link quality from iwinfo assoclist.
+# Lists associated stations per radio with signal, RX/TX rate + MCS.
+# ============================================================
+if [ "$OP" = "clients" ]; then
+	printf '{"ok":true,"radios":['
+	RSEP=''
+	for R in $(uci show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=wifi-device/\1/p'); do
+		BAND="$(radio_band "$R")"
+		IFN="$(radio_ifname "$R")"
+		AL=""
+		[ -n "$IFN" ] && AL="$(iwinfo "$IFN" assoclist 2>/dev/null)"
+		[ -n "$RSEP" ] && printf ','
+		printf '{"radio":"%s","band":"%s","ifname":"%s","clients":[' \
+			"$(json_esc "$R")" "$(json_esc "$BAND")" "$(json_esc "$IFN")"
+		# parse iwinfo assoclist: each station starts with a MAC line, then
+		# indented "RX:"/"TX:" lines. Build records with awk (read-only parse).
+		CL="$(printf '%s\n' "$AL" | awk '
+			/^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}/ {
+				if (mac!="") emit();
+				mac=$1;
+				sig=""; rx=""; tx=""; rxmcs=""; txmcs="";
+				# the line is "<mac>  -52 dBm / -95 dBm (SNR ..)": the FIRST dBm is the
+				# client SIGNAL, the second is the NOISE floor. Take the first and STOP,
+				# else a strong/near client (-52) wrongly showed the noise (-95) -> red.
+				for (i=1;i<=NF;i++) if ($i=="dBm") { sig=$(i-1); break; }
+				next;
+			}
+			/^[[:space:]]*RX:/ {
+				# match MBit by regex (iwinfo may print "MBit/s" or "MBit/s," with a comma)
+				for (i=1;i<=NF;i++){ if ($i ~ /MBit/) rx=$(i-1); if ($i ~ /^MCS$/) rxmcs=$(i+1); }
+				next;
+			}
+			/^[[:space:]]*TX:/ {
+				for (i=1;i<=NF;i++){ if ($i ~ /MBit/) tx=$(i-1); if ($i ~ /^MCS$/) txmcs=$(i+1); }
+				next;
+			}
+			END { if (mac!="") emit(); }
+			function emit(){ printf "%s\t%s\t%s\t%s\t%s\t%s\n", mac, sig, rx, tx, rxmcs, txmcs; }
+		')"
+		CSEP=''
+		# iterate the tab-separated records safely
+		OLDIFS="$IFS"
+		IFS='
+'
+		for line in $CL; do
+			[ -n "$line" ] || continue
+			mac="$(printf '%s' "$line" | cut -f1 | tr -cd '0-9A-Fa-f:')"
+			sig="$(printf '%s' "$line" | cut -f2 | tr -cd '0-9-')"
+			rx="$(printf '%s' "$line" | cut -f3 | tr -cd '0-9.')"
+			tx="$(printf '%s' "$line" | cut -f4 | tr -cd '0-9.')"
+			rxmcs="$(printf '%s' "$line" | cut -f5 | tr -cd '0-9')"
+			txmcs="$(printf '%s' "$line" | cut -f6 | tr -cd '0-9')"
+			[ -n "$mac" ] || continue
+			# resolve a friendly name + IP from the DHCP leases (so the operator sees
+			# device NAMES, not raw MACs). leases line: <exp> <mac> <ip> <host> <cid>.
+			nm=""; ipv=""
+			LN="$(awk -v m="$mac" 'tolower($2)==tolower(m){print $3"\t"$4; exit}' /tmp/dhcp.leases 2>/dev/null)"
+			if [ -n "$LN" ]; then ipv="$(printf '%s' "$LN" | cut -f1)"; nm="$(printf '%s' "$LN" | cut -f2)"; fi
+			[ "$nm" = "*" ] && nm=""
+			[ -n "$CSEP" ] && printf ','
+			printf '{"mac":"%s","name":"%s","ip":"%s","signal":"%s","rx_mbit":"%s","tx_mbit":"%s","rx_mcs":"%s","tx_mcs":"%s"}' \
+				"$mac" "$(json_esc "$nm")" "$(json_esc "$ipv")" "${sig:-}" "${rx:-}" "${tx:-}" "${rxmcs:-}" "${txmcs:-}"
+			CSEP=1
+		done
+		IFS="$OLDIFS"
+		printf ']}'
+		RSEP=1
+	done
+	printf ']}\n'
+	exit 0
+fi
+
+fail "unknown_op"

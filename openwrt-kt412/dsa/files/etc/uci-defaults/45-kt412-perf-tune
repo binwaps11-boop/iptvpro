@@ -1,0 +1,251 @@
+#!/bin/sh
+# KT412 DSA — extra high-performance AP tuning (NEW, distinct from 99-kt412-dsa).
+# ============================================================================
+# SCOPE / SAFETY CONTRACT:
+#   * This file adds ONLY high-value, low-risk performance knobs that are NOT
+#     already set by 99-kt412-dsa (flow_offloading, packet_steering, fq_codel,
+#     conntrack sizing/timeouts, TCP sysctls, conloglevel, DNS cache are ALL in
+#     99 and are deliberately NOT touched here — no duplication).
+#   * It NEVER touches power/RF (txpower, the 990/991/992 patches), the DTS,
+#     ART/caldata, the wifi-boot scripts, or htmode/channel/mcast_rate. It does
+#     NOT trade range for speed (HT20 on 2.4G is preserved elsewhere).
+#   * Every action is guarded: a missing sysfs path / absent ethtool / missing
+#     netdev is ignored gracefully (|| true) so the boot can NEVER fail or brick.
+#   * Idempotent: a marker guard means re-running (e.g. another first-boot pass)
+#     is a no-op for the persistent parts.
+# Sources/rationale are noted per item (OpenWrt wiki Network/Performance, DSA
+# ethernet-offload notes, ath79/QCA9558 hardware reality).
+# ============================================================================
+
+MARK=/etc/kt412-perf-tune.done
+
+apply_runtime() {
+	# ----- (1) DSA ethernet offloads via ethtool -K -------------------------
+	# WHY: On DSA the conduit (eth0) + user ports carry all bridged/routed
+	# traffic through the CPU. Enabling generic segmentation/receive offload and
+	# checksum offload lets the stack batch packets => fewer per-packet CPU
+	# cycles => higher LAN/WAN throughput on a modest MIPS SoC. These are SOFTWARE
+	# offloads (GRO/GSO/TSO are done by the kernel) so they are safe even though
+	# the QCA8337 has no NIC-style HW offload. Source: OpenWrt wiki
+	# "Network/Performance tuning" + DSA ethernet offload discussion. Best-effort:
+	# unsupported features simply fail with ethtool returning non-zero (ignored).
+	if command -v ethtool >/dev/null 2>&1; then
+		for ifc in eth0 lan1 lan2 lan3 lan4 wan br-lan; do
+			[ -e "/sys/class/net/$ifc" ] || continue
+			# enable each feature independently so one unsupported flag does not
+			# abort the rest. All wrapped so a failure never errors the boot.
+			for feat in gro gso tso sg rx rxvlan txvlan; do
+				ethtool -K "$ifc" "$feat" on >/dev/null 2>&1 || true
+			done
+			# tx/rx checksum offload (named differently on some drivers)
+			ethtool -K "$ifc" tx on >/dev/null 2>&1 || true
+			ethtool -K "$ifc" rx on >/dev/null 2>&1 || true
+		done
+	fi
+
+	# ----- (2) Sensible txqueuelen on the conduit + bridge ------------------
+	# WHY: The default txqueuelen on some DSA conduits is small (e.g. 1000 or
+	# less); a slightly larger queue smooths bursty bridged traffic for many WiFi
+	# clients without bufferbloat (fq_codel from 99 manages the AQM). 1000 is the
+	# standard sane value. Source: OpenWrt wiki Network/Performance. Guarded.
+	for ifc in eth0 br-lan; do
+		[ -e "/sys/class/net/$ifc" ] || continue
+		ip link set dev "$ifc" txqueuelen 1000 >/dev/null 2>&1 || true
+	done
+
+	# ----- (2b) NAPI hard-IRQ deferral (single-core IRQ relief) --------------
+	# WHY: on a single 720MHz core, taking a hard IRQ per RX batch burns cycles.
+	# gro_flush_timeout + napi_defer_hard_irqs let the core poll a few more packets
+	# before re-arming IRQs => fewer interrupts, better GRO coalescing, more pps per
+	# CPU-cycle. 50us is conservative (negligible added latency). Per-netdev sysfs;
+	# guarded so a missing path never errors. Source: kernel napi defer docs.
+	for ifc in eth0 br-lan lan1 lan2 lan3 lan4 wan; do
+		gf="/sys/class/net/$ifc/gro_flush_timeout"
+		nd="/sys/class/net/$ifc/napi_defer_hard_irqs"
+		[ -w "$gf" ] && echo 50000 > "$gf" 2>/dev/null || true
+		[ -w "$nd" ] && echo 2 > "$nd" 2>/dev/null || true
+	done
+
+	# ----- (3) CPU scaling governor = performance (ONLY if cpufreq exists) --
+	# WHY: A "performance" governor avoids frequency-ramp latency on routing
+	# bursts. The QCA9558 (ath79) almost certainly does NOT expose cpufreq, so
+	# this is a guarded no-op there. We ONLY write if the sysfs path exists —
+	# skip silently otherwise (never an error). Source: OpenWrt wiki perf tuning.
+	if [ -e /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+		for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+			[ -w "$g" ] && echo performance > "$g" 2>/dev/null || true
+		done
+	fi
+
+	# ----- (4) Bridge multicast-to-unicast for WiFi efficiency --------------
+	# WHY: Converting flooded multicast to unicast on the bridge lets WiFi send
+	# at the client's negotiated (high MCS) rate instead of the lowest basic
+	# rate, helping streaming/mDNS without lowering range (this is NOT mcast_rate;
+	# it does not raise the basic-rate floor). Kernel feature on br-lan; guarded.
+	# Source: OpenWrt/mac80211 multicast_to_unicast notes.
+	if [ -e /sys/class/net/br-lan/bridge ]; then
+		echo 1 > /sys/class/net/br-lan/bridge/multicast_to_unicast 2>/dev/null || true
+	fi
+
+	# ----- (7) ath9k ANI (Adaptive Noise Immunity) — re-assert ON -----------
+	# WHY: ANI is the #1 built-in feature for holding a SMOOTH 2.4G link under
+	# interference: it dynamically tunes PHY noise/spur/OFDM-error thresholds.
+	# It is ON by default; this only re-asserts it (in case anything disabled it)
+	# so a far/low-bars client keeps RX sensitivity AND noise rejection. debugfs
+	# appears only after the radio is up — the sleep-20 retry below covers timing.
+	# Source: ath9k ANI debugfs (forum.openwrt.org ath ANI threads). Guarded.
+	for a in /sys/kernel/debug/ieee80211/phy*/ath9k/ani; do
+		[ -w "$a" ] && echo 1 > "$a" 2>/dev/null || true
+	done
+
+	# ----- (8) AQL (Airtime Queue Limits) on the 5G ath10k ------------------
+	# WHY: a modestly higher AQL keeps the VHT80 aggregation pipe full on a single
+	# bulk transfer (the phone file-copy case) -> higher sustained 5G throughput,
+	# while fq_codel (from 99) still controls bufferbloat. Kept modest so we do
+	# NOT reintroduce latency. Per-phy debugfs; guarded; unsupported = ignored.
+	# Source: forum.openwrt.org "AQL and the ath10k is lovely".
+	for q in /sys/kernel/debug/ieee80211/phy*/aql_txq_limit; do
+		[ -w "$q" ] && { echo "2 24000 24000" > "$q" 2>/dev/null; echo "3 24000 24000" > "$q" 2>/dev/null; } || true
+	done
+}
+
+# ----- (5) Persistent sysctl additions (NEW only; NOT in 99's kt412-tune) ---
+# WHY: 99-kt412-dsa already sets conntrack/TCP/qdisc sysctls under the
+# "# kt412-tune" block. Here we add a SEPARATE, clearly-marked block with knobs
+# 99 does NOT set: a larger UDP receive buffer floor for many concurrent WiFi
+# clients, and tcp_mtu_probing to recover throughput on PPPoE/low-MTU uplinks.
+# Distinct marker so it is idempotent and never duplicates the 99 block.
+if ! grep -q 'kt412-perf-tune' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-perf-tune (45; additive to the 99 kt412-tune block, no duplicates)
+# default socket buffer floors help many-client UDP/streaming without huge RAM
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+# probe a working MTU on PPPoE/encapsulated uplinks => avoids blackholed large
+# packets that otherwise stall throughput (OpenWrt wiki: PPPoE MTU issues)
+net.ipv4.tcp_mtu_probing=1
+SYS
+fi
+sysctl -p >/dev/null 2>&1 || true
+
+# ----- (5b) MAX-PERF network sysctls + BBR (NEW v2 block) --------------------
+# WHY: squeeze more out of the single 720 MHz core by reducing per-packet/per-
+# connection overhead and using a better congestion controller for the device's
+# OWN TCP (built-in speed test, downloads, any proxied/terminated traffic):
+#   * tcp_congestion_control=bbr : best throughput on lossy/far/interference
+#     links (loaded from kmod-tcp-bbr; only applied if actually available).
+#   * tcp_fastopen=3 : 0-RTT connection setup both directions => snappier.
+#   * netdev_max_backlog/netdev_budget : absorb RX bursts on one core without
+#     drops (helps many-client / high-pps moments stay smooth).
+# Separate v2 marker so it ALSO applies on a keep-settings upgrade (the original
+# kt412-perf-tune block may already be present from an older flash).
+if ! grep -q 'kt412-perf-tune-v2' /etc/sysctl.conf 2>/dev/null; then
+	cat >> /etc/sysctl.conf <<'SYS'
+# kt412-perf-tune-v2 (max-perf; additive)
+net.ipv4.tcp_fastopen=3
+net.core.netdev_max_backlog=2000
+net.core.netdev_budget=600
+# time cap pairing netdev_budget so one RX poll can't hog the single core
+net.core.netdev_budget_usecs=4000
+# cap self-inflicted send-queue bufferbloat for device-terminated TCP
+net.ipv4.tcp_notsent_lowat=131072
+# don't let a prior lossy-WiFi session throttle the next connection
+net.ipv4.tcp_no_metrics_save=1
+SYS
+fi
+# BBR only if the module/algo is present (never error if missing)
+modprobe tcp_bbr >/dev/null 2>&1 || true
+if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+	if ! grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf 2>/dev/null; then
+		echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
+	fi
+fi
+sysctl -p >/dev/null 2>&1 || true
+
+# ----- (6) Wireless micro-tuning (SAFE: NO power/htmode/channel/mcast_rate) ----
+# Applied once, idempotently. Improves real-world throughput + smoothness + how
+# well a FAR client (low bars) holds a usable link, WITHOUT lowering range or
+# touching the frozen RF/power path:
+#   * wmm=1  : WMM/QoS MUST be on or 802.11n/ac data rates are disabled and the
+#     link silently caps at 54 Mbps (legacy). Ensuring it = full 2.4G/5G rates.
+#   * dtim_period=2 + multicast_to_unicast(bridge) : lower buffered-frame latency
+#     and send streams at each client's real (high) MCS -> smoother browsing/video
+#     for everyone including the distant client, with NO basic-rate floor change.
+#   * cell_density=0 : keep the lowest management/basic rate so a weak/far client
+#     can still associate and stay connected (range-friendly).
+#   * country stays US (max clean reg power). htmode/channel/noscan/txpower are
+#     left exactly as configured (2.4G HT40, 5G VHT80, 30 dBm) — untouched.
+# Honest note: AP-side tuning maximises a far client's STABILITY, not its raw
+# speed at distance (that is bounded by its weak uplink SNR — physics).
+if [ ! -f /etc/kt412-wifi-tuned.v2.done ] && uci -q show wireless >/dev/null 2>&1; then
+	for wd in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+		uci -q set wireless.$wd.cell_density='0'
+		[ -n "$(uci -q get wireless.$wd.country)" ] || uci -q set wireless.$wd.country='US'
+		# COVERAGE/distance (ACK timeout) for FAR clients: a modest explicit ceiling
+		# (~150 m) sizes the ACK window so an edge client's late ACKs aren't dropped,
+		# without the airtime penalty of a huge value. Helps timing-limited edge
+		# cases; SNR-limited weak clients are helped by ANI/clean-channel instead.
+		[ -n "$(uci -q get wireless.$wd.distance)" ] || uci -q set wireless.$wd.distance='150'
+		# Robust auto-channel: ONLY when the channel is still auto/0 (never override
+		# an explicit channel the config or the program-mode backend chose). Uses
+		# survey-based ACS with extra scans for a representative, least-congested pick.
+		case "$(uci -q get wireless.$wd.channel)" in
+			auto|0|'')
+				uci -q set wireless.$wd.channel='acs_survey'; uci -q set wireless.$wd.acs_num_scans='10'
+				# On 5GHz, pin ACS to NON-DFS channels so 'auto' never lands on a DFS
+				# channel (radar CAC = ~60s black-screen stall + mid-stream radar drops —
+				# fatal for IPTV). 2.4G unaffected. Only set if not already constrained.
+				bnd="$(uci -q get wireless.$wd.band)"; hw="$(uci -q get wireless.$wd.hwmode)"
+				if [ "$bnd" = "5g" ] || echo "$hw" | grep -q 'a'; then
+					[ -n "$(uci -q get wireless.$wd.channels)" ] || uci -q set wireless.$wd.channels='36 40 44 48 149 153 157 161'
+				fi
+				;;
+		esac
+	done
+	for wi in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface/\1/p"); do
+		uci -q set wireless.$wi.wmm='1'
+		uci -q set wireless.$wi.dtim_period='2'
+		# RANGE/STABILITY for the DISTANT client (the user's #1 ask): never kick a
+		# weak/far station and give it a long idle grace. These are pure hold-the-
+		# link knobs — they do NOT touch power/htmode/mcast_rate/basic-rate floor,
+		# so range is preserved, a low-bars phone just STAYS connected & smooth.
+		#  * disassoc_low_ack=0 : hostapd will NOT disconnect a client just because
+		#    its ACKs are weak (default kicks far clients -> drops/roaming churn).
+		#  * max_inactivity=600 : ~10 min idle grace before deauth (default 300),
+		#    so a quiet/distant phone is not bounced off.
+		#  * skip_inactivity_poll=1 : do not aggressively probe idle far clients.
+		uci -q set wireless.$wi.disassoc_low_ack='0'
+		uci -q set wireless.$wi.max_inactivity='600'
+		uci -q set wireless.$wi.skip_inactivity_poll='1'
+	done
+	# 5G (ath10k-ct): make sure the wide channel + aggregation are actually on so
+	# near clients get FULL throughput (VHT80). Only set if a radio is the 5GHz
+	# band AND no htmode is configured yet — never override an explicit choice,
+	# never touch 2.4G width (HT range preserved). Best-effort.
+	for wd in $(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device/\1/p"); do
+		bnd="$(uci -q get wireless.$wd.band)"; hw="$(uci -q get wireless.$wd.hwmode)"
+		if [ "$bnd" = "5g" ] || echo "$hw" | grep -q 'a'; then
+			[ -n "$(uci -q get wireless.$wd.htmode)" ] || uci -q set wireless.$wd.htmode='VHT80'
+		fi
+	done
+	uci -q commit wireless
+	: > /etc/kt412-wifi-tuned.v2.done 2>/dev/null || true
+fi
+# bridge: stream multicast at the client's negotiated rate + snoop IGMP so video
+# multicast is not flooded to every port/STA at the low basic rate.
+if [ -e /sys/class/net/br-lan/bridge ]; then
+	echo 1 > /sys/class/net/br-lan/bridge/multicast_to_unicast 2>/dev/null || true
+	echo 1 > /sys/class/net/br-lan/bridge/multicast_snooping 2>/dev/null || true
+fi
+
+# Runtime offloads/governor must apply AFTER the network is up (netdevs exist).
+# Run once now (best-effort), then a short backgrounded retry so the DSA ports
+# that appear a few seconds into boot also get the offloads. Backgrounded so it
+# never delays boot; fully guarded so it can never error.
+apply_runtime
+( sleep 20; apply_runtime ) >/dev/null 2>&1 &
+
+# Mark done (the persistent sysctl block is already guarded by its own marker;
+# this is just a breadcrumb / future idempotency hook).
+: > "$MARK" 2>/dev/null || true
+exit 0

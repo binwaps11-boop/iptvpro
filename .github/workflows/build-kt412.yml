@@ -1,0 +1,121 @@
+name: Build KT412 firmware
+
+# Builds the real sysupgrade.bin for KT GiGA WiFi home / Dongwon DW02-412H
+# (ath79/nand, QCA9557) on a GitHub runner that HAS internet access to
+# downloads.openwrt.org. Outputs are uploaded as artifacts.
+#
+# Run it: Actions tab -> "Build KT412 firmware" -> Run workflow
+# (it also runs automatically on push to this branch when files here change).
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OpenWrt release (swconfig-compatible)"
+        default: "23.05.5"
+        required: true
+  push:
+    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
+    paths:
+      - "openwrt-kt412/**"
+      - ".github/workflows/build-kt412.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1                 # serialize so both jobs publish to one Release safely
+      matrix:
+        variant: [ "64m", "128m" ]   # both built; flash the one matching your NAND
+    env:
+      VERSION: ${{ github.event.inputs.version || '23.05.5' }}
+      PROFILE: dongwon_dw02-412h-${{ matrix.variant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libncurses-dev zlib1g-dev \
+            gawk git gettext libssl-dev xsltproc wget unzip python3 file
+
+      - name: Download & extract ImageBuilder
+        run: |
+          IB="openwrt-imagebuilder-${VERSION}-ath79-nand.Linux-x86_64"
+          URL="https://downloads.openwrt.org/releases/${VERSION}/targets/ath79/nand/${IB}.tar.xz"
+          echo "Fetching $URL"
+          wget -q "$URL"
+          tar -xf "${IB}.tar.xz"
+          echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
+
+      - name: Build image (with files/ overlay baked in)
+        run: |
+          # Strip inline comments (# ...) AND blank lines, then join.
+          # A literal '#' inside PACKAGES truncates the opkg install command -> broken rootfs.
+          PKGS="$(sed -E 's/#.*$//' openwrt-kt412/packages.txt | tr '\n' ' ' | tr -s ' ')"
+          echo "Profile : $PROFILE"
+          echo "Packages: $PKGS"
+          case "$PKGS" in *'#'*) echo "ERROR: '#' leaked into PACKAGES"; exit 1;; esac
+          make -C "${IB_DIR}" image \
+            PROFILE="$PROFILE" \
+            PACKAGES="$PKGS" \
+            FILES="${GITHUB_WORKSPACE}/openwrt-kt412/files" \
+            EXTRA_IMAGE_NAME="kt412-custom"
+          # Verify the rootfs actually contains an init (catch broken builds early)
+          RB="${IB_DIR}/build_dir/target-mips_24kc_musl/linux-ath79_nand/root.squashfs"
+          unsquashfs -l "$RB" 2>/dev/null | grep -q 'squashfs-root/sbin/init' \
+            && echo "OK: /sbin/init present" \
+            || { echo "FATAL: /sbin/init missing in rootfs"; exit 1; }
+
+      - name: Collect, rename, checksum
+        run: |
+          mkdir -p out
+          BIN="${IB_DIR}/bin/targets/ath79/nand"
+          cp "$(ls $BIN/*${PROFILE}*sysupgrade.bin | head -1)" \
+             "out/openwrt-kt412-${{ matrix.variant }}-custom-sysupgrade.bin"
+          FAC="$(ls $BIN/*${PROFILE}*factory.img 2>/dev/null | head -1 || true)"
+          [ -n "$FAC" ] && cp "$FAC" "out/openwrt-kt412-${{ matrix.variant }}-custom-factory.img" || true
+          cp "$BIN"/*.manifest "out/openwrt-kt412-${{ matrix.variant }}-custom.manifest" || true
+          cp "$BIN/sha256sums" "out/sha256sums-${{ matrix.variant }}.txt" 2>/dev/null || true
+          ( cd out && sha256sum openwrt-kt412-${{ matrix.variant }}-* > SHA256-${{ matrix.variant }}.txt )
+          echo "==== OUTPUT (${{ matrix.variant }}) ===="; ls -lh out; cat out/SHA256-${{ matrix.variant }}.txt
+
+      - name: Fetch OFFICIAL OpenWrt images (recovery baseline, unmodified)
+        run: |
+          BASE="https://downloads.openwrt.org/releases/${VERSION}/targets/ath79/nand"
+          for kind in initramfs-kernel.bin squashfs-factory.img squashfs-sysupgrade.bin; do
+            f="openwrt-${VERSION}-ath79-nand-${PROFILE}-${kind}"
+            if wget -q "$BASE/$f" -O "out/official-${{ matrix.variant }}-${kind}"; then
+              echo "fetched $f"
+            else
+              rm -f "out/official-${{ matrix.variant }}-${kind}"
+              echo "NOT AVAILABLE: $f"
+            fi
+          done
+          ( cd out && sha256sum official-* >> SHA256-${{ matrix.variant }}.txt 2>/dev/null || true )
+          echo "==== OUTPUT incl official (${{ matrix.variant }}) ===="; ls -lh out
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kt412-firmware-${{ matrix.variant }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (permanent direct download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kt412-fw
+          name: KT412 firmware (Dongwon DW02-412H, ath79/nand)
+          body: |
+            Custom OpenWrt firmware for KT GiGA WiFi home / Dongwon DW02-412H.
+            Pick the file matching `cat /proc/mtd` ubi size: 64m (~0x3c00000) or 128m (~0x7c00000).
+            Flash: sysupgrade -v -n openwrt-kt412-<variant>-custom-sysupgrade.bin
+          files: out/*
+          fail_on_unmatched_files: true

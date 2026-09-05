@@ -1,0 +1,59 @@
+#!/bin/sh
+# 44-kt412-leds -- KT412 (DW02-412H) LED mapping, fixed to the REAL board LEDs
+# confirmed from the device (/sys/class/leds):
+#     green:wan      GPIO  -> WAN link/activity (OpenWrt 01_leds already drives it; leave it)
+#     green:wlan     GPIO  -> the PHYSICAL WiFi LED. It shipped UNCONFIGURED (trigger
+#                             "none") = dark -> "wifi light not working". We drive it.
+#     ath9k-phy2 / ath10k-phy0   driver-internal LEDs (auto phyNtpt) -- left untouched.
+# There is NO separate power/status/lan LED on this board, so we map ONLY the WiFi LED.
+#
+# IMPORTANT: the 2.4G ath9k phy INDEX is not stable across boots (seen as phy1 AND
+# phy2). A static uci led section with a fixed "phy2tpt" would break when the index
+# changes. So we set green:wlan's trigger DYNAMICALLY to the live 2.4G phy's tpt
+# trigger via a tiny helper, run on every wifi hotplug + a short post-boot loop.
+# Idempotent install. POSIX sh. Touches NO RF/DSA/caldata.
+
+# 1) helper: point green:wlan at the CURRENT 2.4G (ath9k) phy throughput trigger
+cat > /usr/sbin/kt412-wlan-led <<'HELP'
+#!/bin/sh
+LED=/sys/class/leds/green:wlan
+[ -e "$LED/trigger" ] || exit 0
+N=
+for p in /sys/class/ieee80211/phy*; do
+	[ -e "$p" ] || continue
+	iw phy "${p##*/}" info 2>/dev/null | grep -q '24[0-9][0-9] MHz' && { N="${p##*phy}"; break; }
+done
+if [ -n "$N" ] && grep -q "phy${N}tpt" "$LED/trigger"; then
+	echo "phy${N}tpt" > "$LED/trigger" 2>/dev/null   # blink on 2.4G activity
+else
+	echo default-on > "$LED/trigger" 2>/dev/null     # phy not up yet -> at least solid "on"
+fi
+HELP
+chmod 0755 /usr/sbin/kt412-wlan-led
+
+# 2) re-apply whenever a wifi phy (re)appears (handles the variable phy index + reloads)
+mkdir -p /etc/hotplug.d/ieee80211
+cat > /etc/hotplug.d/ieee80211/30-kt412-wlan-led <<'HP'
+#!/bin/sh
+case "$ACTION" in add|bind) /usr/sbin/kt412-wlan-led;; esac
+HP
+chmod 0755 /etc/hotplug.d/ieee80211/30-kt412-wlan-led
+
+# 3) and run it for the next ~40s of THIS boot (the 2.4G phy can register late)
+( i=0; while [ "$i" -lt 8 ]; do /usr/sbin/kt412-wlan-led; i=$((i+1)); sleep 5; done ) >/dev/null 2>&1 &
+
+# 4) make sure green:wan keeps its WAN netdev trigger (in case it was cleared)
+if [ -e /sys/class/leds/green:wan ]; then
+	uci -q get system.@led[-1] >/dev/null 2>&1
+	if ! uci -q show system | grep -q "sysfs='green:wan'"; then
+		s="kt412_wan"
+		uci -q set system.$s='led'; uci -q set system.$s.name='WAN'
+		uci -q set system.$s.sysfs='green:wan'; uci -q set system.$s.trigger='netdev'
+		uci -q set system.$s.dev='wan'
+		uci -q delete system.$s.mode 2>/dev/null
+		uci -q add_list system.$s.mode='link'; uci -q add_list system.$s.mode='tx'; uci -q add_list system.$s.mode='rx'
+		uci -q commit system; /etc/init.d/led reload >/dev/null 2>&1
+	fi
+fi
+
+exit 0

@@ -1,0 +1,150 @@
+name: Build CR6606 from SOURCE (system-30dbm-measured-test · all-channels · DSA)
+
+# FULL SOURCE build (من الصفر) of OpenWrt for the Xiaomi Mi Router CR6606.
+#   target  : ramips/mt7621 (MT7621AT)  -- DSA is NATIVE here (mt7530), no patches
+#   radios  : MT7915 WiFi6 AX1800 (mt76 / kmod-mt7915e), 2x2/2x2
+#   profile : xiaomi_mi-router-cr6606 (officially supported)
+# SINGLE variant: system-30dbm-measured-test -> release tag cr6606-30dbm-measured.
+#   txpower=30 request on 2.4G+5G, full 5G channel support (36-165, DFS via CAC),
+#   2x2 chains, LuCI+SSH, flow offloading, dmesg markers, in-system proof scripts.
+# Publishes SYSUPGRADE ONLY (no factory/initramfs).
+# NO regulatory/caldata patch, NO MAC change, NO foreign firmware, NO fake numbers.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "claude/kt412-openwrt-custom-lzcgo1" ]
+    paths:
+      - ".github/workflows/build-cr6606-src.yml"
+      - "openwrt-cr6606/files/**"
+      - "openwrt-cr6606/variants/system-30dbm-measured-test/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cr6606-src-build
+  cancel-in-progress: true
+
+env:
+  VARIANT: system-30dbm-measured-test
+  TAG: cr6606-30dbm-measured
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout repo (overlay)
+        uses: actions/checkout@v4
+        with: { path: kt }
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
+            g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync \
+            swig unzip zlib1g-dev file wget zstd ccache
+
+      - name: Checkout OpenWrt source (openwrt-24.10, latest stable)
+        run: |
+          set -eux
+          git clone --depth 1 -b openwrt-24.10 https://github.com/openwrt/openwrt.git
+          cd openwrt
+          git log --oneline -1
+
+      - name: Update + install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure (.config seed for cr6606 + Smart AP + measurement tools)
+        run: |
+          cd openwrt
+          {
+            echo 'CONFIG_TARGET_ramips=y'
+            echo 'CONFIG_TARGET_ramips_mt7621=y'
+            echo 'CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y'
+            echo 'CONFIG_PACKAGE_luci=y'
+            echo 'CONFIG_PACKAGE_luci-ssl=y'
+            echo 'CONFIG_PACKAGE_luci-i18n-base-ar=y'
+            echo 'CONFIG_PACKAGE_curl=y'
+            echo 'CONFIG_PACKAGE_wpad-openssl=y'
+            echo 'CONFIG_PACKAGE_kmod-mt7915e=y'
+            echo 'CONFIG_PACKAGE_kmod-mt7915-firmware=y'
+            echo 'CONFIG_PACKAGE_iw=y'
+            echo 'CONFIG_PACKAGE_iwinfo=y'
+            echo 'CONFIG_PACKAGE_kmod-nft-offload=y'
+            echo 'CONFIG_PACKAGE_ip-full=y'
+            echo 'CONFIG_PACKAGE_ip-bridge=y'
+            echo 'CONFIG_PACKAGE_arping=y'
+            echo 'CONFIG_PACKAGE_irqbalance=y'
+            echo 'CONFIG_PACKAGE_ethtool=y'
+            echo 'CONFIG_PACKAGE_kmod-sched-cake=y'
+            echo 'CONFIG_PACKAGE_luci-app-sqm=y'
+            echo 'CONFIG_PACKAGE_iperf3=y'
+            echo 'CONFIG_PACKAGE_conntrack-tools=y'
+            echo 'CONFIG_PACKAGE_zram-swap=y'
+          } > .config
+          make defconfig
+          echo "=== verify cr6608 selected ==="
+          grep -E "DEVICE_xiaomi_mi-router-cr6608=y" .config || { echo "FATAL: cr6608 not selected"; exit 1; }
+          grep -E "CONFIG_TARGET_ramips_mt7621=y" .config
+
+      - name: Add Smart AP overlay (shared base + variant system-30dbm-measured-test)
+        run: |
+          set -eux
+          cd openwrt
+          rm -rf files; mkdir -p files
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-cr6606/files/." files/
+          cp -a "$GITHUB_WORKSPACE/kt/openwrt-cr6606/variants/${VARIANT}/." files/
+          echo "=== overlay contents ==="
+          find files -type f | sort | head -80; echo "total: $(find files -type f | wc -l)"
+          echo "=== uci-defaults present ==="; ls -la files/etc/uci-defaults/
+
+      - name: Download sources
+        run: |
+          cd openwrt
+          make -j$(nproc) download V=s 2>&1 | tail -20
+
+      - name: Build firmware
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s 2>&1 | tail -200 || { echo "parallel failed, retry single-thread"; make -j1 V=s 2>&1 | tail -200; }
+
+      - name: Collect SYSUPGRADE only + checksum
+        run: |
+          set -eux
+          cd openwrt
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          SRC="$(ls bin/targets/ramips/mt7621/*cr6608*sysupgrade.bin | head -1)"
+          test -s "$SRC" || { echo "NO SYSUPGRADE IMAGE"; exit 1; }
+          cp "$SRC" "$OUT/cr6608-${VARIANT}-sysupgrade.bin"
+          cd "$OUT"; ls -la
+          sha256sum *.bin > "sha256-${VARIANT}.txt"; cat "sha256-${VARIANT}.txt"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: "cr6606-${{ env.VARIANT }}", path: out/*, if-no-files-found: warn }
+
+      - name: Publish to Release (sysupgrade only)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "CR6606 system-30dbm-measured-test — SOURCE (all-channels proof)"
+          body: |
+            Single-variant SOURCE build of OpenWrt openwrt-24.10 for Xiaomi CR6606
+            (ramips/mt7621, MT7915 WiFi6 AX1800 2x2/2x2). DSA native (mt7530).
+            txpower=30 request on 2.4G+5G; full 5G channel support (36-165, DFS via CAC);
+            2x2 chains; LuCI + SSH + flow offloading. SYSUPGRADE only.
+            dmesg markers: CR6606-SYSTEM-30DBM-MEASURED-TEST + CR6606-ALL-CHANNELS-30DBM-MEASURED.
+            In-system proof: /root/cr6606_power_truth.sh and /root/cr6606_all_channels_test.sh.
+            NO regulatory/caldata patch, NO MAC change, NO foreign firmware, NO fake numbers.
+            Flash: sysupgrade -n /tmp/cr6606.bin
+          files: |
+            out/cr6608-system-30dbm-measured-test-sysupgrade.bin
+            out/sha256-system-30dbm-measured-test.txt
+          fail_on_unmatched_files: false

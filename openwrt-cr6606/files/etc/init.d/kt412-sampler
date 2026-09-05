@@ -1,0 +1,18 @@
+#!/bin/sh /etc/rc.common
+# procd service that runs the KT412 resource sampler as a 3s daemon so the dashboard
+# CPU/RAM/traffic graphs update LIVE (no page reload). Respawns if it ever dies.
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/sbin/kt412-sampler
+
+start_service() {
+	[ -x "$PROG" ] || return 0
+	procd_open_instance
+	procd_set_param command "$PROG" daemon
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_close_instance
+}

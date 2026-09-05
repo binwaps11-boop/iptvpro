@@ -1,0 +1,34 @@
+#!/bin/sh
+# KT412 AGGRESSIVE early WiFi load, in PREINIT (the earliest brick-SAFE stage).
+# SAFE: this ONLY does `modprobe` of wifi kernel modules. It NEVER edits the DTS,
+# NEVER reads/writes ART/EEPROM/caldata, NEVER removes an nvmem cell. Worst case it
+# is a no-op (modprobe fails harmlessly if a module isn't there yet) and the normal
+# /etc/modules{,-boot}.d load still happens later — so it cannot brick anything.
+#
+# WHY PREINIT: by the time this runs, mount_root (80_mount_root) has already mounted
+# the UBI rootfs+overlay, so /lib/modules and the ART mtd char device both exist.
+# That means ath9k's AHB wmac can read its calibration nvmem cell on its VERY FIRST
+# probe — at ~preinit time (~5-12s) instead of the ~27s kmodloader pass. This is the
+# single biggest lever for "2.4G broadcasting fast": the first probe succeeds, so no
+# slow rmmod/modprobe reload is needed at all.
+#
+# Registered on the preinit_main hook so it runs AFTER the rootfs is mounted.
+
+kt412_load_wifi() {
+	# Only proceed once the module dir is actually present (rootfs really mounted).
+	[ -d /lib/modules ] || return 0
+	# Load deps explicitly first (order-deterministic), then the drivers. modprobe
+	# auto-resolves deps anyway; each call is idempotent. All output suppressed.
+	for m in cfg80211 mac80211 ath ath9k ath10k_pci; do
+		modprobe "$m" 2>/dev/null
+	done
+	# Marker so it's easy to confirm in the boot log that early-load actually ran.
+	echo "kt412: preinit early-loaded wifi stack (ath9k/ath10k)" > /dev/kmsg 2>/dev/null
+}
+
+# Use the boot-hook system when available (normal OpenWrt preinit), else run direct.
+if command -v boot_hook_add >/dev/null 2>&1; then
+	boot_hook_add preinit_main kt412_load_wifi
+else
+	kt412_load_wifi
+fi

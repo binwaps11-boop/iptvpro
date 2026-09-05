@@ -1,0 +1,19 @@
+{
+	"luci-app-kt412-perf": {
+		"description": "Grant access to the KT412 MK APP Performance / Optimizer view (channel analyzer, speed test, turbo, per-client rates)",
+		"read": {
+			"ubus": {
+				"session": [ "access", "get", "set" ],
+				"network.wireless": [ "status" ],
+				"iwinfo": [ "scan", "assoclist", "info" ]
+			},
+			"uci": [ "wireless", "network" ]
+		},
+		"write": {
+			"ubus": {
+				"session": [ "set" ]
+			},
+			"uci": [ "wireless", "network" ]
+		}
+	}
+}

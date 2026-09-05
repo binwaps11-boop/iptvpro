@@ -1,0 +1,41 @@
+{
+	"admin/mkapp/specs": {
+		"title": "Device Info",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "kt412/specs"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-kt412-tools"
+			]
+		}
+	},
+	"admin/mkapp/power": {
+		"title": "TX Power (dBm)",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "kt412/power"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-kt412-tools"
+			]
+		}
+	},
+	"admin/mkapp/nettools": {
+		"title": "Network Tools",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "kt412/nettools"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-kt412-tools"
+			]
+		}
+	}
+}
