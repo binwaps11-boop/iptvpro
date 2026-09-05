@@ -11,6 +11,7 @@ support_manifest=/usr/share/cr6608/ax-feature-support
 ul_module_file="${CR6608_UL_MURU_MODULE_FILE:-/etc/modules.d/mt7915e}"
 ul_module_param="${CR6608_UL_MURU_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_ul_muru}"
 ul_mask_module_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_muru_mask}"
+ul_advertise_module_param="${CR6608_UL_ADVERTISE_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr6608_advertise_ul_mumimo}"
 ul_debug_root="${CR6608_UL_MURU_DEBUG_ROOT:-/sys/kernel/debug/ieee80211}"
 ul_guard_init="${CR6608_UL_MURU_GUARD_INIT:-/etc/init.d/cr6608-ul-muru-guard}"
 ul_guard_state_file="${CR6608_UL_MURU_GUARD_STATE_FILE:-/var/run/cr6608-private/ul-muru/state.json}"
@@ -37,7 +38,7 @@ verify_support_manifest() {
 		status=1
 		return
 	fi
-	if [ "$(wc -l < "${support_manifest}" 2>/dev/null | tr -d '[:space:]')" != 28 ]; then
+	if [ "$(wc -l < "${support_manifest}" 2>/dev/null | tr -d '[:space:]')" != 29 ]; then
 		result "AX capability manifest state" "invalid: exact schema line count"
 		status=1
 		return
@@ -61,10 +62,11 @@ verify_support_manifest() {
 		'ul_muru_forced_lab=persistent-mask-15-nonsale' \
 		'ul_muru_mcu_telemetry=attempted-response-ok-failed-timeout-not-apply-or-ota-proof' \
 		'ul_muru_fault_policy=kernel-attributed-latch-watchdog-or-sta-rec-plus-unattributed-disarm' \
-		'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-unattributed-strikes' \
+		'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-exercised-unattributed-strikes-15min-decay-host-initiated-recoveries-never-strike' \
 		'ul_muru_dl_floor=upstream-dl-ofdma-and-dl-mumimo-retained-through-fault' \
 		'ul_muru_cfg_policy=phy-wide-cfg-bits-for-every-peer-per-abd80cf6-eligibility-from-peer-he-caps' \
 		'ul_mumimo_advertisement=vendor-parity-b22-off-by-default-boot-frozen-opt-in-cr6608_advertise_ul_mumimo' \
+		'ul_muru_replay_policy=records-replayed-under-driver-mutex-parked-across-recovery-stale-records-rebuilt-or-requeued-never-latched' \
 		'ul_muru_global_mcu_commands=not-used' \
 		'dfs=enabled' \
 		'background_cac=enabled-driver-runtime-capability-gated' \
@@ -365,6 +367,13 @@ config_mu_edca_state() {
 		[ "$(config_regex_state "$conf" "$key" '0|[1-9][0-9]*')" = advertised ] ||
 			valid=0
 	done
+	# AIFSN 0 means "EDCA disabled for this AC while the MU EDCA timer runs";
+	# a beacon carrying that is not an advertisement of usable MU EDCA.
+	for key in he_mu_edca_ac_be_aifsn he_mu_edca_ac_bk_aifsn \
+		   he_mu_edca_ac_vi_aifsn he_mu_edca_ac_vo_aifsn; do
+		[ "$(config_regex_state "$conf" "$key" '[1-9][0-9]*')" = advertised ] ||
+			valid=0
+	done
 	total="$(grep -Ec '^he_mu_edca_[A-Za-z0-9_]+=' "$conf" 2>/dev/null || true)"
 	if [ "$valid" = 1 ] && [ "$total" = "$expected" ]; then
 		printf 'advertised\n'
@@ -558,9 +567,19 @@ check_radio() {
 	rx_nss="$(printf '%s\n' "$ap_he_info" | he_mcs_nss_state RX)"
 	tx_nss="$(printf '%s\n' "$ap_he_info" | he_mcs_nss_state TX)"
 	ul_muru_state="$(ul_muru_runtime_state)"
+	# The AP's HE PHY CAP2 B22 (Full Bandwidth UL MU-MIMO) bit is a
+	# boot-frozen driver decision (patch 09): vendor parity is B22 OFF while
+	# the scheduler bits are still requested per peer, and the operator may
+	# opt in with cr6608_advertise_ul_mumimo=1.  Armed therefore does not
+	# imply B22; the beacon must match the driver's own decision.
+	ul_b22_expected=not-advertised
+	case "$(cat "$ul_advertise_module_param" 2>/dev/null || true)" in
+		Y|1) ul_b22_expected=supported ;;
+	esac
 	ul_policy_ok=0
-	case "${ul_muru_state}:${ul_mu_cap}" in
-		armed:supported|stable-disabled:not-advertised) ul_policy_ok=1 ;;
+	case "$ul_muru_state" in
+		armed) [ "$ul_mu_cap" = "$ul_b22_expected" ] && ul_policy_ok=1 ;;
+		stable-disabled) [ "$ul_mu_cap" = not-advertised ] && ul_policy_ok=1 ;;
 	esac
 
 	result "802.11n" "$(capability_state "$info" 'HT20|HT40|HT RX MCS|HT TX/RX MCS')"
@@ -599,10 +618,10 @@ check_radio() {
 	result "BSS Color advertisement" "$bss_color_runtime"
 	result "Spatial Reuse advertisement" "$spatial_reuse_runtime"
 	result "HE MU-EDCA advertisement" "$mu_edca_runtime"
-	result "DL OFDMA support gate" "capability_hint=$ru_cap hostapd=$mu_edca_runtime observed_airtime=not-measured"
-	result "UL OFDMA support gate" "vendor_sta_rec=$ul_muru_state aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
+	result "DL OFDMA support gate" "capability_hint=$ru_cap hostapd=no-conf-dependency observed_airtime=not-measured"
+	result "UL OFDMA support gate" "vendor_sta_rec=$ul_muru_state mu_edca_element=$mu_edca_runtime aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
 	result "DL MU-MIMO support gate" "capability_hint=$mu_bfer hostapd=$he_mu_bfer_runtime observed_scheduling=not-measured"
-	result "UL MU-MIMO support gate" "capability=$ul_mu_cap vendor_sta_rec=$ul_muru_state aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
+	result "UL MU-MIMO support gate" "capability=$ul_mu_cap advertise_param_expects=$ul_b22_expected vendor_sta_rec=$ul_muru_state aggregate_radio_counter_correlation=not-measured client_attribution=requires-per-peer-telemetry-or-capture-hardware"
 	if [ "$band" = 5g ]; then
 		background_cac="$(capability_state "$info" 'Radar background support')"
 		result "Background CAC capability" "$background_cac"

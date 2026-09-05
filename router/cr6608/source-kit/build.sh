@@ -234,9 +234,14 @@ SRC_MURU_PORT_PATCHES=(
 	"${SCRIPT_DIR}/patches/zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch"
 	"${SCRIPT_DIR}/patches/zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-11-mt7915-cr6608-muru-record-serialisation.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-12-mt7915-cr6608-muru-he-dcm-max-ru-upstream-e5932438.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-13-mt7915-cr6608-muru-recovery-lifecycle.patch"
+	"${SCRIPT_DIR}/patches/zzzzzz-14-mt7915-cr6608-muru-ul-attribution-v2.patch"
 )
 MURU_FIRMWARE_VERIFY="${SCRIPT_DIR}/tools/verify-mt7915-muru-firmware.sh"
 SRC_RF_DTS_PATCH="${SCRIPT_DIR}/patches/996-cr6608-dts-rf-38dbm-lab-mode.patch"
+SRC_MT76_DEBUGFS_MAKEFILE_PATCH="${SCRIPT_DIR}/patches/994-mt76-makefile-mac80211-debugfs.patch"
 SRC_UL_MURU_DTS_PATCH="${SCRIPT_DIR}/patches/996a-cr6608-dts-ul-muru-ram-gate.patch"
 SRC_FACTORY38_WRITE_GATE_PATCH="${SCRIPT_DIR}/patches/997-cr6608-factory38-maintenance-write-gate.patch"
 SRC_FACTORY38_BUILDER="${SCRIPT_DIR}/factory38/build_factory38.py"
@@ -334,6 +339,7 @@ MURU_FAULT_ATTRIBUTION_TEST="${SCRIPT_DIR}/tests/test-muru-fault-attribution.sh"
 UL_MU_EVIDENCE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-ul-mu-evidence-runtime.sh"
 MURU_LIVE_REFRESH_TEST="${SCRIPT_DIR}/tests/test-muru-live-refresh.sh"
 MURU_VENDOR_PARITY_TEST="${SCRIPT_DIR}/tests/test-muru-vendor-parity.sh"
+MURU_RECORD_SERIALISATION_TEST="${SCRIPT_DIR}/tests/test-muru-record-serialisation.sh"
 EASYMESH_VERIFIER_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-easymesh-verifier-runtime.sh"
 PORT_READINESS_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-port-readiness-runtime.sh"
 PRPLMESH_ROLE_RUNTIME_TEST="${SCRIPT_DIR}/tests/test-prplmesh-role-runtime.sh"
@@ -1877,6 +1883,7 @@ write_input_manifest() {
 		record_regular_input source-test "${UL_MU_EVIDENCE_RUNTIME_TEST}"
 		record_regular_input source-test "${MURU_LIVE_REFRESH_TEST}"
 		record_regular_input source-test "${MURU_VENDOR_PARITY_TEST}"
+		record_regular_input source-test "${MURU_RECORD_SERIALISATION_TEST}"
 		record_regular_input source-test "${EASYMESH_VERIFIER_RUNTIME_TEST}"
 		record_regular_input source-test "${PORT_READINESS_RUNTIME_TEST}"
 		record_regular_input source-test "${PRPLMESH_ROLE_RUNTIME_TEST}"
@@ -1940,6 +1947,7 @@ write_input_manifest() {
 		done
 		record_regular_input firmware-baseline-verifier "${MURU_FIRMWARE_VERIFY}"
 		record_regular_input platform-patch "${SRC_RF_DTS_PATCH}"
+		record_regular_input platform-patch "${SRC_MT76_DEBUGFS_MAKEFILE_PATCH}"
 		if [ "${BUILD_PROFILE}" = ul-lab ] || [ "${BUILD_PROFILE}" = ul-forced-lab ]; then
 			record_regular_input ul-muru-ram-platform-patch "${SRC_UL_MURU_DTS_PATCH}"
 		fi
@@ -2481,6 +2489,7 @@ for required_muru_input in \
 	"${UL_MU_EVIDENCE_RUNTIME_TEST}" \
 	"${MURU_LIVE_REFRESH_TEST}" \
 	"${MURU_VENDOR_PARITY_TEST}" \
+	"${MURU_RECORD_SERIALISATION_TEST}" \
 	"${PORT_READINESS_RUNTIME_TEST}" "${PRPLMESH_ROLE_RUNTIME_TEST}" \
 	"${PRPLMESH_CREDENTIAL_SYNC_TEST}" "${PRPLMESH_CREDENTIAL_SYNC_HELPER}" \
 	"${SRC_UL_MURU_DTS_PATCH}" \
@@ -2489,7 +2498,7 @@ for required_muru_input in \
 		die "Required v86 qualification input missing: ${required_muru_input}"
 done
 
-for required_file in "${SRC_PROFILE_APPLIER}" "${RETAIL_BUILD_PROFILE_TEST}" "${SRC_RETAIL_COMMISSIONING_STAGE}" "${RETAIL_COMMISSIONING_TEST}" "${SRC_FACTORY38_BUILDER}" "${SRC_FACTORY38_STAGE}" "${SRC_FACTORY38_MARKER}" "${SRC_FACTORY38_WIFI_DISABLE}" "${SRC_FACTORY38_WRITE_GATE_PATCH}" "${FACTORY38_BUILDER_TEST}" "${ALL_CHANNEL_38_TEST}" "${FACTORY38_STAGE_GUARD_TEST}" "${FACTORY38_STAGE_MOCK_TEST}" "${LEGACY_11B_TEST}" "${SRC_PATCH}" "${SRC_FACTORY38_PATCH}" "${SRC_UL_MURU_PATCH}" "${SRC_UL_MURU_STOCK_POLICY_PATCH}" "${SRC_RF_DTS_PATCH}" "${SRC_MAC80211_PATCH}" "${SRC_LUCI_WIRELESS_PATCH}" "${SRC_DSA_EEE_PATCH}" "${SRC_UBI_INITRAMFS_GUARD_PATCH}" "${SRC_UHTTPD_PATCH}" "${SRC_MNDP_SOURCE}" "${SRC_MNDP_PACKAGE}/Makefile" "${SRC_SEED}" "${INSPECTOR}" "${VLAN_TEST}" "${NETWORK_SAFETY_TEST}" "${INITRAMFS_UBI_DETACH_TEST}" "${SRC_INITRAMFS_UBI_DETACH}" "${SRC_UL_MURU_DEFERRED}" "${SAFE_APPLY_TEST}" "${SAFE_APPLY_RUNTIME_TEST}" "${SAFE_WIFI_RELOAD_TEST}" "${QUICKSETTINGS_CONTRACT_TEST}" "${ROAMING_STEERING_TEST}" "${LUCI_WIRELESS_TXPOWER_TEST}" "${COUNTRY_DOMAIN_TEST}" "${AUTH_LIFECYCLE_TEST}" "${AUTH_BOUNDED_BLOCKING_TEST}" "${TIME_ANCHOR_RUNTIME_TEST}" "${RETAIL_SECURITY_TEST}" "${RETAIL_RADIO_POLICY_TEST}" "${SECURE_CONSOLE_TEST}" "${SMART_AP_BRAND_GENERATOR}" "${SMART_AP_BRANDING_TEST}" "${LOGIN_CACHE_TEST}" "${SMARTAP_ONLY_ROUTING_TEST}" "${FETCH_BODY_TIMEOUT_TEST}" "${UI_CONTRACT_TEST}" "${UI_PASSWORD_TEST}" "${PRESERVED_CONFIG_TEST}" "${DSA_PORT_TEST}" "${DSA_EEE_TEST}" "${DASHAPI_STATUS_TEST}" "${DASHAPI_RUNTIME_TEST}" "${AX_FEATURE_TEST}" "${UL_MURU_GUARD_RUNTIME_TEST}" "${UL_MURU_VERIFIER_RUNTIME_TEST}" "${UL_MURU_DEFAULTS_MIGRATION_TEST}" "${UL_MURU_DEFERRED_RUNTIME_TEST}" "${UL_MURU_AIRTEST_RUNTIME_TEST}" "${EASYMESH_VERIFIER_RUNTIME_TEST}" "${EXECUTABLE_FORMAT_TEST}" "${TXPOWER_COLLECTOR_TEST}" "${MNDP_SOURCE_TEST}" "${PRIVATE_RUNTIME_TEST}" "${LAN_SCAN_RENDER_TEST}" "${RELEASE_PACKAGE_TEST}" "${MAINTENANCE_PUBLICATION_TEST}" "${ROUTER_UHTTPD_SMARTAP_TEST}" "${LOGIN_RUNTIME_TEST}" "${MOBILE_LAYOUT_TEST}" "${CONTROL_RECOVERY_TEST}" "${JSON_CHARSET_TEST}" "${PACKAGE_MANAGER_RUNTIME_TEST}" "${ARGON_MOBILE_CSS}" "${ARGON_LOCALTIME_JS}" "${ARGON_HEADER}" "${BROWSER_SETUP_TEST}" "${PLAYWRIGHT_PACKAGE_JSON}" "${PLAYWRIGHT_PACKAGE_LOCK}" \
+for required_file in "${SRC_PROFILE_APPLIER}" "${RETAIL_BUILD_PROFILE_TEST}" "${SRC_RETAIL_COMMISSIONING_STAGE}" "${RETAIL_COMMISSIONING_TEST}" "${SRC_FACTORY38_BUILDER}" "${SRC_FACTORY38_STAGE}" "${SRC_FACTORY38_MARKER}" "${SRC_FACTORY38_WIFI_DISABLE}" "${SRC_FACTORY38_WRITE_GATE_PATCH}" "${FACTORY38_BUILDER_TEST}" "${ALL_CHANNEL_38_TEST}" "${FACTORY38_STAGE_GUARD_TEST}" "${FACTORY38_STAGE_MOCK_TEST}" "${LEGACY_11B_TEST}" "${SRC_PATCH}" "${SRC_FACTORY38_PATCH}" "${SRC_UL_MURU_PATCH}" "${SRC_UL_MURU_STOCK_POLICY_PATCH}" "${SRC_RF_DTS_PATCH}" "${SRC_MT76_DEBUGFS_MAKEFILE_PATCH}" "${SRC_MAC80211_PATCH}" "${SRC_LUCI_WIRELESS_PATCH}" "${SRC_DSA_EEE_PATCH}" "${SRC_UBI_INITRAMFS_GUARD_PATCH}" "${SRC_UHTTPD_PATCH}" "${SRC_MNDP_SOURCE}" "${SRC_MNDP_PACKAGE}/Makefile" "${SRC_SEED}" "${INSPECTOR}" "${VLAN_TEST}" "${NETWORK_SAFETY_TEST}" "${INITRAMFS_UBI_DETACH_TEST}" "${SRC_INITRAMFS_UBI_DETACH}" "${SRC_UL_MURU_DEFERRED}" "${SAFE_APPLY_TEST}" "${SAFE_APPLY_RUNTIME_TEST}" "${SAFE_WIFI_RELOAD_TEST}" "${QUICKSETTINGS_CONTRACT_TEST}" "${ROAMING_STEERING_TEST}" "${LUCI_WIRELESS_TXPOWER_TEST}" "${COUNTRY_DOMAIN_TEST}" "${AUTH_LIFECYCLE_TEST}" "${AUTH_BOUNDED_BLOCKING_TEST}" "${TIME_ANCHOR_RUNTIME_TEST}" "${RETAIL_SECURITY_TEST}" "${RETAIL_RADIO_POLICY_TEST}" "${SECURE_CONSOLE_TEST}" "${SMART_AP_BRAND_GENERATOR}" "${SMART_AP_BRANDING_TEST}" "${LOGIN_CACHE_TEST}" "${SMARTAP_ONLY_ROUTING_TEST}" "${FETCH_BODY_TIMEOUT_TEST}" "${UI_CONTRACT_TEST}" "${UI_PASSWORD_TEST}" "${PRESERVED_CONFIG_TEST}" "${DSA_PORT_TEST}" "${DSA_EEE_TEST}" "${DASHAPI_STATUS_TEST}" "${DASHAPI_RUNTIME_TEST}" "${AX_FEATURE_TEST}" "${UL_MURU_GUARD_RUNTIME_TEST}" "${UL_MURU_VERIFIER_RUNTIME_TEST}" "${UL_MURU_DEFAULTS_MIGRATION_TEST}" "${UL_MURU_DEFERRED_RUNTIME_TEST}" "${UL_MURU_AIRTEST_RUNTIME_TEST}" "${EASYMESH_VERIFIER_RUNTIME_TEST}" "${EXECUTABLE_FORMAT_TEST}" "${TXPOWER_COLLECTOR_TEST}" "${MNDP_SOURCE_TEST}" "${PRIVATE_RUNTIME_TEST}" "${LAN_SCAN_RENDER_TEST}" "${RELEASE_PACKAGE_TEST}" "${MAINTENANCE_PUBLICATION_TEST}" "${ROUTER_UHTTPD_SMARTAP_TEST}" "${LOGIN_RUNTIME_TEST}" "${MOBILE_LAYOUT_TEST}" "${CONTROL_RECOVERY_TEST}" "${JSON_CHARSET_TEST}" "${PACKAGE_MANAGER_RUNTIME_TEST}" "${ARGON_MOBILE_CSS}" "${ARGON_LOCALTIME_JS}" "${ARGON_HEADER}" "${BROWSER_SETUP_TEST}" "${PLAYWRIGHT_PACKAGE_JSON}" "${PLAYWRIGHT_PACKAGE_LOCK}" \
 	"${SRC_FILES}/usr/share/ucode/luci/template/themes/argon/sysauth.ut" \
 	"${SRC_FILES}/etc/uci-defaults/99-cr6608-smartap-only" \
 	"${UHTTPD_SECURITY_HEADERS}" \
@@ -3074,6 +3083,11 @@ sh -n "${MURU_VENDOR_PARITY_TEST}" || \
 sh "${MURU_VENDOR_PARITY_TEST}" | grep -qx 'muru_vendor_parity_contract=pass' || \
 	die "MURU uniform-cfg, vendor-parity B22, or evidence-honesty contract failed"
 printf 'muru_vendor_parity_contract=pass\n'
+sh -n "${MURU_RECORD_SERIALISATION_TEST}" || \
+	die "MURU record serialisation test syntax failed"
+sh "${MURU_RECORD_SERIALISATION_TEST}" | grep -qx 'muru_record_serialisation_contract=pass' || \
+	die "MURU record serialisation, in-flight attribution, partial-reset convergence, or DCM backport contract failed"
+printf 'muru_record_serialisation_contract=pass\n'
 sh -n "${EASYMESH_VERIFIER_RUNTIME_TEST}" || \
 	die "EasyMesh verifier runtime test syntax failed"
 sh "${EASYMESH_VERIFIER_RUNTIME_TEST}" | \
@@ -3489,6 +3503,12 @@ cmp -s -- "${SRC_MNDP_SOURCE}" \
 	die "Staged MNDP source differs from the recorded input"
 git apply --check "${SRC_RF_DTS_PATCH}"
 git apply "${SRC_RF_DTS_PATCH}"
+# mt76 per-station debugfs (the per-peer uplink attribution nodes) is only
+# compiled when the package passes CONFIG_MAC80211_DEBUGFS to the driver.
+git apply --check "${SRC_MT76_DEBUGFS_MAKEFILE_PATCH}"
+git apply "${SRC_MT76_DEBUGFS_MAKEFILE_PATCH}"
+grep -q '^CONFIG_PACKAGE_MAC80211_DEBUGFS=y' "${SRC_SEED}" || \
+	die "seed config must enable CONFIG_PACKAGE_MAC80211_DEBUGFS for the per-peer attribution nodes"
 if [ "${BUILD_PROFILE}" = ul-lab ] || [ "${BUILD_PROFILE}" = ul-forced-lab ]; then
 	git apply --check "${SRC_UL_MURU_DTS_PATCH}"
 	git apply "${SRC_UL_MURU_DTS_PATCH}"
@@ -3581,8 +3601,8 @@ mapfile -t cr6608_muru_port_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f \
 		-name 'zzzzzz-*-mt7915-cr6608-muru-*.patch' -print
 )
-[ "${#cr6608_muru_port_patches[@]}" -eq 10 ] ||
-	die "Expected exactly ten ordered MediaTek 25.12 MURU port patches"
+[ "${#cr6608_muru_port_patches[@]}" -eq 14 ] ||
+	die "Expected exactly fourteen ordered MediaTek 25.12 MURU port patches"
 mapfile -t cr6608_rf_patches < <(
 	find "${MT76_PATCH_DIR}" -maxdepth 1 -type f -name '*mt7915-cr6608-rf-*.patch' -print
 )

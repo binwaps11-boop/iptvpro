@@ -1,0 +1,501 @@
+mt7915: CR6608 MURU recovery-lifecycle attribution
+
+Verified defects in the disarm / strike / re-arm lifecycle (patches 06/08),
+found by enumerating every caller of the mask primitives against the
+recovery state machine and the mt7996 / upstream reset gates:
+
+1. mt7915_reset() disarmed (with a strike) for every MT_MCU_CMD_ERROR_MASK
+   event, including the RESET_DONE / RECOVERY_DONE / NORMAL_STATE handshake
+   acknowledgements that upstream and mt7996 ignore.  One such event outside
+   a STOP_DMA cycle cleared an armed mask with no re-arm until the next real
+   recovery.  The mask is now touched only by the states that start a
+   recovery (watchdog -> latch, STOP_DMA / STOP_DMA_FW_RELOAD -> disarm).
+
+2. Strikes were charged for recoveries during which the uplink scheduler
+   was never exercised: after a reload the mask is re-armed before
+   mac80211 replays the interfaces, so a post-load loop of failing
+   mt7915_run commands latched permanently after three rounds with zero
+   UL-bearing records ever accepted by the firmware.  A disarm now records
+   whether an uplink-bearing STA_REC was acknowledged since the last re-arm
+   (cr6608_muru_exercised) and charges a strike only in that case.
+
+3. Three host-initiated recoveries (the regulatory reconfig replay, a
+   config call while a band waits for its post-reset witness, a 38 dBm
+   request rejected while TX was paused) charged strikes although they are
+   re-runs of the handshake, not observed firmware faults.  They now use
+   mt7915_mcu_schedule_full_recovery_host(): same recovery, no strike.
+
+4. The strike decay ran only from band 0's mac_work and was blocked by
+   band 0's MT76_RESET bit, which after a full reset stays set on a band
+   with no open interface until that band's own set_channel runs (never,
+   for a 5 GHz-only configuration).  The same sticky bit parked every live
+   record replay.  Decay now runs from every phy (idempotent) and both the
+   decay and the replay use the recovery definition (MCU_RESET, restart,
+   generation) plus the PEER's own band state; mac_work re-kicks parked
+   replays within one tick of the window closing.
+
+5. An operator-initiated full chip reset through the fw_ser debugfs knob
+   reused the watchdog state bits and therefore spent the permanent latch.
+   It is now flagged (cr6608_operator_reset) and attributed to the
+   operator: disarm, re-arm after the verified reset.
+
+6. The debugfs mask writer lowered the live mask before the ceiling (a
+   disarm + re-arm cycle between the two resurrected the retired bit) and
+   validated against the live mask (so during a disarm window only 0 was
+   accepted).  It now lowers the ceiling first, validates against the
+   ceiling, and reduces the live mask with old & val.
+
+7. dev->muru_debug survived a firmware reload while the firmware's TXC
+   trigger-statistics enable did not, so muru_stats accumulated zero
+   deltas for the rest of the uptime.  The enable is re-sent after
+   mt7915_mac_restart when it was on.
+
+Log wording no longer claims a re-arm that a latch, an exhausted strike
+budget or a zero ceiling will refuse, nor that a latch cleared anything in
+the firmware (a partial reset keeps firmware records until the replay).
+New host telemetry: exercised_since_rearm, operator_reset_pending,
+candidate_ul_armed_host_only.  No new MCU command, no ABI change.
+
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index 8f851dc5..0e7641ee 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -105,6 +105,10 @@ mt7915_sys_recovery_set(struct file *file, const char __user *user_buf,
+ 		if (ret)
+ 			return ret;
+ 
++		/* Operator-initiated: the watchdog state bits below are the
++		 * mechanism, not evidence of a scheduler fault.
++		 */
++		WRITE_ONCE(dev->cr6608_operator_reset, true);
+ 		mt7915_reset(dev, READ_ONCE(dev->recovery.state) |
+ 			     MT_MCU_CMD_WDT_MASK);
+ 		break;
+@@ -328,29 +332,36 @@ static int mt7915_cr6608_muru_mask_set(void *data, u64 val)
+ 	 * cmpxchg loop also makes concurrent writers and the fault latch strictly
+ 	 * monotonic: no stale read may restore a bit cleared by another CPU.
+ 	 */
++	/* Validate against the one-way ceiling, not the live mask: during a
++	 * disarm window the live mask is 0 and an operator must still be able
++	 * to retire a bit before the re-arm brings it back.
++	 */
++	if (atomic_read(&dev->cr6608_muru_fault_latched))
++		return -EPERM;
++	if (val & ~(atomic_read(&dev->cr6608_muru_ceiling) & CR6608_MURU_MASK))
++		return -EPERM;
++	/* Retire the cleared bits from the ceiling FIRST (as the kill switch
++	 * does), so a concurrent re-arm's ceiling re-check always sees them;
++	 * lowering the live mask first left a window in which a disarm+re-arm
++	 * cycle resurrected the retired bit until the next recovery.
++	 */
++	mt7915_cr6608_muru_lower_ceiling(dev, (u8)val);
+ 	for (;;) {
+-		if (atomic_read(&dev->cr6608_muru_fault_latched))
+-			return -EPERM;
+ 		old = mt7915_cr6608_muru_mask(dev);
+-		if (val & ~old)
+-			return -EPERM;
++		/* A disarmed (0) live mask stays 0; an armed one is reduced. */
+ 		observed = atomic_cmpxchg(&dev->cr6608_muru_mask, old,
+-					  (int)val);
++					  old & (int)val);
+ 		if (observed == old)
+ 			break;
+ 	}
+-	/* Retire the cleared bits from the one-way ceiling so a post-recovery
+-	 * re-arm cannot restore them without a fresh driver load.
+-	 */
+-	mt7915_cr6608_muru_lower_ceiling(dev, (u8)val);
+ 	/* An explicit operator write is the only thing allowed to retire a DL
+ 	 * bit; keep the floor in step with it, one-way.
+ 	 */
+ 	atomic_and((int)val & CR6608_MURU_DL_MASK, &dev->cr6608_muru_dl_floor);
+-	if (val != old) {
++	if ((old & (u8)val) != old || (val & ~old)) {
+ 		dev_warn(dev->mt76.dev,
+-			 "CR6608 MURU mask reduced from 0x%x to 0x%llx\n",
+-			 old, val);
++			 "CR6608 MURU ceiling reduced to 0x%llx (live mask 0x%x -> 0x%x)\n",
++			 val, old, old & (u8)val);
+ 		mt7915_cr6608_muru_refresh_stations(dev, "debugfs mask write");
+ 	}
+ 	return 0;
+@@ -392,8 +403,13 @@ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 
+ 	seq_printf(file, "candidate_allowed=%u\n",
+ 		   dev->cr6608_ul_muru_allowed);
++	/* Host-armed only: the runtime tools parse this key by name, so it is
++	 * kept; the sibling line says what it means.
++	 */
+ 	seq_printf(file, "candidate_ul_enabled=%u\n",
+ 		   !!(mask & CR6608_MURU_UL_MASK));
++	seq_printf(file, "candidate_ul_armed_host_only=%u\n",
++		   !!(mask & CR6608_MURU_UL_MASK));
+ 	seq_printf(file, "candidate_mask=%u\n", mask);
+ 	seq_printf(file, "candidate_dl_ofdma=%u\n",
+ 		   !!(mask & CR6608_MURU_OFDMA_DL));
+@@ -429,6 +445,10 @@ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 	seq_printf(file, "sta_rec_timeout=%d\n", timeout);
+ 	seq_printf(file, "sta_rec_stale=%d\n",
+ 		   atomic_read(&dev->cr6608_ul_muru_sta_rec_stale));
++	seq_printf(file, "exercised_since_rearm=%d\n",
++		   atomic_read(&dev->cr6608_muru_exercised));
++	seq_printf(file, "operator_reset_pending=%d\n",
++		   READ_ONCE(dev->cr6608_operator_reset));
+ 	seq_printf(file, "he_sta_rec_updates=%d\n",
+ 		   he_updates);
+ 	seq_printf(file, "mimo_capable_updates=%d\n",
+diff --git a/mt7915/init.c b/mt7915/init.c
+index eacca0db..0cc3fcc1 100644
+--- a/mt7915/init.c
++++ b/mt7915/init.c
+@@ -15,7 +15,7 @@
+ static bool cr6608_ul_muru;
+ module_param(cr6608_ul_muru, bool, 0444);
+ MODULE_PARM_DESC(cr6608_ul_muru,
+-		 "Legacy CR6608 switch: enable both UL OFDMA and UL MU-MIMO");
++		 "Legacy CR6608 switch: request (STA_REC_MURU) both UL OFDMA and UL MU-MIMO");
+ 
+ static unsigned char cr6608_muru_mask;
+ module_param(cr6608_muru_mask, byte, 0444);
+@@ -414,7 +414,8 @@ mt7915_regd_notifier(struct wiphy *wiphy,
+ 		 */
+ 		mt7915_init_txpower(phy);
+ 		mphy->dfs_state = MT_DFS_STATE_UNKNOWN;
+-		mt7915_mcu_schedule_full_recovery(dev);
++		/* Host-initiated replay of the handshake, not a firmware fault. */
++		mt7915_mcu_schedule_full_recovery_host(dev);
+ 		mutex_unlock(&dev->mt76.mutex);
+ 		return;
+ 	}
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index 4a2aec78..472d5f45 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1531,6 +1531,20 @@ mt7915_mac_restart(struct mt7915_dev *dev, bool run_main, bool run_ext)
+ 	if (ret)
+ 		goto out;
+ 
++	/* The firmware was reloaded, so its TXC trigger statistics enable is
++	 * back at the post-load default while dev->muru_debug still says 1:
++	 * re-send it, otherwise muru_stats silently accumulates zero deltas
++	 * for the rest of the uptime.  Best effort; a rejection only logs.
++	 */
++	if (dev->muru_debug) {
++		int r = mt7915_mcu_muru_debug_set(dev, true);
++
++		if (r)
++			dev_warn(dev->mt76.dev,
++				 "muru_debug re-enable after firmware restart failed: %d\n",
++				 r);
++	}
++
+ 	if (run_main) {
+ 		ret = mt7915_run(dev->mphy.hw);
+ 		if (ret)
+@@ -1679,16 +1693,13 @@ void mt7915_mac_reset_work(struct work_struct *work)
+ 	 * fault (SKU transaction, DFS, MCU health) cannot permanently disable
+ 	 * MU-RU on a device that is also running the 38 dBm request path.
+ 	 */
+-	if (READ_ONCE(dev->recovery.state) & MT_MCU_CMD_WDT_MASK) {
++	if ((READ_ONCE(dev->recovery.state) & MT_MCU_CMD_WDT_MASK) &&
++	    !READ_ONCE(dev->cr6608_operator_reset)) {
+ 		if (mt7915_cr6608_muru_fault_latch(dev))
+ 			dev_crit(dev->mt76.dev,
+-				 "CR6608 MURU fault latch cleared the scheduler mask before watchdog reset work\n");
++				 "CR6608 MURU fault latch cleared the host scheduler mask before watchdog reset work\n");
+ 	} else if (mt7915_cr6608_muru_disarm(dev)) {
+-		atomic_inc(&dev->cr6608_muru_strikes);
+-		dev_warn(dev->mt76.dev,
+-			 "CR6608 MURU scheduler disarmed for unattributed reset work (strike %d/%d)\n",
+-			 atomic_read(&dev->cr6608_muru_strikes),
+-			 CR6608_MURU_MAX_STRIKES);
++		mt7915_cr6608_muru_report_disarm(dev);
+ 	}
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+@@ -1743,6 +1754,7 @@ restart_check:
+ 			WRITE_ONCE(dev->recovery.state,
+ 				   MT_MCU_CMD_NORMAL_STATE);
+ 			dev->recovery.restart = false;
++			WRITE_ONCE(dev->cr6608_operator_reset, false);
+ 			clear_bit(MT76_MCU_RESET, &dev->mphy.state);
+ 			/* Firmware/EEPROM have just been reloaded.  Keep RESET and the
+ 			 * mac80211 queues held until restart_hw replays set_channel and
+@@ -1763,7 +1775,7 @@ restart_check:
+ 		muru_rearmed = mt7915_cr6608_muru_rearm(dev);
+ 		if (muru_rearmed)
+ 			dev_info(dev->mt76.dev,
+-				 "CR6608 MURU scheduler re-armed with mask 0x%x after verified full reset (rearms=%d strikes=%d/%d)\n",
++				 "CR6608 MURU host mask re-armed to 0x%x after verified full reset; mac80211 replays every station record (rearms=%d strikes=%d/%d)\n",
+ 				 muru_rearmed,
+ 				 atomic_read(&dev->cr6608_muru_rearms),
+ 				 atomic_read(&dev->cr6608_muru_strikes),
+@@ -1940,7 +1952,7 @@ restart_check:
+ 		muru_rearmed = mt7915_cr6608_muru_rearm(dev);
+ 		if (muru_rearmed)
+ 			dev_info(dev->mt76.dev,
+-				 "CR6608 MURU scheduler re-armed with mask 0x%x after verified partial reset (rearms=%d strikes=%d/%d)\n",
++				 "CR6608 MURU host mask re-armed to 0x%x after verified partial reset; station records queued for replay (rearms=%d strikes=%d/%d)\n",
+ 				 muru_rearmed,
+ 				 atomic_read(&dev->cr6608_muru_rearms),
+ 				 atomic_read(&dev->cr6608_muru_strikes),
+@@ -2057,12 +2069,20 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 		return;
+ 	}
+-	if (state & MT_MCU_CMD_WDT_MASK) {
++	/* Only the states that start a recovery may touch the scheduler mask:
++	 * a watchdog is scheduler-attributed evidence (unless the operator
++	 * asked for this reset through fw_ser), STOP_DMA / STOP_DMA_FW_RELOAD
++	 * disarm.  The RESET_DONE / RECOVERY_DONE / NORMAL_STATE handshake
++	 * acknowledgements are ignored, as upstream and mt7996 ignore them in
++	 * reset_work; otherwise one such event outside a STOP_DMA cycle would
++	 * clear an armed mask with no re-arm until the next real recovery.
++	 */
++	muru_latched = false;
++	if ((state & MT_MCU_CMD_WDT_MASK) &&
++	    !READ_ONCE(dev->cr6608_operator_reset))
+ 		muru_latched = mt7915_cr6608_muru_fault_latch(dev);
+-	} else {
+-		muru_latched = false;
++	else if (claim_tx)
+ 		muru_disarmed = mt7915_cr6608_muru_disarm(dev);
+-	}
+ 	WRITE_ONCE(dev->recovery.state, state);
+ 	if (claim_tx) {
+ 		dev->recovery.generation++;
+@@ -2081,7 +2101,7 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 		spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 		if (muru_latched)
+ 			dev_crit(dev->mt76.dev,
+-				 "CR6608 MURU fault latch cleared the scheduler mask before firmware recovery\n");
++				 "CR6608 MURU fault latch cleared the host scheduler mask; firmware records are rewritten by the recovery replay\n");
+ 		else if (muru_disarmed)
+ 			mt7915_cr6608_muru_report_disarm(dev);
+ 		if (claim_tx)
+@@ -2095,7 +2115,7 @@ void mt7915_reset(struct mt7915_dev *dev, u32 state)
+ 	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 	if (muru_latched)
+ 		dev_crit(dev->mt76.dev,
+-			 "CR6608 MURU fault latch cleared the scheduler mask before firmware recovery\n");
++			 "CR6608 MURU fault latch cleared the host scheduler mask; firmware records are rewritten by the recovery replay\n");
+ 	else if (muru_disarmed)
+ 		mt7915_cr6608_muru_report_disarm(dev);
+ 	if (claim_tx)
+@@ -2422,9 +2442,14 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 			bool reset_pending;
+ 			int ret = 0;
+ 
++			/* A recovery in flight, or the peer's own band inside a
++			 * reset/channel-switch window.  Band 0's MT76_RESET bit is
++			 * deliberately not consulted for a band-1 peer: after a
++			 * full reset it stays set on a band with no open interface
++			 * until that band's own set_channel runs, which may be never.
++			 */
+ 			reset_pending =
+-				test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
+-				test_bit(MT76_RESET, &dev->mphy.state) ||
++				mt7915_recovery_pending(dev) ||
+ 				test_bit(MT76_RESET, &peer_phy->state);
+ 			if (!reset_pending && msta->wcid.sta &&
+ 			    !msta->wcid.sta_disabled &&
+@@ -2474,12 +2499,24 @@ void mt7915_mac_work(struct work_struct *work)
+ 		if (phy->dev->muru_debug)
+ 			mt7915_mcu_muru_debug_get(phy);
+ 
+-		if (mphy == &phy->dev->mphy)
+-			mt7915_cr6608_muru_strike_decay(phy->dev);
++		/* Idempotent (cmpxchg), so it may run from both phys: a router
++		 * with band 0 disabled must still decay its strikes.
++		 */
++		mt7915_cr6608_muru_strike_decay(phy->dev);
+ 	}
+ 
+ 	mutex_unlock(&mphy->dev->mutex);
+ 
++	/* Replays parked behind a recovery or a channel-switch window
++	 * (mt7915_mac_sta_rc_work) are re-run within one tick of the window
++	 * closing, whichever path closed it.  list_empty() is a lockless hint;
++	 * rc_work re-checks everything under its own locks.
++	 */
++	if (!list_empty(&phy->dev->sta_rc_list) &&
++	    !mt7915_recovery_pending(phy->dev) &&
++	    !test_bit(MT76_RESET, &mphy->state))
++		ieee80211_queue_work(mt76_hw(phy->dev), &phy->dev->rc_work);
++
+ 	mt76_tx_status_check(mphy->dev, false);
+ 
+ 	ieee80211_queue_delayed_work(mphy->hw, &mphy->mac_work,
+diff --git a/mt7915/main.c b/mt7915/main.c
+index b8b60e7a..25992471 100644
+--- a/mt7915/main.c
++++ b/mt7915/main.c
+@@ -594,7 +594,8 @@ static int mt7915_config(struct ieee80211_hw *hw, int radio_idx,
+ 		case MT7915_RECONFIG_TX_RELEASED:
+ 			break;
+ 		case MT7915_RECONFIG_TX_WAITING:
+-			mt7915_mcu_schedule_full_recovery(dev);
++			/* Host-side ordering error, not a firmware fault. */
++			mt7915_mcu_schedule_full_recovery_host(dev);
+ 			return -EIO;
+ 		case MT7915_RECONFIG_TX_RECOVERY:
+ 			return -EBUSY;
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index a3a841a5..da5533fb 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -4293,7 +4293,8 @@ bool mt7915_mcu_txpower_resume(struct mt7915_phy *phy)
+ 	return mt7915_cr6608_resume_tx(phy);
+ }
+ 
+-void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
++void __mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev,
++					 bool host_initiated)
+ {
+ 	struct mt76_phy *ext_phy = dev->mt76.phys[MT_BAND1];
+ 	unsigned long flags;
+@@ -4338,8 +4339,13 @@ void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
+ 	if (!full_in_progress)
+ 		queue_work(dev->mt76.wq, &dev->reset_work);
+ 	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+-	if (muru_disarmed)
+-		mt7915_cr6608_muru_report_disarm(dev);
++	if (muru_disarmed) {
++		if (host_initiated)
++			dev_info(dev->mt76.dev,
++				 "CR6608 MURU host mask disarmed for a host-initiated recovery (no strike); it may re-arm after the verified reset\n");
++		else
++			mt7915_cr6608_muru_report_disarm(dev);
++	}
+ 
+ 	wake_up(&dev->mt76.mcu.wait);
+ 	wake_up(&dev->reset_wait);
+@@ -4827,7 +4833,7 @@ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy,
+ 			dev_warn_ratelimited(phy->dev->mt76.dev,
+ 				"CR6608-RF 38 dBm request rejected: CR6608 DTS property and cr6608_rf_38dbm=1 are both required\n");
+ 			if (tx_already_paused)
+-				mt7915_mcu_schedule_full_recovery(phy->dev);
++				mt7915_mcu_schedule_full_recovery_host(phy->dev);
+ 			return -EPERM;
+ 		}
+ 
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 862c05bb..33ca6484 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -395,6 +395,19 @@ struct mt7915_dev {
+ 	 * for a live replay; none of them is firmware evidence.
+ 	 */
+ 	atomic_t cr6608_ul_muru_sta_rec_stale;
++	/* Set once the firmware has acknowledged a station record carrying an
++	 * uplink scheduler bit since the last re-arm; cleared by the re-arm.  A
++	 * recovery while this is 0 cannot have been caused by the uplink
++	 * scheduler (no UL-bearing record ever reached the firmware), so it is
++	 * disarmed without a strike.
++	 */
++	atomic_t cr6608_muru_exercised;
++	bool cr6608_muru_last_disarm_exercised;
++	/* The operator asked for a full chip reset through the fw_ser debugfs
++	 * knob.  That path reuses the watchdog state bits, so the reset must be
++	 * attributed to the operator, not to the scheduler.
++	 */
++	bool cr6608_operator_reset;
+ 	atomic_t cr6608_ul_muru_he_sta_rec_updates;
+ 	atomic_t cr6608_ul_muru_mimo_capable_updates;
+ 	bool ibf;
+@@ -475,6 +488,10 @@ mt7915_cr6608_muru_sta_rec_response(struct mt7915_dev *dev, bool mimo_capable)
+ 	if (mimo_capable)
+ 		atomic_inc(&dev->cr6608_ul_muru_mimo_capable_updates);
+ 	spin_unlock_irqrestore(&dev->cr6608_muru_telemetry_lock, flags);
++	/* Only called for a record that carried an uplink bit and was
++	 * acknowledged: from here on the firmware scheduler is live.
++	 */
++	atomic_set(&dev->cr6608_muru_exercised, 1);
+ }
+ 
+ static inline void
+@@ -541,6 +558,11 @@ static inline bool mt7915_cr6608_muru_disarm(struct mt7915_dev *dev)
+ 	if (!atomic_xchg(&dev->cr6608_muru_mask, 0))
+ 		return false;
+ 
++	/* Exactly one caller wins the exchange above, so this snapshot is
++	 * consumed by exactly one report.
++	 */
++	WRITE_ONCE(dev->cr6608_muru_last_disarm_exercised,
++		   !!atomic_xchg(&dev->cr6608_muru_exercised, 0));
+ 	atomic_inc(&dev->cr6608_muru_disarms);
+ 	WRITE_ONCE(dev->cr6608_muru_last_disarm, jiffies);
+ 
+@@ -561,8 +583,11 @@ static inline void mt7915_cr6608_muru_strike_decay(struct mt7915_dev *dev)
+ 	strikes = atomic_read(&dev->cr6608_muru_strikes);
+ 	if (!strikes || atomic_read(&dev->cr6608_muru_fault_latched))
+ 		return;
+-	if (test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
+-	    test_bit(MT76_RESET, &dev->mphy.state))
++	/* A pending recovery is not healthy time.  Do not key this on band 0's
++	 * MT76_RESET bit: after a full reset that bit stays set on a band with
++	 * no open interface until that band's own set_channel releases it.
++	 */
++	if (mt7915_recovery_pending(dev))
+ 		return;
+ 	last = READ_ONCE(dev->cr6608_muru_last_disarm);
+ 	if (!time_after(jiffies, last + CR6608_MURU_STRIKE_DECAY))
+@@ -602,9 +627,21 @@ static inline bool mt7915_cr6608_muru_fault_latch(struct mt7915_dev *dev)
+  */
+ static inline void mt7915_cr6608_muru_report_disarm(struct mt7915_dev *dev)
+ {
++	if (!READ_ONCE(dev->cr6608_muru_last_disarm_exercised)) {
++		/* No uplink-bearing record was accepted by the firmware since
++		 * the last re-arm, so the scheduler cannot have caused this
++		 * recovery: no strike.  Otherwise a post-load recovery loop with
++		 * zero peers would spend the permanent latch on its own.
++		 */
++		dev_info(dev->mt76.dev,
++			 "CR6608 MURU host mask disarmed for a firmware recovery while the scheduler was idle (no strike, %d/%d); it may re-arm after a verified reset\n",
++			 atomic_read(&dev->cr6608_muru_strikes),
++			 CR6608_MURU_MAX_STRIKES);
++		return;
++	}
+ 	atomic_inc(&dev->cr6608_muru_strikes);
+ 	dev_warn(dev->mt76.dev,
+-		 "CR6608 MURU scheduler disarmed for unattributed firmware recovery (strike %d/%d); it re-arms after a verified reset\n",
++		 "CR6608 MURU host mask disarmed for unattributed firmware recovery (strike %d/%d); it may re-arm after a verified reset if not latched and within the strike budget\n",
+ 		 atomic_read(&dev->cr6608_muru_strikes),
+ 		 CR6608_MURU_MAX_STRIKES);
+ }
+@@ -665,8 +702,10 @@ static inline u8 mt7915_cr6608_muru_rearm(struct mt7915_dev *dev)
+ 		atomic_xchg(&dev->cr6608_muru_mask, 0);
+ 
+ 	mask = mt7915_cr6608_muru_mask(dev);
+-	if (mask)
++	if (mask) {
+ 		atomic_inc(&dev->cr6608_muru_rearms);
++		atomic_set(&dev->cr6608_muru_exercised, 0);
++	}
+ 
+ 	return mask;
+ }
+@@ -881,7 +920,21 @@ int mt7915_mcu_set_sar_power_sku(struct mt7915_phy *phy,
+ 				 const struct cfg80211_sar_specs *sar);
+ int mt7915_mcu_txpower_pause(struct mt7915_phy *phy, bool *pause_owned);
+ bool mt7915_mcu_txpower_resume(struct mt7915_phy *phy);
+-void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev);
++void __mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev,
++					 bool host_initiated);
++static inline void mt7915_mcu_schedule_full_recovery(struct mt7915_dev *dev)
++{
++	__mt7915_mcu_schedule_full_recovery(dev, false);
++}
++/* A recovery the host itself asked for (a replayed handshake, a rejected
++ * configuration): it disarms like any other, but it is not evidence and never
++ * charges a strike.
++ */
++static inline void
++mt7915_mcu_schedule_full_recovery_host(struct mt7915_dev *dev)
++{
++	__mt7915_mcu_schedule_full_recovery(dev, true);
++}
+ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+ 			       u8 category);
+ int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower);

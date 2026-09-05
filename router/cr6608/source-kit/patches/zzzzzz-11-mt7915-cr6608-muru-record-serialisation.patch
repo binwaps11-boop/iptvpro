@@ -1,0 +1,450 @@
+mt7915: CR6608 MURU record serialisation and in-flight fault attribution
+
+Verified defects in the live MURU record refresh (patches 06/08), found by
+reading the station lifecycle against mac80211.c and the mt7996 precedent:
+
+1. mt7915_mac_sta_event (ASSOC/AUTHORIZE/DISASSOC) and the replay in
+   mt7915_mac_sta_rc_work both ran without dev->mt76.mutex, so a replay
+   snapshotted as CONNECT could land after AUTHORIZE (downgrading the peer
+   in firmware, which mac80211 never repeats), or after DISASSOC/removal
+   (re-creating a connected record for a torn-down WCID, touching an msta
+   mac80211 is about to free).  Both now hold the mutex, exactly as
+   mt7996_mac_sta_event / mt7996_mac_sta_rc_work do; sta_add/sta_remove
+   already run under it in mac80211.c.
+
+2. __mt7915_mcu_add_sta spent the PERMANENT fault latch and forced a full
+   reset when the live mask was lowered between TLV build and send, or
+   between send and response, or when the send failed for any reason.
+   None of those is firmware evidence: the first two are one-way host
+   lowerings (debugfs write, kill switch, a recovery's own disarm) and the
+   third includes the -ENOMEM/-ETIMEDOUT a pending recovery produces by
+   setting MT76_MCU_RESET.  A stale record is now rebuilt from the live
+   mask (bounded), an acknowledged-but-stale record is re-queued for a
+   live replay, and a failure inside a pending recovery is attributed to
+   that recovery (watchdog -> latch, otherwise disarm + strike).  The same
+   gate applies to the STA_REC_UPDATE timeout in mt7915_mcu_parse_response.
+   A failure with no recovery pending still latches, as before.
+
+3. After a verified partial reset the records were only replayed when the
+   re-arm succeeded, so a refused re-arm (latched, strikes exhausted,
+   operator kill during the reset) left firmware records armed while the
+   host reported mask 0.  The replay now runs after every verified partial
+   reset, converging the records in both directions.
+
+4. A replay that met a reset window was silently dropped (changed bit
+   cleared, nothing re-queued) and only band 0's state was consulted.  It
+   is now parked back on sta_rc_list with the refresh bit set, checks the
+   peer's own phy, and runs again when the band is released
+   (mt7915_reconfig_tx_release) or the partial-reset refresh fires.
+
+No new MCU command, no firmware ABI change, no new capability bit.  The
+new sta_rec_stale counter in cr6608_ul_muru_state is host telemetry.
+
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index 3875151c..8f851dc5 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -427,6 +427,8 @@ static int mt7915_cr6608_ul_muru_state_show(struct seq_file *file,
+ 	seq_printf(file, "sta_rec_response_ok=%d\n", response_ok);
+ 	seq_printf(file, "sta_rec_failed=%d\n", failed);
+ 	seq_printf(file, "sta_rec_timeout=%d\n", timeout);
++	seq_printf(file, "sta_rec_stale=%d\n",
++		   atomic_read(&dev->cr6608_ul_muru_sta_rec_stale));
+ 	seq_printf(file, "he_sta_rec_updates=%d\n",
+ 		   he_updates);
+ 	seq_printf(file, "mimo_capable_updates=%d\n",
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index c5ae8c18..4a2aec78 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1938,20 +1938,27 @@ restart_check:
+ 	 */
+ 	if (partial_ok) {
+ 		muru_rearmed = mt7915_cr6608_muru_rearm(dev);
+-		if (muru_rearmed) {
++		if (muru_rearmed)
+ 			dev_info(dev->mt76.dev,
+ 				 "CR6608 MURU scheduler re-armed with mask 0x%x after verified partial reset (rearms=%d strikes=%d/%d)\n",
+ 				 muru_rearmed,
+ 				 atomic_read(&dev->cr6608_muru_rearms),
+ 				 atomic_read(&dev->cr6608_muru_strikes),
+ 				 CR6608_MURU_MAX_STRIKES);
+-			/* Station records survived a partial reset, but any peer
+-			 * that (re)associated during the disarm window carries a
+-			 * DL-only record.  Replay them now.
+-			 */
+-			mt7915_cr6608_muru_refresh_stations(dev,
+-							    "partial reset re-arm");
+-		}
++		/* Station records survived a partial reset, so they still carry
++		 * whatever bits they were sent with, while the live mask was
++		 * taken down on entry and may now be lower (re-arm refused,
++		 * strikes exhausted, operator kill during the reset) or restored.
++		 * Replay every peer so the firmware records and the host state
++		 * converge in both directions; a peer that (re)associated during
++		 * the disarm window otherwise keeps a DL-only record, and a peer
++		 * from before the reset otherwise keeps UL bits the host no
++		 * longer claims.
++		 */
++		mt7915_cr6608_muru_refresh_stations(dev,
++						    muru_rearmed ?
++						    "partial reset re-arm" :
++						    "partial reset without re-arm");
+ 	}
+ 
+ 	mt7915_update_beacons(dev);
+@@ -2372,6 +2379,13 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 	u32 changed;
+ 	LIST_HEAD(list);
+ 
++	/* Serialise against mt7915_mac_sta_event and against sta_add/remove
++	 * (mac80211.c holds the same mutex for those), so a MURU replay can
++	 * neither land after a later conn_state transition nor touch a peer
++	 * that mac80211 is tearing down.  Same pattern as mt7996.
++	 */
++	mutex_lock(&dev->mt76.mutex);
++
+ 	spin_lock_bh(&dev->mt76.sta_poll_lock);
+ 	list_splice_init(&dev->sta_rc_list, &list);
+ 
+@@ -2395,22 +2409,48 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 
+ 		/* Replay the full record with the same conn_state that was last
+ 		 * sent, so the MURU TLV picks up the live mask without touching
+-		 * the peer's port state.  Skip peers that are gone or mid-teardown
+-		 * and never race a recovery: the replayed records after a full
+-		 * reset come from mac80211 itself.
++		 * the peer's port state.  Skip peers that are gone or mid-teardown.
++		 * A replay that meets a recovery window is parked, not dropped:
++		 * the peer goes back on the list with the refresh bit set and
++		 * runs once the band is released (partial reset refresh or
++		 * mt7915_reconfig_tx_release); a full reset rebuilds every record
++		 * from mac80211 anyway.
+ 		 */
+-		if ((changed & CR6608_RC_MURU_REFRESH) &&
+-		    msta->wcid.sta && !msta->wcid.sta_disabled &&
+-		    msta->cr6608_conn_state != CONN_STATE_DISCONNECT &&
+-		    !test_bit(MT76_MCU_RESET, &dev->mphy.state) &&
+-		    !test_bit(MT76_RESET, &dev->mphy.state))
+-			mt7915_mcu_add_sta(dev, vif, sta,
+-					   msta->cr6608_conn_state, false);
++		if (changed & CR6608_RC_MURU_REFRESH) {
++			struct mt76_phy *peer_phy = msta->vif->phy->mt76;
++			u8 state = READ_ONCE(msta->cr6608_conn_state);
++			bool reset_pending;
++			int ret = 0;
++
++			reset_pending =
++				test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
++				test_bit(MT76_RESET, &dev->mphy.state) ||
++				test_bit(MT76_RESET, &peer_phy->state);
++			if (!reset_pending && msta->wcid.sta &&
++			    !msta->wcid.sta_disabled &&
++			    state != CONN_STATE_DISCONNECT) {
++				ret = mt7915_mcu_add_sta(dev, vif, sta, state,
++							 false);
++				if (ret)
++					reset_pending =
++						mt7915_recovery_pending(dev);
++			}
++			if (reset_pending) {
++				spin_lock_bh(&dev->mt76.sta_poll_lock);
++				msta->changed |= CR6608_RC_MURU_REFRESH;
++				if (list_empty(&msta->rc_list))
++					list_add_tail(&msta->rc_list,
++						      &dev->sta_rc_list);
++				spin_unlock_bh(&dev->mt76.sta_poll_lock);
++			}
++		}
+ 
+ 		spin_lock_bh(&dev->mt76.sta_poll_lock);
+ 	}
+ 
+ 	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++
++	mutex_unlock(&dev->mt76.mutex);
+ }
+ 
+ void mt7915_mac_work(struct work_struct *work)
+diff --git a/mt7915/main.c b/mt7915/main.c
+index 00f1bdc8..b8b60e7a 100644
+--- a/mt7915/main.c
++++ b/mt7915/main.c
+@@ -327,7 +327,7 @@ enum mt7915_reconfig_tx_state {
+ 	MT7915_RECONFIG_TX_RECOVERY,
+ };
+ 
+-static bool mt7915_recovery_pending(struct mt7915_dev *dev)
++bool mt7915_recovery_pending(struct mt7915_dev *dev)
+ {
+ 	unsigned long flags;
+ 	bool pending;
+@@ -406,6 +406,11 @@ mt7915_reconfig_tx_release(struct mt7915_phy *phy, bool allow_release,
+ 	if (state == MT7915_RECONFIG_TX_RELEASED ||
+ 	    (state == MT7915_RECONFIG_TX_READY && wake_when_ready))
+ 		ieee80211_wake_queues(phy->mt76->hw);
++	/* MURU record replays parked behind this band's MT76_RESET window
++	 * (mt7915_mac_sta_rc_work) may run now.
++	 */
++	if (state == MT7915_RECONFIG_TX_RELEASED)
++		ieee80211_queue_work(mt76_hw(dev), &dev->rc_work);
+ 	spin_unlock_irqrestore(&dev->recovery_tx_lock, flags);
+ 
+ 	return state;
+@@ -967,51 +972,63 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ {
+ 	struct mt7915_dev *dev = container_of(mdev, struct mt7915_dev, mt76);
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+-	int i, ret;
++	int i, ret = 0;
+ 	u32 addr;
+ 
++	/* mac80211 calls these transitions without dev->mt76.mutex (only
++	 * sta_add/sta_remove hold it).  Every conn_state record that leaves
++	 * here is also replayed by mt7915_mac_sta_rc_work for a live MURU
++	 * mask change, so the transition and its recorded conn_state must be
++	 * one critical section against that replay - the same serialisation
++	 * mt7996_mac_sta_event uses.  Otherwise a replay snapshotted as
++	 * CONNECT could land after this AUTHORIZE and downgrade the peer in
++	 * firmware, or a replay could re-create a record that DISASSOC just
++	 * tore down.
++	 */
++	mutex_lock(&dev->mt76.mutex);
++
+ 	switch (ev) {
+ 	case MT76_STA_EVENT_ASSOC:
+ 		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_CONNECT, true);
+ 		if (ret)
+-			return ret;
+-		msta->cr6608_conn_state = CONN_STATE_CONNECT;
++			break;
++		WRITE_ONCE(msta->cr6608_conn_state, CONN_STATE_CONNECT);
+ 
+ 		addr = mt7915_mac_wtbl_lmac_addr(dev, msta->wcid.idx, 30);
+ 		mt76_rmw_field(dev, addr, GENMASK(7, 0), 0xa0);
+ 
+ 		ret = mt7915_mcu_add_rate_ctrl(dev, vif, sta, &msta->wcid, false);
+ 		if (ret)
+-			return ret;
++			break;
+ 
+ 		msta->wcid.tx_info |= MT_WCID_TX_INFO_SET;
+ 		msta->wcid.sta = 1;
+ 		msta->wcid.sta_disabled = 0;
+-
+-		return 0;
++		break;
+ 
+ 	case MT76_STA_EVENT_AUTHORIZE:
+ 		mt7915_drop_other_sta(dev, vif, sta);
+ 		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_PORT_SECURE,
+ 					 false);
+ 		if (!ret)
+-			msta->cr6608_conn_state = CONN_STATE_PORT_SECURE;
+-		return ret;
++			WRITE_ONCE(msta->cr6608_conn_state,
++				   CONN_STATE_PORT_SECURE);
++		break;
+ 
+ 	case MT76_STA_EVENT_DISASSOC:
+-		mutex_lock(&dev->mt76.mutex);
+ 		for (i = 0; i < ARRAY_SIZE(msta->twt.flow); i++)
+ 			mt7915_mac_twt_teardown_flow(dev, msta, i);
+-		mutex_unlock(&dev->mt76.mutex);
+ 
+-		msta->cr6608_conn_state = CONN_STATE_DISCONNECT;
++		WRITE_ONCE(msta->cr6608_conn_state, CONN_STATE_DISCONNECT);
+ 		mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_DISCONNECT, false);
+ 		msta->wcid.sta_disabled = 1;
+ 		msta->wcid.sta = 0;
+-		return 0;
++		break;
+ 	}
+ 
+-	return 0;
++	mutex_unlock(&dev->mt76.mutex);
++
++	return ret;
+ }
+ 
+ void mt7915_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+@@ -1376,6 +1393,17 @@ static void mt7915_sta_rc_work(void *data, struct ieee80211_sta *sta)
+ 	spin_unlock_bh(&dev->mt76.sta_poll_lock);
+ }
+ 
++void mt7915_cr6608_muru_queue_refresh(struct mt7915_dev *dev,
++				      struct mt7915_sta *msta)
++{
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	msta->changed |= CR6608_RC_MURU_REFRESH;
++	if (list_empty(&msta->rc_list))
++		list_add_tail(&msta->rc_list, &dev->sta_rc_list);
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	ieee80211_queue_work(mt76_hw(dev), &dev->rc_work);
++}
++
+ /* Replay every associated peer's station record so its STA_REC_MURU carries
+  * the live scheduler mask.  Reuses the rate-control work: the atomic
+  * iterator only queues peers, and mt7915_mac_sta_rc_work() does the MCU
+diff --git a/mt7915/mcu.c b/mt7915/mcu.c
+index d6bc3132..202d8ac4 100644
+--- a/mt7915/mcu.c
++++ b/mt7915/mcu.c
+@@ -478,8 +478,15 @@ mt7915_mcu_parse_response(struct mt76_dev *mdev, int cmd,
+ 		 * log, health) disarms without spending the one-way latch so a
+ 		 * single unrelated firmware hiccup no longer disables MU-RU for
+ 		 * the rest of the uptime.
++		 *
++		 * A station-record wait that ended because a recovery already
++		 * in flight set MT76_MCU_RESET (mt76_mcu_get_response wakes
++		 * early on that bit) is not scheduler evidence either: that
++		 * recovery owns the attribution (watchdog -> latch, otherwise
++		 * disarm + strike), so it is treated like any other timeout.
+ 		 */
+-		if (cmd == MCU_EXT_CMD(STA_REC_UPDATE)) {
++		if (cmd == MCU_EXT_CMD(STA_REC_UPDATE) &&
++		    !test_bit(MT76_MCU_RESET, &dev->mphy.state)) {
+ 			if (mt7915_cr6608_muru_fault_latch(dev))
+ 				dev_crit(mdev->dev,
+ 					 "CR6608 MURU fault latch cleared the scheduler mask before MCU recovery\n");
+@@ -2068,6 +2075,11 @@ int __mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 	u8 cr6608_tx_mask;
+ 	u8 cr6608_live_mask;
+ 	bool cr6608_muru_eligible;
++	/* The live mask is one-way and at most CR6608_MURU_MASK bits wide, so
++	 * a record can be overtaken by a lowering only a bounded number of
++	 * times; the bound only guards against a runaway writer.
++	 */
++	int cr6608_rebuilds = 0;
+ 	int ret;
+ 
+ 	msta = sta ? (struct mt7915_sta *)sta->drv_priv : &mvif->sta;
+@@ -2076,6 +2088,7 @@ int __mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 	if (!wcid)
+ 		wcid = &msta->wcid;
+ 
++rebuild:
+ 	skb = mt76_connac_mcu_alloc_sta_req(&dev->mt76, &mvif->mt76, wcid);
+ 	if (IS_ERR(skb))
+ 		return PTR_ERR(skb);
+@@ -2138,13 +2151,28 @@ out:
+ 	if (cr6608_muru_eligible) {
+ 		cr6608_live_mask = mt7915_cr6608_muru_mask(dev);
+ 		if (cr6608_tx_mask & ~cr6608_live_mask) {
++			/* A one-way lowering (operator write, kill switch, or a
++			 * recovery's disarm) overtook this record between the
++			 * TLV build and the send.  The record is merely stale:
++			 * rebuild it from the live mask instead of arming bits
++			 * the host has already retired.  This is host state,
++			 * not firmware evidence, so it never touches the latch.
++			 */
+ 			dev_kfree_skb(skb);
+-			dev_crit(dev->mt76.dev,
+-				 "CR6608 MURU mask changed before STA_REC send (0x%x -> 0x%x); forcing recovery\n",
++			atomic_inc(&dev->cr6608_ul_muru_sta_rec_stale);
++			if (++cr6608_rebuilds <= CR6608_MURU_STA_REC_REBUILDS) {
++				dev_dbg(dev->mt76.dev,
++					"CR6608 MURU mask lowered before STA_REC send (0x%x -> 0x%x); rebuilding record\n",
++					cr6608_tx_mask, cr6608_live_mask);
++				cr6608_muru_state = 0;
++				goto rebuild;
++			}
++			dev_warn(dev->mt76.dev,
++				 "CR6608 MURU mask kept changing while a STA_REC was built (0x%x -> 0x%x); replay queued\n",
+ 				 cr6608_tx_mask, cr6608_live_mask);
+-			mt7915_cr6608_muru_fault_latch(dev);
+-			mt7915_mcu_schedule_full_recovery(dev);
+-			return -ECANCELED;
++			if (sta)
++				mt7915_cr6608_muru_queue_refresh(dev, msta);
++			return -EAGAIN;
+ 		}
+ 		mt7915_cr6608_muru_sta_rec_attempt(dev);
+ 	}
+@@ -2154,19 +2182,38 @@ out:
+ 	if (cr6608_muru_eligible) {
+ 		cr6608_live_mask = mt7915_cr6608_muru_mask(dev);
+ 		if (!ret && (cr6608_tx_mask & ~cr6608_live_mask)) {
+-			mt7915_cr6608_muru_sta_rec_failure(dev, false);
+-			dev_crit(dev->mt76.dev,
+-				 "CR6608 MURU mask changed during STA_REC response (0x%x -> 0x%x); forcing recovery\n",
++			/* The firmware acknowledged a record whose bits were
++			 * retired while it was in flight.  Converge it with a
++			 * live replay; the path that lowered the mask has no
++			 * way to know this send was still pending.
++			 */
++			atomic_inc(&dev->cr6608_ul_muru_sta_rec_stale);
++			dev_info(dev->mt76.dev,
++				 "CR6608 MURU mask lowered during STA_REC response (0x%x -> 0x%x); replay queued\n",
+ 				 cr6608_tx_mask, cr6608_live_mask);
+-			mt7915_cr6608_muru_fault_latch(dev);
+-			mt7915_mcu_schedule_full_recovery(dev);
+-			return -ECANCELED;
++			if (sta)
++				mt7915_cr6608_muru_queue_refresh(dev, msta);
+ 		}
+ 		if (!ret) {
+ 			mt7915_cr6608_muru_sta_rec_response(dev,
+ 				(cr6608_tx_mask & CR6608_MURU_MUMIMO_UL) &&
+ 				(cr6608_muru_state &
+ 				 CR6608_MURU_STA_FULL_UL_MIMO));
++		} else if (test_bit(MT76_MCU_RESET, &dev->mphy.state) ||
++			   mt7915_recovery_pending(dev)) {
++			/* The send failed because a recovery is already in
++			 * flight (queue refused with MT76_MCU_RESET set, or the
++			 * response wait was woken by it).  That recovery owns
++			 * the attribution - watchdog evidence latches in
++			 * reset_work, anything else disarms with a strike - so
++			 * a record caught in its window must not spend the
++			 * permanent latch on its own.
++			 */
++			mt7915_cr6608_muru_sta_rec_failure(dev,
++							  ret == -ETIMEDOUT);
++			dev_warn(dev->mt76.dev,
++				 "CR6608 MURU STA_REC failed (%d) inside a pending recovery; attributed to that recovery\n",
++				 ret);
+ 		} else {
+ 			mt7915_cr6608_muru_sta_rec_failure(dev,
+ 							  ret == -ETIMEDOUT);
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 528a05f1..862c05bb 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -390,6 +390,11 @@ struct mt7915_dev {
+ 	atomic_t cr6608_ul_muru_sta_rec_response_ok;
+ 	atomic_t cr6608_ul_muru_sta_rec_failed;
+ 	atomic_t cr6608_ul_muru_sta_rec_timeout;
++	/* Records whose scheduler bits were retired by a one-way mask change
++	 * while they were being built or acknowledged.  Each one is re-queued
++	 * for a live replay; none of them is firmware evidence.
++	 */
++	atomic_t cr6608_ul_muru_sta_rec_stale;
+ 	atomic_t cr6608_ul_muru_he_sta_rec_updates;
+ 	atomic_t cr6608_ul_muru_mimo_capable_updates;
+ 	bool ibf;
+@@ -498,6 +503,10 @@ mt7915_cr6608_muru_sta_rec_failure(struct mt7915_dev *dev, bool timed_out)
+  * so the firmware never sees a scheduler bit survive into a reset.
+  */
+ #define CR6608_MURU_MAX_STRIKES	3
++/* Bound on how often one station record is rebuilt after the live mask was
++ * lowered underneath it (see __mt7915_mcu_add_sta).
++ */
++#define CR6608_MURU_STA_REC_REBUILDS	4
+ 
+ /* Strikes count unattributed recoveries that happened close together.  A
+  * healthy radio that later hits one more unrelated event must not inherit
+@@ -513,6 +522,14 @@ mt7915_cr6608_muru_sta_rec_failure(struct mt7915_dev *dev, bool timed_out)
+  */
+ #define CR6608_RC_MURU_REFRESH		BIT(31)
+ 
++/* Queue one peer's record for a live replay (mask retired while its record
++ * was in flight, or a replay parked behind a recovery).  Takes
++ * sta_poll_lock; safe from any context that may take a bh-safe spinlock.
++ */
++void mt7915_cr6608_muru_queue_refresh(struct mt7915_dev *dev,
++				      struct mt7915_sta *msta);
++bool mt7915_recovery_pending(struct mt7915_dev *dev);
++
+ void mt7915_cr6608_muru_refresh_stations(struct mt7915_dev *dev,
+ 					 const char *why);
+ 

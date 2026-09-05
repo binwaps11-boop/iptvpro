@@ -85,7 +85,7 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   only when the telemetry generation is unchanged and even, the MCU generation
   matches, the MCU result is zero, and the readback-derived power matches
   `iw dev`; it never substitutes the configured request for current power.
-- `files/usr/sbin/cr6608-ul-mu-evidence`: client-attributed uplink evidence
+- `files/usr/sbin/cr6608-ul-mu-evidence` (v4, phased): client-attributed uplink evidence
   from the patch-07 per-WCID counters; `--with-firmware --window N` adds the
   firmware's own `hetrig_*` TB PPDU statistics as an independent second source,
   reported as deltas over the window and never allowed to override a host
@@ -167,6 +167,44 @@ It builds OpenWrt `v25.12.5` from the official source tag for the
   evidence tool enable group 5 for a bounded window (never by a profile).
   Also surfaces a failed `MURU_GET_TXC_TX_STATS` in `muru_stats` instead of an
   errno, and restores the `he_ext_su_cnt` accumulation upstream dropped.
+- `patches/zzzzzz-11-mt7915-cr6608-muru-record-serialisation.patch`: fixes four
+  verified defects in the live record refresh. The station transitions and the
+  replay now run under `dev->mt76.mutex` (the `mt7996` pattern), so a replay
+  can neither downgrade a peer that was authorised meanwhile nor touch a peer
+  mac80211 is removing; a record overtaken by a one-way mask lowering is
+  rebuilt or re-queued instead of spending the permanent latch; a `STA_REC`
+  failure inside a recovery already in flight is attributed to that recovery
+  (watchdog latches, anything else disarms with a strike) instead of latching on
+  its own; every verified partial reset replays the records, so a refused re-arm
+  can no longer leave firmware records armed while the host reports mask 0; and
+  a replay that meets a reset window is parked and re-run when the band is
+  released instead of being dropped. New host counter: `sta_rec_stale`.
+- `patches/zzzzzz-12-mt7915-cr6608-muru-he-dcm-max-ru-upstream-e5932438.patch`:
+  verbatim backport of upstream `e59324380042` (HE DCM max-RU encoding), which
+  is on mt76 master but not in the `39c960c3` pin: DCM-capable peers were
+  registered with a wrong `dcm_rx_max_nss` and `dcm_max_ru = 0`.
+- `patches/zzzzzz-13-mt7915-cr6608-muru-recovery-lifecycle.patch`: the mask is
+  touched only by the states that start a recovery (handshake acknowledgements
+  no longer disarm); a strike is charged only when an uplink-bearing record was
+  acknowledged since the last re-arm (a post-load recovery loop with zero peers
+  can no longer latch); host-initiated recoveries (regulatory replay, ordering
+  errors, a rejected 38 dBm request) never strike; strike decay and the record
+  replay no longer depend on band 0's sticky post-reset bit; an operator
+  `fw_ser` full reset disarms instead of latching; the debugfs mask writer
+  lowers the ceiling first and validates against it; the firmware trigger
+  statistics enable is re-sent after a firmware reload.
+- `patches/zzzzzz-14-mt7915-cr6608-muru-ul-attribution-v2.patch`: per-peer TB
+  counters are deduplicated per PPDU (raw descriptors kept as `he_tb_mpdu`),
+  data-bearing PPDUs are split from the QoS-Null responses that the firmware's
+  BSR polls solicit, every peer of a full-bandwidth group is credited, and
+  `muru_stats` gains one `key=value` line per firmware counter with its source
+  semantics. `schema=2` on both nodes; `cr6608-ul-mu-evidence` v4 consumes it.
+- `patches/994-mt76-makefile-mac80211-debugfs.patch` (OpenWrt tree): the mt76
+  package maps the MESH and TESTMODE options to driver defines but not
+  `CONFIG_MAC80211_DEBUGFS`, so on every OpenWrt image the per-station debugfs
+  hook is compiled out regardless of `CONFIG_PACKAGE_MAC80211_DEBUGFS`. The
+  patch mirrors the MESH handling; the CI proof step checks the compiled
+  module for the per-peer node strings.
 - `packages/prplmesh`: pinned prplMesh Controller + Agent + IEEE1905 transport
   built against the generic NL80211 backend and the image's single
   `wpad-openssl` implementation. It is runtime-gated until all processes and

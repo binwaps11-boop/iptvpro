@@ -1,21 +1,34 @@
 #!/bin/sh
 #
-# Read-only report of client-attributed uplink MU evidence.
+# Read-only, phased report of client-attributed uplink MU evidence (v4).
 #
 # Two independent sources, and the verdict names which ones agreed:
 #
-#   host    per-WCID counts of HE trigger-based (TB) PPDUs taken from RX
-#           descriptors (kit patch 07).  A HE TB PPDU exists only as a
+#   host    per-WCID accounting of HE trigger-based (TB) PPDUs taken from RX
+#           descriptors (kit patches 07/14).  A HE TB PPDU exists only as a
 #           response to a Trigger frame this AP transmitted, and the
 #           descriptor carries the transmitting peer's WCID, so this is
 #           direct per-client evidence that the scheduler solicited uplink
-#           airtime from that client.
+#           airtime from that client.  v2 accounting splits data-bearing
+#           PPDUs from the QoS-Null responses the firmware's BSR polls
+#           (BSRP triggers) solicit from idle peers: those are trigger
+#           evidence, not uplink data scheduling.
 #
-#   firmware (--with-firmware) the MURU statistics the closed firmware
-#           itself reports through MURU_GET_TXC_TX_STATS: hetrig_* counters
-#           of HE TB PPDUs it received, split into UL OFDMA (by RU count)
-#           and UL MU-MIMO (by user count).  This is the firmware's own
-#           accounting of the uplink transmissions it scheduled.
+#   firmware (--with-firmware) MURU_GET_TXC_TX_STATS: the firmware's own
+#           TX-command-side accounting of HE trigger transactions, bucketed
+#           by the allocation each trigger solicited (su, 2..16+ RUs, 2..4
+#           MU users).  Whether a bucket increments on trigger transmission
+#           or on TB reception is not determinable from host-visible source
+#           (firmware symbols muruCmdrptTrigHandle, _whTxCmdGetTxTrigReport);
+#           host per-WCID attribution is the only source that proves a TB
+#           PPDU was received.  hetrig_su (single-user triggers) is reported
+#           but never counts towards a multi-user verdict.
+#
+# Control phases (--phases idle,dl,ul): the same window is measured with no
+# traffic, with download-only traffic, and with two clients uploading.  The
+# uplink phase must exceed both controls; otherwise BSR polling alone could
+# satisfy a multi-user verdict.  Armed mask, RXD group-5 state and the
+# firmware reset counters must not change inside or across phases.
 #
 # Host-observed scheduling evidence only.  Not an RF measurement, not a
 # throughput claim, and not a regulatory or sale approval.
@@ -25,10 +38,17 @@
 # monitor mode because per-packet rate reporting can stall RX (d33943ba).  The
 # driver reports that state as rxv_group5_enabled=; while it is 0 the host
 # counters are reported as UNAVAILABLE, never as "nothing scheduled", and the
-# firmware's own hetrig_* statistics are the proof.  --enable-crxv turns
-# group 5 on for the window only (opt-in, restored on every exit path).
+# verdict is at most FIRMWARE_ONLY.  --enable-crxv turns group 5 on for the
+# run only (opt-in, restored on every exit path).
 #
-# usage: cr6608-ul-mu-evidence [--with-firmware] [--enable-crxv] [--window SECONDS]
+# usage: cr6608-ul-mu-evidence [--with-firmware] [--enable-crxv]
+#                              [--window SECONDS] [--phases idle,dl,ul] [--auto]
+#                              [--hook CMD]
+#   --phases   comma list from idle,dl,ul (default: ul only, one window)
+#   --window 0 reports cumulative counters since boot (no deltas, no checks)
+#   --auto     no operator prompt between phases (scripted runs / tests)
+#   --hook CMD run `sh -c CMD hook <phase>` at the start of each phase window
+#              (e.g. a script that starts iperf3 uploads for phase ul)
 
 set -eu
 
@@ -38,26 +58,56 @@ mask_param="${CR6608_MURU_MASK_MODULE_PARAM:-/sys/module/mt7915e/parameters/cr66
 # The firmware build this evidence contract was written against.
 fw_baseline_build="${CR6608_FW_BASELINE_BUILD:-20240429200752}"
 
+# Pass thresholds (heuristics, overridable for lab use; never lowered by a
+# profile).
+min_fw_nonsu="${CR6608_UL_MU_MIN_FW_TRIGGERS:-20}"
+min_data_groups="${CR6608_UL_MU_MIN_DATA_GROUPS:-10}"
+min_peer_data="${CR6608_UL_MU_MIN_PEER_DATA_PPDUS:-10}"
+control_factor="${CR6608_UL_MU_CONTROL_FACTOR:-3}"
+min_upload_bytes="${CR6608_UL_MU_MIN_UPLOAD_BYTES:-1048576}"
+
 with_firmware=0
 enable_crxv=0
+auto=0
+hook=''
 window=30
+phases=ul
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--with-firmware) with_firmware=1 ;;
 		--enable-crxv) enable_crxv=1 ;;
+		--auto) auto=1 ;;
+		--hook)
+			shift
+			hook="${1:-}"
+			[ -n "$hook" ] || { printf 'error=hook-must-not-be-empty\n'; exit 2; } ;;
 		--window)
 			shift
 			case "${1:-}" in
 				''|*[!0-9]*) printf 'error=window-must-be-an-integer\n'; exit 2 ;;
 			esac
 			window="$1" ;;
+		--phases)
+			shift
+			phases="$(printf '%s' "${1:-}" | tr ',' ' ')"
+			[ -n "$phases" ] || { printf 'error=phases-must-not-be-empty\n'; exit 2; }
+			for p in $phases; do
+				case "$p" in idle|dl|ul) ;; *) printf 'error=unknown-phase %s\n' "$p"; exit 2 ;; esac
+			done ;;
 		-h|--help)
-			sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+			sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
 			exit 0 ;;
 		*) printf 'error=unknown-argument %s\n' "$1"; exit 2 ;;
 	esac
 	shift
 done
+case " $phases " in *" ul "*) ;; *) printf 'error=the-ul-phase-is-required\n'; exit 2 ;; esac
+# Controls always run before the uplink phase, whatever order was given.
+ordered=''
+for p in idle dl ul; do
+	case " $phases " in *" $p "*) ordered="$ordered $p" ;; esac
+done
+phases="${ordered# }"
 
 read_field() {
 	# $1 file, $2 key -> value, empty when absent or malformed
@@ -72,44 +122,80 @@ is_uint() {
 	return 0
 }
 
-# muru_stats "Total HE MU-MIMO UL TB PPDU count: N" style lines.
-fw_total() {
-	# $1 muru_stats file, $2 label prefix
-	[ -r "$1" ] || return 0
-	sed -n "s/^$2: *\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -n1
-}
-
 phy_of() {
 	printf '%s\n' "$1" | sed -n 's|.*/\(phy[0-9]*\)/.*|\1|p'
 }
 
+# muru_stats "Total HE MU-MIMO UL TB PPDU count: N" style lines (fallback for
+# a driver without the key=value block).
+fw_total() {
+	[ -r "$1" ] || return 0
+	sed -n "s/^$2: *\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+fw_sum() {
+	# $1 muru_stats file, $2.. keys -> sum of key=value lines, empty if any is missing
+	f="$1"; shift
+	total=0
+	for k in "$@"; do
+		v="$(read_field "$f" "$k")"
+		is_uint "$v" || return 0
+		total=$((total + v))
+	done
+	printf '%s\n' "$total"
+}
+
+reset_total() {
+	total=0
+	for node in "$debug_root"/phy*/mt76/sys_recovery; do
+		[ -f "$node" ] || continue
+		line="$(grep 'SYS_RESET_COUNT:' "$node" 2>/dev/null | tail -n1)"
+		wm="$(printf '%s\n' "$line" | sed -n 's/.*WM \([0-9][0-9]*\),.*/\1/p')"
+		wa="$(printf '%s\n' "$line" | sed -n 's/.*WA \([0-9][0-9]*\).*/\1/p')"
+		total=$((total + ${wm:-0} + ${wa:-0}))
+	done
+	printf '%s\n' "$total"
+}
+
+# Per-peer received bytes from mac80211 (uplink volume sanity check).  Absent
+# when iw is unavailable; then the upload criterion is reported as skipped.
+station_rx_bytes() {
+	command -v iw >/dev/null 2>&1 || return 0
+	for netdir in /sys/class/ieee80211/phy*/device/net/*; do
+		[ -d "$netdir" ] || continue
+		iw dev "$(basename "$netdir")" station dump 2>/dev/null |
+			awk '/^Station /{mac=$2} /rx bytes:/{print mac, $3}'
+	done
+}
+
 # ---------------------------------------------------------------------------
-# Snapshot: one line per radio and per peer, machine-parseable, into $1.
+# Snapshot: one line per radio, firmware source and peer, into $1.
 snapshot() {
 	out="$1"
 	: > "$out"
+	printf 'resets %s\n' "$(reset_total)" >> "$out"
 	for node in "$debug_root"/phy*/mt76/cr6608_ul_attribution; do
 		[ -f "$node" ] || continue
 		phy="$(phy_of "$node")"
-		tb="$(read_field "$node" he_tb_ppdu)"
-		ofdma_ru="$(read_field "$node" he_tb_ul_ofdma_ru)"
-		full_bw="$(read_field "$node" he_tb_full_bw)"
-		ofdma_groups="$(read_field "$node" ul_ofdma_multi_user_ppdus)"
-		mumimo_groups="$(read_field "$node" ul_mumimo_multi_user_ppdus)"
-		max_peers="$(read_field "$node" max_peers_in_one_ppdu)"
+		schema="$(read_field "$node" schema)"
 		band="$(read_field "$node" band)"
 		armed="$(read_field "$node" armed_mask)"
 		g5="$(read_field "$node" rxv_group5_enabled)"
-		# Older drivers (before patch 10) do not report the group-5 state;
-		# treat that as unknown rather than as enabled.
 		is_uint "$g5" || g5=unknown
+		vals=''
 		ok=1
-		for v in "$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers"; do
+		for key in he_tb_ppdu he_tb_mpdu he_tb_ul_ofdma_ru he_tb_full_bw \
+			   he_tb_data_ppdu he_tb_nulldata_ppdu he_tb_fc_unknown \
+			   he_tb_no_timestamp ul_ofdma_multi_user_ppdus \
+			   ul_mumimo_multi_user_ppdus ul_ofdma_multi_user_data_ppdus \
+			   ul_mumimo_multi_user_data_ppdus max_peers_in_one_ppdu; do
+			v="$(read_field "$node" "$key")"
 			is_uint "$v" || ok=0
+			vals="$vals $v"
 		done
-		if [ "$ok" = 1 ]; then
-			printf 'radio %s %s %s %s %s %s %s %s %s %s\n' "$phy" "${band:-?}" "${armed:-?}" \
-				"$tb" "$ofdma_ru" "$full_bw" "$ofdma_groups" "$mumimo_groups" "$max_peers" "$g5" >> "$out"
+		if [ "$ok" = 1 ] && [ "$schema" = 2 ]; then
+			# radio <phy> <band> <armed> <g5> <13 counters>
+			printf 'radio %s %s %s %s%s\n' "$phy" "${band:-?}" "${armed:-?}" "$g5" "$vals" >> "$out"
 		else
 			printf 'radio %s malformed\n' "$phy" >> "$out"
 		fi
@@ -119,11 +205,22 @@ snapshot() {
 				printf 'fw %s unavailable\n' "$phy" >> "$out"
 				continue
 			fi
-			fw_all="$(fw_total "$stats" 'All HE UL TB PPDU count')"
-			fw_mu="$(fw_total "$stats" 'Total HE MU-MIMO UL TB PPDU count')"
-			fw_ofdma="$(fw_total "$stats" 'Total HE OFDMA UL TB PPDU count')"
-			if is_uint "$fw_all" && is_uint "$fw_mu" && is_uint "$fw_ofdma"; then
-				printf 'fw %s %s %s %s\n' "$phy" "$fw_all" "$fw_mu" "$fw_ofdma" >> "$out"
+			su="$(fw_sum "$stats" ul_hetrig_su)"
+			ofdma="$(fw_sum "$stats" ul_hetrig_2ru ul_hetrig_3ru ul_hetrig_4ru ul_hetrig_5to8ru ul_hetrig_9to16ru ul_hetrig_gtr16ru)"
+			mumimo="$(fw_sum "$stats" ul_hetrig_2mu ul_hetrig_3mu ul_hetrig_4mu)"
+			if ! is_uint "$su"; then
+				# Driver without the key=value block: derive from the table.
+				all="$(fw_total "$stats" 'All HE UL TB PPDU count')"
+				mumimo="$(fw_total "$stats" 'Total HE MU-MIMO UL TB PPDU count')"
+				ofdma="$(fw_total "$stats" 'Total HE OFDMA UL TB PPDU count')"
+				if is_uint "$all" && is_uint "$mumimo" && is_uint "$ofdma"; then
+					su=$((all - mumimo - ofdma))
+					[ "$su" -ge 0 ] || su=0
+				fi
+			fi
+			if is_uint "$su" && is_uint "$ofdma" && is_uint "$mumimo"; then
+				# fw <phy> <su> <ofdma> <mumimo>
+				printf 'fw %s %s %s %s\n' "$phy" "$su" "$ofdma" "$mumimo" >> "$out"
 			else
 				printf 'fw %s unavailable\n' "$phy" >> "$out"
 			fi
@@ -134,25 +231,31 @@ snapshot() {
 		phy="$(phy_of "$sta")"
 		mac="$(printf '%s\n' "$sta" | sed -n 's|.*/stations/\([^/]*\)/.*|\1|p')"
 		wcid="$(read_field "$sta" wcid)"
-		tb="$(read_field "$sta" he_tb_ppdu)"
-		ofdma_ru="$(read_field "$sta" he_tb_ul_ofdma_ru)"
-		full_bw="$(read_field "$sta" he_tb_full_bw)"
-		shared="$(read_field "$sta" he_tb_ul_mumimo_shared)"
+		vals=''
 		ok=1
-		for v in "$tb" "$ofdma_ru" "$full_bw" "$shared"; do
+		for key in he_tb_ppdu he_tb_ul_ofdma_ru he_tb_full_bw he_tb_ul_mumimo_shared \
+			   he_tb_data_ppdu he_tb_nulldata_ppdu; do
+			v="$(read_field "$sta" "$key")"
 			is_uint "$v" || ok=0
+			vals="$vals $v"
 		done
 		if [ "$ok" = 1 ]; then
-			printf 'peer %s %s %s %s %s %s %s\n' "$phy" "$mac" "${wcid:-?}" "$tb" "$ofdma_ru" "$full_bw" "$shared" >> "$out"
+			# peer <phy> <mac> <wcid> <tb> <ofdma_ru> <full_bw> <shared> <data> <null>
+			printf 'peer %s %s %s%s\n' "$phy" "$mac" "${wcid:-?}" "$vals" >> "$out"
 		else
 			printf 'peer %s %s malformed\n' "$phy" "$mac" >> "$out"
 		fi
 	done
+	station_rx_bytes | while read -r mac bytes; do
+		is_uint "$bytes" && printf 'rxbytes %s %s\n' "$mac" "$bytes" >> "$out"
+	done
 }
 
 # ---------------------------------------------------------------------------
-# Firmware statistics are only produced while muru_debug is enabled.  Enable
-# it for the window and put back exactly what was there before, on every exit.
+# Firmware statistics are only produced while muru_debug is enabled.  The
+# debugfs write re-sends MURU_SET_TXC_TX_STATS_EN, so it is always written
+# (a firmware reload silently drops the enable while the node still reads 1);
+# the original value is put back on every exit.
 restore_list=''
 restore_muru_debug() {
 	for entry in $restore_list; do
@@ -164,7 +267,6 @@ enable_muru_debug() {
 	for f in "$debug_root"/phy*/mt76/muru_debug; do
 		[ -f "$f" ] || continue
 		cur="$(head -n1 "$f" 2>/dev/null | tr -d '[:space:]')"
-		[ "$cur" = 1 ] && continue
 		restore_list="$restore_list $f=${cur:-0}"
 		printf '1\n' > "$f" 2>/dev/null || :
 	done
@@ -190,8 +292,17 @@ enable_crxv_window() {
 tmp="$(mktemp -d)"
 trap 'restore_crxv; restore_muru_debug; rm -rf "$tmp"' EXIT INT TERM
 
-printf 'schema=cr6608-ul-mu-evidence-v3\n'
-printf 'mode=%s\n' "$([ "$with_firmware" = 1 ] && printf 'host-plus-firmware-window' || printf 'host-cumulative')"
+printf 'schema=cr6608-ul-mu-evidence-v4\n'
+windowed=1
+if [ "$with_firmware" = 1 ]; then
+	printf 'mode=host-plus-firmware-window\n'
+elif [ "$window" -gt 0 ]; then
+	printf 'mode=host-window\n'
+else
+	windowed=0
+	printf 'mode=host-cumulative\n'
+fi
+printf 'phases=%s window_seconds=%s\n' "$(printf '%s' "$phases" | tr ' ' ',')" "$window"
 
 # Firmware identity: wiphy->fw_version is "<fw_ver>-<build_date>" (ethtool -i
 # on any netdev of the phy); fall back to the WM banner in the kernel log.
@@ -230,130 +341,231 @@ if [ "$with_firmware" = 1 ]; then
 		[ -f "$f" ] || continue
 		phy="$(phy_of "$f")"
 		cur="$(head -n1 "$f" 2>/dev/null | tr -d '[:space:]')"
-		[ "$cur" = 1 ] || printf '1\n' > "$f" 2>/dev/null || :
+		printf '1\n' > "$f" 2>/dev/null || :
 		if grep -q '^firmware-stats-unavailable' "$debug_root/$phy/mt76/muru_stats" 2>/dev/null; then
 			stats_probe_failed=1
 			printf 'firmware=%s status=stats-probe-failed muru_debug-left-off\n' "$phy"
 		fi
-		[ "$cur" = 1 ] || printf '%s\n' "${cur:-0}" > "$f" 2>/dev/null || :
+		printf '%s\n' "${cur:-0}" > "$f" 2>/dev/null || :
 	done
 	[ "$stats_probe_failed" = 1 ] || enable_muru_debug
-	snapshot "$tmp/before"
-	printf 'window_seconds=%s\n' "$window"
-	[ "$window" -gt 0 ] && sleep "$window"
-	snapshot "$tmp/after"
-	restore_muru_debug
-	restore_list=''
-	restore_crxv
-	crxv_restore_list=''
-else
-	snapshot "$tmp/after"
-	: > "$tmp/before"
 fi
 
+prompt_phase() {
+	case "$1" in
+		idle) msg='stop all client traffic (control phase)' ;;
+		dl) msg='start download-only traffic on both clients, e.g. iperf3 -c <router> -R (control phase)' ;;
+		ul) msg='start simultaneous uploads from two HE clients, e.g. iperf3 -c <router>' ;;
+	esac
+	printf 'phase=%s action=%s\n' "$1" "$(printf '%s' "$msg" | tr ' ' '-')"
+	[ "$auto" = 1 ] && return 0
+	[ -r /dev/tty ] || return 0
+	printf 'press Enter when the %s phase traffic is in place: ' "$1" > /dev/tty 2>/dev/null || return 0
+	read -r _ < /dev/tty 2>/dev/null || :
+}
+
 # ---------------------------------------------------------------------------
-# Report.  In window mode every number is the delta over the window; in
-# cumulative mode it is the counter itself.
+# Per-phase measurement.  Every number printed is the delta over the window.
 delta() {
-	# $1 after, $2 before (empty -> 0)
 	printf '%s\n' "$(( ${1:-0} - ${2:-0} ))"
 }
 before_line() {
-	# $1 kind, $2 key1 [, $3 key2] -> matching line from before, or empty
-	if [ "$#" -ge 3 ]; then
-		awk -v k="$1" -v a="$2" -v b="$3" '$1==k && $2==a && $3==b {print; exit}' "$tmp/before"
+	# $1 file, $2 kind, $3 key1 [, $4 key2]
+	if [ "$#" -ge 4 ]; then
+		awk -v k="$2" -v a="$3" -v b="$4" '$1==k && $2==a && $3==b {print; exit}' "$1"
 	else
-		awk -v k="$1" -v a="$2" '$1==k && $2==a {print; exit}' "$tmp/before"
+		awk -v k="$2" -v a="$3" '$1==k && $2==a {print; exit}' "$1"
 	fi
 }
 
-radios=0; tb_total=0; ofdma_total=0; mumimo_total=0
-radios_attributable=0
-fw_radios=0; fw_all_total=0; fw_mu_total=0; fw_ofdma_total=0
-peers_with_tb=0; peers_with_mumimo=0
-verdict=UNKNOWN
+# Results of the last measured phase, kept in plain variables (POSIX sh).
+measure_phase() {
+	name="$1"
+	before="$tmp/$name.before"; after="$tmp/$name.after"
+	prompt_phase "$name"
+	if [ "$windowed" = 1 ]; then
+		snapshot "$before"
+		# The hook starts this phase's traffic just inside the window (after
+		# the baseline snapshot); it must return promptly.
+		[ -n "$hook" ] && { sh -c "$hook" hook "$name" >/dev/null 2>&1 || :; }
+		[ "$window" -gt 0 ] && sleep "$window"
+	else
+		# host-only --window 0: cumulative counters since boot (no delta,
+		# and no state-stability check is possible).
+		: > "$before"
+	fi
+	snapshot "$after"
 
-while read -r kind phy rest; do
-	case "$kind" in
-	radio)
-		radios=$((radios + 1))
-		case "$rest" in malformed) printf 'radio=%s status=malformed\n' "$phy"; continue ;; esac
-		set -- $rest
-		band=$1; armed=$2; tb=$3; ofdma_ru=$4; full_bw=$5; og=$6; mg=$7; mp=$8; g5=${9:-unknown}
-		# radio <phy> <band> <armed> <tb> <ofdma_ru> <full_bw> <og> <mg> <mp> <g5>
-		b="$(before_line radio "$phy")"; set -- $b
-		btb=${5:-0}; bofdma=${6:-0}; bfull=${7:-0}; bog=${8:-0}; bmg=${9:-0}; bg5=${11:-unknown}
-		case "$g5" in
-			1) radios_attributable=$((radios_attributable + 1)) ;;
+	radios=0; radios_attributable=0; malformed_radios=0
+	tb_total=0; data_total=0; null_total=0
+	groups_total=0; data_groups_total=0; mumimo_groups_total=0; mumimo_data_groups_total=0
+	fw_radios=0; fw_su_total=0; fw_ofdma_total=0; fw_mumimo_total=0
+	peers_with_tb=0; peers_with_data=0; peers_with_mumimo=0; peers_uploading=0
+	upload_check=unavailable
+	state_changed=''
+
+	b_resets="$(awk '$1=="resets"{print $2; exit}' "$before")"
+	a_resets="$(awk '$1=="resets"{print $2; exit}' "$after")"
+	if [ "$windowed" = 1 ]; then
+		[ "${b_resets:-0}" = "${a_resets:-0}" ] || state_changed="${state_changed}firmware-reset-counter,"
+	fi
+
+	while read -r kind phy rest; do
+		case "$kind" in
+		radio)
+			radios=$((radios + 1))
+			case "$rest" in malformed)
+				malformed_radios=$((malformed_radios + 1))
+				printf 'phase=%s radio=%s status=malformed\n' "$name" "$phy"; continue ;;
+			esac
+			set -- $rest
+			band=$1; armed=$2; g5=$3
+			tb=$4; mpdu=$5; ofdma_ru=$6; full_bw=$7; data=$8; null=$9
+			shift 9; fcunk=$1; nots=$2; og=$3; mg=$4; ogd=$5; mgd=$6; mp=$7
+			b="$(before_line "$before" radio "$phy")"; set -- $b
+			barmed=${4:-?}; bg5=${5:-unknown}
+			btb=${6:-0}; bmpdu=${7:-0}; bofdma=${8:-0}; bfull=${9:-0}; bdata=${10:-0}; bnull=${11:-0}
+			bfcunk=${12:-0}; bnots=${13:-0}; bog=${14:-0}; bmg=${15:-0}; bogd=${16:-0}; bmgd=${17:-0}
+			[ "$g5" = 1 ] && radios_attributable=$((radios_attributable + 1))
+			if [ "$windowed" = 1 ]; then
+				[ "$barmed" = "$armed" ] || state_changed="${state_changed}armed-mask-$phy,"
+				[ "$bg5" = "$g5" ] || state_changed="${state_changed}rxv-group5-$phy,"
+			fi
+			d_tb=$(delta "$tb" "$btb"); d_mpdu=$(delta "$mpdu" "$bmpdu")
+			d_ofdma=$(delta "$ofdma_ru" "$bofdma"); d_full=$(delta "$full_bw" "$bfull")
+			d_data=$(delta "$data" "$bdata"); d_null=$(delta "$null" "$bnull")
+			d_fcunk=$(delta "$fcunk" "$bfcunk"); d_nots=$(delta "$nots" "$bnots")
+			d_og=$(delta "$og" "$bog"); d_mg=$(delta "$mg" "$bmg")
+			d_ogd=$(delta "$ogd" "$bogd"); d_mgd=$(delta "$mgd" "$bmgd")
+			tb_total=$((tb_total + d_tb)); data_total=$((data_total + d_data)); null_total=$((null_total + d_null))
+			groups_total=$((groups_total + d_og + d_mg)); data_groups_total=$((data_groups_total + d_ogd + d_mgd))
+			mumimo_groups_total=$((mumimo_groups_total + d_mg)); mumimo_data_groups_total=$((mumimo_data_groups_total + d_mgd))
+			printf 'phase=%s radio=%s band=%s armed_mask=%s rxv_group5_enabled=%s he_tb_ppdu=%s he_tb_mpdu=%s ul_ofdma_ru=%s full_bw=%s data_ppdu=%s nulldata_ppdu=%s fc_unknown=%s no_timestamp=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s ul_ofdma_multi_user_data_ppdus=%s ul_mumimo_multi_user_data_ppdus=%s max_peers_in_one_ppdu=%s\n' \
+				"$name" "$phy" "$band" "$armed" "$g5" "$d_tb" "$d_mpdu" "$d_ofdma" "$d_full" "$d_data" "$d_null" "$d_fcunk" "$d_nots" "$d_og" "$d_mg" "$d_ogd" "$d_mgd" "$mp"
+			;;
+		fw)
+			case "$rest" in unavailable)
+				printf 'phase=%s firmware=%s status=unavailable-muru_stats-or-muru_debug\n' "$name" "$phy"; continue ;;
+			esac
+			fw_radios=$((fw_radios + 1))
+			set -- $rest; su=$1; ofdma=$2; mumimo=$3
+			b="$(before_line "$before" fw "$phy")"; set -- $b
+			bsu=${3:-0}; bofdma=${4:-0}; bmumimo=${5:-0}
+			d_su=$(delta "$su" "$bsu"); d_ofdma=$(delta "$ofdma" "$bofdma"); d_mumimo=$(delta "$mumimo" "$bmumimo")
+			fw_su_total=$((fw_su_total + d_su)); fw_ofdma_total=$((fw_ofdma_total + d_ofdma)); fw_mumimo_total=$((fw_mumimo_total + d_mumimo))
+			printf 'phase=%s firmware=%s fw_hetrig_su=%s fw_hetrig_ofdma=%s fw_hetrig_mumimo=%s source=MURU_GET_TXC_TX_STATS semantics=txcmd-side-trigger-accounting\n' \
+				"$name" "$phy" "$d_su" "$d_ofdma" "$d_mumimo"
+			;;
+		peer)
+			set -- $rest; mac=$1
+			case "${2:-}" in malformed) printf 'phase=%s peer=%s status=malformed\n' "$name" "$mac"; continue ;; esac
+			wcid=$2; tb=$3; ofdma_ru=$4; full_bw=$5; shared=$6; data=$7; null=$8
+			b="$(before_line "$before" peer "$phy" "$mac")"; set -- $b
+			btb=${5:-0}; bofdma=${6:-0}; bfull=${7:-0}; bshared=${8:-0}; bdata=${9:-0}; bnull=${10:-0}
+			d_tb=$(delta "$tb" "$btb"); d_ofdma=$(delta "$ofdma_ru" "$bofdma"); d_full=$(delta "$full_bw" "$bfull")
+			d_shared=$(delta "$shared" "$bshared"); d_data=$(delta "$data" "$bdata"); d_null=$(delta "$null" "$bnull")
+			[ "$d_tb" -gt 0 ] && peers_with_tb=$((peers_with_tb + 1))
+			[ "$d_data" -ge "$min_peer_data" ] && peers_with_data=$((peers_with_data + 1))
+			[ "$d_shared" -gt 0 ] && peers_with_mumimo=$((peers_with_mumimo + 1))
+			rx=''
+			a_rx="$(awk -v m="$mac" '$1=="rxbytes" && $2==m {print $3; exit}' "$after")"
+			b_rx="$(awk -v m="$mac" '$1=="rxbytes" && $2==m {print $3; exit}' "$before")"
+			if is_uint "$a_rx" && is_uint "$b_rx"; then
+				rx=$(delta "$a_rx" "$b_rx")
+				upload_check=available
+				[ "$rx" -ge "$min_upload_bytes" ] && peers_uploading=$((peers_uploading + 1))
+			fi
+			printf 'phase=%s peer=%s radio=%s wcid=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_mumimo_shared=%s data_ppdu=%s nulldata_ppdu=%s rx_bytes_delta=%s\n' \
+				"$name" "$mac" "$phy" "$wcid" "$d_tb" "$d_ofdma" "$d_full" "$d_shared" "$d_data" "$d_null" "${rx:-unavailable}"
+			;;
 		esac
-		if [ "$with_firmware" = 1 ] && [ "$bg5" != "$g5" ]; then
-			printf 'radio=%s note=rxv-group5-state-changed-during-window before=%s after=%s\n' "$phy" "$bg5" "$g5"
-		fi
-		d_tb=$(delta "$tb" "$btb"); d_ofdma=$(delta "$ofdma_ru" "$bofdma")
-		d_full=$(delta "$full_bw" "$bfull"); d_og=$(delta "$og" "$bog"); d_mg=$(delta "$mg" "$bmg")
-		tb_total=$((tb_total + d_tb)); ofdma_total=$((ofdma_total + d_og)); mumimo_total=$((mumimo_total + d_mg))
-		printf 'radio=%s band=%s armed_mask=%s rxv_group5_enabled=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s max_peers_in_one_ppdu=%s\n' \
-			"$phy" "$band" "$armed" "$g5" "$d_tb" "$d_ofdma" "$d_full" "$d_og" "$d_mg" "$mp"
-		;;
-	fw)
-		case "$rest" in unavailable) printf 'firmware=%s status=unavailable-muru_stats-or-muru_debug\n' "$phy"; continue ;; esac
-		fw_radios=$((fw_radios + 1))
-		set -- $rest; fa=$1; fm=$2; fo=$3
-		# fw <phy> <all> <mumimo> <ofdma>
-		b="$(before_line fw "$phy")"; set -- $b
-		bfa=${3:-0}; bfm=${4:-0}; bfo=${5:-0}
-		d_fa=$(delta "$fa" "$bfa"); d_fm=$(delta "$fm" "$bfm"); d_fo=$(delta "$fo" "$bfo")
-		fw_all_total=$((fw_all_total + d_fa)); fw_mu_total=$((fw_mu_total + d_fm)); fw_ofdma_total=$((fw_ofdma_total + d_fo))
-		printf 'firmware=%s he_ul_tb_ppdu=%s he_mumimo_ul_tb_ppdu=%s he_ofdma_ul_tb_ppdu=%s source=MURU_GET_TXC_TX_STATS\n' \
-			"$phy" "$d_fa" "$d_fm" "$d_fo"
-		;;
-	peer)
-		set -- $rest; mac=$1
-		case "${2:-}" in malformed) printf 'peer=%s status=malformed\n' "$mac"; continue ;; esac
-		wcid=$2; tb=$3; ofdma_ru=$4; full_bw=$5; shared=$6
-		# peer <phy> <mac> <wcid> <tb> <ofdma_ru> <full_bw> <shared>
-		b="$(before_line peer "$phy" "$mac")"; set -- $b
-		btb=${5:-0}; bofdma=${6:-0}; bfull=${7:-0}; bshared=${8:-0}
-		d_tb=$(delta "$tb" "$btb"); d_ofdma=$(delta "$ofdma_ru" "$bofdma")
-		d_full=$(delta "$full_bw" "$bfull"); d_shared=$(delta "$shared" "$bshared")
-		[ "$d_tb" -gt 0 ] && peers_with_tb=$((peers_with_tb + 1))
-		[ "$d_shared" -gt 0 ] && peers_with_mumimo=$((peers_with_mumimo + 1))
-		printf 'peer=%s radio=%s wcid=%s he_tb_ppdu=%s ul_ofdma_ru=%s full_bw=%s ul_mumimo_shared=%s\n' \
-			"$mac" "$phy" "$wcid" "$d_tb" "$d_ofdma" "$d_full" "$d_shared"
-		;;
+	done < "$after"
+
+	printf 'phase=%s radios=%s peers_with_trigger_response=%s peers_with_data_ppdus=%s peers_with_ul_mumimo=%s peers_uploading=%s upload_check=%s\n' \
+		"$name" "$radios" "$peers_with_tb" "$peers_with_data" "$peers_with_mumimo" "$peers_uploading" "$upload_check"
+	printf 'phase=%s totals he_tb_ppdu=%s data_ppdu=%s nulldata_ppdu=%s multi_user_ppdus=%s multi_user_data_ppdus=%s mumimo_multi_user_ppdus=%s mumimo_multi_user_data_ppdus=%s\n' \
+		"$name" "$tb_total" "$data_total" "$null_total" "$groups_total" "$data_groups_total" "$mumimo_groups_total" "$mumimo_data_groups_total"
+	[ "$with_firmware" = 1 ] && printf 'phase=%s firmware_totals fw_hetrig_su=%s fw_hetrig_ofdma=%s fw_hetrig_mumimo=%s fw_hetrig_nonsu=%s radios_reporting=%s\n' \
+		"$name" "$fw_su_total" "$fw_ofdma_total" "$fw_mumimo_total" "$((fw_ofdma_total + fw_mumimo_total))" "$fw_radios"
+	[ -n "$state_changed" ] && printf 'phase=%s state_changed=%s\n' "$name" "${state_changed%,}"
+	return 0
+}
+
+# Control-phase results are kept for the comparison against the ul phase.
+ctl_fw_max=0; ctl_data_groups_max=0; ctl_groups_max=0; ctl_state_changed=''; ctl_run=0
+for name in $phases; do
+	measure_phase "$name"
+	case "$name" in
+		idle|dl)
+			ctl_run=1
+			fw_nonsu=$((fw_ofdma_total + fw_mumimo_total))
+			[ "$fw_nonsu" -gt "$ctl_fw_max" ] && ctl_fw_max=$fw_nonsu
+			[ "$data_groups_total" -gt "$ctl_data_groups_max" ] && ctl_data_groups_max=$data_groups_total
+			[ "$groups_total" -gt "$ctl_groups_max" ] && ctl_groups_max=$groups_total
+			[ -z "$state_changed" ] || ctl_state_changed="${ctl_state_changed}${name}:${state_changed}"
+			;;
 	esac
-done < "$tmp/after"
+done
+restore_muru_debug; restore_list=''
+restore_crxv; crxv_restore_list=''
 
-printf 'radios=%s peers_with_trigger_response=%s peers_with_ul_mumimo=%s\n' \
-	"$radios" "$peers_with_tb" "$peers_with_mumimo"
-printf 'totals he_tb_ppdu=%s ul_ofdma_multi_user_ppdus=%s ul_mumimo_multi_user_ppdus=%s\n' \
-	"$tb_total" "$ofdma_total" "$mumimo_total"
-[ "$with_firmware" = 1 ] && printf 'firmware_totals he_ul_tb_ppdu=%s he_mumimo_ul_tb_ppdu=%s he_ofdma_ul_tb_ppdu=%s radios_reporting=%s\n' \
-	"$fw_all_total" "$fw_mu_total" "$fw_ofdma_total" "$fw_radios"
-
+fw_nonsu_total=$((fw_ofdma_total + fw_mumimo_total))
 printf 'host_attribution=%s\n' "$([ "$radios_attributable" -gt 0 ] && printf 'available' || printf 'unavailable-rxv-group5-off')"
 
-# Host verdict first (client-attributed), then firmware corroboration.
+# ---------------------------------------------------------------------------
+# Verdict.  Validity first, then host-attributed evidence, then firmware.
+verdict=UNKNOWN
+reason=''
 if [ "$radios" -eq 0 ]; then
 	verdict=NO_ATTRIBUTION_NODES
-	printf 'reason=driver-lacks-the-uplink-attribution-patch-or-no-uplink-bit-is-armed\n'
-elif [ "$radios_attributable" -eq 0 ] && [ "$tb_total" -eq 0 ]; then
+	reason=driver-lacks-the-uplink-attribution-patch-or-no-uplink-bit-is-armed
+elif [ "$malformed_radios" -gt 0 ] && [ "$malformed_radios" -eq "$radios" ]; then
+	verdict=NO_ATTRIBUTION_NODES
+	reason=attribution-nodes-are-not-schema-2-driver-and-tool-do-not-match
+elif [ -n "$state_changed$ctl_state_changed" ]; then
+	verdict=INVALID_STATE_CHANGED_DURING_WINDOW
+	reason="$(printf '%s%s' "$ctl_state_changed" "$state_changed" | tr -d ' ')"
+elif [ "$radios_attributable" -eq 0 ]; then
 	# MT7915 cannot recognise a HE TB PPDU while RXD group 5 is off; the
 	# host counters are structurally zero here and must not be read as
 	# "the scheduler did not solicit".
 	verdict=HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF
-	printf 'reason=per-packet-phy-type-is-only-reported-with-crxv-use-enable-crxv-for-a-bounded-window-or-rely-on-firmware-hetrig-counters\n'
-elif [ "$mumimo_total" -gt 0 ] && [ "$peers_with_mumimo" -ge 2 ]; then
-	verdict=UL_MUMIMO_CLIENT_ATTRIBUTED
-elif [ "$ofdma_total" -gt 0 ] && [ "$peers_with_tb" -ge 2 ]; then
-	verdict=UL_OFDMA_CLIENT_ATTRIBUTED
+	reason=per-packet-phy-type-is-only-reported-with-crxv-use-enable-crxv-for-a-bounded-window-or-rely-on-firmware-hetrig-counters
+elif [ "$with_firmware" = 1 ] && [ "$fw_radios" -gt 0 ] && [ "$data_groups_total" -gt "$fw_nonsu_total" ]; then
+	verdict=INCONCLUSIVE_HOST_EXCEEDS_FIRMWARE
+	reason=host-counted-more-multi-user-data-ppdus-than-the-firmware-reports-non-su-triggers
+elif [ "$data_groups_total" -ge "$min_data_groups" ] && [ "$peers_with_data" -ge 2 ] &&
+     { [ "$upload_check" = unavailable ] || [ "$peers_uploading" -ge 2 ]; }; then
+	if [ "$ctl_run" = 1 ] && [ "$data_groups_total" -lt $((ctl_data_groups_max * control_factor)) ]; then
+		verdict=INCONCLUSIVE_CONTROL_PHASE_NOT_EXCEEDED
+		reason="ul-phase-multi-user-data-ppdus-$data_groups_total-below-${control_factor}x-control-max-$ctl_data_groups_max"
+	elif [ "$with_firmware" = 1 ] && [ "$fw_radios" -gt 0 ] && [ "$fw_nonsu_total" -lt "$min_fw_nonsu" ]; then
+		verdict=INCONCLUSIVE_FIRMWARE_TRIGGER_COUNT_BELOW_MINIMUM
+		reason="firmware-non-su-triggers-$fw_nonsu_total-below-$min_fw_nonsu"
+	elif [ "$with_firmware" = 1 ] && [ "$fw_radios" -gt 0 ] && [ "$ctl_run" = 1 ] &&
+	     [ "$fw_nonsu_total" -lt $((ctl_fw_max * control_factor)) ]; then
+		verdict=INCONCLUSIVE_CONTROL_PHASE_NOT_EXCEEDED
+		reason="ul-phase-firmware-non-su-triggers-$fw_nonsu_total-below-${control_factor}x-control-max-$ctl_fw_max"
+	elif [ "$mumimo_data_groups_total" -ge "$min_data_groups" ] && [ "$peers_with_mumimo" -ge 2 ] &&
+	     { [ "$with_firmware" = 0 ] || [ "$fw_radios" -eq 0 ] || [ "$fw_mumimo_total" -ge "$min_data_groups" ]; }; then
+		verdict=UL_MUMIMO_FULL_BW_DATA_MULTI_USER_OBSERVED_ON_DEVICE
+	else
+		verdict=UL_OFDMA_DATA_MULTI_USER_OBSERVED_ON_DEVICE
+	fi
+elif [ "$groups_total" -gt 0 ] && [ "$data_groups_total" -eq 0 ]; then
+	verdict=BSR_POLL_RESPONSES_ONLY
+	reason=multi-user-ppdus-seen-but-none-carried-data-from-two-peers-clients-answer-bsr-polls-not-uploading
+elif [ "$data_groups_total" -gt 0 ] || [ "$groups_total" -gt 0 ]; then
+	verdict=INSUFFICIENT_MULTI_USER_DATA_PPDUS
+	reason="multi-user-data-ppdus-$data_groups_total-peers-with-data-$peers_with_data-uploading-$peers_uploading-below-thresholds"
 elif [ "$tb_total" -gt 0 ]; then
-	verdict=TRIGGER_RESPONSE_ONLY_NO_MULTI_USER_PPDU_YET
-	printf 'reason=peers-answer-triggers-but-no-two-peers-shared-one-uplink-ppdu\n'
+	verdict=TRIGGER_RESPONSE_SINGLE_USER_ONLY
+	reason=peers-answer-triggers-but-no-two-peers-shared-one-uplink-ppdu
 else
-	verdict=NO_TRIGGER_RESPONSE_OBSERVED
-	printf 'reason=no-he-tb-ppdu-seen-run-simultaneous-uploads-from-two-he-clients\n'
+	verdict=NO_TRIGGER_ACTIVITY
+	reason=no-he-tb-ppdu-seen-run-simultaneous-uploads-from-two-he-clients
 fi
+[ -n "$reason" ] && printf 'reason=%s\n' "$reason"
 
 if [ "$with_firmware" = 1 ] && [ "$radios" -gt 0 ]; then
 	if [ "$fw_radios" -eq 0 ]; then
@@ -361,32 +573,34 @@ if [ "$with_firmware" = 1 ] && [ "$radios" -gt 0 ]; then
 	else
 		case "$verdict" in
 		HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF)
-			if [ "$fw_mu_total" -gt 0 ]; then
-				corroboration=FIRMWARE_ONLY_UL_MUMIMO_TB_PPDUS_SEEN
-			elif [ "$fw_ofdma_total" -gt 0 ]; then
-				corroboration=FIRMWARE_ONLY_UL_OFDMA_TB_PPDUS_SEEN
-			elif [ "$fw_all_total" -gt 0 ]; then
-				corroboration=FIRMWARE_ONLY_SU_TRIGGER_RESPONSES_SEEN
+			if [ "$fw_mumimo_total" -ge "$min_fw_nonsu" ]; then
+				corroboration=FIRMWARE_ONLY_UL_MUMIMO_TRIGGERS_SEEN
+			elif [ "$fw_ofdma_total" -ge "$min_fw_nonsu" ]; then
+				corroboration=FIRMWARE_ONLY_UL_OFDMA_TRIGGERS_SEEN
+			elif [ "$fw_nonsu_total" -gt 0 ] || [ "$fw_su_total" -gt 0 ]; then
+				corroboration=FIRMWARE_ONLY_TRIGGERS_BELOW_MINIMUM
 			else
 				corroboration=FIRMWARE_AGREES_NOTHING_SCHEDULED
 			fi ;;
-		UL_MUMIMO_CLIENT_ATTRIBUTED)
-			[ "$fw_mu_total" -gt 0 ] && corroboration=FIRMWARE_CORROBORATED || corroboration=FIRMWARE_DISAGREES_MUMIMO_COUNTER_ZERO ;;
-		UL_OFDMA_CLIENT_ATTRIBUTED)
+		UL_MUMIMO_FULL_BW_DATA_MULTI_USER_OBSERVED_ON_DEVICE)
+			corroboration=FIRMWARE_CORROBORATED ;;
+		UL_OFDMA_DATA_MULTI_USER_OBSERVED_ON_DEVICE)
 			[ "$fw_ofdma_total" -gt 0 ] && corroboration=FIRMWARE_CORROBORATED || corroboration=FIRMWARE_DISAGREES_OFDMA_COUNTER_ZERO ;;
-		TRIGGER_RESPONSE_ONLY_NO_MULTI_USER_PPDU_YET)
-			[ "$fw_all_total" -gt 0 ] && corroboration=FIRMWARE_CORROBORATED || corroboration=FIRMWARE_DISAGREES_TB_COUNTER_ZERO ;;
+		TRIGGER_RESPONSE_SINGLE_USER_ONLY|BSR_POLL_RESPONSES_ONLY|INSUFFICIENT_MULTI_USER_DATA_PPDUS)
+			[ $((fw_su_total + fw_nonsu_total)) -gt 0 ] && corroboration=FIRMWARE_CORROBORATED || corroboration=FIRMWARE_DISAGREES_TRIGGER_COUNTER_ZERO ;;
+		NO_TRIGGER_ACTIVITY)
+			[ $((fw_su_total + fw_nonsu_total)) -gt 0 ] && corroboration=FIRMWARE_SAW_TRIGGERS_HOST_DID_NOT || corroboration=FIRMWARE_AGREES_NOTHING_SCHEDULED ;;
 		*)
-			[ "$fw_all_total" -gt 0 ] && corroboration=FIRMWARE_SAW_TB_PPDUS_HOST_DID_NOT || corroboration=FIRMWARE_AGREES_NOTHING_SCHEDULED ;;
+			corroboration=NOT_EVALUATED ;;
 		esac
 	fi
 	printf 'firmware_corroboration=%s\n' "$corroboration"
 	case "$corroboration" in FIRMWARE_DISAGREES*|FIRMWARE_SAW*)
 		printf 'note=host-and-firmware-counters-disagree-treat-the-result-as-inconclusive\n' ;;
 	FIRMWARE_ONLY_*)
-		printf 'note=firmware-aggregate-counters-prove-the-scheduler-solicited-uplink-airtime-but-cannot-attribute-it-to-a-client\n' ;;
+		printf 'note=firmware-aggregate-trigger-counters-cannot-attribute-to-a-client-and-do-not-prove-tb-reception\n' ;;
 	esac
 fi
 
 printf 'verdict=%s\n' "$verdict"
-printf 'evidence_boundary=host-observed-scheduling-evidence-not-an-rf-regulatory-or-throughput-measurement\n'
+printf 'evidence_boundary=observed-on-this-device-in-this-window-not-a-support-certification-rf-or-regulatory-claim\n'

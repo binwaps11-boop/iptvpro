@@ -147,6 +147,7 @@ run_full() {
 		CR6608_UL_MURU_MODULE_FILE="$TMP/module-file" \
 		CR6608_UL_MURU_MODULE_PARAM="$TMP/legacy-param" \
 		CR6608_MURU_MASK_MODULE_PARAM="$TMP/mask-param" \
+		CR6608_UL_ADVERTISE_MODULE_PARAM="$TMP/advertise-param" \
 		CR6608_UL_MURU_DEBUG_ROOT="$DEBUG" \
 		CR6608_UL_MURU_GUARD_INIT="$BIN/guard-init" \
 		CR6608_UL_MURU_GUARD_STATE_FILE="$TMP/guard-state.json" \
@@ -177,6 +178,22 @@ printf '{"state":"armed","reason":"test","time":%s}\n' "$now" >"$TMP/guard-state
 run_state 1
 [ "$state_rc" -eq 0 ] && [ "$state_output" = armed ] ||
 	fail 'fresh mask-15 state with a running guard did not pass'
+# Vendor parity (patch 09 default): armed with B22 OFF in the beacon and
+# cr6608_advertise_ul_mumimo=N must pass; the pre-09 assumption "armed
+# implies B22" would fail every shipped ul-lab unit by construction.
+printf 'N\n' >"$TMP/advertise-param"
+run_full 1 0
+[ "$full_rc" -eq 0 ] && printf '%s\n' "$full_output" |
+	grep -qx 'RESULT_UL_MURU_MASK=15' || fail 'full verifier rejected armed vendor-parity state (B22 off, advertise=N)'
+printf '%s\n' "$full_output" | grep -qx 'RESULT_UL_MUMIMO_B22_ADVERTISEMENT=not-advertised-vendor-parity' ||
+	fail 'full verifier does not print the B22 expectation it applied'
+# B22 present while the driver said it would not advertise it: mismatch.
+run_full 1 1
+[ "$full_rc" -ne 0 ] || fail 'full verifier accepted B22 in the beacon against advertise=N'
+# Operator opt-in: advertise=Y requires the B22 line, and accepts it.
+printf 'Y\n' >"$TMP/advertise-param"
+run_full 1 0
+[ "$full_rc" -ne 0 ] || fail 'full verifier accepted a missing B22 line against advertise=Y'
 run_full 1 1
 [ "$full_rc" -eq 0 ] && printf '%s\n' "$full_output" |
 	grep -qx 'RESULT_UL_MURU_MASK=15' || fail 'full verifier rejected valid mask-15 qualification state'

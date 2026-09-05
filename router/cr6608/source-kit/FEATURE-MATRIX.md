@@ -125,7 +125,7 @@
 ## مصادر أساسية
 
 - OpenWrt 25.12.5: <https://github.com/openwrt/openwrt/releases/tag/v25.12.5>
-- مولد hostapd الرسمي: <https://github.com/openwrt/openwrt/blob/v25.12.5/package/network/config/wifi-scripts/files/lib/netifd/hostapd.sh>
+- مولد hostapd المثبّت فعلياً (ucode، `CONFIG_WIFI_SCRIPTS_UCODE=y` الافتراضي): <https://github.com/openwrt/openwrt/blob/v25.12.5/package/network/config/wifi-scripts/files-ucode/usr/share/ucode/wifi/hostapd.uc> مع مخطط القيم الافتراضية <https://github.com/openwrt/openwrt/blob/v25.12.5/package/network/config/wifi-scripts/files-ucode/usr/share/schema/wireless.wifi-device.json> (مولد الصدفة `files/lib/netifd/hostapd.sh` لا يُثبَّت في هذه الصورة)
 - إعدادات Wi‑Fi: <https://openwrt.org/docs/guide-user/network/wifi/basic>
 - التجوال وusteer: <https://openwrt.org/docs/guide-user/network/wifi/roaming> و<https://openwrt.org/docs/guide-user/network/wifi/usteer>
 - SQM: <https://openwrt.org/docs/guide-user/network/traffic-shaping/sqm>

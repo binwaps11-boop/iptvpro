@@ -40,11 +40,18 @@ Driver (`patches/`), both host-side only, no new firmware command:
 - `zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch`
 - `zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch`
 - `zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch`
+- `zzzzzz-11-mt7915-cr6608-muru-record-serialisation.patch`
+- `zzzzzz-12-mt7915-cr6608-muru-he-dcm-max-ru-upstream-e5932438.patch`
+- `zzzzzz-13-mt7915-cr6608-muru-recovery-lifecycle.patch`
+- `zzzzzz-14-mt7915-cr6608-muru-ul-attribution-v2.patch`
+- `994-mt76-makefile-mac80211-debugfs.patch` (OpenWrt tree: forwards
+  `CONFIG_PACKAGE_MAC80211_DEBUGFS` to the mt76 build; without it the
+  per-station debugfs nodes are compiled out on every OpenWrt image)
 
 Build wiring:
 
 - `build.sh` / `build.remote.sh`: the two patches added to
-  `SRC_MURU_PORT_PATCHES`, the ordered-patch count raised from five to ten,
+  `SRC_MURU_PORT_PATCHES`, the ordered-patch count raised from five to fourteen,
   and the two new source gates registered and executed.
 
 Tests:

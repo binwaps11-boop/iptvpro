@@ -73,6 +73,7 @@ jobs:
                    tests/test-muru-fault-attribution.sh \
                    tests/test-muru-live-refresh.sh \
                    tests/test-muru-vendor-parity.sh \
+                   tests/test-muru-record-serialisation.sh \
                    tests/test-ul-mu-evidence-runtime.sh \
                    tests/test-ax-feature-contracts.sh \
                    tests/test-release-package-contract.sh \
@@ -98,6 +99,12 @@ jobs:
           # -F0: no fuzz. If upstream moved, we want a hard failure, not a
           # silently misplaced hunk.
           patch -p1 -F0 < "$KIT/patches/996-cr6608-dts-rf-38dbm-lab-mode.patch"
+          # The mt76 package never passes CONFIG_MAC80211_DEBUGFS to the
+          # driver build, so without this the per-station debugfs nodes
+          # (and the kit's per-peer uplink attribution) are compiled out
+          # even with CONFIG_PACKAGE_MAC80211_DEBUGFS=y.
+          patch -p1 -F0 < "$KIT/patches/994-mt76-makefile-mac80211-debugfs.patch"
+          grep -n 'CONFIG_MAC80211_DEBUGFS' package/kernel/mt76/Makefile
           case "${{ inputs.profile }}" in
             ul-lab|ul-forced-lab)
               patch -p1 -F0 < "$KIT/patches/996a-cr6608-dts-ul-muru-ram-gate.patch"
@@ -137,7 +144,11 @@ jobs:
                    zzzzzz-07-mt7915-cr6608-muru-ul-tb-attribution.patch \
                    zzzzzz-08-mt7915-cr6608-muru-live-refresh.patch \
                    zzzzzz-09-mt7915-cr6608-muru-uniform-cfg-vendor-parity.patch \
-                   zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch; do
+                   zzzzzz-10-mt7915-cr6608-muru-evidence-honesty.patch \
+                   zzzzzz-11-mt7915-cr6608-muru-record-serialisation.patch \
+                   zzzzzz-12-mt7915-cr6608-muru-he-dcm-max-ru-upstream-e5932438.patch \
+                   zzzzzz-13-mt7915-cr6608-muru-recovery-lifecycle.patch \
+                   zzzzzz-14-mt7915-cr6608-muru-ul-attribution-v2.patch; do
             cp -v "$KIT/patches/$p" "$DEST/$p"
           done
           ls -la "$DEST"
@@ -221,17 +232,20 @@ jobs:
           [ -n "$KO" ] || { echo "::error::mt7915e.ko not found"; exit 1; }
           echo "mt7915e.ko: $KO"
           MISSING=0
-          # OpenWrt installs a STRIPPED module: the __param_<name> ELF symbol
-          # names are gone, but each module parameter still leaves its
-          # 'parm=<name>:<description>' record in .modinfo, and that record
-          # only exists if the module_param() line was compiled in.
+          # OpenWrt installs a STRIPPED module and additionally builds the
+          # kernel with MODULE_STRIPPED (target/linux/generic/hack-*/
+          # 204-module_strip.patch), which drops the 'parm=' modinfo records
+          # too.  What survives is the parameter's name string, which the
+          # kernel_param table references at runtime for
+          # /sys/module/mt7915e/parameters/<name>; it only exists if the
+          # module_param() line was compiled in.
           for parm in cr6608_rf_38dbm \
                       cr6608_muru_mask \
                       cr6608_advertise_ul_mumimo \
                       cr6608_rf_band0_sku_applied_per_path_half_dbm \
                       cr6608_rf_band1_sku_applied_per_path_half_dbm \
                       cr6608_factory38_persisted_match; do
-            if strings -a "$KO" | grep -q "^parm=$parm:"; then
+            if strings -a "$KO" | grep -qx "$parm"; then
               echo "  OK   parm=$parm"
             else
               echo "  MISS parm=$parm"; MISSING=1
@@ -242,6 +256,11 @@ jobs:
           # not depend on any optional kernel config.
           for s in "cr6608_ul_attribution" \
                    "ul_mumimo_multi_user_ppdus" \
+                   "ul_mumimo_multi_user_data_ppdus" \
+                   "he_tb_nulldata_ppdu" \
+                   "exercised_since_rearm" \
+                   "sta_rec_stale" \
+                   "ul_hetrig_gtr16ru=" \
                    "unattributed_disarms" \
                    "upstream_dl_floor" \
                    "strike_limit" \
@@ -255,10 +274,10 @@ jobs:
               echo "  MISS $s"; MISSING=1
             fi
           done
-          # The per-peer nodes are compiled only when mac80211 debugfs is on.
-          # OpenWrt's kmod-mac80211 leaves it OFF by default; the kit's seed
-          # config sets CONFIG_PACKAGE_MAC80211_DEBUGFS=y precisely so these
-          # nodes exist. If they are missing the seed was not honoured.
+          # The per-peer nodes are compiled only when the driver build sees
+          # CONFIG_MAC80211_DEBUGFS: the seed enables the package option and
+          # the kit's 994 Makefile patch forwards it to mt76.  If they are
+          # missing, one of the two was not honoured.
           for s in "he_tb_ul_mumimo_shared" "cr6608_muru_capabilities"; do
             if strings -a "$KO" | grep -qF "$s"; then
               echo "  OK   $s (per-peer)"

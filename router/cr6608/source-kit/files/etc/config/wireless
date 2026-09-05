@@ -9,7 +9,10 @@
 #   short_gi_*                -> short guard interval: higher rates for ac/n clients
 #   distance is omitted       -> netifd/driver default ACK timing; the invalid
 #                                legacy string "auto" is removed during apply
-#   he_spr_sr_control         -> advertise AX spatial-reuse support when the driver accepts it
+#   he_spr_sr_control '3'     -> Spatial Reuse Parameter Set element with PSR (bit0) and
+#                                non-SRG OBSS-PD (bit1) spatial reuse DISALLOWED; hostapd
+#                                emits SR Control 7 (offset present) and the Non-SRG
+#                                offset is carried but inert.  Nothing here allows OBSS-PD.
 config wifi-device 'radio0'
 	option type 'mac80211'
 	option path '1e140000.pcie/pci0000:00/0000:00:01.0/0000:02:00.0'

@@ -51,7 +51,7 @@ Three primitives replace the single latch:
 | `mt7915_cr6608_muru_lower_ceiling()` | via caller | no | yes |
 
 Every recovery still takes the scheduler down before the firmware is reset, so
-no scheduler bit can survive into a reset — the fail-closed property of v86 is
+no scheduler bit survives a FULL reset, and after a partial reset (firmware records preserved) every record is replayed with the live mask (patch 11) — the fail-closed property of v86 is
 unchanged. What changed is *who gets blamed*:
 
 - **Watchdog reset** (`MT_MCU_CMD_WDT_MASK` in `mt7915_reset()` and in
@@ -187,47 +187,81 @@ recoveries *inside* the window still latch.
 disarm happens (including the tasklet path of `mt7915_reset()`), with a plain
 `WRITE_ONCE`.
 
-## Two-source on-device proof (`cr6608-ul-mu-evidence --with-firmware`)
+## Two-source on-device proof (`cr6608-ul-mu-evidence` v4)
 
-The evidence tool has two modes.
+The evidence tool reads two independent sources and names which agreed.
 
-`cr6608-ul-mu-evidence` (cumulative) reads the host-side per-WCID counters
-from patch 07 and answers from them alone.
+**Host** (patches 07/14, `schema=2`): per-WCID accounting of HE trigger-based
+PPDUs from the RX descriptors. A HE TB PPDU exists only as a response to a
+Trigger frame this AP sent, and the descriptor carries the sender's WCID.
+Counters are deduplicated per (peer, PHY start time); `he_tb_mpdu` keeps the
+raw descriptor count. Data-bearing PPDUs (`he_tb_data_ppdu`) are split from
+the QoS-Null responses that the firmware's BSR polls solicit from idle peers
+(`he_tb_nulldata_ppdu`): both are trigger evidence, only the first is uplink
+data scheduling. `ul_{ofdma,mumimo}_multi_user_data_ppdus` count a PPDU once
+two distinct peers have each contributed a data frame to it.
 
-`cr6608-ul-mu-evidence --with-firmware [--window SECONDS]` adds the second,
-independent source: the MURU statistics the closed firmware itself reports
-through `MURU_GET_TXC_TX_STATS` (`struct mt7915_mcu_muru_stats.ul`:
-`hetrig_su_cnt`, `hetrig_2ru…gtr16ru_cnt`, `hetrig_2mu/3mu/4mu_cnt`), which
-`muru_stats` prints as `Total HE OFDMA UL TB PPDU count`, `Total HE MU-MIMO UL
-TB PPDU count` and `All HE UL TB PPDU count`. These are the firmware's own
-counts of the trigger-based PPDUs it received — that is, of the uplink
-transmissions it scheduled. The tool enables `muru_debug` for the window
-(the statistics are only produced while it is on) and restores the previous
-value on every exit path.
+**Firmware** (`--with-firmware`): `MURU_GET_TXC_TX_STATS` (sub-command 151,
+enable 150; clear-on-read, per band). `muru_stats` prints the table upstream
+prints and, from patch 14, one `key=value` line per counter (`ul_hetrig_su`,
+`ul_hetrig_2ru…gtr16ru`, `ul_hetrig_2mu…4mu`, `dl_he_*`). These are the
+firmware's TX-command-side accounting of HE trigger transactions, bucketed by
+the allocation each trigger solicited. Whether a bucket increments on trigger
+transmission or on TB reception is not determinable from host-visible source
+(firmware symbols `muruCmdrptTrigHandle`, `_whTxCmdGetTxTrigReport_Falcon`);
+the host attribution is the only source that proves a TB PPDU was received.
+`hetrig_su` (single-user triggers) is reported and never counts towards a
+multi-user verdict. The tool always re-writes `muru_debug` (the debugfs write
+re-sends the enable, which a firmware reload silently drops) and restores the
+previous value on every exit path; patch 13 also re-sends it after a reload.
 
 Everything in window mode is a **delta over the window**, so counters that
-were already high before the test cannot count as activity. The verdict is
-still decided by the client-attributed host counters (two distinct peers in
-one PPDU), and the firmware counters are reported as corroboration:
+were already high before the test cannot count as activity. Armed mask, RXD
+group-5 state and the firmware reset counters (`sys_recovery`) must not change
+inside the window, otherwise `INVALID_STATE_CHANGED_DURING_WINDOW`.
 
-| host verdict | firmware delta | reported |
-|---|---|---|
-| `UL_MUMIMO_CLIENT_ATTRIBUTED` | `he_mumimo_ul_tb_ppdu > 0` | `FIRMWARE_CORROBORATED` |
-| `UL_OFDMA_CLIENT_ATTRIBUTED` | `he_ofdma_ul_tb_ppdu > 0` | `FIRMWARE_CORROBORATED` |
-| any host activity | matching counter `0` | `FIRMWARE_DISAGREES_*` + `inconclusive` |
-| no host activity | `he_ul_tb_ppdu > 0` | `FIRMWARE_SAW_TB_PPDUS_HOST_DID_NOT` + `inconclusive` |
-| no host activity | `0` | `FIRMWARE_AGREES_NOTHING_SCHEDULED` |
-| — | `muru_stats` missing | `FIRMWARE_STATS_UNAVAILABLE` |
+### Procedure
 
-A disagreement is never resolved in favour of the stronger claim.
+Two HE clients, both able to upload at the same time. On the router:
 
-Procedure that cannot be satisfied by one client or by downlink-only traffic:
-two HE clients that advertise full-bandwidth UL MU-MIMO, both uploading at
-the same time to the AP (e.g. `iperf3 -R` from the router side, or two
-uploads), then `cr6608-ul-mu-evidence --with-firmware --window 60`. Expected
-on a working uplink scheduler: `verdict=UL_OFDMA_CLIENT_ATTRIBUTED` or
-`verdict=UL_MUMIMO_CLIENT_ATTRIBUTED` with `firmware_corroboration=FIRMWARE_CORROBORATED`.
-Anything else is reported as exactly what it is.
+```
+cr6608-ul-mu-evidence --with-firmware --enable-crxv --phases idle,dl,ul --window 60
+```
+
+The tool prompts once per phase (or `--hook CMD` runs `CMD hook <phase>` at
+each phase start, `--auto` skips the prompts): `idle` with no client traffic,
+`dl` with both clients downloading only (`iperf3 -c <router> -R`), `ul` with
+both clients uploading (`iperf3 -c <router>`). Each phase is the same window.
+`--enable-crxv` turns RXD group 5 on for the run only; without it the host
+side is `unavailable` on MT7915 and the verdict is at most `FIRMWARE_ONLY_*`.
+
+Pass criteria, all evaluated on the `ul` phase (thresholds are heuristics,
+overridable through `CR6608_UL_MU_MIN_*`; a profile never lowers them):
+
+| criterion | default |
+|---|---|
+| multi-user **data** PPDUs on the host | ≥ 10, from ≥ 2 distinct peers each with ≥ 10 data PPDUs |
+| per-peer upload volume (when `iw` is available) | ≥ 1 MiB received from each of ≥ 2 peers |
+| firmware non-SU triggers (`ofdma + mumimo`) | ≥ 20 |
+| host multi-user data PPDUs vs firmware non-SU triggers | host ≤ firmware, else `INCONCLUSIVE_HOST_EXCEEDS_FIRMWARE` |
+| control phases | `ul` ≥ 3 × max(idle, dl) for both host data groups and firmware non-SU triggers |
+| UL MU-MIMO specifically | ≥ 10 full-bandwidth multi-user data PPDUs, ≥ 2 credited peers, firmware `mumimo ≥ 10` |
+
+Verdicts: `UL_OFDMA_DATA_MULTI_USER_OBSERVED_ON_DEVICE`,
+`UL_MUMIMO_FULL_BW_DATA_MULTI_USER_OBSERVED_ON_DEVICE`,
+`BSR_POLL_RESPONSES_ONLY` (multi-user PPDUs, none carrying data from two
+peers: clients answer polls, nobody uploads), `INSUFFICIENT_MULTI_USER_DATA_PPDUS`,
+`TRIGGER_RESPONSE_SINGLE_USER_ONLY`, `NO_TRIGGER_ACTIVITY`,
+`HOST_ATTRIBUTION_UNAVAILABLE_RXV_GROUP5_OFF`, `INCONCLUSIVE_*`, `INVALID_*`,
+`NO_ATTRIBUTION_NODES`. Firmware corroboration is reported alongside
+(`FIRMWARE_CORROBORATED`, `FIRMWARE_DISAGREES_*`, `FIRMWARE_SAW_TRIGGERS_HOST_DID_NOT`,
+`FIRMWARE_ONLY_*`, `FIRMWARE_AGREES_NOTHING_SCHEDULED`, `FIRMWARE_STATS_UNAVAILABLE`).
+A disagreement is never resolved in favour of the stronger claim, and the
+footer states the boundary: observed on this device in this window; not a
+support certification, RF or regulatory claim.
+
+`--window 0` without `--with-firmware` prints cumulative counters since boot
+(no deltas, no stability checks) for a quick look.
 
 ## Patch 09 — uniform per-peer cfg bits and boot-frozen, vendor-parity B22
 
@@ -346,3 +380,103 @@ flagged because none of this evidence contract has been checked against it.
 `e4823530` dropped the `he_ext_su_cnt` accumulation in
 `mt7915_mcu_muru_debug_get()`, so the `HE EXT` column and the HE DL total in
 `muru_stats` were wrong on every mt7915. Patch 10 restores it.
+
+## Patch 11 — record serialisation and in-flight attribution
+
+An adversarial re-read of patches 06 and 08 against `mac80211.c`
+(`mt76_sta_state`: only `sta_add`/`sta_remove` hold `dev->mt76.mutex`; the
+ASSOC/AUTHORIZE/DISASSOC events do not) and against the `mt7996` driver
+found four defects in the live refresh. All four are host-side; no MCU
+command or firmware field changes.
+
+### 1. The replay raced the station lifecycle
+
+`mt7915_mac_sta_rc_work` replayed a record without `dev->mt76.mutex`, and
+`mt7915_mac_sta_event` wrote `cr6608_conn_state` without it. Two orderings
+were possible: a replay snapshotted as `CONNECT` landing after `AUTHORIZE`
+(the firmware then holds a downgraded record that mac80211 never repeats,
+exactly the premise stated in `mt7915.h`), or a replay landing after
+`DISASSOC`/removal (a connected record re-created for a WCID mac80211 is
+tearing down, touching an `msta` about to be freed). Both now hold
+`dev->mt76.mutex`, as `mt7996_mac_sta_event` / `mt7996_mac_sta_rc_work` do;
+the DISASSOC path's inner lock around the TWT teardown became part of the
+outer critical section. Lock order stays wiphy → `dev->mt76.mutex`; nothing
+holds the mutex while waiting for `rc_work`.
+
+### 2. A host mask change was being booked as firmware evidence
+
+`__mt7915_mcu_add_sta` spent the permanent latch and forced a full reset
+when the live mask was lowered between TLV build and send, between send and
+response, or when the send failed for any reason. None of those is scheduler
+evidence:
+
+| Situation | Before | Now |
+|---|---|---|
+| mask lowered before the send (operator write, kill switch, a recovery's own disarm) | latch + full reset, `-ECANCELED` (fails the association) | record rebuilt from the live mask (bounded by `CR6608_MURU_STA_REC_REBUILDS`); `sta_rec_stale++` |
+| mask lowered while the record was in flight | latch + full reset | acknowledged record re-queued for a live replay via `mt7915_cr6608_muru_queue_refresh()`; `sta_rec_stale++` |
+| send failed while `MT76_MCU_RESET` is set or `mt7915_recovery_pending()` | latch + full reset | failure counted; attribution belongs to the recovery already in flight (watchdog → latch in `reset_work`, otherwise disarm + strike) |
+| send failed with no recovery pending | latch + full reset | unchanged |
+
+The same gate applies to the `STA_REC_UPDATE` timeout in
+`mt7915_mcu_parse_response`: `mt76_mcu_get_response` wakes early when
+`MT76_MCU_RESET` is set, so a `NULL` response in that window is the reset,
+not a hung scheduler. Reproduction that used to latch MU-RU for the uptime
+and drop every client: `echo 7 > cr6608_muru_mask; echo 3 > cr6608_muru_mask`
+with several HE peers (the second write lands during the first write's
+replay burst).
+
+### 3. A refused re-arm left firmware records armed
+
+`reset_work` disarms on entry; after a verified partial reset the station
+records survive with the bits they were sent with. The replay was only
+issued inside `if (muru_rearmed)`, so a refused re-arm (latched, strikes
+exhausted, operator kill during the reset) left every surviving record with
+`ofdma_ul_en`/`mimo_ul_en` set while `cr6608_ul_muru_state` reported mask 0.
+The replay now runs after every verified partial reset (reason
+`partial reset re-arm` or `partial reset without re-arm`), converging in both
+directions.
+
+### 4. A replay that met a reset window was dropped
+
+`rc_work` cleared `msta->changed` before its reset check and re-queued
+nothing; it also tested only band 0's state. `MT76_RESET` can stay set on a
+band with `MT76_MCU_RESET` clear until the post-reset SKU witness releases it
+(`mt7915_reconfig_tx_release`), so a kill switch or mask write in that window
+reached no live record. A replay that meets a reset window (checked on the
+peer's own phy) is now parked back on `sta_rc_list` with the refresh bit set,
+and `mt7915_reconfig_tx_release` queues `rc_work` when it releases the band.
+A full reset re-initialises `sta_rc_list` by design: mac80211 replays every
+station from scratch with the re-armed mask.
+
+## Patch 12 — upstream `e59324380042` (HE DCM max-RU)
+
+`mt7915_mcu_sta_he_tlv` and `mt76_connac_mcu_sta_he_tlv` assigned
+`dcm_rx_max_nss` twice and never wrote `dcm_max_ru`, so every DCM-capable HE
+peer was registered with a wrong RX NSS and `dcm_max_ru = 0`. Felix Fietkau's
+fix is on mt76 master but not an ancestor of the `39c960c3` pin, so OpenWrt
+25.12.5 and MediaTek's 25.12 feed both carry the bug. It affects the
+firmware's DCM trigger MCS choice for those peers; it is a correctness fix,
+not the cause of an absent uplink. The backport is verbatim.
+
+## Decisions recorded from the audit (no code change)
+
+- `cfg.mimo_ul_en` is **not** gated on the BSS's transmitted B22
+  (`bss_conf.he_full_ul_mumimo`). Vendor parity — the only configuration
+  MediaTek shipped and tested on this firmware — requests `mimo_ul_en` per
+  peer with the AP B22 bit absent (`0099:1960`, `0099:3843-3845`), and the
+  normative scheduling constraint is the peer's B22, which the driver already
+  forwards in `mimo_ul.full_ul_mimo`. Gating on the AP bit would silently
+  disable UL MU-MIMO in the default (vendor-parity) build.
+- No further AP-side UL/MU capability bits are advertised (TRS, MU cascading,
+  UORA, NDP feedback, triggered CQI, BSRP/BQRP aggregation, UL 2×996 RU,
+  partial-BW UL MU-MIMO): no chip in this driver and no MediaTek build sets
+  them, the STA_REC path consumes only the peer's values, and there is no
+  firmware evidence for the AP side. Partial-BW UL MU-MIMO is ruled out by
+  `a2838480`.
+- No `hostapd.conf` key exists for UL OFDMA / UL MU-MIMO; the generator that
+  is actually installed is the ucode one
+  (`files-ucode/usr/share/ucode/wifi/hostapd.uc`), which emits the MU EDCA
+  element with the OpenWrt schema defaults. `cr6608-ax-verify` therefore no
+  longer keys the DL OFDMA gate on MU EDCA (an uplink element) and checks
+  that the AP's B22 in the beacon matches the driver's boot-frozen decision
+  (`cr6608_advertise_ul_mumimo`) rather than assuming "armed implies B22".

@@ -1,0 +1,421 @@
+mt7915: CR6608 uplink trigger-based attribution accounting v2
+
+Corrects three defects in the patch-07 host accounting that the on-device
+evidence verdicts depend on, plus two guards, and adds machine-readable
+firmware statistics:
+
+1. he_tb_ppdu / he_tb_full_bw / he_tb_ul_ofdma_ru counted RX descriptors
+   (MPDUs of an A-MPDU and hardware-deaggregated A-MSDU subframes), not
+   PPDUs.  They are now deduplicated per (peer, RXD group-2 PHY start
+   time); the raw descriptor count is kept as he_tb_mpdu.
+
+2. Full-bandwidth UL MU-MIMO credit (he_tb_ul_mumimo_shared) went only to
+   the peer whose frame completed the two-peer group, so with two clients
+   the "two credited peers" verdict depended on delivery order.  Every peer
+   of a recognised group is now credited (the first by WCID lookup under
+   the NAPI RCU read side; third/fourth full-bandwidth users as they join).
+
+3. QoS-Null responses to the firmware's BSR polls (BSRP triggers) were
+   counted like data, so two idle peers could satisfy a multi-user verdict
+   with no uplink data.  Frames are now split by frame control into
+   he_tb_data_ppdu / he_tb_nulldata_ppdu / he_tb_fc_unknown, and
+   ul_{ofdma,mumimo}_multi_user_data_ppdus count a group only once two
+   distinct peers have each contributed a data-bearing frame.
+
+Guards: a descriptor without RXD group 2 (no PHY start time) is counted as
+he_tb_no_timestamp and never absorbed into a stale group; a frame with a
+failed FCS is ignored (its WCID is not trustworthy).
+
+muru_stats additionally prints one key=value line per firmware counter
+(dl_he_*, ul_hetrig_*) with an explicit source/semantics footer: the
+MURU_GET_TXC_TX_STATS counters are the firmware's TX-command-side trigger
+accounting bucketed by solicited allocation; whether a bucket increments on
+trigger transmission or on TB reception is not determinable from
+host-visible source.  Both debugfs nodes now carry schema=2.
+
+Cost: confined to MT_PHY_TYPE_HE_TB frames while an uplink bit is armed
+and RXD group 5 is enabled, i.e. evidence windows.  Read-only telemetry.
+
+diff --git a/mt7915/debugfs.c b/mt7915/debugfs.c
+index 0e7641ee..83804d9b 100644
+--- a/mt7915/debugfs.c
++++ b/mt7915/debugfs.c
+@@ -470,19 +470,28 @@ static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
+ {
+ 	struct mt7915_phy *phy = file->private;
+ 	unsigned long flags;
+-	u32 tb, ofdma_ru, full_bw, ofdma_groups, mumimo_groups, max_peers;
++	u32 tb, mpdu, ofdma_ru, full_bw, ofdma_groups, mumimo_groups, max_peers;
++	u32 tb_data, nulldata, fc_unknown, no_ts, ofdma_data, mumimo_data;
+ 	bool g5 = !!(mt76_rr(phy->dev, MT_DMA_DCR0(phy->mt76->band_idx)) &
+ 		     MT_DMA_DCR0_RXD_G5_EN);
+ 
+ 	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
+ 	tb = phy->cr6608_ul.tb_ppdu;
++	mpdu = phy->cr6608_ul.tb_mpdu;
+ 	ofdma_ru = phy->cr6608_ul.tb_ofdma_ru;
+ 	full_bw = phy->cr6608_ul.tb_full_bw;
++	tb_data = phy->cr6608_ul.tb_data;
++	nulldata = phy->cr6608_ul.tb_nulldata;
++	fc_unknown = phy->cr6608_ul.tb_fc_unknown;
++	no_ts = phy->cr6608_ul.tb_no_timestamp;
+ 	ofdma_groups = phy->cr6608_ul.ofdma_groups;
+ 	mumimo_groups = phy->cr6608_ul.mumimo_groups;
++	ofdma_data = phy->cr6608_ul.ofdma_groups_data;
++	mumimo_data = phy->cr6608_ul.mumimo_groups_data;
+ 	max_peers = phy->cr6608_ul.max_group_peers;
+ 	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
+ 
++	seq_puts(file, "schema=2\n");
+ 	seq_printf(file, "band=%u\n", phy->mt76->band_idx);
+ 	seq_printf(file, "armed_mask=%u\n",
+ 		   mt7915_cr6608_muru_mask(phy->dev));
+@@ -494,11 +503,24 @@ static int mt7915_cr6608_ul_attribution_show(struct seq_file *file, void *data)
+ 	 * "the scheduler did not solicit".
+ 	 */
+ 	seq_printf(file, "rxv_group5_enabled=%u\n", g5);
++	/* he_tb_ppdu is deduplicated per (peer, PHY start time); he_tb_mpdu is
++	 * the raw descriptor count (MPDUs and A-MSDU subframes).
++	 */
+ 	seq_printf(file, "he_tb_ppdu=%u\n", tb);
++	seq_printf(file, "he_tb_mpdu=%u\n", mpdu);
+ 	seq_printf(file, "he_tb_ul_ofdma_ru=%u\n", ofdma_ru);
+ 	seq_printf(file, "he_tb_full_bw=%u\n", full_bw);
++	/* Firmware BSR polls (BSRP triggers) solicit QoS-Null responses from
++	 * idle peers: those are trigger evidence, not uplink data scheduling.
++	 */
++	seq_printf(file, "he_tb_data_ppdu=%u\n", tb_data);
++	seq_printf(file, "he_tb_nulldata_ppdu=%u\n", nulldata);
++	seq_printf(file, "he_tb_fc_unknown=%u\n", fc_unknown);
++	seq_printf(file, "he_tb_no_timestamp=%u\n", no_ts);
+ 	seq_printf(file, "ul_ofdma_multi_user_ppdus=%u\n", ofdma_groups);
+ 	seq_printf(file, "ul_mumimo_multi_user_ppdus=%u\n", mumimo_groups);
++	seq_printf(file, "ul_ofdma_multi_user_data_ppdus=%u\n", ofdma_data);
++	seq_printf(file, "ul_mumimo_multi_user_data_ppdus=%u\n", mumimo_data);
+ 	seq_printf(file, "max_peers_in_one_ppdu=%u\n", max_peers);
+ 	if (is_mt7915(&phy->dev->mt76) && !g5)
+ 		seq_puts(file, "evidence=unavailable-crxv-disabled\n");
+@@ -750,6 +772,38 @@ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
+ 
+ 	seq_printf(file, "\nAll HE UL TB PPDU count: %lld\n", total_ppdu_cnt);
+ 
++	/* Machine-readable copy with explicit source semantics.  The table
++	 * above is kept unchanged for existing tooling.
++	 */
++	seq_puts(file, "\n");
++#define __muru_kv(_k, _v) seq_printf(file, #_k "=%u\n", phy->mib._v)
++	__muru_kv(dl_he_su, dl_he_su_cnt);
++	__muru_kv(dl_he_ext_su, dl_he_ext_su_cnt);
++	__muru_kv(dl_he_2ru, dl_he_2ru_cnt);
++	__muru_kv(dl_he_3ru, dl_he_3ru_cnt);
++	__muru_kv(dl_he_4ru, dl_he_4ru_cnt);
++	__muru_kv(dl_he_5to8ru, dl_he_5to8ru_cnt);
++	__muru_kv(dl_he_9to16ru, dl_he_9to16ru_cnt);
++	__muru_kv(dl_he_gtr16ru, dl_he_gtr16ru_cnt);
++	__muru_kv(dl_he_2mu, dl_he_2mu_cnt);
++	__muru_kv(dl_he_3mu, dl_he_3mu_cnt);
++	__muru_kv(dl_he_4mu, dl_he_4mu_cnt);
++	__muru_kv(ul_hetrig_su, ul_hetrig_su_cnt);
++	__muru_kv(ul_hetrig_2ru, ul_hetrig_2ru_cnt);
++	__muru_kv(ul_hetrig_3ru, ul_hetrig_3ru_cnt);
++	__muru_kv(ul_hetrig_4ru, ul_hetrig_4ru_cnt);
++	__muru_kv(ul_hetrig_5to8ru, ul_hetrig_5to8ru_cnt);
++	__muru_kv(ul_hetrig_9to16ru, ul_hetrig_9to16ru_cnt);
++	__muru_kv(ul_hetrig_gtr16ru, ul_hetrig_gtr16ru_cnt);
++	__muru_kv(ul_hetrig_2mu, ul_hetrig_2mu_cnt);
++	__muru_kv(ul_hetrig_3mu, ul_hetrig_3mu_cnt);
++	__muru_kv(ul_hetrig_4mu, ul_hetrig_4mu_cnt);
++#undef __muru_kv
++	seq_printf(file, "source=MURU_GET_TXC_TX_STATS band=%u polled_ms=500\n",
++		   phy->mt76->band_idx);
++	seq_puts(file,
++		 "semantics=firmware-txcmd-side-he-trigger-accounting-by-solicited-allocation;rx-decoding-not-implied\n");
++
+ exit:
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+@@ -1839,7 +1893,7 @@ static int mt7915_cr6608_sta_ul_show(struct seq_file *file, void *data)
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	struct mt7915_phy *phy;
+ 	unsigned long flags;
+-	u32 tb, ofdma, full_bw, mumimo, ts;
++	u32 tb, mpdu, ofdma, full_bw, mumimo, ts, tb_data, nulldata, fc_unknown;
+ 
+ 	if (!msta->vif || !msta->vif->phy)
+ 		return -ENODEV;
+@@ -1847,22 +1901,34 @@ static int mt7915_cr6608_sta_ul_show(struct seq_file *file, void *data)
+ 
+ 	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
+ 	tb = msta->cr6608_ul.tb_ppdu;
++	mpdu = msta->cr6608_ul.tb_mpdu;
+ 	ofdma = msta->cr6608_ul.tb_ofdma_ru;
+ 	full_bw = msta->cr6608_ul.tb_full_bw;
+ 	mumimo = msta->cr6608_ul.tb_mumimo;
++	tb_data = msta->cr6608_ul.tb_data;
++	nulldata = msta->cr6608_ul.tb_nulldata;
++	fc_unknown = msta->cr6608_ul.tb_fc_unknown;
+ 	ts = msta->cr6608_ul.last_ts;
+ 	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
+ 
++	seq_puts(file, "schema=2\n");
+ 	seq_printf(file, "wcid=%u\n", msta->wcid.idx);
+-	/* A HE TB PPDU is only ever a response to a Trigger frame. */
++	/* A HE TB PPDU is only ever a response to a Trigger frame.  Counted
++	 * once per PHY start time; he_tb_mpdu is the raw descriptor count.
++	 */
+ 	seq_printf(file, "he_tb_ppdu=%u\n", tb);
++	seq_printf(file, "he_tb_mpdu=%u\n", mpdu);
++	seq_printf(file, "he_tb_data_ppdu=%u\n", tb_data);
++	seq_printf(file, "he_tb_nulldata_ppdu=%u\n", nulldata);
++	seq_printf(file, "he_tb_fc_unknown=%u\n", fc_unknown);
+ 	/* Sub-bandwidth RU: this peer was given part of the channel. */
+ 	seq_printf(file, "he_tb_ul_ofdma_ru=%u\n", ofdma);
+ 	/* Full operating bandwidth: SU trigger, or UL MU-MIMO when shared. */
+ 	seq_printf(file, "he_tb_full_bw=%u\n", full_bw);
+ 	/* Full-bandwidth TB PPDU that shared its PHY start time with another
+ 	 * peer: full-bandwidth UL MU-MIMO, the only uplink MIMO mode MT7915
+-	 * supports.
++	 * supports.  Every peer of such a group is credited, not only the one
++	 * whose frame completed it.
+ 	 */
+ 	seq_printf(file, "he_tb_ul_mumimo_shared=%u\n", mumimo);
+ 	seq_printf(file, "last_tb_timestamp=%u\n", ts);
+diff --git a/mt7915/mac.c b/mt7915/mac.c
+index 472d5f45..b9857b43 100644
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -306,38 +306,95 @@ static u16 mt7915_cr6608_ul_full_bw_tones(enum nl80211_chan_width width)
+ 	}
+ }
+ 
+-/* Account one received HE trigger-based PPDU against its transmitting peer.
++/* Credit a peer of a newly recognised full-bandwidth multi-user group.  The
++ * first peer of the group was accounted before the group existed, so it is
++ * looked up by WCID; NAPI runs under rcu_read_lock, which __mt76_wcid_ptr
++ * requires.
++ */
++static void mt7915_cr6608_ul_credit_mumimo(struct mt7915_phy *phy, u16 idx)
++{
++	struct mt76_wcid *wcid = mt76_wcid_ptr(phy->dev, idx);
++	struct mt7915_sta *peer;
++
++	if (!wcid || !wcid->sta)
++		return;
++	peer = container_of(wcid, struct mt7915_sta, wcid);
++	peer->cr6608_ul.tb_mumimo++;
++}
++
++/* Account one received HE trigger-based frame against its transmitting peer.
+  *
+  * Called from the RX NAPI path only for MT_PHY_TYPE_HE_TB frames while an
+  * uplink MU-RU bit is armed, so the added cost is confined to airtime the
+  * scheduler actually solicited.  Everything here is read-only telemetry: it
+  * never changes scheduling, capability or power state.
++ *
++ * One PPDU reaches the host as several descriptors (MPDUs of an A-MPDU,
++ * hardware-deaggregated A-MSDU subframes), all sharing the RXD group-2 PHY
++ * start time.  tb_mpdu counts descriptors; tb_ppdu and the RU/full-bandwidth
++ * split count each (peer, start time) once; the multi-user groups count each
++ * start time once when a second distinct peer joins it.
+  */
+ static void
+ mt7915_cr6608_ul_account_tb(struct mt7915_phy *phy, struct mt7915_sta *msta,
+-			    struct mt76_rx_status *status, const __le32 *rxv)
++			    struct mt76_rx_status *status, const __le32 *rxv,
++			    __le16 fc, bool have_ts)
+ {
+ 	u16 full_bw_tones = mt7915_cr6608_ul_full_bw_tones(phy->mt76->chandef.width);
+ 	u16 tones = mt7915_cr6608_ul_ru_tones(rxv);
+ 	bool full_bw = full_bw_tones && tones >= full_bw_tones;
++	bool is_data = fc && ieee80211_is_data_present(fc);
++	bool is_null = fc && (ieee80211_is_nullfunc(fc) ||
++			      ieee80211_is_qos_nullfunc(fc));
+ 	unsigned long flags;
+-	bool seen = false;
++	bool new_ppdu;
++	u8 slot = CR6608_UL_TB_GROUP_MAX;
+ 	u8 i;
+ 
+ 	if (!tones)
+ 		return;
++	/* A frame that failed its FCS carries no trustworthy WCID. */
++	if (status->flag & RX_FLAG_FAILED_FCS_CRC)
++		return;
+ 
+ 	spin_lock_irqsave(&phy->cr6608_ul.lock, flags);
+ 
+-	phy->cr6608_ul.tb_ppdu++;
+-	msta->cr6608_ul.tb_ppdu++;
+-	msta->cr6608_ul.last_ts = status->timestamp;
+-	if (full_bw) {
+-		phy->cr6608_ul.tb_full_bw++;
+-		msta->cr6608_ul.tb_full_bw++;
+-	} else {
+-		phy->cr6608_ul.tb_ofdma_ru++;
+-		msta->cr6608_ul.tb_ofdma_ru++;
++	phy->cr6608_ul.tb_mpdu++;
++	msta->cr6608_ul.tb_mpdu++;
++
++	new_ppdu = !have_ts || !msta->cr6608_ul.tb_ppdu ||
++		   msta->cr6608_ul.last_ts != status->timestamp;
++	if (new_ppdu) {
++		phy->cr6608_ul.tb_ppdu++;
++		msta->cr6608_ul.tb_ppdu++;
++		if (full_bw) {
++			phy->cr6608_ul.tb_full_bw++;
++			msta->cr6608_ul.tb_full_bw++;
++		} else {
++			phy->cr6608_ul.tb_ofdma_ru++;
++			msta->cr6608_ul.tb_ofdma_ru++;
++		}
++		if (!fc) {
++			phy->cr6608_ul.tb_fc_unknown++;
++			msta->cr6608_ul.tb_fc_unknown++;
++		} else if (is_null) {
++			phy->cr6608_ul.tb_nulldata++;
++			msta->cr6608_ul.tb_nulldata++;
++		} else if (is_data) {
++			phy->cr6608_ul.tb_data++;
++			msta->cr6608_ul.tb_data++;
++		}
++	}
++	if (have_ts)
++		msta->cr6608_ul.last_ts = status->timestamp;
++
++	/* Without the group-2 PHY start time a frame cannot be placed in a
++	 * PPDU group; count it and leave the current group untouched instead
++	 * of absorbing it into a stale one.
++	 */
++	if (!have_ts) {
++		phy->cr6608_ul.tb_no_timestamp++;
++		goto out;
+ 	}
+ 
+ 	/* Start a new timestamp group whenever the PHY start time changes.  A
+@@ -349,19 +406,22 @@ mt7915_cr6608_ul_account_tb(struct mt7915_phy *phy, struct mt7915_sta *msta,
+ 		phy->cr6608_ul.group_ts = status->timestamp;
+ 		phy->cr6608_ul.group_n = 0;
+ 		phy->cr6608_ul.group_full_bw = 0;
++		phy->cr6608_ul.group_data_mask = 0;
+ 		phy->cr6608_ul.group_counted = false;
++		phy->cr6608_ul.group_data_counted = false;
+ 	}
+ 
+ 	for (i = 0; i < phy->cr6608_ul.group_n; i++) {
+ 		if (phy->cr6608_ul.group_wcid[i] == msta->wcid.idx) {
+-			seen = true;
++			slot = i;
+ 			break;
+ 		}
+ 	}
+ 
+-	if (!seen && phy->cr6608_ul.group_n < CR6608_UL_TB_GROUP_MAX) {
+-		phy->cr6608_ul.group_wcid[phy->cr6608_ul.group_n++] =
+-			msta->wcid.idx;
++	if (slot == CR6608_UL_TB_GROUP_MAX &&
++	    phy->cr6608_ul.group_n < CR6608_UL_TB_GROUP_MAX) {
++		slot = phy->cr6608_ul.group_n++;
++		phy->cr6608_ul.group_wcid[slot] = msta->wcid.idx;
+ 		if (full_bw)
+ 			phy->cr6608_ul.group_full_bw++;
+ 
+@@ -377,13 +437,41 @@ mt7915_cr6608_ul_account_tb(struct mt7915_phy *phy, struct mt7915_sta *msta,
+ 			 */
+ 			if (phy->cr6608_ul.group_full_bw >= 2) {
+ 				phy->cr6608_ul.mumimo_groups++;
++				/* Credit both peers, not only the one whose
++				 * frame completed the group.
++				 */
+ 				msta->cr6608_ul.tb_mumimo++;
++				mt7915_cr6608_ul_credit_mumimo(
++					phy, phy->cr6608_ul.group_wcid[0]);
+ 			} else {
+ 				phy->cr6608_ul.ofdma_groups++;
+ 			}
++		} else if (phy->cr6608_ul.group_n > 2 &&
++			   phy->cr6608_ul.group_counted && full_bw &&
++			   phy->cr6608_ul.group_full_bw == phy->cr6608_ul.group_n) {
++			/* Third/fourth full-bandwidth user of an already
++			 * recognised MU-MIMO group.
++			 */
++			msta->cr6608_ul.tb_mumimo++;
+ 		}
+ 	}
+ 
++	/* Data-bearing multi-user groups: counted when two distinct peers of
++	 * this group have each contributed a data frame.
++	 */
++	if (slot < CR6608_UL_TB_GROUP_MAX && is_data) {
++		phy->cr6608_ul.group_data_mask |= BIT(slot);
++		if (!phy->cr6608_ul.group_data_counted &&
++		    hweight8(phy->cr6608_ul.group_data_mask) >= 2) {
++			phy->cr6608_ul.group_data_counted = true;
++			if (phy->cr6608_ul.group_full_bw >= 2)
++				phy->cr6608_ul.mumimo_groups_data++;
++			else
++				phy->cr6608_ul.ofdma_groups_data++;
++		}
++	}
++
++out:
+ 	spin_unlock_irqrestore(&phy->cr6608_ul.lock, flags);
+ }
+ 
+@@ -593,7 +681,8 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 			     CR6608_MURU_UL_MASK) &&
+ 			    mphy->chandef.chan)
+ 				mt7915_cr6608_ul_account_tb(phy, msta, status,
+-							    rxv);
++							    rxv, fc,
++							    !!(rxd1 & MT_RXD1_NORMAL_GROUP_2));
+ 		}
+ 	}
+ 
+diff --git a/mt7915/mt7915.h b/mt7915/mt7915.h
+index 33ca6484..f6b994cd 100644
+--- a/mt7915/mt7915.h
++++ b/mt7915/mt7915.h
+@@ -154,10 +154,14 @@ struct mt7915_sta {
+ 	 * NAPI path under the owning phy's cr6608_ul.lock.
+ 	 */
+ 	struct {
+-		u32 tb_ppdu;
++		u32 tb_ppdu;	/* PPDUs: deduplicated by PHY start time */
++		u32 tb_mpdu;	/* raw RX descriptors (MPDUs, A-MSDU subframes) */
+ 		u32 tb_ofdma_ru;
+ 		u32 tb_full_bw;
+ 		u32 tb_mumimo;
++		u32 tb_data;	/* PPDUs whose first seen frame carried data */
++		u32 tb_nulldata;	/* QoS-Null / Null: BSR poll responses */
++		u32 tb_fc_unknown;	/* no RXD group 4: frame control unknown */
+ 		u32 last_ts;
+ 	} cr6608_ul;
+ 
+@@ -270,12 +274,26 @@ struct mt7915_phy {
+ 		u16 group_wcid[CR6608_UL_TB_GROUP_MAX];
+ 		u8 group_n;
+ 		u8 group_full_bw;
++		u8 group_data_mask;	/* bit i: group_wcid[i] sent data */
+ 		bool group_counted;
+-		u32 tb_ppdu;
++		bool group_data_counted;
++		u32 tb_ppdu;	/* deduplicated per (peer, PHY start time) */
++		u32 tb_mpdu;	/* raw RX descriptors */
+ 		u32 tb_ofdma_ru;
+ 		u32 tb_full_bw;
++		u32 tb_data;
++		u32 tb_nulldata;
++		u32 tb_fc_unknown;
++		u32 tb_no_timestamp;	/* RXD group 2 absent: not groupable */
+ 		u32 ofdma_groups;
+ 		u32 mumimo_groups;
++		/* Same groups, counted only once two distinct peers have each
++		 * contributed a data-bearing frame: BSR-poll (QoS-Null) responses
++		 * from idle peers are genuine trigger evidence but not uplink
++		 * data scheduling.
++		 */
++		u32 ofdma_groups_data;
++		u32 mumimo_groups_data;
+ 		u32 max_group_peers;
+ 	} cr6608_ul;
+ 

@@ -1,0 +1,24 @@
+package/kernel/mt76: pass CONFIG_MAC80211_DEBUGFS to the driver build
+
+mt76 guards its per-station debugfs hook (drv->sta_add_debugfs and the
+mt7915/mt7996 station nodes) with CONFIG_MAC80211_DEBUGFS.  The package
+already maps CONFIG_PACKAGE_MAC80211_MESH and CONFIG_PACKAGE_CFG80211_TESTMODE
+to the corresponding driver defines, but not the debugfs one, so
+CONFIG_PACKAGE_MAC80211_DEBUGFS=y compiles mac80211's station debugfs while
+every mt76 per-station node stays out of the module.  Mirror the MESH
+handling.  The CR6608 kit's per-peer uplink attribution nodes depend on it;
+the build proof step checks the compiled module for them.
+
+--- a/package/kernel/mt76/Makefile
++++ b/package/kernel/mt76/Makefile
+@@ -414,6 +414,10 @@ ifdef CONFIG_PACKAGE_MAC80211_MESH
+   NOSTDINC_FLAGS += -DCONFIG_MAC80211_MESH
+ endif
+ 
++ifdef CONFIG_PACKAGE_MAC80211_DEBUGFS
++  NOSTDINC_FLAGS += -DCONFIG_MAC80211_DEBUGFS
++endif
++
+ ifdef CONFIG_PACKAGE_CFG80211_TESTMODE
+   NOSTDINC_FLAGS += -DCONFIG_NL80211_TESTMODE
+   PKG_MAKE_FLAGS += CONFIG_NL80211_TESTMODE=y

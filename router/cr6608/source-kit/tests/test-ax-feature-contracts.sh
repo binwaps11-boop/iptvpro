@@ -744,10 +744,11 @@ for marker in \
 	'ul_muru_qualification=ram-boot-only-mask-15' \
 	'ul_muru_mcu_telemetry=attempted-response-ok-failed-timeout-not-apply-or-ota-proof' \
 	'ul_muru_fault_policy=kernel-attributed-latch-watchdog-or-sta-rec-plus-unattributed-disarm' \
-	'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-unattributed-strikes' \
+	'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-exercised-unattributed-strikes-15min-decay-host-initiated-recoveries-never-strike' \
 	'ul_muru_dl_floor=upstream-dl-ofdma-and-dl-mumimo-retained-through-fault' \
 	'ul_muru_cfg_policy=phy-wide-cfg-bits-for-every-peer-per-abd80cf6-eligibility-from-peer-he-caps' \
 	'ul_mumimo_advertisement=vendor-parity-b22-off-by-default-boot-frozen-opt-in-cr6608_advertise_ul_mumimo' \
+	'ul_muru_replay_policy=records-replayed-under-driver-mutex-parked-across-recovery-stale-records-rebuilt-or-requeued-never-latched' \
 	'ul_muru_global_mcu_commands=not-used' \
 	'background_cac=enabled-driver-runtime-capability-gated' \
 	'easymesh=prplmesh-controller-agent-runtime-gated'; do
@@ -760,10 +761,10 @@ if grep -Eq 'unsupported-on-mt7915|background_cac=disabled-by-cr6608-dts' \
 fi
 
 [ -f "${SUPPORT}" ] || fail "official AX feature support manifest is missing"
-[ "$(wc -l < "${SUPPORT}" | tr -d '[:space:]')" -eq 28 ] ||
-	fail "AX support manifest schema must contain exactly 28 lines"
-grep -Fq '!= 28' "${VERIFY}" ||
-	fail "runtime AX verifier does not enforce the 28-line support schema"
+[ "$(wc -l < "${SUPPORT}" | tr -d '[:space:]')" -eq 29 ] ||
+	fail "AX support manifest schema must contain exactly 29 lines"
+grep -Fq '!= 29' "${VERIFY}" ||
+	fail "runtime AX verifier does not enforce the 29-line support schema"
 for marker in \
 	'format=1' \
 	'board=xiaomi,mi-router-cr6608' \
@@ -782,7 +783,7 @@ for marker in \
 	'ul_muru_forced_lab=persistent-mask-15-nonsale' \
 	'ul_muru_mcu_telemetry=attempted-response-ok-failed-timeout-not-apply-or-ota-proof' \
 	'ul_muru_fault_policy=kernel-attributed-latch-watchdog-or-sta-rec-plus-unattributed-disarm' \
-	'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-unattributed-strikes' \
+	'ul_muru_rearm_policy=one-way-ceiling-restored-after-verified-reset-max-3-exercised-unattributed-strikes-15min-decay-host-initiated-recoveries-never-strike' \
 	'ul_muru_dl_floor=upstream-dl-ofdma-and-dl-mumimo-retained-through-fault' \
 	'ul_muru_global_mcu_commands=not-used' \
 	'dfs=enabled' \
@@ -850,7 +851,9 @@ for marker in \
 	'ul_muru_runtime_state()' \
 	'Full Bandwidth UL MU-MIMO' \
 	'vendor_sta_rec=$ul_muru_state' \
-	'armed:supported|stable-disabled:not-advertised' \
+	'ul_b22_expected=not-advertised' \
+	'armed) [ "$ul_mu_cap" = "$ul_b22_expected" ] && ul_policy_ok=1 ;;' \
+	'advertise_param_expects=$ul_b22_expected' \
 	'ul_module_token_value()' \
 	'cr6608_muru_mask' \
 	'fault_latched' \
