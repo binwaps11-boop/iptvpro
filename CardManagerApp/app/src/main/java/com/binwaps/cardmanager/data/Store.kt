@@ -1,0 +1,608 @@
+package com.binwaps.cardmanager.data
+
+import android.content.Context
+import android.net.Uri
+import com.binwaps.cardmanager.model.ActiveUser
+import com.binwaps.cardmanager.model.AppSettings
+import com.binwaps.cardmanager.model.CardCell
+import com.binwaps.cardmanager.model.CardField
+import com.binwaps.cardmanager.model.CardLayoutMode
+import com.binwaps.cardmanager.model.CardRow
+import com.binwaps.cardmanager.model.CardTemplate
+import com.binwaps.cardmanager.model.FieldType
+import com.binwaps.cardmanager.model.HotspotProfile
+import com.binwaps.cardmanager.model.PrintBatch
+import com.binwaps.cardmanager.model.RouterProfile
+import com.binwaps.cardmanager.model.RouterStatus
+import com.binwaps.cardmanager.model.UserEntry
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
+
+/** تخزين بملفات JSON داخل مجلد التطبيق */
+object Store {
+    // JSON مضغوط — الكتابة المنسّقة كانت تضاعف حجم ملفات القوائم الكبيرة
+    private val json = Json { ignoreUnknownKeys = true }
+
+    private lateinit var appContext: Context
+
+    private val _templates = MutableStateFlow<List<CardTemplate>>(emptyList())
+    val templates: StateFlow<List<CardTemplate>> get() = _templates
+
+    private val _users = MutableStateFlow<List<UserEntry>>(emptyList())
+    val users: StateFlow<List<UserEntry>> get() = _users
+
+    private val _settings = MutableStateFlow(AppSettings())
+    val settings: StateFlow<AppSettings> get() = _settings
+
+    private val _routers = MutableStateFlow<List<RouterProfile>>(emptyList())
+    val routers: StateFlow<List<RouterProfile>> get() = _routers
+
+    private val _batches = MutableStateFlow<List<PrintBatch>>(emptyList())
+    val batches: StateFlow<List<PrintBatch>> get() = _batches
+
+    private val _profiles = MutableStateFlow<List<HotspotProfile>>(emptyList())
+    val profiles: StateFlow<List<HotspotProfile>> get() = _profiles
+
+    private val _sales = MutableStateFlow<List<com.binwaps.cardmanager.model.SaleEntry>>(emptyList())
+    val sales: StateFlow<List<com.binwaps.cardmanager.model.SaleEntry>> get() = _sales
+
+    /** حالة الجلسة الحالية (لا تُحفظ على القرص) */
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> get() = _connected
+
+    private val _status = MutableStateFlow(RouterStatus())
+    val status: StateFlow<RouterStatus> get() = _status
+
+    private val _activeUsers = MutableStateFlow<List<ActiveUser>>(emptyList())
+    val activeUsers: StateFlow<List<ActiveUser>> get() = _activeUsers
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        // قائمة فارغة (حذف المستخدم كل القوالب) تُعامل كغياب: بدون قالب تتعطّل
+        // أزرار الطباعة كلها بلا أي تفسير على الشاشة
+        _templates.value = load<List<CardTemplate>>("templates.json")?.takeIf { it.isNotEmpty() }
+            ?: listOf(defaultTemplate())
+        _users.value = load("users.json") ?: emptyList()
+        _settings.value = load("settings.json") ?: AppSettings()
+        _routers.value = load("routers.json") ?: emptyList()
+        _batches.value = load("batches.json") ?: emptyList()
+        _profiles.value = load("profiles.json") ?: emptyList()
+        _sales.value = load("sales.json") ?: emptyList()
+    }
+
+    // ===== المبيعات والصندوق =====
+    fun addSale(s: com.binwaps.cardmanager.model.SaleEntry) {
+        _sales.value = listOf(s) + _sales.value
+        save("sales.json", _sales.value)
+    }
+
+    fun deleteSale(id: Long) {
+        _sales.value = _sales.value.filterNot { it.id == id }
+        save("sales.json", _sales.value)
+    }
+
+    fun updateSale(s: com.binwaps.cardmanager.model.SaleEntry) {
+        _sales.value = _sales.value.map { if (it.id == s.id) s else it }
+        save("sales.json", _sales.value)
+    }
+
+    private inline fun <reified T> load(name: String): T? {
+        val f = File(appContext.filesDir, name)
+        if (!f.exists()) return null
+        val parsed = runCatching { json.decodeFromString<T>(f.readText()) }.getOrNull()
+        if (parsed == null) {
+            // ملف تالف — نحفظه جانباً بدل تجاهله، فالكتابة التالية كانت ستمحو التاريخ كله
+            runCatching { f.copyTo(File(appContext.filesDir, "$name.bak"), overwrite = true) }
+        }
+        return parsed
+    }
+
+    /**
+     * يُسلسل فوراً (لالتقاط الحالة الصحيحة) ويكتب على القرص في خيط خلفي.
+     * الكتابة ذرّية: ملف مؤقت ثم إعادة تسمية — انقطاع الحفظ في منتصفه
+     * كان يترك ملفاً نصفياً يمسح كل السجل عند التشغيل التالي.
+     */
+    private inline fun <reified T> save(name: String, value: T) {
+        // التسلسل نفسه على الخيط الخلفي: مع آلاف الكروت كان encodeToString
+        // يجمّد الخيط الرئيسي ثوانٍ في كل تعديل. القيمة لقطة ثابتة (immutable
+        // list) فلا خطر من تسلسلها لاحقاً.
+        io.execute {
+            val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return@execute
+            runCatching {
+                val tmp = File(appContext.filesDir, "$name.tmp")
+                tmp.writeText(text)
+                if (!tmp.renameTo(File(appContext.filesDir, name))) {
+                    File(appContext.filesDir, name).writeText(text)
+                    tmp.delete()
+                }
+            }
+        }
+    }
+
+    val io: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    // ===== المستخدمون =====
+    /**
+     * يُحفظ على القرص الكروت المحلية فقط. الكروت المجلوبة من الراوتر
+     * تبقى في الذاكرة — قد تكون بعشرات الآلاف وكتابتها تجمّد الجهاز،
+     * وجلبها من جديد أصبح سريعاً.
+     */
+    // كل تعديلات قائمة الكروت متزامنة — SyncEngine يدمج من خيط خلفي بينما
+    // الواجهة تولّد وتوسم، وقراءة-ثم-كتابة غير متزامنة كانت قد تمحو كروتاً وليدة
+    @Synchronized
+    fun setUsers(list: List<UserEntry>) {
+        _users.value = list
+        scheduleUsersSave()
+    }
+
+    // كتابة users.json مُجمَّعة: أثناء رفع ١٠ آلاف كرت كان كل وسم «مرفوع» يسلسل
+    // القائمة المحلية كلها ويكتبها من جديد (عشرات الكتابات بميغابايتات على
+    // الخيط الخلفي — ثقلٌ محسوس على الجهاز). الآن كتابة واحدة بعد هدوء ٤٠٠
+    // مللي ثانية، واللقطة تُؤخذ لحظة الكتابة فلا يضيع آخر تعديل
+    private val usersDirty = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val flusher = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+    private fun scheduleUsersSave() {
+        if (!usersDirty.compareAndSet(false, true)) return
+        flusher.schedule({
+            usersDirty.set(false)
+            save("users.json", _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
+        }, 400, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    @Synchronized
+    fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
+    fun clearUsers() = setUsers(emptyList())
+
+    /**
+     * دمج كروت الراوتر المجلوبة مع القائمة المحلية: نسخة الراوتر هي المرجع،
+     * والكروت المحلية التي لم تُرفع بعد تبقى كما هي فلا يضيع منها شيء.
+     */
+    @Synchronized
+    fun mergeRouterCards(
+        fetched: List<UserEntry>,
+        /**
+         * المصادر التي قُرئت فعلاً في هذا الجلب. كروت المصدر الذي **لم** يُقرأ
+         * (فشل اليوزر منجر بمهلة، أو جلب الهوتسبوت وحده) تبقى كما هي — كان الدمج
+         * يمسحها فتختفي آلاف الكروت من القائمة حتى الجلب الكامل التالي (~١٠ دقائق)
+         */
+        sources: Set<com.binwaps.cardmanager.model.CardSource> = setOf(
+            com.binwaps.cardmanager.model.CardSource.HOTSPOT,
+            com.binwaps.cardmanager.model.CardSource.USER_MANAGER,
+        ),
+    ) {
+        val names = fetched.map { it.username }.toHashSet()
+        val kept = _users.value.filter {
+            (it.source == com.binwaps.cardmanager.model.CardSource.LOCAL && it.routerId.isBlank() && it.username !in names) ||
+                (it.source != com.binwaps.cardmanager.model.CardSource.LOCAL && it.source !in sources && it.username !in names)
+        }
+        // أسعار الكروت تعيش محلياً فقط — ننقلها لنسخة الراوتر بدل فقدها
+        val prices = _users.value.associate { it.username to it.price }
+        setUsers(
+            fetched.map { f ->
+                val oldPrice = prices[f.username].orEmpty()
+                if (f.price.isBlank() && oldPrice.isNotBlank()) f.copy(price = oldPrice) else f
+            } + kept
+        )
+        recomputeProfileCounts()
+    }
+
+    /**
+     * عدد كروت كل باقة يُحسب محلياً من قائمة الراوتر — بدل نقل حقل الباقة لكل
+     * مستخدم عبر الشبكة في كل دورة مزامنة (كان أثقل نقلٍ دوري في التطبيق)
+     */
+    private fun recomputeProfileCounts() {
+        val cur = _profiles.value
+        if (cur.isEmpty()) return
+        val counts = _users.value
+            .filter { it.source != com.binwaps.cardmanager.model.CardSource.LOCAL }
+            .groupingBy { it.profile }.eachCount()
+        val next = cur.map { p -> p.copy(userCount = counts[p.name] ?: 0) }
+        if (next != cur) _profiles.value = next
+    }
+
+    /** وسم الكروت المحلية التي نجح رفعها للراوتر — حتى لا تُرفع مرتين */
+    @Synchronized
+    fun markUploaded(usernames: Collection<String>) {
+        if (usernames.isEmpty()) return
+        val set = usernames.toHashSet()
+        setUsers(_users.value.map {
+            if (it.username in set && it.routerId.isBlank() && !it.uploaded) it.copy(uploaded = true) else it
+        })
+    }
+
+    // ===== القوالب =====
+    fun upsertTemplate(t: CardTemplate) {
+        val cur = _templates.value
+        _templates.value = if (cur.any { it.id == t.id }) cur.map { if (it.id == t.id) t else it } else cur + t
+        save("templates.json", _templates.value)
+    }
+
+    fun deleteTemplate(id: Long) {
+        _templates.value = _templates.value.filterNot { it.id == id }
+        save("templates.json", _templates.value)
+    }
+
+    fun template(id: Long): CardTemplate? = _templates.value.firstOrNull { it.id == id }
+
+    // ===== الإعدادات =====
+    fun updateSettings(s: AppSettings) {
+        _settings.value = s
+        save("settings.json", s)
+    }
+
+    /** يختار القالب الافتراضي للطباعة والتوليد السريع */
+    fun setDefaultTemplate(id: Long) = updateSettings(_settings.value.copy(defaultTemplateId = id))
+
+    /** القالب المختار افتراضياً، أو الأول إن لم يُختر شيء */
+    fun defaultTemplateOrFirst(): CardTemplate? {
+        val list = _templates.value
+        return list.firstOrNull { it.id == _settings.value.defaultTemplateId } ?: list.firstOrNull()
+    }
+
+    // ===== الراوترات =====
+    fun upsertRouter(r: RouterProfile) {
+        val cur = _routers.value
+        _routers.value = if (cur.any { it.id == r.id }) cur.map { if (it.id == r.id) r else it } else cur + r
+        save("routers.json", _routers.value)
+    }
+
+    fun deleteRouter(id: Long) {
+        _routers.value = _routers.value.filterNot { it.id == id }
+        save("routers.json", _routers.value)
+        if (_settings.value.activeRouterId == id) {
+            updateSettings(_settings.value.copy(activeRouterId = _routers.value.firstOrNull()?.id ?: 0))
+        }
+    }
+
+    fun activeRouter(): RouterProfile? =
+        _routers.value.firstOrNull { it.id == _settings.value.activeRouterId } ?: _routers.value.firstOrNull()
+
+    fun setActiveRouter(id: Long) = updateSettings(_settings.value.copy(activeRouterId = id))
+
+    // ===== حالة الاتصال =====
+    fun setConnected(value: Boolean) { _connected.value = value }
+
+    /** دمج الحالة: التحديث الخفيف لا يحمل عدادات الكروت (-1) فنبقي القديمة */
+    fun setStatus(s: RouterStatus) {
+        val prev = _status.value
+        _status.value = s.copy(
+            activeUsers = if (s.activeUsers >= 0) s.activeUsers else prev.activeUsers,
+            hotspotUsers = if (s.hotspotUsers >= 0) s.hotspotUsers else prev.hotspotUsers,
+            userManagerUsers = if (s.userManagerUsers >= 0) s.userManagerUsers else prev.userManagerUsers,
+            usedUsers = if (s.usedUsers >= 0) s.usedUsers else prev.usedUsers,
+            identity = s.identity.ifBlank { prev.identity },
+            version = s.version.ifBlank { prev.version },
+            board = s.board.ifBlank { prev.board },
+            uptime = s.uptime.ifBlank { prev.uptime },
+            cpuLoad = s.cpuLoad.ifBlank { prev.cpuLoad },
+            freeMemory = s.freeMemory.ifBlank { prev.freeMemory },
+            totalMemory = s.totalMemory.ifBlank { prev.totalMemory },
+        )
+    }
+    fun setActiveUsers(list: List<ActiveUser>) { _activeUsers.value = list }
+
+    // ===== الباقات =====
+    fun setProfiles(list: List<HotspotProfile>) {
+        // نحافظ على الأسعار المحفوظة محلياً عند تحديث القائمة من الراوتر
+        val prices = _profiles.value.associate { it.name to it.price }
+        val costs = _profiles.value.associate { it.name to it.cost }
+        val counts = _users.value
+            .filter { it.source != com.binwaps.cardmanager.model.CardSource.LOCAL }
+            .groupingBy { it.profile }.eachCount()
+        val next = list.map { p ->
+            p.copy(
+                price = p.price.ifBlank { prices[p.name].orEmpty() },
+                cost = p.cost.ifBlank { costs[p.name].orEmpty() },
+                userCount = if (p.userCount > 0) p.userCount else counts[p.name] ?: 0,
+            )
+        }
+        // لا كتابة على القرص إن لم يتغيّر شيء — كانت كل دورة مزامنة تكتب الملف
+        if (next == _profiles.value) return
+        _profiles.value = next
+        save("profiles.json", next)
+    }
+
+    fun updateProfilePrice(name: String, price: String) {
+        _profiles.value = _profiles.value.map { if (it.name == name) it.copy(price = price) else it }
+        save("profiles.json", _profiles.value)
+    }
+
+    /** سعر البيع وتكلفة الكرت معاً */
+    fun updateProfilePricing(name: String, price: String, cost: String) {
+        _profiles.value = _profiles.value.map { if (it.name == name) it.copy(price = price, cost = cost) else it }
+        save("profiles.json", _profiles.value)
+    }
+
+    // ===== سجل الدفعات =====
+    fun addBatch(b: PrintBatch) {
+        _batches.value = listOf(b) + _batches.value
+        save("batches.json", _batches.value)
+    }
+
+    fun deleteBatch(id: Long) {
+        _batches.value = _batches.value.filterNot { it.id == id }
+        save("batches.json", _batches.value)
+    }
+
+    fun markReprinted(id: Long) {
+        _batches.value = _batches.value.map { if (it.id == id) it.copy(printCount = it.printCount + 1) else it }
+        save("batches.json", _batches.value)
+    }
+
+    /** نسخ صورة خلفية مختارة من الجوال إلى مجلد القوالب وإرجاع مسارها */
+    fun importBackground(uri: Uri): String? = runCatching {
+        val dir = File(appContext.filesDir, "templates").apply { mkdirs() }
+        val out = File(dir, "bg_${System.currentTimeMillis()}.img")
+        appContext.contentResolver.openInputStream(uri)!!.use { input ->
+            out.outputStream().use { input.copyTo(it) }
+        }
+        out.absolutePath
+    }.getOrNull()
+
+    // معرّفات تصاعدية لا تتكرر — العشوائية القديمة كانت تسمح بتصادمٍ يجعل
+    // حذف عملية بيع واحدة يحذف عمليتين تشتركان في نفس المعرّف
+    private val idCounter = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+
+    fun newId(): Long = idCounter.updateAndGet { maxOf(it + 1, System.currentTimeMillis()) }
+
+    // ===== مهمة الطباعة غير المكتملة — تنجو حتى من إغلاق التطبيق =====
+
+    @kotlinx.serialization.Serializable
+    data class PrintJobMeta(
+        val kind: String,
+        val templateId: Long,
+        val next: Int,
+        val total: Int,
+        val createdAt: Long,
+    )
+
+    fun savePrintJob(meta: PrintJobMeta, cards: List<UserEntry>) {
+        save("print_job.json", meta)
+        save("print_job_cards.json", cards)
+    }
+
+    fun loadPrintJobMeta(): PrintJobMeta? = load("print_job.json")
+
+    fun loadPrintJobCards(): List<UserEntry> = load("print_job_cards.json") ?: emptyList()
+
+    fun clearPrintJob() {
+        io.execute {
+            runCatching { File(appContext.filesDir, "print_job.json").delete() }
+            runCatching { File(appContext.filesDir, "print_job_cards.json").delete() }
+        }
+    }
+
+    /** يزيد عدّاد الطباعة ويعيد الرقم الجديد — قراءةٌ وكتابة ذرّيتان لأن الطباعة تعمل من خيوط خلفية */
+    @Synchronized
+    fun nextPrintNo(): Int {
+        val next = _settings.value.copy(printCounter = _settings.value.printCounter + 1)
+        _settings.value = next
+        save("settings.json", next)
+        return next.printCounter
+    }
+
+    fun defaultTemplate(): CardTemplate = CardTemplate(
+        id = 1L,
+        name = "قالب افتراضي",
+        fields = listOf(
+            CardField(id = 1, type = FieldType.CUSTOM_TEXT, customText = "كرت انترنت", xFrac = 0.5f, yFrac = 0.14f, sizeFrac = 0.13f, color = 0xFF0B5E4F),
+            CardField(id = 2, type = FieldType.USERNAME, prefix = "المستخدم: ", xFrac = 0.5f, yFrac = 0.40f, sizeFrac = 0.11f),
+            CardField(id = 3, type = FieldType.PASSWORD, prefix = "الرمز: ", xFrac = 0.5f, yFrac = 0.58f, sizeFrac = 0.11f),
+            CardField(id = 4, type = FieldType.PRICE, xFrac = 0.16f, yFrac = 0.84f, sizeFrac = 0.10f, color = 0xFFB71C1C),
+            CardField(id = 5, type = FieldType.VALIDITY, xFrac = 0.80f, yFrac = 0.84f, sizeFrac = 0.08f),
+        ),
+    )
+
+    // ==================== قوالب جاهزة ====================
+
+    /**
+     * قالب بنمط الجدول بنفس مقاسات سمارت كريتور بالضبط:
+     * الكرت 69.38×17.64مم (196.67×50 نقطة)، ثلاثة كروت في الصف على A4،
+     * صفّان بعرض كامل بارتفاع 14 نقطة، والصف الأخير مقسوم إلى خليتين 16 نقطة.
+     */
+    fun smartTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول كلاسيكي (3 في الصف)",
+        widthMm = 69.38f,
+        heightMm = 17.64f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 4.94f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "شبكة لاسلكية", bold = true),
+            )),
+            CardRow(id = id + 2, heightMm = 4.94f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.PRICE, prefix = "السعر : "),
+            )),
+            CardRow(id = id + 3, heightMm = 5.64f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.CUSTOM_TEXT, customText = "اسم المستخدم", fontSizePt = 9f),
+                CardCell(id = id + 32, type = FieldType.USERNAME, bold = true),
+            )),
+        ),
+    )
+
+    /** جدول أربعة صفوف: العنوان، المستخدم، كلمة المرور، السعر مع الصلاحية */
+    fun fullTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول كامل (مستخدم وكلمة مرور)",
+        widthMm = 69.38f,
+        heightMm = 25f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "كرت انترنت", bold = true, fontSizePt = 11f),
+            )),
+            CardRow(id = id + 2, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.CUSTOM_TEXT, customText = "المستخدم", fontSizePt = 9f, weight = 0.85f),
+                CardCell(id = id + 22, type = FieldType.USERNAME, bold = true, weight = 1.15f),
+            )),
+            CardRow(id = id + 3, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.CUSTOM_TEXT, customText = "كلمة المرور", fontSizePt = 9f, weight = 0.85f),
+                CardCell(id = id + 32, type = FieldType.PASSWORD, bold = true, weight = 1.15f),
+            )),
+            CardRow(id = id + 4, heightMm = 5.5f, cells = listOf(
+                CardCell(id = id + 41, type = FieldType.PRICE, fontSizePt = 9f),
+                CardCell(id = id + 42, type = FieldType.VALIDITY, fontSizePt = 9f),
+            )),
+        ),
+    )
+
+    /** جدول مع رمز QR على اليسار وثلاثة صفوف معلومات على اليمين */
+    fun qrTableTemplate(id: Long = newId()): CardTemplate = CardTemplate(
+        id = id,
+        name = "جدول مع رمز QR",
+        widthMm = 80f,
+        heightMm = 26f,
+        borderWidthMm = 0f,
+        cornerRadiusMm = 0f,
+        layoutMode = CardLayoutMode.TABLE,
+        tablePaddingMm = 0.7f,
+        rows = listOf(
+            CardRow(id = id + 1, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 11, type = FieldType.CUSTOM_TEXT, customText = "كرت انترنت", bold = true, fontSizePt = 11f, weight = 2.2f),
+                CardCell(id = id + 12, type = FieldType.QR_CODE, weight = 1f, border = false),
+            )),
+            CardRow(id = id + 2, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 21, type = FieldType.USERNAME, prefix = "المستخدم : ", bold = true, weight = 2.2f),
+                CardCell(id = id + 22, type = FieldType.CUSTOM_TEXT, customText = "", border = false, weight = 1f),
+            )),
+            CardRow(id = id + 3, heightMm = 8f, cells = listOf(
+                CardCell(id = id + 31, type = FieldType.PRICE, fontSizePt = 9f, weight = 1.1f),
+                CardCell(id = id + 32, type = FieldType.VALIDITY, fontSizePt = 9f, weight = 1.1f),
+                CardCell(id = id + 33, type = FieldType.CUSTOM_TEXT, customText = "", border = false, weight = 1f),
+            )),
+        ),
+    )
+
+    /** كل القوالب الجاهزة — تُعرض في شاشة القوالب لإضافتها بلمسة */
+    fun presets(): List<Pair<String, (Long) -> CardTemplate>> = listOf(
+        "جدول كلاسيكي (3 في الصف)" to { id: Long -> smartTableTemplate(id) },
+        "جدول كامل (مستخدم وكلمة مرور)" to { id: Long -> fullTableTemplate(id) },
+        "جدول مع رمز QR" to { id: Long -> qrTableTemplate(id) },
+        "حر — سحب العناصر" to { id: Long -> defaultTemplate().copy(id = id, name = "قالب حر") },
+    )
+
+    // ==================== نسخ احتياطي واستعادة كامل ====================
+    //
+    // يحمي المستخدم من فقدان كل شيء عند تغيير الجوال أو إعادة تثبيت التطبيق:
+    // ملف JSON واحد يضمّ القوالب والكروت المحلية والإعدادات والراوترات
+    // والدفعات والباقات والمبيعات — وصور خلفيات القوالب مضمّنة Base64 حتى
+    // تُستعاد كاملة على جهاز جديد بلا مسارات مكسورة.
+
+    @kotlinx.serialization.Serializable
+    data class BackupBundle(
+        val version: Int = 1,
+        val createdAt: Long = 0,
+        val templates: List<CardTemplate> = emptyList(),
+        val users: List<UserEntry> = emptyList(),
+        val settings: AppSettings = AppSettings(),
+        val routers: List<RouterProfile> = emptyList(),
+        val batches: List<PrintBatch> = emptyList(),
+        val profiles: List<HotspotProfile> = emptyList(),
+        val sales: List<com.binwaps.cardmanager.model.SaleEntry> = emptyList(),
+        /** اسم ملف الخلفية ← محتواه Base64 */
+        val backgrounds: Map<String, String> = emptyMap(),
+    )
+
+    /** كل مسارات الصور التي يشير إليها قالب: الخلفية وصور الحقول والخلايا */
+    /** كل مسارات الصور التي يعتمدها القالب (خلفية + شعارات الحقول والخلايا) */
+    internal fun templateImagePaths(t: CardTemplate): List<String> = buildList {
+        if (t.backgroundPath.isNotBlank()) add(t.backgroundPath)
+        t.fields.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) }
+        t.rows.forEach { r -> r.cells.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) } }
+    }
+
+    /** يبني نسخة احتياطية كاملة كنص JSON (بما فيها صور الخلفيات والشعارات مضمّنة) */
+    fun buildBackupJson(): String {
+        val bgs = HashMap<String, String>()
+        _templates.value.forEach { t ->
+            templateImagePaths(t).forEach { path ->
+                runCatching {
+                    val f = File(path)
+                    if (f.exists() && !bgs.containsKey(f.name)) {
+                        bgs[f.name] = android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+                    }
+                }
+            }
+        }
+        val bundle = BackupBundle(
+            createdAt = System.currentTimeMillis(),
+            templates = _templates.value,
+            users = _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL },
+            settings = _settings.value,
+            routers = _routers.value,
+            batches = _batches.value,
+            profiles = _profiles.value,
+            sales = _sales.value,
+            backgrounds = bgs,
+        )
+        return json.encodeToString(bundle)
+    }
+
+    /**
+     * يكتب النسخة الاحتياطية إلى ملف داخل cache ويعيد مساره (لمشاركته).
+     * الكتابة على خيط الاستدعاء مقصودة — الحجم صغير والمستخدم ينتظر النتيجة.
+     */
+    fun writeBackupFile(): File {
+        // داخل exports لأن FileProvider يكشف هذا المسار فقط (file_paths.xml)
+        val dir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+            .format(java.util.Date())
+        val out = File(dir, "card-manager-backup-$stamp.json")
+        out.writeText(buildBackupJson())
+        return out
+    }
+
+    /**
+     * يستعيد نسخة احتياطية: يستبدل البيانات المحلية بما فيها، ويعيد كتابة صور
+     * الخلفيات في مجلد القوالب ويصحّح مساراتها لهذا الجهاز. يعيد true عند النجاح.
+     */
+    @Synchronized
+    fun restoreBackupJson(text: String): Boolean = runCatching {
+        val bundle = json.decodeFromString<BackupBundle>(text)
+        val dir = File(appContext.filesDir, "templates").apply { mkdirs() }
+        val nameToPath = HashMap<String, String>()
+        bundle.backgrounds.forEach { (name, b64) ->
+            runCatching {
+                val fileName = File(name).name // نحمي من أسماء تحوي مسارات
+                val bg = File(dir, fileName)
+                bg.writeBytes(android.util.Base64.decode(b64, android.util.Base64.NO_WRAP))
+                nameToPath[fileName] = bg.absolutePath
+            }
+        }
+        // يعيد ربط مسار صورة بالمسار الجديد على هذا الجهاز (أو يفرّغه إن غابت)
+        fun remap(path: String): String =
+            if (path.isBlank()) "" else nameToPath[File(path).name] ?: ""
+        val fixedTemplates = bundle.templates.map { t ->
+            t.copy(
+                backgroundPath = remap(t.backgroundPath),
+                fields = t.fields.map { it.copy(imagePath = remap(it.imagePath)) },
+                rows = t.rows.map { r -> r.copy(cells = r.cells.map { it.copy(imagePath = remap(it.imagePath)) }) },
+            )
+        }
+        _templates.value = fixedTemplates.ifEmpty { listOf(defaultTemplate()) }
+        _settings.value = bundle.settings
+        _routers.value = bundle.routers
+        _batches.value = bundle.batches
+        _profiles.value = bundle.profiles
+        _sales.value = bundle.sales
+        save("templates.json", _templates.value)
+        save("settings.json", _settings.value)
+        save("routers.json", _routers.value)
+        save("batches.json", _batches.value)
+        save("profiles.json", _profiles.value)
+        save("sales.json", _sales.value)
+        // الكروت المحلية عبر setUsers (يحفظ نسخة LOCAL فقط)
+        setUsers(bundle.users)
+        true
+    }.getOrDefault(false)
+}

@@ -1,0 +1,78 @@
+name: Build Card Manager APK
+
+on:
+  push:
+    branches:
+      - claude/user-card-management-app-6nhwlj
+      - main
+    paths:
+      - "CardManagerApp/**"
+      - ".github/workflows/build-card-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+
+      # اختبارات المنطق الحرج تسبق البناء: أي رجوع لعطل معروف يوقف الإصدار
+      - name: Run unit tests
+        working-directory: CardManagerApp
+        run: gradle testSubscriberDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build both APKs
+        working-directory: CardManagerApp
+        run: gradle assembleSubscriberDebug assembleAdminDebug --no-daemon --stacktrace
+
+      - name: Collect APKs
+        run: |
+          cp CardManagerApp/app/build/outputs/apk/subscriber/debug/app-subscriber-debug.apk CardManager.apk
+          cp CardManagerApp/app/build/outputs/apk/admin/debug/app-admin-debug.apk CardManager-Admin.apk
+          ls -la *.apk
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardManager-APKs
+          path: |
+            CardManager.apk
+            CardManager-Admin.apk
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: card-manager-latest
+          name: "Card Manager APK (آخر إصدار)"
+          body: |
+            ## تطبيقان
+
+            - **CardManager.apk** — تطبيق المشترك (مدير الكروت). فترة تجريبية أسبوع ثم يطلب مفتاح ترخيص.
+            - **CardManager-Admin.apk** — لوحة التراخيص (خاصة بك أنت فقط). تصدر مفاتيح التفعيل للمشتركين.
+
+            ⚠️ لا تشارك ملف لوحة التراخيص مع أحد.
+
+            ### طريقة التفعيل
+            1. المشترك يفتح التطبيق ويرسل لك **رمز جهازه**.
+            2. تفتح لوحة التراخيص، تلصق الرمز، تختار المدة، وتضغط "إصدار المفتاح".
+            3. ترسل له المفتاح، يلصقه في تطبيقه ويضغط "تفعيل".
+
+            المفتاح يعمل على ذلك الجوال فقط.
+          prerelease: true
+          files: |
+            CardManager.apk
+            CardManager-Admin.apk
