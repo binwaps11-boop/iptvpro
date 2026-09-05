@@ -94,33 +94,24 @@ fun ReportsScreen() {
     val timeFmt = remember { SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US) }
     val cur = settings.currency
     val connected by Store.connected.collectAsState()
-    var loading by remember { mutableStateOf(false) }
-    var loadNote by remember { mutableStateOf<String?>(null) }
 
-    // التقرير يقرأ من الذاكرة (تملؤها المزامنة) فيفتح فوراً بلا انتظار. نجلب
-    // من الراوتر **مرة واحدة فقط** إن لم تكن كروت الراوتر محمّلة بعد — بمفتاح
-    // Unit لا connected (فلا يُعاد الجلب الثقيل عند تذبذب VPN)، وبأولوية
-    // (foreground) فلا يصطف خلف المزامنة، وبمهلة فلا يعلق «جاري الجلب» أبداً.
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        val hasRouterCards = users.any { it.source != CardSource.LOCAL }
-        if (!hasRouterCards && connected && Store.activeRouter() != null) {
-            loading = true
-            val res = kotlinx.coroutines.withTimeoutOrNull(40_000) {
-                com.binwaps.cardmanager.mikrotik.MikrotikClient.fetchAllCards(
-                    Store.activeRouter(), foreground = true,
-                )
-            }
-            when {
-                res == null -> loadNote = "الجلب بطيء عبر الشبكة — ستُحدَّث القائمة تلقائياً بالمزامنة"
-                res.isSuccess -> res.getOrNull()?.let { Store.mergeRouterCards(it) }
-                else -> loadNote = "تعذّر جلب كروت الراوتر — تحقق من الاتصال"
-            }
-            loading = false
-        }
+    // التقرير يقرأ من الذاكرة التي تملؤها المزامنة وحدها. الجلب المستقل هنا كان
+    // ينقل القائمة كاملة مرة ثانية موازياً لأول جلب المزامنة، ومهلته لا تُلغي
+    // النقل الفعلي فيبقى الراوتر مشغولاً بينما تقول الشاشة «الجلب بطيء».
+    val cardsSyncing by com.binwaps.cardmanager.data.SyncEngine.cardsSyncing.collectAsState()
+    val syncError by com.binwaps.cardmanager.data.SyncEngine.lastCardsError.collectAsState()
+    val loading = cardsSyncing && users.none { it.source != CardSource.LOCAL }
+    val loadNote: String? = when {
+        loading -> "جاري جلب كروت الراوتر بالمزامنة…"
+        syncError != null && users.none { it.source != CardSource.LOCAL } -> "تعذّر جلب كروت الراوتر: $syncError"
+        else -> null
     }
 
-    // الحساب ثقيل مع آلاف الكروت — يُحسب مرة عند تغيّر المدخلات لا كل إعادة تركيب
-    val rows: List<ReportRow> = remember(tab, users, batches, sales, activeUsers, profiles, cur) { when (tab) {
+    // الحساب ثقيل مع آلاف الكروت — يُحسب مرة عند تغيّر المدخلات لا كل إعادة تركيب.
+    // المتصلون يتغيّرون كل دورة مزامنة، فلا يدخلون في المفتاح إلا لتبويب الأجهزة
+    // وإلا أُعيد تجميع كل الكروت كل ١٥ ثانية بلا سبب
+    val deviceKey = if (tab == ReportTab.DEVICE) activeUsers else null
+    val rows: List<ReportRow> = remember(tab, users, batches, sales, deviceKey, profiles, cur) { when (tab) {
         ReportTab.PROFILE -> users.groupBy { it.profile.ifBlank { "بدون باقة" } }
             .map { (profile, list) ->
                 val p = profiles.firstOrNull { it.name == profile }
@@ -241,7 +232,7 @@ fun ReportsScreen() {
         }
         if (tab == ReportTab.DEVICE) {
             Spacer(Modifier.height(8.dp))
-            Text("يعرض الأجهزة المتصلة الآن فقط — ليس سجلاً تاريخياً", fontSize = 10.5.sp, color = TextLow)
+            Text("يعرض الأجهزة المتصلة الآن فقط — ليس سجلاً تاريخياً", fontSize = 11.5.sp, color = TextLow)
         }
         Spacer(Modifier.height(12.dp))
 
@@ -273,7 +264,7 @@ fun ReportsScreen() {
                             Column(Modifier.weight(1f)) {
                                 Text(r.title, fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
                                 if (r.subtitle.isNotBlank()) {
-                                    Text(r.subtitle, fontSize = 10.5.sp, color = TextLow)
+                                    Text(r.subtitle, fontSize = 11.5.sp, color = TextLow)
                                 }
                             }
                             Column(horizontalAlignment = Alignment.End) {
@@ -284,7 +275,7 @@ fun ReportsScreen() {
                                 if (r.extra.isNotBlank()) {
                                     Text(
                                         "${r.extraLabel}: ${r.extra}",
-                                        fontSize = 10.sp,
+                                        fontSize = 11.sp,
                                         color = if (r.debt > 0.005) Danger else TextMid,
                                     )
                                 }
@@ -308,7 +299,7 @@ private fun emptyHint(tab: ReportTab): String = when (tab) {
 private fun Total(label: String, value: String, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = color)
-        Text(label, fontSize = 10.sp, color = TextLow)
+        Text(label, fontSize = 11.sp, color = TextLow)
     }
 }
 

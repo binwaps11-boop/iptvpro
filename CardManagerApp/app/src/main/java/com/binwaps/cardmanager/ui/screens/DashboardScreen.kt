@@ -121,7 +121,9 @@ fun DashboardScreen(navController: NavController) {
         set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
     }.timeInMillis
     val sales by Store.sales.collectAsState()
-    val todayRevenue = sales.filter { it.at >= todayStart && it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.total }
+    val todayRevenue = remember(sales, todayStart) {
+        sales.filter { it.at >= todayStart && it.kind == com.binwaps.cardmanager.model.SaleKind.SALE }.sumOf { it.total }
+    }
 
     fun n(v: Int) = if (v < 0) "…" else v.toString()
 
@@ -145,9 +147,26 @@ fun DashboardScreen(navController: NavController) {
                     fontSize = 11.5.sp, color = TextLow,
                 )
             }
-            StatusPill(connected, if (connected) "متصل" else "غير متصل")
+            // «جاري الاتصال…» أثناء الاتصال التلقائي بدل «غير متصل» الصامتة، والسبب عند الفشل
+            val connectError by com.binwaps.cardmanager.data.SyncEngine.connectError.collectAsState()
+            val autoConnecting = !connected && connectError == null &&
+                Store.activeRouter() != null && com.binwaps.cardmanager.data.SyncEngine.isRunning()
+            StatusPill(connected, if (connected) "متصل" else if (autoConnecting) "جاري الاتصال…" else "غير متصل")
             IconButton(onClick = { refresh() }, enabled = connected && !refreshing) {
                 Icon(Icons.Filled.Refresh, "تحديث", tint = if (refreshing) TextLow else Neon)
+            }
+        }
+        if (!connected && connectError != null) {
+            GlassCard(Modifier.fillMaxWidth(), glow = Danger.copy(alpha = 0.35f), padding = 10) {
+                Text(
+                    "تعذّر الاتصال بالراوتر: $connectError",
+                    fontSize = 12.5.sp, color = TextHi, lineHeight = 19.sp,
+                )
+                Text(
+                    "تُعاد المحاولة تلقائياً كل ١٥ ثانية. لتغيير العنوان أو كلمة المرور افتح «الإعدادات ← الراوتر».",
+                    fontSize = 11.5.sp, color = TextMid, lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
         }
 
@@ -168,7 +187,7 @@ fun DashboardScreen(navController: NavController) {
                         Text(
                             listOf(status.board, status.version, status.uptime)
                                 .filter { it.isNotBlank() }.joinToString(" • "),
-                            fontSize = 10.5.sp, color = TextLow,
+                            fontSize = 11.5.sp, color = TextLow,
                         )
                     }
                     Icon(
@@ -213,12 +232,16 @@ fun DashboardScreen(navController: NavController) {
         // تنبيهات — باقات على وشك النفاد، وديون معلّقة
         run {
             val threshold = settings.lowStockThreshold
-            val lowProfiles = users
-                .filter { it.status == com.binwaps.cardmanager.model.CardStatus.UNUSED && it.profile.isNotBlank() }
-                .groupingBy { it.profile }.eachCount()
-                // العتبة صفر تعطّل التنبيه بدل إظهار باقات فارغة بلا داعٍ
-                .filter { com.binwaps.cardmanager.util.CardUtils.isLowStock(it.value, threshold) }
-                .toList().sortedBy { it.second }
+            // remember: الشاشة تُعاد تركيبها كل دورة مزامنة (حالة الراوتر تتغيّر)،
+            // وتجميع عشرات آلاف الكروت على الخيط الرئيسي كل ١٥ ثانية كان تجمّداً محسوساً
+            val lowProfiles = remember(users, threshold) {
+                users
+                    .filter { it.status == com.binwaps.cardmanager.model.CardStatus.UNUSED && it.profile.isNotBlank() }
+                    .groupingBy { it.profile }.eachCount()
+                    // العتبة صفر تعطّل التنبيه بدل إظهار باقات فارغة بلا داعٍ
+                    .filter { com.binwaps.cardmanager.util.CardUtils.isLowStock(it.value, threshold) }
+                    .toList().sortedBy { it.second }
+            }
             // لكل زبون على حدة — الدفعة الزائدة لزبون لا تُخفي دين زبون آخر
             val openDebt = com.binwaps.cardmanager.util.Ledger.totalDebt(sales)
             if (lowProfiles.isNotEmpty() || openDebt > 0) {
@@ -299,7 +322,7 @@ private fun MiniStat(label: String, value: String, accent: Color, modifier: Modi
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(value, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = accent)
-        Text(label, fontSize = 9.5.sp, color = TextLow)
+        Text(label, fontSize = 11.sp, color = TextLow)
     }
 }
 
@@ -330,7 +353,7 @@ private fun HomeTile(
             if (badge != null) {
                 Text(
                     if (badge > 999) "999+" else badge.toString(),
-                    fontSize = 9.sp, fontWeight = FontWeight.Bold, color = com.binwaps.cardmanager.ui.theme.Ink,
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, color = com.binwaps.cardmanager.ui.theme.Ink,
                     modifier = Modifier
                         .padding(top = 0.dp)
                         .background(accent, RoundedCornerShape(999.dp))

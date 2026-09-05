@@ -93,7 +93,10 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
 
     // محرك الطباعة الصامد — يعمل في الخلفية ويستأنف من نقطة التوقف عند أي فشل
     val engineState by PrintEngine.state.collectAsState()
-    androidx.compose.runtime.LaunchedEffect(Unit) { PrintEngine.restoreIfAny() }
+    // قراءة مهمة محفوظة وفكّ آلاف الكروت وتخطيطها — على خيط خلفي لا الرئيسي
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { PrintEngine.restoreIfAny() }
+    }
     val busy = engineState is PrintEngine.State.Running
     val canStart = engineState is PrintEngine.State.Idle || engineState is PrintEngine.State.Done
     var showPrinterPicker by remember { mutableStateOf(false) }
@@ -122,7 +125,9 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
     }
 
     val btPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
-        if (granted.values.all { it }) {
+        // قائمة الأجهزة المقترنة والاتصال بها تحتاجان CONNECT فقط — رفض SCAN وحده
+        // كان يمنع الطباعة كلها بلا سبب
+        if (granted[Manifest.permission.BLUETOOTH_CONNECT] == true) {
             printers = ThermalPrinter.pairedPrinters()
             showPrinterPicker = true
         } else {
@@ -154,21 +159,43 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
         uploadNote = "جاري رفع ${pendingCards.size} كرت إلى الراوتر بالخلفية…"
         scope.launch {
             val created = java.util.Collections.synchronizedList(mutableListOf<String>())
-            val res = if (Store.settings.value.uploadTarget == com.binwaps.cardmanager.model.UploadTarget.USER_MANAGER)
-                com.binwaps.cardmanager.mikrotik.MikrotikClient.createUserManagerUsers(
-                    router, pendingCards, onCreated = { created.add(it.username) },
-                )
-            else
-                com.binwaps.cardmanager.mikrotik.MikrotikClient.createHotspotUsers(
-                    router, pendingCards, onCreated = { created.add(it.username) },
-                )
-            Store.markUploaded(created)
+            val onCreated: (com.binwaps.cardmanager.model.UserEntry) -> Unit = {
+                created.add(it.username)
+                // وسم تدريجي: مغادرة الشاشة أثناء رفع طويل لا تضيّع سجل ما رُفع
+                if (created.size % 200 == 0) Store.markUploaded(created.toList())
+            }
+            val res = try {
+                if (Store.settings.value.uploadTarget == com.binwaps.cardmanager.model.UploadTarget.USER_MANAGER)
+                    com.binwaps.cardmanager.mikrotik.MikrotikClient.createUserManagerUsers(router, pendingCards, onCreated = onCreated)
+                else
+                    com.binwaps.cardmanager.mikrotik.MikrotikClient.createHotspotUsers(router, pendingCards, onCreated = onCreated)
+            } finally {
+                // يُنفَّذ حتى عند إلغاء النطاق (مغادرة الشاشة): ما وصل الراوتر يُوسم مرفوعاً
+                Store.markUploaded(created.toList())
+            }
+            res.onSuccess { com.binwaps.cardmanager.data.SyncEngine.syncNow() }
             uploadNote = res.fold(
                 onSuccess = { "✓ رُفع $it كرت إلى الراوتر تلقائياً" },
                 onFailure = { "تعذر الرفع التلقائي: ${it.message ?: ""} — ارفعها من قسم الكروت بزر «رفع الجديد»" },
             )
         }
     }
+
+    // أندرويد ٨/٩: إذن التخزين للحفظ التلقائي في «التنزيلات». الرفض لا يمنع
+    // الطباعة — تبقى المشاركة — لكن بدون طلبٍ كان الحفظ يفشل صامتاً دائماً
+    var pendingPdfStart by remember { mutableStateOf(false) }
+    val storagePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+        val t0 = template
+        if (pendingPdfStart && t0 != null) {
+            pendingPdfStart = false
+            autoUploadPending()
+            PrintEngine.startPdf(context, t0, users, settings)
+        }
+    }
+    fun needsStoragePermission(): Boolean =
+        Build.VERSION.SDK_INT < 29 &&
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
 
     Column(
         Modifier
@@ -273,8 +300,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                         )
                         Text(
                             "${settings.layout.paper.labelAr} ${settings.layout.orientation.labelAr} • " +
-                                "${info.pages} صفحة • الكرت ${info.cardWidthMm.toInt()}×${info.cardHeightMm.toInt()} مم",
-                            fontSize = 10.5.sp, color = TextLow,
+                                "${info.pages} صفحة • الكرت ${com.binwaps.cardmanager.ui.components.ltr("${info.cardWidthMm.toInt()}×${info.cardHeightMm.toInt()}")} مم",
+                            fontSize = 11.5.sp, color = TextLow,
                         )
                     }
                     Text("تعديل ‹", fontSize = 13.sp, color = Violet, fontWeight = FontWeight.Bold)
@@ -294,7 +321,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             "يمكنك مغادرة الشاشة — الطباعة تستمر في الخلفية",
-                            fontSize = 10.5.sp, color = TextLow, modifier = Modifier.weight(1f),
+                            fontSize = 11.5.sp, color = TextLow, modifier = Modifier.weight(1f),
                         )
                         Text(
                             "إيقاف",
@@ -312,8 +339,9 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Spacer(Modifier.height(5.dp))
                     Text(es.error, fontSize = 11.5.sp, color = TextMid)
                     Spacer(Modifier.height(9.dp))
+                    // weight لكلٍّ منهما: NeonButton يملأ العرض داخلياً فكان زر «إلغاء المهمة» غير مرئي إطلاقاً
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NeonButton("استئناف من نقطة التوقف") {
+                        NeonButton("استئناف من نقطة التوقف", Modifier.weight(1.4f)) {
                             if (es.kind == PrintEngine.Kind.THERMAL) {
                                 // الاتصال القديم قد يكون مقطوعاً — نعيد اختيار الطابعة
                                 thermalResumeMode = true
@@ -322,7 +350,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 PrintEngine.resume(context)
                             }
                         }
-                        GhostButton("إلغاء المهمة", color = com.binwaps.cardmanager.ui.theme.Danger) {
+                        GhostButton("إلغاء المهمة", Modifier.weight(1f), color = com.binwaps.cardmanager.ui.theme.Danger) {
                             PrintEngine.cancel()
                         }
                     }
@@ -336,7 +364,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Text("اكتمل ${es.done} من ${es.total} — يمكن المتابعة من مكان التوقف", fontSize = 11.5.sp, color = TextMid)
                     Spacer(Modifier.height(9.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NeonButton("استئناف") {
+                        NeonButton("استئناف", Modifier.weight(1.4f)) {
                             if (es.kind == PrintEngine.Kind.THERMAL) {
                                 thermalResumeMode = true
                                 openPrinterPicker()
@@ -344,7 +372,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 PrintEngine.resumeRestored(context)
                             }
                         }
-                        GhostButton("تجاهل") { PrintEngine.dismissRestored() }
+                        GhostButton("تجاهل", Modifier.weight(0.8f)) { PrintEngine.dismissRestored() }
                     }
                 }
             }
@@ -389,6 +417,11 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     Toast.makeText(context, issues.first(), Toast.LENGTH_LONG).show()
                     return@NeonButton
                 }
+                if (needsStoragePermission()) {
+                    pendingPdfStart = true
+                    storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    return@NeonButton
+                }
                 autoUploadPending()
                 PrintEngine.startPdf(context, t0, users, settings)
             }
@@ -396,7 +429,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             Text(
                 "ملف PDF واحد يضم كل الكروت مهما كان عددها — يكتمل في ثوانٍ، " +
                     "وأي خطأ يُعالج بضغطة استئناف بلا إعادة من البداية.",
-                fontSize = 10.sp, color = TextLow,
+                fontSize = 11.sp, color = TextLow,
             )
             Spacer(Modifier.height(9.dp))
             GhostButton("صفحة HTML للطباعة من المتصفح", Modifier.fillMaxWidth(), enabled = !busy && !htmlBusy && template != null) {
@@ -421,7 +454,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             Text(
                 "صفحة HTML تُفتح في أي متصفح على الجوال أو الكمبيوتر وتُطبع منه بنفس المقاسات — " +
                     "مفيدة لإرسال الكروت لشخص آخر ليطبعها. رمز QR يظهر في PDF فقط.",
-                fontSize = 10.sp, color = TextLow,
+                fontSize = 11.sp, color = TextLow,
             )
         } else {
             NeonButton("طباعة عبر البلوتوث", Modifier.fillMaxWidth(), Icons.Filled.Bluetooth, enabled = canStart) {
@@ -438,7 +471,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             Text(
                 "كل كرت له ثلاث محاولات بإعادة اتصال تلقائية — انقطاع البلوتوث لا يفشل الدفعة، " +
                     "وعند التوقف تستأنف من الكرت نفسه.",
-                fontSize = 10.sp, color = TextLow,
+                fontSize = 11.sp, color = TextLow,
             )
             if (settings.tcpPrinterIp.isNotBlank()) {
                 Spacer(Modifier.height(9.dp))

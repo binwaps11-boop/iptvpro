@@ -109,8 +109,12 @@ object PrintEngine {
                 template.rows.all { it.cells.isEmpty() }
             else template.fields.none { it.visible }
             if (empty) issues += "القالب فارغ — أضف حقولاً أو صفوفاً في محرر القالب"
-            if (template.backgroundPath.isNotBlank() && !File(template.backgroundPath).exists()) {
-                issues += "صورة خلفية القالب مفقودة — ارفعها من جديد أو أزلها"
+            // كل صور القالب (الخلفية + شعارات الحقول والخلايا) — شعار مفقود كان يمرّ
+            // من الفحص ثم يُرسم الكرت بلا شعار صامتاً
+            val missing = Store.templateImagePaths(template).filter { !File(it).exists() }
+            if (missing.isNotEmpty()) {
+                issues += if (template.backgroundPath in missing) "صورة خلفية القالب مفقودة — ارفعها من جديد أو أزلها"
+                else "صورة/شعار في القالب مفقود — أعد اختياره من محرر القالب أو أزله"
             }
         }
         if (users.isEmpty()) issues += "لا توجد كروت — ولّد أو اجلب كروتاً أولاً"
@@ -147,6 +151,9 @@ object PrintEngine {
         this.batchSaved = false
         stampRun()
         persist(Kind.PDF)
+        // الحالة «جارية» تُثبَّت فوراً لا داخل المهمة: ضغطتان سريعتان كانتا تطلقان
+        // مهمتين تتشاركان الحقول (files/nextPage) قبل أن يمنعهما isRunning
+        _state.value = State.Running(Kind.PDF, 0, plan?.pages?.size ?: 0, "تجهيز الملف…")
         runPdf(appContext)
     }
 
@@ -168,16 +175,22 @@ object PrintEngine {
                 val file = PdfExporter.exportPages(
                     appContext, t, settings, p, 0, totalPages,
                     printNo, dateText, timeText,
+                    isActive = { isActive },
                 ) { pageDone ->
-                    _state.value = State.Running(
-                        Kind.PDF, pageDone + 1, totalPages,
-                        "صفحة ${pageDone + 1} من $totalPages",
-                    )
+                    if (isActive) {
+                        _state.value = State.Running(
+                            Kind.PDF, pageDone + 1, totalPages,
+                            "صفحة ${pageDone + 1} من $totalPages",
+                        )
+                    }
                 }
+                // أُلغيت أثناء البناء: لا «اكتملت» ولا حفظ دفعة بعد ضغط المستخدم «إيقاف»
+                if (!isActive) return@launch
                 files = mutableListOf(file)
                 nextPage = totalPages
                 finishJob(Kind.PDF, p.totalCards)
             } catch (e: Throwable) {
+                if (!isActive || e is kotlinx.coroutines.CancellationException) return@launch
                 // Throwable لا Exception: نفاد الذاكرة مع الدفعات الضخمة كان
                 // يهرب من الالتقاط ويُسقط التطبيق بدل أن يصير حالة قابلة للاستئناف
                 _state.value = State.Failed(
@@ -210,6 +223,7 @@ object PrintEngine {
         this.batchSaved = false
         stampRun()
         persist(Kind.THERMAL)
+        _state.value = State.Running(Kind.THERMAL, 0, cards.size, "الاتصال بالطابعة…")
         runThermal(appContext)
     }
 
@@ -274,12 +288,17 @@ object PrintEngine {
                             }
                             printed = true
                             break
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             lastError = e
                             closeQuietly()
                             if (attempt < THERMAL_RETRIES) delay(700L * attempt)
                         }
                     }
+                    // أُلغيت أثناء الطباعة: لا نكتب أي حالة بعد «إيقاف» المستخدم —
+                    // كتابة Running بعد الإلغاء كانت تُبقي الشاشة على «جارية» بلا مهمة
+                    if (!isActive) return@launch
 
                     if (!printed) {
                         _state.value = State.Failed(
@@ -295,7 +314,7 @@ object PrintEngine {
                     _state.value = State.Running(Kind.THERMAL, nextCard, toPrint.size, "كرت $nextCard من ${toPrint.size}")
                     if (nextCard % 5 == 0) persist(Kind.THERMAL)
                 }
-                if (nextCard >= toPrint.size) finishJob(Kind.THERMAL, toPrint.size)
+                if (nextCard >= toPrint.size && isActive) finishJob(Kind.THERMAL, toPrint.size)
             } finally {
                 closeQuietly()
             }
@@ -447,6 +466,8 @@ object PrintEngine {
     private fun friendly(t: Throwable?): String {
         val raw = t?.message ?: "خطأ غير معروف"
         return when {
+            // رسالة OutOfMemoryError لا تحوي اسم الصنف («Failed to allocate…») — نفحص النوع
+            t is OutOfMemoryError -> "الذاكرة ممتلئة — أغلق تطبيقات أخرى ثم استأنف"
             raw.contains("ENOSPC", true) || raw.contains("No space", true) ->
                 "امتلأت ذاكرة الجوال — احذف ملفات ثم استأنف"
             raw.contains("Broken pipe", true) || raw.contains("socket", true) ||

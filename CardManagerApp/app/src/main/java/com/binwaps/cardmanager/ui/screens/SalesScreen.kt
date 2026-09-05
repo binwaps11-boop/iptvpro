@@ -84,6 +84,16 @@ fun SalesScreen() {
     var period by remember { mutableStateOf(Period.DAY) }
     var showAdd by remember { mutableStateOf(false) }
     var addKind by remember { mutableStateOf(SaleKind.SALE) }
+    // تأكيد قبل حذف سجل مالي — كان يُحذف بضغطة واحدة بلا رجعة
+    val confirmDeleteId = remember { mutableStateOf<Long?>(null) }
+    confirmDeleteId.value?.let { id ->
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "حذف هذه العملية؟",
+            body = "سيُحذف السجل المالي نهائياً وتتغيّر أرصدة اليوم والديون تبعاً له.",
+            onConfirm = { Store.deleteSale(id) },
+            onDismiss = { confirmDeleteId.value = null },
+        )
+    }
 
     val fmt = remember { SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.US) }
     val cur = settings.currency
@@ -301,11 +311,11 @@ fun SalesScreen() {
                                     if (s.debt > 0) add("دين ${Ledger.money(s.debt)}")
                                     if (s.note.isNotBlank()) add(s.note)
                                 }.joinToString("  •  "),
-                                fontSize = 10.5.sp, color = TextLow,
+                                fontSize = 11.5.sp, color = TextLow,
                             )
                         }
                         Text("${Ledger.money(s.total)} $cur", fontSize = 14.sp, color = color, fontWeight = FontWeight.Bold)
-                        IconButton(onClick = { Store.deleteSale(s.id) }) {
+                        IconButton(onClick = { confirmDeleteId.value = s.id }) {
                             Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(16.dp))
                         }
                     }

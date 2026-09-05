@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.FileOpen
@@ -115,6 +116,19 @@ fun UsersScreen() {
     var editCard by remember { mutableStateOf<UserEntry?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     val selecting = selected.isNotEmpty()
+    // سلة الصف تزيل الكرت من القائمة فقط (يبقى على الراوتر) — تأكيد يوضّح ذلك بدل حذفٍ صامت بضغطة
+    var confirmRemove by remember { mutableStateOf<UserEntry?>(null) }
+    confirmRemove?.let { u ->
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "إزالة «${u.username}» من القائمة؟",
+            body = if (u.routerId.isNotBlank())
+                "يُزال من قائمة التطبيق فقط ويبقى على الراوتر (وسيعود مع المزامنة). لحذفه من الراوتر نهائياً حدّده ثم استعمل «حذف» في شريط التحديد."
+            else "كرت محلي لم يُرفع بعد — سيُحذف نهائياً من التطبيق.",
+            confirmLabel = if (u.routerId.isNotBlank()) "إزالة" else "حذف",
+            onConfirm = { Store.setUsers(Store.users.value - u) },
+            onDismiss = { confirmRemove = null },
+        )
+    }
 
     val csvPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -183,7 +197,7 @@ fun UsersScreen() {
                 Chip(m.labelAr, settings.cardMode == m) { Store.updateSettings(settings.copy(cardMode = m)) }
             }
         }
-        Text(settings.cardMode.hintAr, fontSize = 10.5.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp))
+        Text(settings.cardMode.hintAr, fontSize = 11.5.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp))
 
         Spacer(Modifier.height(10.dp))
         Text("مكان الرفع على الراوتر", fontSize = 12.sp, color = TextLow)
@@ -213,25 +227,28 @@ fun UsersScreen() {
         ) {
             GhostButton("كل الكروت", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري جلب كل الكروت من الراوتر…") {
-                    MikrotikClient.fetchAllCards(Store.activeRouter(), foreground = true).map { list ->
-                        Store.mergeRouterCards(list)
+                    MikrotikClient.fetchAllCardsDetailed(Store.activeRouter(), foreground = true).map { f ->
+                        val list = f.cards
+                        Store.mergeRouterCards(list, f.sources)
                         val unused = list.count { it.status == CardStatus.UNUSED }
                         val expired = list.count { it.status == CardStatus.EXPIRED }
-                        "تم جلب ${list.size} كرت — $unused غير مستهلك، $expired منتهي"
+                        "تم جلب ${list.size} كرت — $unused غير مستهلك، $expired منتهي" +
+                            if (CardSource.USER_MANAGER !in f.sources) " (تعذّر جلب اليوزر منجر — كروته السابقة بقيت كما هي)" else ""
                     }
                 }
             }
+            // جلب مصدر واحد يدمج كروته فقط — كان يمسح كروت المصدر الآخر من القائمة
             GhostButton("الهوتسبوت", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري الجلب من الهوتسبوت…") {
                     MikrotikClient.fetchHotspotUsers(Store.activeRouter(), foreground = true).map { list ->
-                        Store.mergeRouterCards(list); "تم جلب ${list.size} كرت من الهوتسبوت"
+                        Store.mergeRouterCards(list, setOf(CardSource.HOTSPOT)); "تم جلب ${list.size} كرت من الهوتسبوت"
                     }
                 }
             }
             GhostButton("اليوزر منجر", icon = Icons.Filled.CloudDownload, enabled = !busy) {
                 run("جاري الجلب من اليوزر منجر…") {
                     MikrotikClient.fetchUserManagerUsers(Store.activeRouter(), foreground = true).map { list ->
-                        Store.mergeRouterCards(list); "تم جلب ${list.size} مستخدم من اليوزر منجر"
+                        Store.mergeRouterCards(list, setOf(CardSource.USER_MANAGER)); "تم جلب ${list.size} مستخدم من اليوزر منجر"
                     }
                 }
             }
@@ -249,27 +266,33 @@ fun UsersScreen() {
                 run("جاري رفع ${pendingUpload.size} كرت إلى ${target.labelAr}…") {
                     val t0 = System.currentTimeMillis()
                     val created = java.util.Collections.synchronizedList(mutableListOf<String>())
-                    val res = if (target == UploadTarget.USER_MANAGER) {
-                        MikrotikClient.createUserManagerUsers(
-                            Store.activeRouter(), pendingUpload,
-                            onProgress = { d, t -> progress = d to t },
-                            onCreated = { u ->
-                                created.add(u.username)
-                                // وسم تدريجي: مغادرة الشاشة أو إلغاء لا يضيّع سجل ما رُفع
-                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
-                            },
-                        )
-                    } else {
-                        MikrotikClient.createHotspotUsers(
-                            Store.activeRouter(), pendingUpload,
-                            onProgress = { d, t -> progress = d to t },
-                            onCreated = { u ->
-                                created.add(u.username)
-                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
-                            },
-                        )
+                    // خانق التقدّم: نبضة لكل كرت من خيط الشبكة كانت تعيد تركيب الشاشة
+                    // كلها مئات المرات في الثانية — تجمّد محسوس أثناء الرفع
+                    var lastEmit = 0L
+                    val onProgress: (Int, Int) -> Unit = { d, t ->
+                        val now = System.currentTimeMillis()
+                        if (d >= t || now - lastEmit > 120) { lastEmit = now; progress = d to t }
                     }
-                    Store.markUploaded(created)
+                    val onCreated: (UserEntry) -> Unit = { u ->
+                        created.add(u.username)
+                        // وسم تدريجي: مغادرة الشاشة أو إلغاء لا يضيّع سجل ما رُفع
+                        if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                    }
+                    val res = try {
+                        if (target == UploadTarget.USER_MANAGER) {
+                            MikrotikClient.createUserManagerUsers(
+                                Store.activeRouter(), pendingUpload, onProgress = onProgress, onCreated = onCreated,
+                            )
+                        } else {
+                            MikrotikClient.createHotspotUsers(
+                                Store.activeRouter(), pendingUpload, onProgress = onProgress, onCreated = onCreated,
+                            )
+                        }
+                    } finally {
+                        // يُنفَّذ حتى عند الإلغاء: ما وصل الراوتر يُوسم مرفوعاً فلا يُرفع ثانية
+                        Store.markUploaded(created.toList())
+                    }
+                    res.onSuccess { com.binwaps.cardmanager.data.SyncEngine.syncNow() }
                     // الفشل الجزئي لم يعد يظهر كنجاح أخضر: يُذكر العدد الفاشل صراحة
                     val requested = pendingUpload.size
                     res.mapCatching { ok ->
@@ -506,8 +529,9 @@ fun UsersScreen() {
             )
         } else {
             val visible = if (shown.size > showLimit) shown.subList(0, showLimit) else shown
+            // مفاتيح ثابتة: بدونها كان كل دمج مزامنة يعيد تركيب كل الصفوف الظاهرة بالموضع
             LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                items(visible.size) { i ->
+                items(visible.size, key = { i -> visible[i].source.name + "/" + visible[i].username }) { i ->
                     val u = visible[i]
                     val isSel = u.username in selected
                     GlassCard(
@@ -540,7 +564,7 @@ fun UsersScreen() {
                                 } else {
                                     Text(
                                         u.serial.ifBlank { (i + 1).toString() },
-                                        fontSize = 10.5.sp, color = statusColor(u.status), fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp, color = statusColor(u.status), fontWeight = FontWeight.Bold,
                                     )
                                 }
                             }
@@ -563,25 +587,30 @@ fun UsersScreen() {
                                             if (u.uptime.isNotBlank()) add("استُخدم ${u.uptime}")
                                             if (u.bytesUsed > 0) add(formatBytes(u.bytesUsed))
                                         }.joinToString("  •  "),
-                                        fontSize = 10.sp, color = TextLow,
+                                        fontSize = 11.sp, color = TextLow,
                                     )
                                 }
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 if (u.status != CardStatus.UNKNOWN) {
                                     Text(
-                                        u.status.labelAr, fontSize = 10.sp, color = statusColor(u.status),
+                                        u.status.labelAr, fontSize = 11.sp, color = statusColor(u.status),
                                         modifier = Modifier
                                             .background(statusColor(u.status).copy(alpha = 0.12f), RoundedCornerShape(999.dp))
                                             .padding(horizontal = 8.dp, vertical = 2.dp),
                                     )
                                 }
-                                Text(u.source.labelAr, fontSize = 9.sp, color = TextLow, modifier = Modifier.padding(top = 3.dp))
+                                Text(u.source.labelAr, fontSize = 11.sp, color = TextLow, modifier = Modifier.padding(top = 3.dp))
                             }
                             IconButton(onClick = {
                                 val tpl = Store.defaultTemplateOrFirst()
                                 if (tpl != null) {
-                                    com.binwaps.cardmanager.print.PdfExporter.shareCardImage(context, tpl, u, settings)
+                                    // رسم الكرت وضغط PNG وكتابة الملف كانت على الخيط الرئيسي — تجمّد لحظي
+                                    scope.launch {
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                                            runCatching { com.binwaps.cardmanager.print.PdfExporter.shareCardImage(context, tpl, u, settings) }
+                                        }.onFailure { message = "تعذّرت مشاركة الكرت: ${it.message ?: ""}" to true }
+                                    }
                                 } else {
                                     android.widget.Toast.makeText(context, "أنشئ قالباً أولاً", android.widget.Toast.LENGTH_SHORT).show()
                                 }
@@ -591,8 +620,8 @@ fun UsersScreen() {
                             IconButton(onClick = { editCard = u }) {
                                 Icon(Icons.Filled.Edit, "تعديل", tint = Neon, modifier = Modifier.size(17.dp))
                             }
-                            IconButton(onClick = { Store.setUsers(users - u) }) {
-                                Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(17.dp))
+                            IconButton(onClick = { confirmRemove = u }) {
+                                Icon(Icons.Filled.RemoveCircleOutline, "إزالة من القائمة", tint = TextLow, modifier = Modifier.size(17.dp))
                             }
                         }
                     }
@@ -631,9 +660,9 @@ fun UsersScreen() {
             title = { Text("تعديل الكرت ${card.username}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    AppField(pw, { pw = it }, "كلمة المرور", Modifier.fillMaxWidth())
+                    AppField(pw, { pw = it }, "كلمة المرور", Modifier.fillMaxWidth(), code = true)
                     Spacer(Modifier.height(8.dp))
-                    AppField(prof, { prof = it }, "الباقة", Modifier.fillMaxWidth())
+                    AppField(prof, { prof = it }, "الباقة", Modifier.fillMaxWidth(), code = true)
                     // اختيار مباشر من باقات الراوتر — بدل الكتابة اليدوية
                     val routerProfiles = Store.profiles.collectAsState().value
                     if (routerProfiles.isNotEmpty()) {
@@ -648,7 +677,7 @@ fun UsersScreen() {
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    AppField(validity, { validity = it }, "الصلاحية (مثل 30d أو 12h)", Modifier.fillMaxWidth())
+                    AppField(validity, { validity = it }, "الصلاحية (مثل 30d أو 12h)", Modifier.fillMaxWidth(), code = true)
                     Spacer(Modifier.height(8.dp))
                     AppField(price, { price = it }, "السعر", Modifier.fillMaxWidth(), numeric = true)
                     Spacer(Modifier.height(8.dp))
@@ -657,7 +686,7 @@ fun UsersScreen() {
                     Text(
                         if (onRouter) "سيُعدّل الكرت على الراوتر أيضاً"
                         else "هذا الكرت محلي — سيُحفظ التعديل في التطبيق فقط",
-                        fontSize = 10.5.sp, color = TextLow,
+                        fontSize = 11.5.sp, color = TextLow,
                     )
                 }
             },
@@ -713,7 +742,7 @@ fun UsersScreen() {
                             fontSize = 13.sp, color = Danger,
                         )
                         "profile" -> {
-                            AppField(value, { value = it }, "اسم الباقة الجديدة", Modifier.fillMaxWidth())
+                            AppField(value, { value = it }, "اسم الباقة الجديدة", Modifier.fillMaxWidth(), code = true)
                             val profiles = Store.profiles.value
                             if (profiles.isNotEmpty()) {
                                 Row(
@@ -813,25 +842,24 @@ fun UsersScreen() {
                 run("تم توليد ${generated.size} كرت — جاري رفعها تلقائياً إلى ${target.labelAr}…") {
                     val t0 = System.currentTimeMillis()
                     val created = java.util.Collections.synchronizedList(mutableListOf<String>())
-                    val res = if (target == UploadTarget.USER_MANAGER)
-                        MikrotikClient.createUserManagerUsers(
-                            router, generated,
-                            onProgress = { d, t -> progress = d to t },
-                            onCreated = { u ->
-                                created.add(u.username)
-                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
-                            },
-                        )
-                    else
-                        MikrotikClient.createHotspotUsers(
-                            router, generated,
-                            onProgress = { d, t -> progress = d to t },
-                            onCreated = { u ->
-                                created.add(u.username)
-                                if (created.size % 200 == 0) Store.markUploaded(created.toList())
-                            },
-                        )
-                    Store.markUploaded(created)
+                    var lastEmit = 0L
+                    val onProgress: (Int, Int) -> Unit = { d, t ->
+                        val now = System.currentTimeMillis()
+                        if (d >= t || now - lastEmit > 120) { lastEmit = now; progress = d to t }
+                    }
+                    val onCreated: (UserEntry) -> Unit = { u ->
+                        created.add(u.username)
+                        if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                    }
+                    val res = try {
+                        if (target == UploadTarget.USER_MANAGER)
+                            MikrotikClient.createUserManagerUsers(router, generated, onProgress = onProgress, onCreated = onCreated)
+                        else
+                            MikrotikClient.createHotspotUsers(router, generated, onProgress = onProgress, onCreated = onCreated)
+                    } finally {
+                        Store.markUploaded(created.toList())
+                    }
+                    res.onSuccess { com.binwaps.cardmanager.data.SyncEngine.syncNow() }
                     res.mapCatching { ok ->
                         val failed = generated.size - ok
                         if (failed > 0) {
@@ -950,7 +978,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                         "عدد أرقام كلمة المرور", Modifier.fillMaxWidth(), numeric = true,
                     )
                 }
-                AppField(prefix, { prefix = it }, "بادئة الاسم (اختياري)", Modifier.fillMaxWidth())
+                AppField(prefix, { prefix = it }, "بادئة الاسم (اختياري)", Modifier.fillMaxWidth(), code = true)
 
                 Text("نوع الرموز", fontSize = 12.sp, color = TextLow)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -959,9 +987,9 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AppField(price, { price = it }, "السعر", Modifier.weight(1f))
-                    AppField(validity, { validity = it }, "الصلاحية (30d)", Modifier.weight(1f))
+                    AppField(validity, { validity = it }, "الصلاحية (30d)", Modifier.weight(1f), code = true)
                 }
-                AppField(profile, { profile = it }, "الباقة / البروفايل", Modifier.fillMaxWidth())
+                AppField(profile, { profile = it }, "الباقة / البروفايل", Modifier.fillMaxWidth(), code = true)
 
                 // كروت مجانية
                 Text("كروت مجانية", fontSize = 12.sp, color = TextLow)
@@ -984,7 +1012,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     }
                 }
                 if (everyNOn || randomOn) {
-                    AppField(freeProfile, { freeProfile = it }, "باقة الكرت المجاني (اختياري)", Modifier.fillMaxWidth())
+                    AppField(freeProfile, { freeProfile = it }, "باقة الكرت المجاني (اختياري)", Modifier.fillMaxWidth(), code = true)
                     val n = count.toIntOrNull() ?: 0
                     val preview = UserGenerator.freePositions(
                         n,
@@ -1022,7 +1050,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                             loadingProfiles = false
                         }
                     }
-                    profilesError?.let { Text(it, fontSize = 10.5.sp, color = Danger) }
+                    profilesError?.let { Text(it, fontSize = 11.5.sp, color = Danger) }
                 }
 
                 // أكواد بونص — دفعة إضافية برموز أطول وباقة خاصة، للهدايا والمسابقات
@@ -1034,13 +1062,13 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                         AppField(bonusLength, { bonusLength = it.filter { c -> c.isDigit() } }, "طول الرمز", Modifier.weight(1f), numeric = true)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AppField(bonusPrefix, { bonusPrefix = it }, "بادئة", Modifier.weight(1f))
-                        AppField(bonusSuffix, { bonusSuffix = it }, "لاحقة", Modifier.weight(1f))
+                        AppField(bonusPrefix, { bonusPrefix = it }, "بادئة", Modifier.weight(1f), code = true)
+                        AppField(bonusSuffix, { bonusSuffix = it }, "لاحقة", Modifier.weight(1f), code = true)
                     }
-                    AppField(bonusProfile, { bonusProfile = it }, "باقة البونص (اختياري)", Modifier.fillMaxWidth())
+                    AppField(bonusProfile, { bonusProfile = it }, "باقة البونص (اختياري)", Modifier.fillMaxWidth(), code = true)
                     Text(
                         "تُضاف ${bonusCount.toIntOrNull() ?: 0} كرت بونص بعد الدفعة، بوسم منفصل حتى تميّزها في التقارير",
-                        fontSize = 10.5.sp, color = Lime,
+                        fontSize = 11.5.sp, color = Lime,
                     )
                 }
             }
@@ -1058,6 +1086,9 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                 Store.updateSettings(Store.settings.value.copy(cardMode = mode, freeRules = rules))
                 val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
                     .format(java.util.Date())
+                // التوليد على خيط حسابي — ١٠٠ ألف كرت داخل ضغطة الزر كانت تجمّد الواجهة
+                dialogScope.launch {
+                val (main, bonus) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 val main = UserGenerator.generate(
                     count = count.toIntOrNull()?.coerceIn(1, 100000) ?: 50,
                     prefix = prefix,
@@ -1086,7 +1117,10 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     batchTag = "bonus-" + stamp,
                     suffix = bonusSuffix,
                 )
+                main to bonus
+                }
                 onGenerate(main + bonus)
+                }
             }) { Text("توليد", color = Neon, fontWeight = FontWeight.Bold) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء", color = TextLow) } },

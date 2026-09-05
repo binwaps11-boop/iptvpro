@@ -53,6 +53,16 @@ fun TemplatesScreen(navController: NavController) {
     val settings by Store.settings.collectAsState()
     val defaultId = settings.defaultTemplateId.takeIf { id -> templates.any { it.id == id } }
         ?: templates.firstOrNull()?.id
+    // تأكيد قبل حذف قالب — كان يُحذف بضغطة واحدة من أيقونة ملاصقة لأيقونات أخرى
+    val confirmDelete = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<com.binwaps.cardmanager.model.CardTemplate?>(null) }
+    confirmDelete.value?.let { t ->
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "حذف القالب «${t.name}»؟",
+            body = "سيُحذف تصميم القالب نهائياً" + if (t.id == defaultId) " — وهو القالب المستخدم للطباعة حالياً." else ".",
+            onConfirm = { Store.deleteTemplate(t.id) },
+            onDismiss = { confirmDelete.value = null },
+        )
+    }
 
     Column(
         Modifier
@@ -116,7 +126,7 @@ fun TemplatesScreen(navController: NavController) {
                                     Spacer(Modifier.width(7.dp))
                                     Text(
                                         "✓ مُختار",
-                                        fontSize = 10.5.sp, color = Neon, fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp, color = Neon, fontWeight = FontWeight.Bold,
                                         modifier = Modifier
                                             .background(Neon.copy(alpha = 0.14f), RoundedCornerShape(999.dp))
                                             .padding(horizontal = 8.dp, vertical = 3.dp),
@@ -126,7 +136,7 @@ fun TemplatesScreen(navController: NavController) {
                             val shape = if (t.layoutMode == com.binwaps.cardmanager.model.CardLayoutMode.TABLE)
                                 "جدول ${t.rows.size} صفوف" else "${t.fields.size} حقل"
                             Text(
-                                "${"%.1f".format(java.util.Locale.US, t.widthMm)}×${"%.1f".format(java.util.Locale.US, t.heightMm)} مم  •  $shape" +
+                                "${com.binwaps.cardmanager.ui.components.ltr("${"%.1f".format(java.util.Locale.US, t.widthMm)}×${"%.1f".format(java.util.Locale.US, t.heightMm)}")} مم  •  $shape" +
                                     if (t.backgroundPath.isNotBlank()) "  •  خلفية مخصصة" else "",
                                 fontSize = 11.sp, color = TextLow,
                             )
@@ -140,7 +150,7 @@ fun TemplatesScreen(navController: NavController) {
                             Icon(Icons.Filled.ContentCopy, "نسخ", tint = Violet, modifier = Modifier.size(19.dp))
                         }
                         if (templates.size > 1) {
-                            IconButton(onClick = { Store.deleteTemplate(t.id) }) {
+                            IconButton(onClick = { confirmDelete.value = t }) {
                                 Icon(Icons.Filled.Delete, "حذف", tint = Danger, modifier = Modifier.size(19.dp))
                             }
                         }

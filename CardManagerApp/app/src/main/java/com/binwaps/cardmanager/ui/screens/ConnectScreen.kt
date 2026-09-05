@@ -87,6 +87,16 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
 
     var editingId by remember { mutableStateOf(Store.activeRouter()?.id ?: 0L) }
     val current = routers.firstOrNull { it.id == editingId }
+    // تأكيد قبل حذف راوتر محفوظ — يضيع الاسم والعنوان وكلمة المرور بضغطة خاطئة
+    val confirmDelete = remember { mutableStateOf<com.binwaps.cardmanager.model.RouterProfile?>(null) }
+    confirmDelete.value?.let { r ->
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "حذف الراوتر «${r.name}»؟",
+            body = "سيُحذف ${r.host}:${r.port} مع بيانات دخوله من التطبيق. الراوتر نفسه لا يتأثر.",
+            onConfirm = { Store.deleteRouter(r.id); if (editingId == r.id) editingId = 0L },
+            onDismiss = { confirmDelete.value = null },
+        )
+    }
 
     var name by remember { mutableStateOf(current?.name ?: "راوتري") }
     var host by remember { mutableStateOf(current?.host ?: "192.168.88.1") }
@@ -295,7 +305,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                         Text(r.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextHi)
                         Text("${r.host}:${r.port} — ${r.username}", fontSize = 11.sp, color = TextLow)
                     }
-                    IconButton(onClick = { Store.deleteRouter(r.id); if (editingId == r.id) editingId = 0L }) {
+                    IconButton(onClick = { confirmDelete.value = r }) {
                         Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(18.dp))
                     }
                 }
@@ -343,7 +353,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                     Text("اتصال مشفّر (api-ssl)", fontSize = 12.5.sp, color = TextHi)
                     Text(
                         "إن لم تكن متأكداً اتركه كما هو — التطبيق يجرّب النوعين ويختار الناجح",
-                        fontSize = 10.5.sp, color = TextLow,
+                        fontSize = 11.5.sp, color = TextLow,
                     )
                 }
                 Switch(
@@ -440,7 +450,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
                             else
                                 "تأكد أن خدمة API مفعّلة: IP → Services → api، وأن المنفذ في التطبيق " +
                                     "يطابق منفذ الخدمة على الراوتر، وأن جوالك على نفس الشبكة.",
-                            fontSize = 10.5.sp, lineHeight = 15.sp, color = TextLow,
+                            fontSize = 11.5.sp, lineHeight = 15.sp, color = TextLow,
                         )
                     }
                 }
@@ -479,7 +489,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         // رقم الإصدار ظاهر دائماً — ليعرف المستخدم فوراً أي نسخة مثبّتة فعلاً
         Text(
             "الإصدار ${com.binwaps.cardmanager.BuildConfig.VERSION_NAME}",
-            fontSize = 10.5.sp,
+            fontSize = 11.5.sp,
             lineHeight = 14.sp,
             color = com.binwaps.cardmanager.ui.theme.TextLow,
             modifier = Modifier.fillMaxWidth(),

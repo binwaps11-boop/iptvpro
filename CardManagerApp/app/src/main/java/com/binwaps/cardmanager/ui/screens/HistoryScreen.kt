@@ -72,6 +72,16 @@ fun HistoryScreen() {
     val batches by Store.batches.collectAsState()
     val settings by Store.settings.collectAsState()
     var busy by remember { mutableStateOf(false) }
+    // تأكيد قبل حذف دفعة من السجل
+    val confirmDelete = remember { mutableStateOf<com.binwaps.cardmanager.model.PrintBatch?>(null) }
+    confirmDelete.value?.let { b ->
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "حذف الدفعة من السجل؟",
+            body = "دفعة «${b.templateName}» بـ ${b.users.size} كرت ستُحذف من سجل الطباعة. الكروت نفسها على الراوتر لا تتأثر.",
+            onConfirm = { Store.deleteBatch(b.id) },
+            onDismiss = { confirmDelete.value = null },
+        )
+    }
 
     val fmt = remember { SimpleDateFormat("yyyy/MM/dd — HH:mm", Locale.US) }
 
@@ -170,28 +180,42 @@ fun HistoryScreen() {
                                     if (b.profile.isNotBlank()) Chip(b.profile, Lime)
                                     if (b.unitPrice.isNotBlank()) Chip("${b.total.toLong()} ${settings.currency}", Warn)
                                     Chip(b.paper.labelAr.take(14), Neon)
-                                    if (b.printCount > 1) Chip("طُبعت ${b.printCount}×", Violet)
+                                    if (b.printCount > 1) Chip("طُبعت ${com.binwaps.cardmanager.ui.components.ltr("${b.printCount}×")}", Violet)
                                 }
                             }
                             Column {
                                 IconButton(onClick = {
-                                    // إعادة تحميل كروت الدفعة في القائمة الحالية للطباعة
-                                    Store.setUsers(b.users)
-                                    Toast.makeText(context, "تم تحميل ${b.users.size} كرت — اذهب لتبويب الطباعة", Toast.LENGTH_LONG).show()
+                                    // إعادة تحميل كروت الدفعة إلى القائمة **دون مسح** ما فيها:
+                                    // setUsers كان يستبدل القائمة كلها فتضيع الكروت المحلية
+                                    // غير المرفوعة من غير هذه الدفعة نهائياً من القرص
+                                    val existing = Store.users.value.mapTo(HashSet()) { it.username }
+                                    val missing = b.users.filter { it.username !in existing }
+                                    Store.addUsers(missing)
+                                    Toast.makeText(
+                                        context,
+                                        "أُضيف ${missing.size} كرت من الدفعة (${b.users.size - missing.size} موجود مسبقاً) — اذهب لتبويب الطباعة",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
                                 }) { Icon(Icons.Filled.Restore, "إعادة تحميل", tint = Neon, modifier = Modifier.size(19.dp)) }
                                 IconButton(enabled = !busy, onClick = {
                                     val t = Store.template(b.templateId) ?: Store.templates.value.firstOrNull() ?: return@IconButton
                                     busy = true
                                     scope.launch {
-                                        val file = withContext(Dispatchers.IO) {
-                                            PdfExporter.export(context, t, b.users, Store.settings.value)
+                                        // أي خطأ في التصدير أو المشاركة كان يُسقط التطبيق كله (بلا التقاط)
+                                        try {
+                                            val file = withContext(Dispatchers.IO) {
+                                                PdfExporter.export(context, t, b.users, Store.settings.value)
+                                            }
+                                            Store.markReprinted(b.id)
+                                            PdfExporter.share(context, file)
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "تعذّرت إعادة الطباعة: ${e.message ?: "خطأ غير معروف"}", Toast.LENGTH_LONG).show()
+                                        } finally {
+                                            busy = false
                                         }
-                                        busy = false
-                                        Store.markReprinted(b.id)
-                                        PdfExporter.share(context, file)
                                     }
                                 }) { Icon(Icons.Filled.Share, "مشاركة PDF", tint = Violet, modifier = Modifier.size(19.dp)) }
-                                IconButton(onClick = { Store.deleteBatch(b.id) }) {
+                                IconButton(onClick = { confirmDelete.value = b }) {
                                     Icon(Icons.Filled.Delete, "حذف", tint = TextLow, modifier = Modifier.size(19.dp))
                                 }
                             }
@@ -208,7 +232,7 @@ fun HistoryScreen() {
 private fun Chip(text: String, color: androidx.compose.ui.graphics.Color) {
     Text(
         text,
-        fontSize = 10.5.sp,
+        fontSize = 11.5.sp,
         color = color,
         modifier = Modifier
             .background(color.copy(alpha = 0.11f), RoundedCornerShape(999.dp))

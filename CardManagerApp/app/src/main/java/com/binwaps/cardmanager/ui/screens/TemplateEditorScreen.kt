@@ -168,7 +168,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                         .padding(horizontal = 11.dp, vertical = 9.dp),
                 ) {
                     Text(m.labelAr, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (on) Neon else TextMid)
-                    Text(m.hintAr, fontSize = 10.sp, color = TextLow)
+                    Text(m.hintAr, fontSize = 11.sp, color = TextLow)
                 }
             }
         }
@@ -280,7 +280,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
                     }
                     if (selected.imagePath.isBlank()) {
                         Spacer(Modifier.height(4.dp))
-                        Text("لم تُختر صورة بعد — لن يظهر الحقل حتى تختار صورة", fontSize = 10.5.sp, color = TextLow)
+                        Text("لم تُختر صورة بعد — لن يظهر الحقل حتى تختار صورة", fontSize = 11.5.sp, color = TextLow)
                     }
                 } else if (!graphic) {
                     AppField(selected.prefix, { updateField(selected.copy(prefix = it)) }, "نص قبل القيمة (مثل: المستخدم:)", Modifier.fillMaxWidth())
@@ -392,11 +392,11 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(
-                    "3 في الصف 69×18" to (69.38f to 17.64f),
-                    "كرت بنكي 85×54" to (85.6f to 54f),
-                    "تذكرة 63×33" to (63f to 33f),
-                    "صغير 63×27" to (63f to 27f),
-                    "قسيمة 48×27" to (48f to 27f),
+                    "3 في الصف ${com.binwaps.cardmanager.ui.components.ltr(\"69×18\")}" to (69.38f to 17.64f),
+                    "كرت بنكي ${com.binwaps.cardmanager.ui.components.ltr(\"85×54\")}" to (85.6f to 54f),
+                    "تذكرة ${com.binwaps.cardmanager.ui.components.ltr(\"63×33\")}" to (63f to 33f),
+                    "صغير ${com.binwaps.cardmanager.ui.components.ltr(\"63×27\")}" to (63f to 27f),
+                    "قسيمة ${com.binwaps.cardmanager.ui.components.ltr(\"48×27\")}" to (48f to 27f),
                 ).forEach { (label, dims) ->
                     val on = template.widthMm == dims.first && template.heightMm == dims.second
                     Text(
@@ -507,7 +507,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
             }
             Text(
                 "الخطوط مضمّنة في التطبيق فتُطبع العربية بنفس الشكل على أي جهاز أو طابعة",
-                fontSize = 10.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp),
+                fontSize = 11.sp, color = TextLow, modifier = Modifier.padding(top = 4.dp),
             )
 
             Spacer(Modifier.height(11.dp))
@@ -626,7 +626,7 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
             Text("صفوف الكرت", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
             Text(
                 "مجموع الارتفاع ${"%.1f".format(java.util.Locale.US, template.rowsHeightMm)} من ${"%.1f".format(java.util.Locale.US, template.heightMm)} مم",
-                fontSize = 10.5.sp,
+                fontSize = 11.5.sp,
                 color = if (template.rowsHeightMm > template.heightMm) Danger else TextLow,
             )
         }
@@ -802,7 +802,7 @@ private fun TableBuilder(template: CardTemplate, onChange: (CardTemplate) -> Uni
         Spacer(Modifier.height(6.dp))
         Text(
             "الخلية الأولى في كل صف تُطبع على اليمين. العرض النسبي يعني: خليتان بـ1 و1 تتقاسمان الصف بالتساوي، وبـ2 و1 تأخذ الأولى الثلثين.",
-            fontSize = 10.sp, color = TextLow,
+            fontSize = 11.sp, color = TextLow,
         )
     }
 

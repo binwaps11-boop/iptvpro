@@ -77,12 +77,17 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
         ActivityResultContracts.GetContent(),
     ) { uri ->
         if (uri != null) {
-            val text = runCatching {
-                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (text.isNullOrBlank()) {
-                Toast.makeText(context, "تعذّر قراءة الملف", Toast.LENGTH_LONG).show()
-            } else pendingRestore = text
+            // قراءة ملف قد يحوي صوراً Base64 بميغابايتات — على خيط خلفي لا الرئيسي
+            scope.launch {
+                val text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    }.getOrNull()
+                }
+                if (text.isNullOrBlank()) {
+                    Toast.makeText(context, "تعذّر قراءة الملف", Toast.LENGTH_LONG).show()
+                } else pendingRestore = text
+            }
         }
     }
 
@@ -144,12 +149,12 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             AppField(
                 settings.hotspotLoginUrl,
                 { Store.updateSettings(settings.copy(hotspotLoginUrl = it)) },
-                "رابط صفحة دخول الهوتسبوت", Modifier.fillMaxWidth(), leading = Icons.Filled.QrCode2,
+                "رابط صفحة دخول الهوتسبوت", Modifier.fillMaxWidth(), leading = Icons.Filled.QrCode2, code = true,
             )
             Spacer(Modifier.height(9.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppField(settings.wifiSsid, { Store.updateSettings(settings.copy(wifiSsid = it)) }, "اسم الشبكة SSID", Modifier.weight(1f))
-                AppField(settings.wifiPassword, { Store.updateSettings(settings.copy(wifiPassword = it)) }, "كلمة مرور الواي فاي", Modifier.weight(1f))
+                AppField(settings.wifiSsid, { Store.updateSettings(settings.copy(wifiSsid = it)) }, "اسم الشبكة SSID", Modifier.weight(1f), code = true)
+                AppField(settings.wifiPassword, { Store.updateSettings(settings.copy(wifiPassword = it)) }, "كلمة مرور الواي فاي", Modifier.weight(1f), code = true)
             }
         }
 
@@ -182,7 +187,7 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                 AppField(
                     settings.tcpPrinterIp,
                     { Store.updateSettings(settings.copy(tcpPrinterIp = it.trim())) },
-                    "طابعة شبكة IP (اختياري)", Modifier.weight(2f), leading = Icons.Filled.Print,
+                    "طابعة شبكة IP (اختياري)", Modifier.weight(2f), leading = Icons.Filled.Print, code = true,
                 )
                 AppField(
                     settings.tcpPrinterPort.toString(),
@@ -211,21 +216,28 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             Spacer(Modifier.height(11.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GhostButton("حفظ نسخة احتياطية", Modifier.weight(1f), Icons.Filled.Send, color = Lime) {
-                    runCatching {
-                        val f = Store.writeBackupFile()
-                        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
-                        context.startActivity(
-                            android.content.Intent.createChooser(
-                                android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                    type = "application/json"
-                                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                },
-                                "حفظ / مشاركة النسخة الاحتياطية",
-                            ),
-                        )
-                    }.onFailure {
-                        Toast.makeText(context, "تعذّر إنشاء النسخة: ${it.message}", Toast.LENGTH_LONG).show()
+                    // بناء النسخة (تشفير صور الخلفيات Base64 وكتابة الملف) على خيط خلفي
+                    scope.launch {
+                        val built = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching { Store.writeBackupFile() }
+                        }
+                        built.onSuccess { f ->
+                            runCatching {
+                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
+                                context.startActivity(
+                                    android.content.Intent.createChooser(
+                                        android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = "application/json"
+                                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        },
+                                        "حفظ / مشاركة النسخة الاحتياطية",
+                                    ),
+                                )
+                            }.onFailure { Toast.makeText(context, "تعذّرت المشاركة: ${it.message}", Toast.LENGTH_LONG).show() }
+                        }.onFailure {
+                            Toast.makeText(context, "تعذّر إنشاء النسخة: ${it.message}", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
                 GhostButton("استعادة من ملف", Modifier.weight(1f), Icons.Filled.Router) {
@@ -264,9 +276,12 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
         if (crash != null) {
             GlassCard(Modifier.fillMaxWidth(), glow = Danger.copy(alpha = 0.4f)) {
                 Text("تقرير آخر خروج للتطبيق", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Danger)
+                // لا نعرض Stack trace بلغة Java للمستخدم — سطر عربي، والنص الكامل يذهب في «إرسال التقرير»
+                val stamp = crash.lineSequence().firstOrNull().orEmpty().take(40)
                 Text(
-                    crash.lineSequence().take(4).joinToString("\n"),
-                    fontSize = 10.5.sp, color = TextMid,
+                    "أُغلق التطبيق بشكل غير متوقع" + (if (stamp.isNotBlank()) " ($stamp)" else "") +
+                        " — أرسل التقرير للمطوّر ليُعالج السبب.",
+                    fontSize = 12.sp, color = TextMid, lineHeight = 18.sp,
                     modifier = Modifier.padding(top = 6.dp),
                 )
                 Spacer(Modifier.height(10.dp))
@@ -293,7 +308,7 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
             Text("سجل العمليات", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
             Text(
                 "آخر ما جرى فعلاً: الاتصال، التوليد، الرفع، الطباعة — أرسله عند أي مشكلة",
-                fontSize = 10.5.sp, color = TextLow,
+                fontSize = 11.5.sp, color = TextLow,
             )
             Spacer(Modifier.height(9.dp))
             if (events.isEmpty()) {
@@ -311,7 +326,7 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                         Spacer(Modifier.width(6.dp))
                         Text(
                             "${fmt.format(java.util.Date(e.at))} [${e.tag}] ${e.text}",
-                            fontSize = 10.5.sp,
+                            fontSize = 11.5.sp,
                             color = if (e.ok) TextMid else Danger,
                         )
                     }

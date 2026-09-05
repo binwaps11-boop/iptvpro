@@ -288,7 +288,7 @@ fun RouterAdminScreen() {
                                         else if (s.disabled) add("معطّل")
                                         else add("غير متصل")
                                     }.joinToString("  •  "),
-                                    fontSize = 10.5.sp,
+                                    fontSize = 11.5.sp,
                                     color = if (s.active) Lime else if (s.disabled) Danger else TextLow,
                                 )
                             }
@@ -355,7 +355,7 @@ fun RouterAdminScreen() {
                                 Text(
                                     "${l.address}  •  ${l.macAddress}" +
                                         (if (l.expiresAfter.isNotBlank()) "  •  ينتهي بعد ${l.expiresAfter}" else ""),
-                                    fontSize = 10.sp, color = TextLow,
+                                    fontSize = 11.sp, color = TextLow,
                                 )
                             }
                             IconButton(onClick = {
@@ -391,11 +391,11 @@ fun RouterAdminScreen() {
                             Spacer(Modifier.width(9.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(s.name, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextHi)
-                                Text(s.type, fontSize = 10.sp, color = TextLow)
+                                Text(s.type, fontSize = 11.sp, color = TextLow)
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                Text("نزول ${bytes(s.rxBytes)}", fontSize = 10.5.sp, color = Neon)
-                                Text("صعود ${bytes(s.txBytes)}", fontSize = 10.5.sp, color = Violet)
+                                Text("نزول ${bytes(s.rxBytes)}", fontSize = 11.5.sp, color = Neon)
+                                Text("صعود ${bytes(s.txBytes)}", fontSize = 11.5.sp, color = Violet)
                             }
                         }
                     }
@@ -406,7 +406,7 @@ fun RouterAdminScreen() {
                 GlassCard(Modifier.fillMaxWidth(), padding = 12) {
                     Text("إضافة عنوان فيزيائي", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextHi)
                     Spacer(Modifier.height(8.dp))
-                    AppField(macToAdd, { macToAdd = it }, "MAC مثل AA:BB:CC:DD:EE:FF", Modifier.fillMaxWidth())
+                    AppField(macToAdd, { macToAdd = it }, "MAC مثل AA:BB:CC:DD:EE:FF", Modifier.fillMaxWidth(), code = true)
                     Spacer(Modifier.height(7.dp))
                     AppField(macNote, { macNote = it }, "ملاحظة (اختياري)", Modifier.fillMaxWidth())
                     Spacer(Modifier.height(9.dp))
@@ -446,7 +446,7 @@ fun RouterAdminScreen() {
                                 )
                                 Text(
                                     bindingLabel(b.type) + (if (b.comment.isNotBlank()) "  •  ${b.comment}" else ""),
-                                    fontSize = 10.sp,
+                                    fontSize = 11.sp,
                                     color = if (b.type == "blocked") Danger else Lime,
                                 )
                             }
@@ -478,7 +478,7 @@ fun RouterAdminScreen() {
                             Spacer(Modifier.width(10.dp))
                             Text(
                                 if (enabled) "مفعّلة" else "معطّلة",
-                                fontSize = 10.5.sp,
+                                fontSize = 11.5.sp,
                                 color = if (enabled) Lime else TextLow,
                             )
                         }
@@ -494,7 +494,7 @@ fun RouterAdminScreen() {
                     Text(
                         "عند تشغيله يُثبَّت الكرت على أول جهاز يدخل به، فلا يعمل على جهاز آخر. " +
                             "يُنفَّذ بسكربت دخول على بروفايل سيرفر الهوتسبوت.",
-                        fontSize = 10.5.sp, color = TextLow,
+                        fontSize = 11.5.sp, color = TextLow,
                     )
                     Spacer(Modifier.height(9.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -563,7 +563,7 @@ fun RouterAdminScreen() {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "إعادة التشغيل تقطع الإنترنت عن كل المتصلين لدقيقة أو أكثر",
-                        fontSize = 10.sp, color = TextLow,
+                        fontSize = 11.sp, color = TextLow,
                     )
                 }
             }

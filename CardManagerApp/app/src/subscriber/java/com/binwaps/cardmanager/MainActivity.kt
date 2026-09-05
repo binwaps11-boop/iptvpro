@@ -86,9 +86,15 @@ class MainActivity : ComponentActivity() {
         com.binwaps.cardmanager.data.EventLog.init(this)
         com.binwaps.cardmanager.data.EventLog.log("تشغيل", "فتح التطبيق")
         LicenseManager.init(this)
-        // المزامنة لا تبدأ هنا: كانت تحاول الاتصال بالراوتر المحفوظ فور الإقلاع
-        // وتحتجز قفل الجلسة، فيقف اتصال المستخدم اليدوي في الطابور حتى تنتهي
-        // مهلته. تبدأ الآن بعد نجاح الاتصال من شاشة الاتصال فقط.
+        // راوتر محفوظ ⇒ اتصال تلقائي فوري بالخلفية وفتح اللوحة مباشرة. كان كل فتح
+        // للتطبيق يعرض شاشة الاتصال ويطلب ضغط «اتصال» يدوياً رغم وجود الراوتر.
+        // اكتساب القفل محدود زمنياً وعمليات المستخدم لها الأولوية، فلا يعيق
+        // المزامنةَ اتصالٌ يدوي لاحق من شاشة الاتصال.
+        val savedRouter = Store.activeRouter()
+        if (savedRouter != null) {
+            com.binwaps.cardmanager.data.EventLog.log("تشغيل", "اتصال تلقائي بـ ${savedRouter.name}")
+            com.binwaps.cardmanager.data.SyncEngine.start()
+        }
         startCloudAutoActivate()
         handleLink(intent)
 
@@ -150,7 +156,7 @@ class MainActivity : ComponentActivity() {
                                         label = {
                                             Text(
                                                 tab.labelAr,
-                                                fontSize = 10.sp,
+                                                fontSize = 11.sp,
                                                 lineHeight = 14.sp,
                                                 maxLines = 1,
                                             )
@@ -171,7 +177,8 @@ class MainActivity : ComponentActivity() {
                 ) { padding ->
                     NavHost(
                         navController = navController,
-                        startDestination = "connect",
+                        // راوتر محفوظ ⇒ اللوحة مباشرة (المزامنة تتصل بالخلفية)؛ وإلا شاشة الاتصال
+                        startDestination = if (Store.activeRouter() != null) "dashboard" else "connect",
                         modifier = Modifier.padding(padding).background(Ink),
                     ) {
                         composable("license") {

@@ -21,9 +21,23 @@ import kotlinx.coroutines.withContext
  */
 object ThermalPrinter {
 
-    /** الطابعات المقترنة عبر البلوتوث */
-    fun pairedPrinters(): List<BluetoothConnection> =
-        runCatching { BluetoothPrintersConnections().list?.toList() ?: emptyList() }.getOrDefault(emptyList())
+    /**
+     * الطابعات المقترنة عبر البلوتوث. المكتبة تُرشّح الأجهزة المقترنة بفئة
+     * «تصوير/طابعة» فقط، وأغلب الطابعات الحرارية الرخيصة (58/80مم) تعلن فئة
+     * أخرى أو لا تعلن شيئاً — فكانت القائمة تخرج فارغة («لا توجد طابعات مقترنة»)
+     * ولا سبيل لاختيار الطابعة أصلاً. الآن: الطابعات المصنَّفة أولاً، وإلا كل
+     * الأجهزة المقترنة ليختار المستخدم طابعته.
+     */
+    fun pairedPrinters(): List<BluetoothConnection> = runCatching {
+        val classified = BluetoothPrintersConnections().list?.toList().orEmpty()
+        if (classified.isNotEmpty()) classified
+        else com.dantsu.escposprinter.connection.bluetooth.BluetoothConnections().list?.toList().orEmpty()
+    }.getOrElse { e ->
+        com.binwaps.cardmanager.data.EventLog.log(
+            "طباعة", "تعذّر قراءة أجهزة البلوتوث المقترنة: ${e.message?.take(120)}", ok = false,
+        )
+        emptyList()
+    }
 
     internal fun printableWidthMm(paper: PaperType): Float = when (paper) {
         PaperType.THERMAL_80 -> 72f

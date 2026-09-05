@@ -84,13 +84,8 @@ fun SessionsScreen() {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // تحديث المتصلين كل 20 ثانية
-    LaunchedEffect(connected) {
-        while (connected) {
-            MikrotikClient.fetchActiveUsers(Store.activeRouter()).onSuccess { Store.setActiveUsers(it) }
-            delay(20_000)
-        }
-    }
+    // تحديث المتصلين يتولاه SyncEngine كل دورة — حلقة ثانية هنا كانت تطلب نفس
+    // الجدول من الراوتر مرتين وتتزاحم على قفل الجلسة
 
     fun load(t: SessionTab) {
         tab = t
@@ -189,11 +184,11 @@ fun SessionsScreen() {
                                         Text(a.username, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
                                         Text(
                                             "${a.uptime}  •  ${a.address}",
-                                            fontSize = 10.5.sp, color = TextLow,
+                                            fontSize = 11.5.sp, color = TextLow,
                                         )
                                         Text(
                                             "↓ ${formatBytes(a.bytesIn)}   ↑ ${formatBytes(a.bytesOut)}",
-                                            fontSize = 10.sp, color = TextMid,
+                                            fontSize = 11.sp, color = TextMid,
                                         )
                                     }
                                     IconButton(onClick = {
@@ -239,12 +234,12 @@ fun SessionsScreen() {
                                         Text(
                                             listOf(s.uptime, s.startedAt, s.macAddress)
                                                 .filter { it.isNotBlank() }.joinToString("  •  "),
-                                            fontSize = 10.sp, color = TextLow,
+                                            fontSize = 11.sp, color = TextLow,
                                         )
                                         if (s.bytesIn > 0 || s.bytesOut > 0) {
                                             Text(
                                                 "↓ ${formatBytes(s.bytesIn)}   ↑ ${formatBytes(s.bytesOut)}",
-                                                fontSize = 10.sp, color = TextMid,
+                                                fontSize = 11.sp, color = TextMid,
                                             )
                                         }
                                     }
@@ -278,7 +273,7 @@ fun SessionsScreen() {
                                         Text(
                                             listOf(d.address, d.macAddress, d.startedAt)
                                                 .filter { it.isNotBlank() }.joinToString("  •  "),
-                                            fontSize = 10.sp, color = TextLow,
+                                            fontSize = 11.sp, color = TextLow,
                                         )
                                     }
                                     Icon(Icons.Filled.Devices, null, tint = Violet, modifier = Modifier.size(17.dp))

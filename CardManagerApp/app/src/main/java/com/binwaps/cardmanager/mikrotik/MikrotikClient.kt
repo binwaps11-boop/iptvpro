@@ -12,6 +12,7 @@ import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -111,6 +112,10 @@ object MikrotikClient {
         val k = keyOf(r)
         session?.let { if (sessionKey == k && it.isConnected) return it }
         runCatching { session?.close() }
+        // جلسة جديدة (راوتر آخر أو انقطاع) ⇒ إصدار اليوزر منجر يُكتشف من جديد.
+        // كان يبقى مخزّناً من الراوتر السابق، فبعد التبديل من v6 إلى v7 كانت كل
+        // أوامر اليوزر منجر تذهب إلى مسار الإصدار القديم وتفشل بـ«no such command»
+        umVariant = null
         return open(r).also { session = it; sessionKey = k }
     }
 
@@ -177,6 +182,10 @@ object MikrotikClient {
                             block(obtain(r).also { runCatching { it.setTimeout(cmdTimeout) } })
                         } catch (e: Exception) {
                             if (isCommandError(e)) throw e
+                            // مستدعٍ أُلغي (قطع اتصال/تبديل راوتر) لا يُعاد له الاتصال
+                            // ولا تُكرَّر عمليته الطويلة على جلسة جديدة — كان «شبح»
+                            // الجلب يعاود النقل كاملاً بعد القطع ويؤخّر اتصال المستخدم
+                            kotlin.coroutines.coroutineContext.ensureActive()
                             // الجلسة القديمة ماتت غالباً — اتصال جديد ومحاولة أخيرة
                             invalidateSession()
                             block(obtain(r).also { runCatching { it.setTimeout(cmdTimeout) } })
@@ -228,8 +237,26 @@ object MikrotikClient {
         }
     }
 
+    /**
+     * رسالة عربية مفهومة لأي خطأ. رسالة التطبيق نفسه (RouterLogicException، عربية)
+     * تُعرض كما هي مع إلحاق تفسير الجزء التقني بعد آخر «: » إن عُرف نمطه؛ والخطأ
+     * التقني الخام لا يُعرض للمستخدم أبداً إلا كتفصيل ثانٍ.
+     */
     private fun arabicError(t: Throwable): String {
         val raw = (t.message ?: t.toString())
+        val isArabic = raw.any { it in '؀'..'ۿ' }
+        val tech = if (isArabic) raw.substringAfterLast(": ", "") else raw
+        val hint = if (tech.isBlank()) null else technicalHint(tech)
+        return when {
+            isArabic && hint != null -> "$raw — $hint"
+            isArabic -> raw
+            hint != null -> hint
+            else -> "تعذّرت العملية على الراوتر — أعد المحاولة (التفصيل: ${raw.take(140)})"
+        }
+    }
+
+    /** تفسير عربي لنمط خطأ تقني معروف، أو null إن لم يُعرف */
+    private fun technicalHint(raw: String): String? {
         return when {
             raw.contains("timed out", true) || raw.contains("timeout", true) ->
                 "انتهت مهلة الاتصال — تأكد من العنوان والمنفذ، أو زد المهلة من شاشة الاتصال"
@@ -246,7 +273,15 @@ object MikrotikClient {
                 "هذا الأمر غير موجود على الراوتر — قد تكون حزمة اليوزر منجر غير مثبّتة"
             raw.contains("SSL", true) || raw.contains("handshake", true) ->
                 "فشل الاتصال المشفّر — جرّب إيقاف api-ssl أو تأكد من المنفذ 8729"
-            else -> raw
+            raw.contains("no such item", true) ->
+                "العنصر لم يُعثر عليه على الراوتر — حُذف أو تغيّر، حدّث القائمة ثم أعد المحاولة"
+            raw.contains("reset", true) || raw.contains("broken pipe", true) || raw.contains("EPIPE", true) ->
+                "انقطع الاتصال بالراوتر أثناء العملية — أعد المحاولة"
+            raw.contains("unreachable", true) || raw.contains("EHOSTUNREACH", true) || raw.contains("ENETUNREACH", true) ->
+                "الراوتر غير قابل للوصول — تأكد أن الجوال على شبكة الراوتر أو أن الاتصال البعيد يعمل"
+            raw.contains("input does not match any value of", true) ->
+                "قيمة غير موجودة على الراوتر (${raw.substringAfter("value of ").take(40)}) — تأكد من اسم الباقة/العميل"
+            else -> null
         }
     }
 
@@ -317,6 +352,11 @@ object MikrotikClient {
          * يعني أن الكرت موجود فعلاً: إعادة التشغيل متكررة النتيجة بلا تكرار كروت
          */
         treatErrorAsOk: (String) -> Boolean = { false },
+        /**
+         * يُستدعى (قبل onDone) لأمرٍ عُدّ ناجحاً لأن عنصره موجود مسبقاً — يميّز
+         * «أُنشئ الآن» عن «كان موجوداً» فلا تُعاد خطواتٌ لاحقة على الموجود
+         */
+        onExisting: (index: Int) -> Unit = {},
         /**
          * عدد الأوامر المعلّقة في وقت واحد. الهوتسبوت خفيف فيتحمّل نافذة واسعة،
          * أما يوزر منجر v6 فكل إضافة فيه تكتب في قاعدة بياناته — نافذة واسعة
@@ -399,6 +439,7 @@ object MikrotikClient {
                     override fun receive(result: Map<String, String>) {}
                     override fun error(ex: me.legrange.mikrotik.MikrotikApiException) {
                         if (treatErrorAsOk(ex.message ?: "")) {
+                            if (!roundClosed.get() && !finished.get()) onExisting(index)
                             finish(true)
                             return
                         }
@@ -939,10 +980,14 @@ object MikrotikClient {
      */
     private fun readUserManager(con: ApiConnection): List<UserEntry> {
         val variant = userManagerVariant(con)
-        // proplist v7 يضمّ حقول العدّاد المحتملة على user-profile؛ نقرأ ما يوجد
-        val rows = con.tryPrintLight(
-            ".id,name,username,customer,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
+        // الحزمة غير مثبّتة: لا مستخدمين — بلا خطأ ولا تسجيل مزعج كل دورة
+        if (variant == UmVariant.NONE) return emptyList()
+        // printLight لا tryPrintLight: انتهاء المهلة على قائمة كبيرة يجب أن يُرمى
+        // ليُعرف أن المصدر لم يُقرأ — ابتلاعه كان يعيد «صفر مستخدم» بنجاح زائف
+        // فتُمسح كل كروت اليوزر منجر من القائمة المحلية حتى الجلب التالي
+        val rows = con.printLight(
             umPath(variant, "user"),
+            ".id,name,username,customer,password,group,actual-profile,comment,disabled,uptime-used,download-used,upload-used",
         )
         if (rows.isEmpty()) return emptyList()
 
@@ -1048,8 +1093,17 @@ object MikrotikClient {
         return null
     }
 
+    /**
+     * نتيجة جلب مفصّلة: الكروت + المصادر التي قُرئت فعلاً. المصدر الذي فشلت
+     * قراءته (مهلة/انقطاع) لا يُعلن مقروءاً، فلا تُمسح كروته من القائمة المحلية.
+     */
+    data class FetchedCards(val cards: List<UserEntry>, val sources: Set<CardSource>)
+
     /** كل الكروت من المصدرين معاً */
-    suspend fun fetchAllCards(r: RouterProfile?, foreground: Boolean = false): Result<List<UserEntry>> = onRouter(r, foreground = foreground) { con ->
+    suspend fun fetchAllCards(r: RouterProfile?, foreground: Boolean = false): Result<List<UserEntry>> =
+        fetchAllCardsDetailed(r, foreground).map { it.cards }
+
+    suspend fun fetchAllCardsDetailed(r: RouterProfile?, foreground: Boolean = false): Result<FetchedCards> = onRouter(r, foreground = foreground) { con ->
         // فشل الهوتسبوت خطأ حقيقي يظهر للمستخدم — كان يتحول إلى "0 كرت" بنجاح زائف
         val hotspot = con.printLight("/ip/hotspot/user", HOTSPOT_PROPS)
             .filter { (it["name"] ?: "") != "default-trial" }
@@ -1077,7 +1131,8 @@ object MikrotikClient {
             }
         // دمج المصدرين لا يجب أن يسقط بفشل اليوزر منجر، لكن لا نبتلعه صامتاً:
         // نسجّله في السجل ليعرف المستخدم أن مصدراً لم يُجلب (كان يظهر كأن لا كروت)
-        val um = runCatching { readUserManager(con) }.getOrElse { e ->
+        val umRead = runCatching { readUserManager(con) }
+        val um = umRead.getOrElse { e ->
             com.binwaps.cardmanager.data.EventLog.log(
                 "جلب",
                 "تعذّر جلب اليوزر منجر: ${e.message?.take(120) ?: "سبب غير معروف"}",
@@ -1085,7 +1140,9 @@ object MikrotikClient {
             )
             emptyList()
         }
-        hotspot + um
+        val sources = if (umRead.isSuccess) setOf(CardSource.HOTSPOT, CardSource.USER_MANAGER)
+        else setOf(CardSource.HOTSPOT)
+        FetchedCards(hotspot + um, sources)
     }
 
     // ===== الجلسات =====
@@ -1146,33 +1203,12 @@ object MikrotikClient {
     // ===== الباقات =====
 
     /**
-     * باقات الهوتسبوت واليوزر منجر معاً، مع عدد الكروت في كل باقة.
-     * جداول الباقات صغيرة فتصل فوراً، وعدّ كروت كل باقة يتم على الراوتر
-     * نفسه بـ count-only — لا يُنقل أي مستخدم عبر الشبكة إطلاقاً.
+     * باقات الهوتسبوت واليوزر منجر معاً — **جدولا الباقات فقط** (صغيران يصلان
+     * فوراً). عدد كروت كل باقة يحسبه Store محلياً من قائمة الكروت المجلوبة؛
+     * كان يُنقل هنا حقل الباقة لكل مستخدم (عشرات الآلاف) في كل دورة مزامنة
+     * وهو أثقل نقل دوري في التطبيق ويحبس قفل الجلسة أمام عمليات المستخدم.
      */
     suspend fun fetchProfiles(r: RouterProfile?, foreground: Boolean = false): Result<List<HotspotProfile>> = onRouter(r, foreground = foreground) { con ->
-        // عدّ الكروت لكل باقة بجولة **تجميع واحدة لكل مصدر** بدل جولة count-only
-        // منفصلة لكل باقة (كانت N جولة تسلسلية على راوتر بعيد = ثوانٍ تجمّد شاشة
-        // الباقات في كل بناء وبعد كل رفع). نجلب حقل الباقة لكل مستخدم مرة واحدة
-        // متدفقاً ونجمّعه محلياً — يهبط الإجمالي إلى جولتين مهما كثُرت الباقات.
-        val hsCounts: Map<String, Int> = runCatching {
-            con.printLight("/ip/hotspot/user", "profile")
-                .groupingBy { it["profile"].orEmpty() }.eachCount()
-        }.getOrDefault(emptyMap())
-
-        // كشف الإصدار مرة واحدة، ثم قراءة الجدول الصحيح حسب النكهة:
-        // v7 الباقة الفعلية في جدول user-profile، وv6 في actual-profile على المستخدم
-        val umV = userManagerVariant(con)
-        val umCounts: Map<String, Int> = runCatching {
-            when (umV) {
-                UmVariant.V7 -> con.printLight(umPath(umV, "user-profile"), "profile")
-                    .groupingBy { it["profile"].orEmpty() }.eachCount()
-                UmVariant.V6 -> con.printLight(umPath(umV, "user"), "actual-profile")
-                    .groupingBy { it["actual-profile"].orEmpty() }.eachCount()
-                else -> emptyMap()
-            }
-        }.getOrDefault(emptyMap())
-
         val hotspotProfiles = con.tryList("/ip/hotspot/user/profile/print").map { row ->
             val name = row["name"].orEmpty()
             HotspotProfile(
@@ -1182,7 +1218,7 @@ object MikrotikClient {
                 sessionTimeout = row["session-timeout"].orEmpty(),
                 sharedUsers = row["shared-users"] ?: "1",
                 source = CardSource.HOTSPOT,
-                userCount = hsCounts[name] ?: 0,
+                userCount = 0,
             )
         }
 
@@ -1197,7 +1233,7 @@ object MikrotikClient {
                     sessionTimeout = row["validity"] ?: row["session-timeout"].orEmpty(),
                     sharedUsers = row["shared-users"] ?: "1",
                     source = CardSource.USER_MANAGER,
-                    userCount = umCounts[name] ?: 0,
+                    userCount = 0,
                 )
             }
 
@@ -1337,6 +1373,11 @@ object MikrotikClient {
         // v6 يسمي حقل الدخول username لا name — استعمال name كان يُفشل كل الرفع
         val addCmds = users.map { umAddCommand(isV7, customer, it) }
         val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
+        // من كان موجوداً مسبقاً (إعادة رفع دفعة انقطعت) يُفصل عمّن أُنشئ الآن:
+        // جدول user-profile في v7 (وتفعيل v6) **يقبل التكرار** على الراوتر
+        // الحقيقي، فإعادة ربط الباقة بمستخدم موجود كانت تُضاعف الباقة عليه
+        val existingIdx = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+        val existing = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
         // نافذة v6 صغيرة عمداً: كل add يكتب في قاعدة يوزر منجر تسلسلياً، ونافذة
         // ١٦ كانت تُغرقه فيتأخر أول ردّ !done جداً فلا يُسجَّل أي نجاح مبكّر
         // ويبقى الشريط «٠ من N» بينما العمل يجري — شكوى المستخدم بالضبط.
@@ -1345,9 +1386,10 @@ object MikrotikClient {
         val addResult = con.pipeline(
             addCmds,
             treatErrorAsOk = { it.contains("already have", true) || it.contains("already exists", true) },
+            onExisting = { existingIdx.add(it) },
             onDone = { index, success ->
                 if (success) {
-                    created.add(users[index])
+                    if (index in existingIdx) existing.add(users[index]) else created.add(users[index])
                     onCreated(users[index])
                 }
                 bump()
@@ -1364,7 +1406,19 @@ object MikrotikClient {
         // الموجة الثانية (متدفقة): ربط الباقة بمن نجح إنشاؤهم.
         // نسخة ثابتة — مستمع متأخر من مهلة منتهية قد يضيف أثناء القراءة
         val createdSafe = synchronized(created) { created.toList() }
-        val linkCmds = createdSafe.filter { it.profile.isNotBlank() }
+        val existingSafe = synchronized(existing) { existing.toList() }.filter { it.profile.isNotBlank() }
+        // الموجود مسبقاً يُربط فقط إن لم تكن باقته موجودة أصلاً (رفعٌ انقطع بين
+        // الموجتين) — جولة قراءة خفيفة واحدة، ولا تحدث إلا عند إعادة الرفع
+        val toRelink = if (existingSafe.isEmpty()) emptyList() else {
+            val linked: Set<String> = runCatching {
+                if (isV7) con.printLight("/user-manager/user-profile", "user,profile")
+                    .map { "${it["user"].orEmpty()} ${it["profile"].orEmpty()}" }.toSet()
+                else con.printLight("/tool/user-manager/user", "username,actual-profile")
+                    .map { "${it["username"].orEmpty()} ${it["actual-profile"].orEmpty()}" }.toSet()
+            }.getOrDefault(emptySet())
+            existingSafe.filter { "${it.username} ${it.profile}" !in linked }
+        }
+        val linkCmds = (createdSafe.filter { it.profile.isNotBlank() } + toRelink)
             .map { umLinkProfileCommand(isV7, customer, it.username, it.profile) }
         // نتيجة ربط الباقة كانت مُهمَلة تماماً: كرت أُنشئ بلا باقة كان يُحسب
         // نجاحاً كاملاً، فيبدو الرفع سليماً والكرت لا يعمل على الشبكة

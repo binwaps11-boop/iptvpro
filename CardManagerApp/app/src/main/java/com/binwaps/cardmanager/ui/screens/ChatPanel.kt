@@ -94,7 +94,7 @@ fun ChatPanel(accountId: String, asAdmin: Boolean, modifier: Modifier = Modifier
                         Text(m.text, fontSize = 12.5.sp, color = TextHi)
                         Text(
                             timeFmt.format(Date(m.at)),
-                            fontSize = 8.5.sp, color = TextLow,
+                            fontSize = 11.sp, color = TextLow,
                             modifier = Modifier.align(Alignment.End),
                         )
                     }

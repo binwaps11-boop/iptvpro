@@ -61,7 +61,10 @@ object Store {
 
     fun init(context: Context) {
         appContext = context.applicationContext
-        _templates.value = load("templates.json") ?: listOf(defaultTemplate())
+        // قائمة فارغة (حذف المستخدم كل القوالب) تُعامل كغياب: بدون قالب تتعطّل
+        // أزرار الطباعة كلها بلا أي تفسير على الشاشة
+        _templates.value = load<List<CardTemplate>>("templates.json")?.takeIf { it.isNotEmpty() }
+            ?: listOf(defaultTemplate())
         _users.value = load("users.json") ?: emptyList()
         _settings.value = load("settings.json") ?: AppSettings()
         _routers.value = load("routers.json") ?: emptyList()
@@ -133,7 +136,21 @@ object Store {
     @Synchronized
     fun setUsers(list: List<UserEntry>) {
         _users.value = list
-        save("users.json", list.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
+        scheduleUsersSave()
+    }
+
+    // كتابة users.json مُجمَّعة: أثناء رفع ١٠ آلاف كرت كان كل وسم «مرفوع» يسلسل
+    // القائمة المحلية كلها ويكتبها من جديد (عشرات الكتابات بميغابايتات على
+    // الخيط الخلفي — ثقلٌ محسوس على الجهاز). الآن كتابة واحدة بعد هدوء ٤٠٠
+    // مللي ثانية، واللقطة تُؤخذ لحظة الكتابة فلا يضيع آخر تعديل
+    private val usersDirty = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val flusher = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+    private fun scheduleUsersSave() {
+        if (!usersDirty.compareAndSet(false, true)) return
+        flusher.schedule({
+            usersDirty.set(false)
+            save("users.json", _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
+        }, 400, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     @Synchronized
@@ -145,11 +162,22 @@ object Store {
      * والكروت المحلية التي لم تُرفع بعد تبقى كما هي فلا يضيع منها شيء.
      */
     @Synchronized
-    fun mergeRouterCards(fetched: List<UserEntry>) {
+    fun mergeRouterCards(
+        fetched: List<UserEntry>,
+        /**
+         * المصادر التي قُرئت فعلاً في هذا الجلب. كروت المصدر الذي **لم** يُقرأ
+         * (فشل اليوزر منجر بمهلة، أو جلب الهوتسبوت وحده) تبقى كما هي — كان الدمج
+         * يمسحها فتختفي آلاف الكروت من القائمة حتى الجلب الكامل التالي (~١٠ دقائق)
+         */
+        sources: Set<com.binwaps.cardmanager.model.CardSource> = setOf(
+            com.binwaps.cardmanager.model.CardSource.HOTSPOT,
+            com.binwaps.cardmanager.model.CardSource.USER_MANAGER,
+        ),
+    ) {
         val names = fetched.map { it.username }.toHashSet()
-        val localPending = _users.value.filter {
-            it.routerId.isBlank() && it.source == com.binwaps.cardmanager.model.CardSource.LOCAL &&
-                it.username !in names
+        val kept = _users.value.filter {
+            (it.source == com.binwaps.cardmanager.model.CardSource.LOCAL && it.routerId.isBlank() && it.username !in names) ||
+                (it.source != com.binwaps.cardmanager.model.CardSource.LOCAL && it.source !in sources && it.username !in names)
         }
         // أسعار الكروت تعيش محلياً فقط — ننقلها لنسخة الراوتر بدل فقدها
         val prices = _users.value.associate { it.username to it.price }
@@ -157,8 +185,23 @@ object Store {
             fetched.map { f ->
                 val oldPrice = prices[f.username].orEmpty()
                 if (f.price.isBlank() && oldPrice.isNotBlank()) f.copy(price = oldPrice) else f
-            } + localPending
+            } + kept
         )
+        recomputeProfileCounts()
+    }
+
+    /**
+     * عدد كروت كل باقة يُحسب محلياً من قائمة الراوتر — بدل نقل حقل الباقة لكل
+     * مستخدم عبر الشبكة في كل دورة مزامنة (كان أثقل نقلٍ دوري في التطبيق)
+     */
+    private fun recomputeProfileCounts() {
+        val cur = _profiles.value
+        if (cur.isEmpty()) return
+        val counts = _users.value
+            .filter { it.source != com.binwaps.cardmanager.model.CardSource.LOCAL }
+            .groupingBy { it.profile }.eachCount()
+        val next = cur.map { p -> p.copy(userCount = counts[p.name] ?: 0) }
+        if (next != cur) _profiles.value = next
     }
 
     /** وسم الكروت المحلية التي نجح رفعها للراوتر — حتى لا تُرفع مرتين */
@@ -247,13 +290,20 @@ object Store {
         // نحافظ على الأسعار المحفوظة محلياً عند تحديث القائمة من الراوتر
         val prices = _profiles.value.associate { it.name to it.price }
         val costs = _profiles.value.associate { it.name to it.cost }
-        _profiles.value = list.map { p ->
+        val counts = _users.value
+            .filter { it.source != com.binwaps.cardmanager.model.CardSource.LOCAL }
+            .groupingBy { it.profile }.eachCount()
+        val next = list.map { p ->
             p.copy(
                 price = p.price.ifBlank { prices[p.name].orEmpty() },
                 cost = p.cost.ifBlank { costs[p.name].orEmpty() },
+                userCount = if (p.userCount > 0) p.userCount else counts[p.name] ?: 0,
             )
         }
-        save("profiles.json", _profiles.value)
+        // لا كتابة على القرص إن لم يتغيّر شيء — كانت كل دورة مزامنة تكتب الملف
+        if (next == _profiles.value) return
+        _profiles.value = next
+        save("profiles.json", next)
     }
 
     fun updateProfilePrice(name: String, price: String) {
@@ -464,7 +514,8 @@ object Store {
     )
 
     /** كل مسارات الصور التي يشير إليها قالب: الخلفية وصور الحقول والخلايا */
-    private fun templateImagePaths(t: CardTemplate): List<String> = buildList {
+    /** كل مسارات الصور التي يعتمدها القالب (خلفية + شعارات الحقول والخلايا) */
+    internal fun templateImagePaths(t: CardTemplate): List<String> = buildList {
         if (t.backgroundPath.isNotBlank()) add(t.backgroundPath)
         t.fields.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) }
         t.rows.forEach { r -> r.cells.forEach { if (it.imagePath.isNotBlank()) add(it.imagePath) } }

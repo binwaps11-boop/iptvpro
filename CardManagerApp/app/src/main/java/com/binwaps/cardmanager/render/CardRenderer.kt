@@ -55,18 +55,23 @@ object CardRenderer {
         return result
     }
 
-    /** ذاكرة مؤقتة لصورة الخلفية — تمنع فك ترميز الصورة لكل كرت (تسريع كبير للدفعات) */
-    private var bgPath: String? = null
-    private var bgBitmap: Bitmap? = null
+    /**
+     * ذاكرة مؤقتة لصور الخلفية بمفتاح المسار — تمنع فك ترميز الصورة لكل كرت.
+     * **لا تُعاد تدوير (recycle) أي صورة أبداً**: الخانة الواحدة السابقة كانت
+     * تُدوَّر حين تُعرض معاينة قالب آخر بينما مهمة الطباعة تعمل بالخلفية على
+     * القالب الأول، فيرمي الرسم «recycled bitmap» ويُبتلع وتخرج الكروت فارغة
+     * مع رسالة «اكتملت الطباعة». الصور تُترك لجامع المهملات.
+     */
+    private val bgCache = HashMap<String, Bitmap?>()
 
     @Synchronized
     private fun background(path: String): Bitmap? {
         if (path.isBlank()) return null
-        if (bgPath == path && bgBitmap?.isRecycled == false) return bgBitmap
-        bgBitmap?.recycle()
-        bgBitmap = if (File(path).exists()) BitmapFactory.decodeFile(path) else null
-        bgPath = path
-        return bgBitmap
+        bgCache[path]?.let { if (!it.isRecycled) return it }
+        if (bgCache.size > 4) bgCache.clear()
+        val bmp = if (File(path).exists()) runCatching { BitmapFactory.decodeFile(path) }.getOrNull() else null
+        bgCache[path] = bmp
+        return bmp
     }
 
     /** ذاكرة صور الشعارات/الحقول المصوّرة — بمفتاح المسار، فلا تُفكّ الصورة لكل كرت في الدفعة */
@@ -86,9 +91,7 @@ object CardRenderer {
     /** تُستدعى عند تغيير خلفية القالب أو صورة حقل */
     @Synchronized
     fun clearCache() {
-        bgBitmap?.recycle()
-        bgBitmap = null
-        bgPath = null
+        bgCache.clear()
         imageCache.clear()
     }
 

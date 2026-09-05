@@ -107,6 +107,8 @@ object PdfExporter {
         printNo: Int,
         dateText: String,
         timeText: String,
+        /** يُفحص قبل كل صفحة — إلغاء المستخدم يوقف البناء بدل إكماله وإعلان «اكتملت» */
+        isActive: () -> Boolean = { true },
         onPageDone: (Int) -> Unit = { },
     ): File {
         val layout = settings.layout
@@ -137,8 +139,16 @@ object PdfExporter {
 
         var pdfPageNo = 0
         var cardsBefore = plan.pages.take(fromPage).sumOf { pg -> pg.count { it != null } }
+        // فشل رسم كرت كان يُبتلع صامتاً فتخرج مستطيلات فارغة مع «✓ اكتملت الطباعة»
+        // — الآن يُعدّ ويُسجَّل ويُحوَّل إلى فشلٍ مفهوم قابل للاستئناف
+        var failedCards = 0
+        var firstDrawError: Throwable? = null
 
         for (pageIndex in fromPage until toPageExclusive.coerceAtMost(plan.pages.size)) {
+            if (!isActive()) {
+                doc.close()
+                throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
+            }
             val pageUsers = plan.pages[pageIndex]
             repeat(plan.copies) {
                 pdfPageNo++
@@ -167,6 +177,10 @@ object PdfExporter {
                     canvas.translate(rect.left, rect.top)
                     canvas.scale(rect.width() / cellW.toFloat(), rect.height() / cellH.toFloat())
                     runCatching { CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri) }
+                        .onFailure { e ->
+                            failedCards++
+                            if (firstDrawError == null) firstDrawError = e
+                        }
                     canvas.restore()
                     drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
                 }
@@ -174,6 +188,13 @@ object PdfExporter {
             }
             cardsBefore += pageUsers.count { it != null }
             onPageDone(pageIndex)
+        }
+
+        if (failedCards > 0) {
+            doc.close()
+            val why = firstDrawError?.message?.take(120) ?: firstDrawError?.javaClass?.simpleName ?: "خطأ في القالب"
+            com.binwaps.cardmanager.data.EventLog.log("طباعة", "تعذّر رسم $failedCards كرت: $why", ok = false)
+            throw IllegalStateException("تعذّر رسم $failedCards كرت ($why) — افحص صور القالب ثم اضغط استئناف")
         }
 
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
@@ -394,11 +415,27 @@ object PdfExporter {
             val uri = resolver.insert(
                 android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
             ) ?: return null
-            resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+            val out = resolver.openOutputStream(uri)
+            if (out == null) {
+                // لا نترك صفاً معلّقاً بملف صفر بايت في التنزيلات
+                runCatching { resolver.delete(uri, null, null) }
+                return null
+            }
+            out.use { o -> file.inputStream().use { it.copyTo(o) } }
             values.clear()
             values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
         } else {
+            // أندرويد ٨/٩: الكتابة في المجلد العام تحتاج إذن التخزين — بدونه كان
+            // النسخ يفشل صامتاً فلا يظهر الملف في «التنزيلات» ولا أي رسالة
+            val granted = context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                com.binwaps.cardmanager.data.EventLog.log(
+                    "طباعة", "لم يُحفظ في التنزيلات: إذن التخزين غير ممنوح — استخدم «مشاركة»", ok = false,
+                )
+                return null
+            }
             val dir = android.os.Environment.getExternalStoragePublicDirectory(
                 android.os.Environment.DIRECTORY_DOWNLOADS,
             )
@@ -406,7 +443,10 @@ object PdfExporter {
             file.copyTo(File(dir, name), overwrite = true)
         }
         name
-    }.getOrNull()
+    }.getOrElse { e ->
+        com.binwaps.cardmanager.data.EventLog.log("طباعة", "تعذّر الحفظ في التنزيلات: ${e.message?.take(120)}", ok = false)
+        null
+    }
 
     /**
      * يرسم كرتاً واحداً كصورة PNG ويشاركه (واتساب/أي تطبيق) — لبيع كرت مفرد

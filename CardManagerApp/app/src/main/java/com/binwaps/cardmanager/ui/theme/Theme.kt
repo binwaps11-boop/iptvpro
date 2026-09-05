@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
+import androidx.compose.ui.unit.em
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -84,7 +85,10 @@ private val AppTypography = Typography(
     headlineMedium = TextStyle(fontSize = 24.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, color = TextHi),
     titleLarge = TextStyle(fontSize = 19.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = TextHi),
     titleMedium = TextStyle(fontSize = 15.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, color = TextHi),
-    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 24.sp, color = TextHi),
+    // ارتفاع السطر **نسبي** (em) لا ثابتاً: النمط الافتراضي يرثه كل Text يمرّر
+    // fontSize يدوياً، وكان 24sp ثابتاً — يقصّ العناوين الكبيرة (≥21sp) ويترك
+    // صندوقاً ضخماً حول النصوص الصغيرة. الآن 1.5× حجم الخط الفعلي أينما كان
+    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 1.5.em, color = TextHi),
     bodyMedium = TextStyle(fontSize = 13.sp, lineHeight = 21.sp, color = TextMid),
     labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 17.sp, color = TextLow, letterSpacing = 0.6.sp),
 )

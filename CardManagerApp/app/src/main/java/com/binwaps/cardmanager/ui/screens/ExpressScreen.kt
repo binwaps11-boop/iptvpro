@@ -85,7 +85,9 @@ fun ExpressScreen() {
     val settings by Store.settings.collectAsState()
     val routers by Store.routers.collectAsState()
     val engineState by PrintEngine.state.collectAsState()
-    LaunchedEffect(Unit) { PrintEngine.restoreIfAny() }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { PrintEngine.restoreIfAny() }
+    }
 
     var templateId by remember { mutableStateOf(Store.defaultTemplateOrFirst()?.id) }
     val template = templates.firstOrNull { it.id == templateId } ?: Store.defaultTemplateOrFirst()
@@ -111,19 +113,32 @@ fun ExpressScreen() {
         upload = UploadState.Running(0, cards.size)
         scope.launch {
             val created = java.util.Collections.synchronizedList(mutableListOf<UserEntry>())
-            val result = when (target) {
-                UploadTarget.HOTSPOT -> MikrotikClient.createHotspotUsers(
-                    Store.activeRouter(), cards,
-                    onProgress = { d, t -> upload = UploadState.Running(d, t) },
-                    onCreated = { created.add(it) },
-                )
-                UploadTarget.USER_MANAGER -> MikrotikClient.createUserManagerUsers(
-                    Store.activeRouter(), cards,
-                    onProgress = { d, t -> upload = UploadState.Running(d, t) },
-                    onCreated = { created.add(it) },
-                )
+            // خانق التقدّم: نبضة لكل كرت من خيط الشبكة كانت تعيد تركيب الشاشة كلها
+            // مئات المرات في الثانية أثناء الرفع — تجمّد محسوس
+            var lastEmit = 0L
+            val onProgress: (Int, Int) -> Unit = { d, t ->
+                val now = System.currentTimeMillis()
+                if (d >= t || now - lastEmit > 120) { lastEmit = now; upload = UploadState.Running(d, t) }
             }
-            Store.markUploaded(created.map { it.username })
+            val onCreated: (UserEntry) -> Unit = {
+                created.add(it)
+                if (created.size % 200 == 0) Store.markUploaded(created.map { c -> c.username })
+            }
+            val result = try {
+                when (target) {
+                    UploadTarget.HOTSPOT -> MikrotikClient.createHotspotUsers(
+                        Store.activeRouter(), cards, onProgress = onProgress, onCreated = onCreated,
+                    )
+                    UploadTarget.USER_MANAGER -> MikrotikClient.createUserManagerUsers(
+                        Store.activeRouter(), cards, onProgress = onProgress, onCreated = onCreated,
+                    )
+                }
+            } finally {
+                // يُنفَّذ حتى عند مغادرة الشاشة أثناء الرفع: ما وصل الراوتر يُوسم مرفوعاً
+                // فلا يُرفع ثانية ولا يظهر «رفع الجديد» بعدد كاذب
+                Store.markUploaded(created.map { it.username })
+            }
+            result.onSuccess { com.binwaps.cardmanager.data.SyncEngine.syncNow() }
             upload = result.fold(
                 onSuccess = { ok ->
                     if (ok >= cards.size) UploadState.Done(ok, cards.size)
@@ -151,26 +166,31 @@ fun ExpressScreen() {
         )
         Store.updateSettings(quickSettings.copy(uploadTarget = target))
 
-        val cards = UserGenerator.generate(
-            count = n,
-            prefix = "",
-            length = (length.toCountOrNull() ?: 6).coerceIn(3, 20),
-            charset = Charset.DIGITS,
-            mode = mode,
-            passwordLength = 4,
-            profile = profile,
-            price = price,
-            validity = validity,
-            serialStart = 1,
-            batchTag = "vc-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
-                .format(java.util.Date()),
-        )
-        generated = cards
-        Store.addUsers(cards)
+        // التوليد على خيط حسابي: ١٠٠ ألف كرت داخل onClick كانت تجمّد الواجهة ثوانٍ
+        scope.launch {
+            val cards = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                UserGenerator.generate(
+                    count = n,
+                    prefix = "",
+                    length = (length.toCountOrNull() ?: 6).coerceIn(3, 20),
+                    charset = Charset.DIGITS,
+                    mode = mode,
+                    passwordLength = 4,
+                    profile = profile,
+                    price = price,
+                    validity = validity,
+                    serialStart = 1,
+                    batchTag = "vc-" + java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
+                        .format(java.util.Date()),
+                )
+            }
+            generated = cards
+            Store.addUsers(cards)
 
-        // الرفع والطباعة ينطلقان معاً — لا انتظار أحدهما للآخر
-        if (uploadEnabled && routers.isNotEmpty()) doUpload(cards) else upload = UploadState.Skipped
-        PrintEngine.startPdf(context, t0, cards, quickSettings)
+            // الرفع والطباعة ينطلقان معاً — لا انتظار أحدهما للآخر
+            if (uploadEnabled && routers.isNotEmpty()) doUpload(cards) else upload = UploadState.Skipped
+            PrintEngine.startPdf(context, t0, cards, quickSettings)
+        }
     }
 
     Column(
@@ -247,14 +267,14 @@ fun ExpressScreen() {
             }
             profilesError?.let {
                 Spacer(Modifier.height(5.dp))
-                Text(it, fontSize = 10.5.sp, color = com.binwaps.cardmanager.ui.theme.Danger)
+                Text(it, fontSize = 11.5.sp, color = com.binwaps.cardmanager.ui.theme.Danger)
             }
             Spacer(Modifier.height(7.dp))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppField(profile, { profile = it }, "اسم الباقة", Modifier.weight(1.2f))
+            AppField(profile, { profile = it }, "اسم الباقة", Modifier.weight(1.2f), code = true)
             AppField(price, { price = it }, "السعر", Modifier.weight(0.9f), numeric = true)
-            AppField(validity, { validity = it }, "الصلاحية", Modifier.weight(0.9f))
+            AppField(validity, { validity = it }, "الصلاحية", Modifier.weight(0.9f), code = true)
         }
 
         Spacer(Modifier.height(10.dp))
@@ -268,7 +288,7 @@ fun ExpressScreen() {
             }
         }
         if (routers.isEmpty()) {
-            Text("لا يوجد راوتر محفوظ — سيُنشأ PDF فقط", fontSize = 10.5.sp, color = TextLow)
+            Text("لا يوجد راوتر محفوظ — سيُنشأ PDF فقط", fontSize = 11.5.sp, color = TextLow)
         }
 
         Spacer(Modifier.height(14.dp))
@@ -282,7 +302,7 @@ fun ExpressScreen() {
         Text(
             "الرفع للميكروتك وبناء الـ PDF يعملان معاً بالتوازي — متدفق وسريع حتى عن بُعد. " +
                 "ملف PDF واحد لكل الكروت مهما كان العدد.",
-            fontSize = 10.sp, color = TextLow,
+            fontSize = 11.sp, color = TextLow,
         )
 
         // حالة الرفع
@@ -306,9 +326,10 @@ fun ExpressScreen() {
                 GlassCard(Modifier.fillMaxWidth(), glow = Danger.copy(alpha = 0.5f), padding = 11) {
                     Text("الرفع لم يكتمل: ${u.error}", fontSize = 12.sp, color = TextHi)
                     Spacer(Modifier.height(8.dp))
+                    // weight لكلٍّ منهما: NeonButton يملأ العرض داخلياً فكان يطرد زر «تجاهل» خارج الشاشة
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NeonButton("إعادة رفع الناقص (${u.remaining.size})") { doUpload(u.remaining) }
-                        GhostButton("تجاهل") { upload = UploadState.Idle }
+                        NeonButton("إعادة رفع الناقص (${u.remaining.size})", Modifier.weight(1.4f)) { doUpload(u.remaining) }
+                        GhostButton("تجاهل", Modifier.weight(0.8f)) { upload = UploadState.Idle }
                     }
                 }
             }

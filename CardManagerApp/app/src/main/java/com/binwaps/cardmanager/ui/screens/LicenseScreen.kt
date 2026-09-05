@@ -517,7 +517,7 @@ fun LicenseScreen(
                 Text("لديك مفتاح؟", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(
                     "إن ضغطت رابط التفعيل سيتم كل شيء تلقائياً — هذا الحقل للحالات الاستثنائية.",
-                    fontSize = 10.5.sp, color = TextLow,
+                    fontSize = 11.5.sp, color = TextLow,
                 )
                 Spacer(Modifier.height(9.dp))
                 AppField(

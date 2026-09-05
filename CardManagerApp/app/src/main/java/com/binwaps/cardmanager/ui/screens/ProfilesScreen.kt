@@ -165,7 +165,7 @@ fun ProfilesScreen() {
                                     }.joinToString("  •  "),
                                     fontSize = 11.sp, color = TextMid,
                                 )
-                                Text("${p.userCount} كرت في هذه الباقة", fontSize = 10.5.sp, color = TextLow)
+                                Text("${p.userCount} كرت في هذه الباقة", fontSize = 11.5.sp, color = TextLow)
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
@@ -175,7 +175,7 @@ fun ProfilesScreen() {
                                     color = if (p.price.isBlank()) TextLow else Warn,
                                 )
                                 if (p.cost.isNotBlank()) {
-                                    Text("تكلفة ${p.cost}", fontSize = 10.sp, color = TextLow)
+                                    Text("تكلفة ${p.cost}", fontSize = 11.sp, color = TextLow)
                                 }
                                 TextButton(onClick = { priceEditing = p }) {
                                     Text("تعديل الأسعار", fontSize = 11.sp, color = Neon)
@@ -238,16 +238,16 @@ fun ProfilesScreen() {
             title = { Text("باقة جديدة على الراوتر", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    AppField(name, { name = it }, "اسم الباقة", Modifier.fillMaxWidth())
-                    AppField(rate, { rate = it }, "السرعة (مثال: 2M/2M)", Modifier.fillMaxWidth())
+                    AppField(name, { name = it }, "اسم الباقة", Modifier.fillMaxWidth(), code = true)
+                    AppField(rate, { rate = it }, "السرعة (مثال: 2M/2M)", Modifier.fillMaxWidth(), code = true)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AppField(timeout, { timeout = it }, "المدة (مثال: 1d)", Modifier.weight(1f))
+                        AppField(timeout, { timeout = it }, "المدة (مثال: 1d)", Modifier.weight(1f), code = true)
                         AppField(shared, { shared = it.filter { c -> c.isDigit() } }, "عدد الأجهزة", Modifier.weight(1f), numeric = true)
                     }
                     AppField(price, { price = it }, "السعر (يُحفظ في التطبيق)", Modifier.fillMaxWidth(), numeric = true)
                     Text(
                         "تُنشأ الباقة في هوتسبوت الراوتر، والسعر يُحفظ داخل التطبيق لأن الراوتر لا يخزّن الأسعار.",
-                        fontSize = 10.5.sp, color = TextLow,
+                        fontSize = 11.5.sp, color = TextLow,
                     )
                 }
             },

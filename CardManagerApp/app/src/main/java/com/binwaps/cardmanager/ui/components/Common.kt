@@ -116,6 +116,44 @@ fun NeonButton(
     }
 }
 
+/**
+ * يعزل نصاً رقمياً/لاتينياً (مثل «85×54» أو «3×16») عن اتجاه الفقرة العربية.
+ * بدون عازل Bidi تُعكس خوارزمية الاتجاه ترتيب الرقمين حول × فيظهر 85×54 على
+ * أنه 54×85 — مقاسات الكروت كانت تُعرض معكوسة في كل شاشات التخطيط.
+ */
+fun ltr(s: String): String = "⁦$s⁩"
+
+/**
+ * حوار تأكيد موحّد للأفعال التي لا تُعكس (حذف قالب/مبيعة/دفعة/راوتر/كرت).
+ * كان الحذف بضغطة واحدة من أيقونة صغيرة ملاصقة لأيقونات أخرى.
+ */
+@Composable
+fun ConfirmDialog(
+    title: String,
+    body: String,
+    confirmLabel: String = "حذف",
+    danger: Boolean = true,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        title = { Text(title, color = TextHi, fontWeight = FontWeight.Bold, fontSize = 17.sp, lineHeight = 25.sp) },
+        text = { Text(body, color = TextMid, fontSize = 13.5.sp, lineHeight = 21.sp) },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onConfirm(); onDismiss() }) {
+                Text(confirmLabel, color = if (danger) Danger else Neon, fontWeight = FontWeight.Bold, fontSize = 14.sp, lineHeight = 20.sp)
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("إلغاء", color = TextMid, fontSize = 14.sp, lineHeight = 20.sp)
+            }
+        },
+    )
+}
+
 /** زر ثانوي بحدود */
 @Composable
 fun GhostButton(
@@ -173,9 +211,16 @@ fun AppField(
      * الذي أُضيف لتشخيصه.
      */
     reveal: Boolean = false,
+    /**
+     * محتوى «رمزي» لاتيني: اسم باقة ميكروتك (حساس لحالة الأحرف)، مدة مثل 30d،
+     * MAC، IP، رابط، SSID. يعطّل تكبير أول حرف والتصحيح التلقائي ويجعل الاتجاه
+     * LTR معاً — «default» كان يصير «Default» فيفشل الرفع، والنقاط تنقلب في RTL.
+     */
+    code: Boolean = false,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val isErr = !error.isNullOrBlank()
+    val ltrDir = ltr || code
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -191,7 +236,7 @@ fun AppField(
         textStyle = LocalTextStyle.current.copy(
             fontSize = 15.sp,
             lineHeight = 23.sp,
-            textDirection = if (ltr) TextDirection.Ltr else TextDirection.Content,
+            textDirection = if (ltrDir) TextDirection.Ltr else TextDirection.Content,
         ),
         supportingText = (error ?: supporting)?.takeIf { it.isNotBlank() }?.let {
             { Text(it, fontSize = 11.5.sp, lineHeight = 17.sp, color = if (isErr) Danger else TextMid) }
@@ -203,11 +248,12 @@ fun AppField(
                 numeric -> KeyboardType.Number
                 email -> KeyboardType.Email
                 password -> KeyboardType.Password
+                code -> KeyboardType.Ascii
                 else -> KeyboardType.Text
             },
-            capitalization = if (email || password || numeric) KeyboardCapitalization.None
+            capitalization = if (email || password || numeric || code) KeyboardCapitalization.None
                 else KeyboardCapitalization.Sentences,
-            autoCorrect = !email && !password && !numeric,
+            autoCorrect = !email && !password && !numeric && !code,
         ),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Neon,
@@ -242,7 +288,7 @@ fun StatTile(
         }
         Spacer(Modifier.height(4.dp))
         Text(value, fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
-        if (hint != null) Text(hint, fontSize = 10.sp, color = TextLow)
+        if (hint != null) Text(hint, fontSize = 11.sp, color = TextLow)
     }
 }
 
