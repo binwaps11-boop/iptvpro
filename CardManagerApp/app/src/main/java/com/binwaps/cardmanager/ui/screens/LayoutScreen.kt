@@ -20,7 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Add
@@ -92,7 +92,7 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onDone) { Icon(Icons.Filled.ArrowForward, "رجوع", tint = TextMid) }
+            IconButton(onClick = onDone) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "رجوع", tint = TextMid) }
             Box(Modifier.weight(1f)) {
                 SectionHeader("تخطيط الصفحة", template?.name, Icons.Filled.GridView)
             }
@@ -115,16 +115,31 @@ fun LayoutScreen(templateId: Long, onDone: () -> Unit) {
 
         // المعاينة الحية للصفحة
         if (template != null) {
-            val preview = remember(template, layout, users.firstOrNull()) {
-                PdfExporter.renderPagePreview(template, users, settings, 560)
+            // الرسم على خيط خلفي مع التقاط الأخطاء — كان يرسم صفحة كاملة (حتى ٦٥ كرتاً)
+            // على خيط الواجهة داخل التركيب مع كل حركة منزلق، وأي استثناء يُسقط التطبيق.
+            // المفاتيح تشمل البدء من الخلية/النسخ/الإزاحة فتتحدث المعاينة عند تغييرها
+            val preview by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+                null, template, layout, settings.startCell, settings.copies,
+                settings.offsetXMm, settings.offsetYMm, users.firstOrNull(),
+            ) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    runCatching { PdfExporter.renderPagePreview(template, users, settings, 560).asImageBitmap() }.getOrNull()
+                }
             }
             GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 10) {
-                Image(
-                    bitmap = preview.asImageBitmap(),
-                    contentDescription = "معاينة الصفحة",
-                    modifier = Modifier.fillMaxWidth(),
-                    contentScale = ContentScale.FillWidth,
-                )
+                val bmp = preview
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = "معاينة الصفحة",
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.FillWidth,
+                    )
+                } else {
+                    Box(Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
+                        Text("جاري رسم المعاينة…", fontSize = 12.sp, color = TextMid)
+                    }
+                }
             }
             Text(
                 "معاينة الصفحة كما ستُطبع",

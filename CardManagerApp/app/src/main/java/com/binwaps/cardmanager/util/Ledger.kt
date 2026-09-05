@@ -29,10 +29,20 @@ object Ledger {
     /** إجمالي الديون = مجموع ديون الزبائن بعد السداد، كلٌّ على حدة */
     fun totalDebt(sales: List<SaleEntry>): Double = perCustomerDebt(sales).values.sum()
 
-    /** عرض مبلغ: بلا كسور إن كان صحيحاً، وإلا برقمين عشريين — أرقام إنجليزية دائماً */
-    fun money(v: Double): String =
-        if (v == v.toLong().toDouble()) v.toLong().toString()
-        else String.format(Locale.US, "%.2f", v)
+    /**
+     * عرض مبلغ: فواصل آلاف، بلا كسور إن كان صحيحاً وإلا حتى رقمين عشريين —
+     * أرقام إنجليزية دائماً (150,000 و 1,500.75 بدل 150000 و 1500.75)
+     */
+    fun money(v: Double): String {
+        val nf = java.text.NumberFormat.getNumberInstance(Locale.US)
+        nf.maximumFractionDigits = 2
+        nf.minimumFractionDigits = 0
+        nf.isGroupingUsed = true
+        return nf.format(v)
+    }
+
+    /** مبلغ مع وحدة العملة في نص واحد */
+    fun moneyWithUnit(v: Double, currency: String): String = "${money(v)} $currency".trim()
 }
 
 /**

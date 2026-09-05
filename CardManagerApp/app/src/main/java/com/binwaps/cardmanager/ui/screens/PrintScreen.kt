@@ -323,12 +323,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                             "يمكنك مغادرة الشاشة — الطباعة تستمر في الخلفية",
                             fontSize = 11.5.sp, color = TextLow, modifier = Modifier.weight(1f),
                         )
-                        Text(
-                            "إيقاف",
-                            fontSize = 12.sp, color = com.binwaps.cardmanager.ui.theme.Danger,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.clickable { PrintEngine.cancel() }.padding(6.dp),
-                        )
+                        // زر حقيقي ≥48dp — كان نصاً قابلاً للنقر بارتفاع ~30dp بلا أثر ضغط لفعلٍ حرج
+                        GhostButton("إيقاف", color = com.binwaps.cardmanager.ui.theme.Danger) { PrintEngine.cancel() }
                     }
                 }
             }

@@ -394,8 +394,8 @@ fun RouterAdminScreen() {
                                 Text(s.type, fontSize = 11.sp, color = TextLow)
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                Text("نزول ${bytes(s.rxBytes)}", fontSize = 11.5.sp, color = Neon)
-                                Text("صعود ${bytes(s.txBytes)}", fontSize = 11.5.sp, color = Violet)
+                                Text("نزول ${com.binwaps.cardmanager.ui.components.formatBytes(s.rxBytes)}", fontSize = 11.5.sp, color = Neon)
+                                Text("صعود ${com.binwaps.cardmanager.ui.components.formatBytes(s.txBytes)}", fontSize = 11.5.sp, color = Violet)
                             }
                         }
                     }
@@ -590,8 +590,10 @@ fun RouterAdminScreen() {
                     confirmReboot = false
                     val r = router ?: return@TextButton
                     scope.launch {
+                        // النتيجة كانت مُهملة: «أُرسل الأمر» حتى عند الفشل
                         MikrotikClient.rebootRouter(r)
-                        message = "أُرسل أمر إعادة التشغيل"
+                            .onSuccess { message = "تم إرسال أمر إعادة التشغيل — سيعود الراوتر خلال دقيقة" }
+                            .onFailure { message = "تعذّر إرسال أمر إعادة التشغيل: ${it.message ?: "خطأ غير معروف"}" }
                     }
                 }) { Text("إعادة التشغيل", color = Danger, fontWeight = FontWeight.Bold) }
             },
@@ -609,9 +611,3 @@ private fun bindingLabel(type: String): String = when (type) {
     else -> type
 }
 
-private fun bytes(v: Long): String = when {
-    v >= 1_073_741_824 -> String.format(Locale.US, "%.2f GB", v / 1_073_741_824.0)
-    v >= 1_048_576 -> String.format(Locale.US, "%.1f MB", v / 1_048_576.0)
-    v >= 1024 -> String.format(Locale.US, "%.0f KB", v / 1024.0)
-    else -> "$v B"
-}

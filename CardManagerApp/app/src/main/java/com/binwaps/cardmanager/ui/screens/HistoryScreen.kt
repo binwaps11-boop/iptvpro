@@ -85,28 +85,28 @@ fun HistoryScreen() {
 
     val fmt = remember { SimpleDateFormat("yyyy/MM/dd — HH:mm", Locale.US) }
 
-    val cal = remember { Calendar.getInstance() }
-    val todayStart = remember {
-        Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0)
-        }.timeInMillis
-    }
-    val monthStart = remember {
-        Calendar.getInstance().apply {
-            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
-        }.timeInMillis
-    }
+    // حدود اليوم/الشهر تُحسب كل تركيب — remember بلا مفتاح كان يجمّدها على وقت فتح الشاشة
+    val todayStart = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val monthStart = Calendar.getInstance().apply {
+        set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
 
-    val today = batches.filter { it.createdAt >= todayStart }
-    val month = batches.filter { it.createdAt >= monthStart }
+    // التجميعات ثقيلة مع مئات الدفعات — تُحسب عند تغيّر المدخلات فقط
+    val today = remember(batches, todayStart) { batches.filter { it.createdAt >= todayStart } }
+    val month = remember(batches, monthStart) { batches.filter { it.createdAt >= monthStart } }
 
     // أعلى الباقات مبيعاً هذا الشهر
-    val topProfiles = month
-        .filter { it.profile.isNotBlank() }
-        .groupBy { it.profile }
-        .map { (name, list) -> name to list.sumOf { it.users.size } }
-        .sortedByDescending { it.second }
-        .take(5)
+    val topProfiles = remember(month) {
+        month
+            .filter { it.profile.isNotBlank() }
+            .groupBy { it.profile }
+            .map { (name, list) -> name to list.sumOf { it.users.size } }
+            .sortedByDescending { it.second }
+            .take(5)
+    }
     val maxSold = topProfiles.maxOfOrNull { it.second } ?: 1
 
     Column(

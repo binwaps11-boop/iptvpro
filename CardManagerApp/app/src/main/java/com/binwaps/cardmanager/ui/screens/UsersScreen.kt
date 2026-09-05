@@ -1001,11 +1001,11 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                 // كروت مجانية
                 Text("كروت مجانية", fontSize = 12.sp, color = TextLow)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Chip(if (everyNOn) "كل رقم ✓" else "كل كرت رقم N", everyNOn) { everyNOn = !everyNOn }
+                    Chip(if (everyNOn) "كل رقم ✓" else "كل كرت رقم…", everyNOn) { everyNOn = !everyNOn }
                     if (everyNOn) {
                         Spacer(Modifier.width(6.dp))
                         Box(Modifier.width(90.dp)) {
-                            AppField(everyN, { everyN = it.filter { c -> c.isDigit() } }, "N", Modifier.fillMaxWidth(), numeric = true)
+                            AppField(everyN, { everyN = it.filter { c -> c.isDigit() } }, "كل كم كرت؟", Modifier.fillMaxWidth(), numeric = true)
                         }
                     }
                 }

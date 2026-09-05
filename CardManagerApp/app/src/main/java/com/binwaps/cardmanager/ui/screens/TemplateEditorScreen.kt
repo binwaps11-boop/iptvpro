@@ -24,7 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -153,7 +153,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { leave() }) { Icon(Icons.Filled.ArrowForward, "رجوع", tint = TextMid) }
+            IconButton(onClick = { leave() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "رجوع", tint = TextMid) }
             Text("محرر القالب", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
             Box(Modifier.width(110.dp)) {
                 NeonButton("حفظ", icon = Icons.Filled.Save) {

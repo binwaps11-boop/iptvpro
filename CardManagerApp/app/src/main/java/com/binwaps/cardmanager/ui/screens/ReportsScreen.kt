@@ -129,7 +129,7 @@ fun ReportsScreen() {
                     count = list.size,
                     money = money,
                     extraLabel = "الربح",
-                    extra = fmt(profit) + " " + cur,
+                    extra = com.binwaps.cardmanager.util.Ledger.money(profit) + " " + cur,
                 )
             }.sortedByDescending { it.count }
 
@@ -166,7 +166,7 @@ fun ReportsScreen() {
                     count = list.size,
                     money = 0.0,
                     extraLabel = "الاستهلاك",
-                    extra = human(list.sumOf { it.bytesIn + it.bytesOut }),
+                    extra = com.binwaps.cardmanager.ui.components.formatBytes(list.sumOf { it.bytesIn + it.bytesOut }),
                 )
             }.sortedByDescending { it.count }
 
@@ -183,7 +183,7 @@ fun ReportsScreen() {
                         count = list.sumOf { it.quantity },
                         money = list.sumOf { it.total },
                         extraLabel = "دين متبقٍ",
-                        extra = fmt(remaining) + " " + cur,
+                        extra = com.binwaps.cardmanager.util.Ledger.money(remaining) + " " + cur,
                         debt = remaining,
                     )
                 }.sortedByDescending { it.money }
@@ -240,7 +240,7 @@ fun ReportsScreen() {
         GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.28f), padding = 12) {
             Row {
                 Total("عدد الكروت", rows.sumOf { it.count }.toString(), Neon, Modifier.weight(1f))
-                Total("الإجمالي", fmt(rows.sumOf { it.money }) + " " + cur, Warn, Modifier.weight(1f))
+                Total("الإجمالي", com.binwaps.cardmanager.util.Ledger.money(rows.sumOf { it.money }) + " " + cur, Warn, Modifier.weight(1f))
                 Total("السجلات", rows.size.toString(), Violet, Modifier.weight(1f))
             }
         }
@@ -270,7 +270,7 @@ fun ReportsScreen() {
                             Column(horizontalAlignment = Alignment.End) {
                                 Text("${r.count} كرت", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Neon)
                                 if (r.money != 0.0) {
-                                    Text(fmt(r.money) + " " + cur, fontSize = 11.sp, color = Warn)
+                                    Text(com.binwaps.cardmanager.util.Ledger.money(r.money) + " " + cur, fontSize = 11.sp, color = Warn)
                                 }
                                 if (r.extra.isNotBlank()) {
                                     Text(
@@ -303,15 +303,7 @@ private fun Total(label: String, value: String, color: androidx.compose.ui.graph
     }
 }
 
-private fun fmt(v: Double): String =
-    if (v == v.toLong().toDouble()) v.toLong().toString() else String.format(Locale.US, "%.2f", v)
-
-private fun human(bytes: Long): String = when {
-    bytes >= 1_073_741_824 -> String.format(Locale.US, "%.2f GB", bytes / 1_073_741_824.0)
-    bytes >= 1_048_576 -> String.format(Locale.US, "%.1f MB", bytes / 1_048_576.0)
-    bytes >= 1024 -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
-    else -> "$bytes B"
-}
+// تنسيق المال والبايتات موحّد عبر Ledger.money وformatBytes (كانت نسخاً محلية بوحدات إنجليزية)
 
 /** يكتب التقرير كملف CSV بترميز UTF-8 مع BOM حتى تفتحه إكسل بالعربية صحيحة */
 private fun shareCsv(
@@ -325,7 +317,7 @@ private fun shareCsv(
             context,
             listOf("البيان", "التفصيل", "عدد الكروت", "الإجمالي ($currency)", "إضافي"),
             rows.map {
-                listOf(it.title, it.subtitle, it.count.toString(), fmt(it.money), "${it.extraLabel} ${it.extra}".trim())
+                listOf(it.title, it.subtitle, it.count.toString(), com.binwaps.cardmanager.util.Ledger.money(it.money), "${it.extraLabel} ${it.extra}".trim())
             },
         )
         com.binwaps.cardmanager.util.CsvExporter.share(context, file, "تقرير $reportName")
