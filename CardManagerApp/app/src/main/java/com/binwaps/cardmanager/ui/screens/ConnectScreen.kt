@@ -234,12 +234,7 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         error = "أُلغي الاتصال"
     }
 
-    val transition = rememberInfiniteTransition(label = "glow")
-    val pulse by transition.animateFloat(
-        initialValue = 0.94f, targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(tween(2200), RepeatMode.Reverse), label = "pulse",
-    )
-
+    // لا نبض لا نهائي للشعار: حركة دائمة فوق شاشة فيها حقول وأخطاء تشتّت وتستهلك البطارية
     Column(
         Modifier
             .fillMaxSize()
@@ -255,7 +250,6 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
             Box(
                 Modifier
                     .size(96.dp)
-                    .scale(pulse)
                     .background(
                         Brush.radialGradient(listOf(Neon.copy(alpha = 0.25f), Violet.copy(alpha = 0.02f))),
                         CircleShape,
@@ -480,11 +474,16 @@ fun ConnectScreen(onConnected: () -> Unit, onSkip: () -> Unit) {
         // زر بارز لا رابط صغير: توليد الكروت وتصميمها وطباعتها لا يحتاج راوتراً،
         // ويجب أن يكون الوصول إليها واضحاً حتى لو تعذّر الاتصال
         GhostButton(
-            "الدخول بدون اتصال — توليد وتصميم وطباعة محلياً",
+            "العمل بدون راوتر",
             Modifier.fillMaxWidth(),
             color = Violet,
             enabled = !busy,
         ) { Store.setConnected(false); onSkip() }
+        Text(
+            "توليد الكروت وتصميمها وطباعتها لا يحتاج راوتراً — ارفعها لاحقاً بضغطة",
+            fontSize = 11.5.sp, color = TextMid, lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 4.dp),
+        )
         Spacer(Modifier.height(10.dp))
         // رقم الإصدار ظاهر دائماً — ليعرف المستخدم فوراً أي نسخة مثبّتة فعلاً
         Text(
