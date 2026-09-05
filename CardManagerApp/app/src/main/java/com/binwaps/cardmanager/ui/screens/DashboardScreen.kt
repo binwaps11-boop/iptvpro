@@ -136,6 +136,7 @@ fun DashboardScreen(navController: NavController) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         // الرأس
+        val connectError by com.binwaps.cardmanager.data.SyncEngine.connectError.collectAsState()
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
@@ -148,7 +149,6 @@ fun DashboardScreen(navController: NavController) {
                 )
             }
             // «جاري الاتصال…» أثناء الاتصال التلقائي بدل «غير متصل» الصامتة، والسبب عند الفشل
-            val connectError by com.binwaps.cardmanager.data.SyncEngine.connectError.collectAsState()
             val autoConnecting = !connected && connectError == null &&
                 Store.activeRouter() != null && com.binwaps.cardmanager.data.SyncEngine.isRunning()
             StatusPill(connected, if (connected) "متصل" else if (autoConnecting) "جاري الاتصال…" else "غير متصل")

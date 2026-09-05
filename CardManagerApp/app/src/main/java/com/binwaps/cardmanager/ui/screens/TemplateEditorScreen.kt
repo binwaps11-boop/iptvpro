@@ -126,6 +126,24 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
         template = template.copy(fields = template.fields.map { if (it.id == f.id) f else it })
     }
 
+    // الرجوع (السهم أو زر النظام) كان يرمي كل التعديلات بصمت — الآن تأكيد: حفظ/تجاهل/بقاء
+    val dirty = template != (Store.template(templateId) ?: template)
+    var confirmLeave by remember { mutableStateOf(false) }
+    fun leave() { if (dirty) confirmLeave = true else onDone() }
+    androidx.activity.compose.BackHandler(enabled = dirty) { confirmLeave = true }
+    if (confirmLeave) {
+        com.binwaps.cardmanager.ui.components.ConfirmDialog(
+            title = "تغييرات غير محفوظة",
+            body = "عدّلت القالب ولم تحفظ. احفظ قبل الخروج، أو تجاهل التغييرات، أو ابقَ في المحرر.",
+            confirmLabel = "حفظ والخروج",
+            danger = false,
+            neutralLabel = "تجاهل التغييرات",
+            onNeutral = { onDone() },
+            onConfirm = { Store.upsertTemplate(template); onDone() },
+            onDismiss = { confirmLeave = false },
+        )
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -135,7 +153,7 @@ fun TemplateEditorScreen(templateId: Long, onDone: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onDone) { Icon(Icons.Filled.ArrowForward, "رجوع", tint = TextMid) }
+            IconButton(onClick = { leave() }) { Icon(Icons.Filled.ArrowForward, "رجوع", tint = TextMid) }
             Text("محرر القالب", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextHi, modifier = Modifier.weight(1f))
             Box(Modifier.width(110.dp)) {
                 NeonButton("حفظ", icon = Icons.Filled.Save) {

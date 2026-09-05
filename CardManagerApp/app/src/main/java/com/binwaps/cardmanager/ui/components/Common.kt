@@ -134,6 +134,9 @@ fun ConfirmDialog(
     body: String,
     confirmLabel: String = "حذف",
     danger: Boolean = true,
+    /** خيار ثالث اختياري (مثل «تجاهل التغييرات») يظهر بجوار «إلغاء» */
+    neutralLabel: String? = null,
+    onNeutral: () -> Unit = {},
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -148,8 +151,15 @@ fun ConfirmDialog(
             }
         },
         dismissButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) {
-                Text("إلغاء", color = TextMid, fontSize = 14.sp, lineHeight = 20.sp)
+            Row {
+                if (neutralLabel != null) {
+                    androidx.compose.material3.TextButton(onClick = { onNeutral(); onDismiss() }) {
+                        Text(neutralLabel, color = Danger, fontSize = 14.sp, lineHeight = 20.sp)
+                    }
+                }
+                androidx.compose.material3.TextButton(onClick = onDismiss) {
+                    Text("إلغاء", color = TextMid, fontSize = 14.sp, lineHeight = 20.sp)
+                }
             }
         },
     )

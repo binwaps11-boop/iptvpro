@@ -193,10 +193,11 @@ fun SalesScreen() {
         }
 
         Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Box(Modifier.weight(1f)) {
-                NeonButton("تسجيل بيع", icon = Icons.Filled.Add) { addKind = SaleKind.SALE; showAdd = true }
-            }
+        // الزر الرئيسي بعرض كامل، والحركات الثانوية في صف يتمرّر أفقياً — الأربعة في صف
+        // واحد كانت تفيض عن الشاشة فيُسحق «تسجيل بيع» إلى بضع نقاط
+        NeonButton("تسجيل بيع", Modifier.fillMaxWidth(), Icons.Filled.Add) { addKind = SaleKind.SALE; showAdd = true }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             GhostButton("مصروف", color = Danger) { addKind = SaleKind.EXPENSE; showAdd = true }
             GhostButton("سداد دين", color = Warn) { addKind = SaleKind.DEBT_PAID; showAdd = true }
             GhostButton("إيداع", color = Neon) { addKind = SaleKind.DEPOSIT; showAdd = true }

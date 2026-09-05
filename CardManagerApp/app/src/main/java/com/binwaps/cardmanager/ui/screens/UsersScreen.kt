@@ -771,7 +771,8 @@ fun UsersScreen() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                // لا تنفيذ بقيمة فارغة: «تمديد» بلا مدة كان يعرض «تم تمديد» بلا أثر
+                TextButton(enabled = kind == "delete" || value.isNotBlank(), onClick = {
                     val target = chosen
                     bulkDialog = null
                     progress = 0 to target.size
