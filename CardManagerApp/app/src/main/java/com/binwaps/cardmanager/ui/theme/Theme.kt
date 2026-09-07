@@ -23,14 +23,14 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// ===== لوحة الألوان: داكن احترافي + أزرق نيون =====
-val Ink = Color(0xFF070B14)          // خلفية الشاشة
-val Panel = Color(0xFF111827)         // البطاقات
-val PanelHi = Color(0xFF18213A)       // بطاقة مرتفعة
-val Stroke = Color(0xFF23304D)        // حدود خفيفة (زينة فقط)
-val StrokeHi = Color(0xFF3B4C74)      // حدود الحقول غير المركّزة — تُرى فعلاً
-val Neon = Color(0xFF00D4FF)          // اللون المميز الأساسي
-val Violet = Color(0xFF7C4DFF)        // اللون المميز الثانوي
+// ===== حبر داكن وأخضر نعناعي: تباين واضح وهرمية هادئة =====
+val Ink = Color(0xFF091216)          // خلفية الشاشة
+val Panel = Color(0xFF112026)         // البطاقات
+val PanelHi = Color(0xFF172B32)       // بطاقة مرتفعة
+val Stroke = Color(0xFF263B42)        // حدود خفيفة (زينة فقط)
+val StrokeHi = Color(0xFF47616A)      // حدود الحقول غير المركّزة — تُرى فعلاً
+val Neon = Color(0xFF70E4C1)          // اللون المميز الأساسي
+val Violet = Color(0xFFA2B8F5)        // اللون المميز الثانوي
 val Lime = Color(0xFF4ADE80)          // حالة: متصل / نجاح
 val Warn = Color(0xFFFBBF24)          // حالة: تنبيه
 val Danger = Color(0xFFFF5470)        // حالة: خطأ / حذف
@@ -38,14 +38,14 @@ val Danger = Color(0xFFFF5470)        // حالة: خطأ / حذف
 // سلّم النصوص مضبوط على تباين مقروء فوق Panel/PanelHi.
 // كان TextLow (5B6B8A) يُستخدم لجُمل كاملة بتباين ٢٫٩:١ — أقل من نصف الحد
 // الأدنى ٤٫٥:١، فالنص الإرشادي كان يكاد لا يُقرأ. الآن:
-val TextHi = Color(0xFFEAF2FF)        // نص أساسي وعناوين
-val TextMid = Color(0xFFA9BAD8)       // نص ثانوي وإرشادي — يُقرأ بلا جهد
-val TextLow = Color(0xFF7F91B3)       // تسميات قصيرة فقط، لا جُمل
-val Muted = Color(0xFF5B6B8A)         // زينة وأيقونات معطّلة — لا نص أبداً
+val TextHi = Color(0xFFF0F6F7)        // نص أساسي وعناوين
+val TextMid = Color(0xFFB1C5CC)       // نص ثانوي وإرشادي — يُقرأ بلا جهد
+val TextLow = Color(0xFF91ABB5)       // تسميات قصيرة فقط، لا جُمل
+val Muted = Color(0xFF617F8A)         // زينة وأيقونات معطّلة — لا نص أبداً
 
-val NeonGradient = Brush.horizontalGradient(listOf(Neon, Violet))
+val NeonGradient = Brush.horizontalGradient(listOf(Neon, Color(0xFF8DE9D4)))
 val PanelGradient = Brush.verticalGradient(listOf(PanelHi, Panel))
-val ScreenGradient = Brush.verticalGradient(listOf(Color(0xFF0B1220), Ink))
+val ScreenGradient = Brush.verticalGradient(listOf(Color(0xFF0F1D23), Ink))
 
 // ===== رموز تباعد دلالية =====
 // بدل الأرقام السحرية المتناثرة (6..30dp) — نظام تباعد واحد متسق.
@@ -68,7 +68,7 @@ private val Scheme = darkColorScheme(
     primary = Neon,
     onPrimary = Color(0xFF00212B),
     secondary = Violet,
-    onSecondary = Color.White,
+    onSecondary = Ink,
     tertiary = Lime,
     background = Ink,
     onBackground = TextHi,

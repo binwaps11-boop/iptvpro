@@ -30,6 +30,18 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      - name: Check 50k generation, page planning and PDF recovery
+        working-directory: CardManagerApp
+        run: bash tools/performance/run-checks.sh
+
+      - name: Save measured core performance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardManager-performance
+          path: CardManagerApp/build/performance/*.json
+          if-no-files-found: ignore
+
       # اختبارات المنطق الحرج تسبق البناء: أي رجوع لعطل معروف يوقف الإصدار
       - name: Run unit tests
         working-directory: CardManagerApp
@@ -61,17 +73,12 @@ jobs:
           body: |
             ## تطبيقان
 
-            - **CardManager.apk** — تطبيق المشترك (مدير الكروت). فترة تجريبية أسبوع ثم يطلب مفتاح ترخيص.
-            - **CardManager-Admin.apk** — لوحة التراخيص (خاصة بك أنت فقط). تصدر مفاتيح التفعيل للمشتركين.
+            - **CardManager.apk** — مدير الكروت 4: استوديو دفعات، متابعة سرعات المراحل، توليد يمنع تكرار الكروت المحفوظة.
+            - **CardManager-Admin.apk** — لوحة إدارة التراخيص لصاحب النظام.
 
-            ⚠️ لا تشارك ملف لوحة التراخيص مع أحد.
+            إعداد التشغيل المحلي الحالي لا يفرض بوابة تفعيل. يُنشر هذا الإصدار بعد نجاح اختبارات الوحدات وبناء التطبيقين.
 
-            ### طريقة التفعيل
-            1. المشترك يفتح التطبيق ويرسل لك **رمز جهازه**.
-            2. تفتح لوحة التراخيص، تلصق الرمز، تختار المدة، وتضغط "إصدار المفتاح".
-            3. ترسل له المفتاح، يلصقه في تطبيقه ويضغط "تفعيل".
-
-            المفتاح يعمل على ذلك الجوال فقط.
+            قياس التوليد الموجود مع ملفات هذه العملية يختبر الرموز وتخطيط الصفحات فقط؛ سرعة PDF والراوتر والطابعة تعتمد على الجهاز والشبكة والقالب.
           prerelease: true
           files: |
             CardManager.apk

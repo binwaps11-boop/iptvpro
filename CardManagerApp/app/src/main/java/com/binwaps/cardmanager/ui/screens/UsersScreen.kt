@@ -138,10 +138,16 @@ fun UsersScreen() {
                     runCatching { CsvImporter.import(context, uri) }
                 }
                 res.onSuccess { imported ->
-                    Store.addUsers(imported)
-                    message = if (imported.isEmpty())
-                        "لم يُعثر على كروت في الملف — تأكد من تنسيقه" to true
-                    else "تم استيراد ${imported.size} كرت من الملف" to false
+                    val accepted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                        Store.importUsers(imported)
+                    }
+                    val skipped = imported.size - accepted
+                    message = when {
+                        imported.isEmpty() -> "لم يُعثر على كروت في الملف — تأكد من تنسيقه" to true
+                        accepted == 0 -> "كل الكروت موجودة بالفعل — تم تخطي $skipped كرت مكرر" to false
+                        skipped > 0 -> "تم استيراد $accepted كرت وتخطي $skipped كرت مكرر" to false
+                        else -> "تم استيراد $accepted كرت من الملف" to false
+                    }
                 }.onFailure {
                     message = "تعذّرت قراءة الملف: ${it.message ?: "ملف غير صالح"}" to true
                 }
@@ -269,7 +275,8 @@ fun UsersScreen() {
                 val target = settings.uploadTarget
                 run("جاري رفع ${pendingUpload.size} كرت إلى ${target.labelAr}…") {
                     val t0 = System.currentTimeMillis()
-                    val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+                    val created = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+                    var lastSave = System.nanoTime()
                     // خانق التقدّم: نبضة لكل كرت من خيط الشبكة كانت تعيد تركيب الشاشة
                     // كلها مئات المرات في الثانية — تجمّد محسوس أثناء الرفع
                     var lastEmit = 0L
@@ -280,7 +287,11 @@ fun UsersScreen() {
                     val onCreated: (UserEntry) -> Unit = { u ->
                         created.add(u.username)
                         // وسم تدريجي: مغادرة الشاشة أو إلغاء لا يضيّع سجل ما رُفع
-                        if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                        val now = System.nanoTime()
+                        if (now - lastSave >= 2_000_000_000L) {
+                            lastSave = now
+                            Store.markUploaded(created)
+                        }
                     }
                     val res = try {
                         if (target == UploadTarget.USER_MANAGER) {
@@ -836,7 +847,7 @@ fun UsersScreen() {
 
     if (showGenerate) {
         GenerateDialog(onDismiss = { showGenerate = false }) { generated ->
-            Store.addUsers(generated)
+            Store.addGeneratedUsers(generated)
             com.binwaps.cardmanager.data.EventLog.log("توليد", "تم توليد ${generated.size} كرت")
             showGenerate = false
             // الرفع التلقائي الفوري — التوليد وحده كان يترك الكروت محلية فلا تعمل على الشبكة
@@ -848,7 +859,8 @@ fun UsersScreen() {
                 val target = settings.uploadTarget
                 run("تم توليد ${generated.size} كرت — جاري رفعها تلقائياً إلى ${target.labelAr}…") {
                     val t0 = System.currentTimeMillis()
-                    val created = java.util.Collections.synchronizedList(mutableListOf<String>())
+                    val created = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+                    var lastSave = System.nanoTime()
                     var lastEmit = 0L
                     val onProgress: (Int, Int) -> Unit = { d, t ->
                         val now = System.currentTimeMillis()
@@ -856,7 +868,11 @@ fun UsersScreen() {
                     }
                     val onCreated: (UserEntry) -> Unit = { u ->
                         created.add(u.username)
-                        if (created.size % 200 == 0) Store.markUploaded(created.toList())
+                        val now = System.nanoTime()
+                        if (now - lastSave >= 2_000_000_000L) {
+                            lastSave = now
+                            Store.markUploaded(created)
+                        }
                     }
                     val res = try {
                         if (target == UploadTarget.USER_MANAGER)
@@ -925,6 +941,8 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
     val profiles by Store.profiles.collectAsState()
     val settings by Store.settings.collectAsState()
     val dialogScope = rememberCoroutineScope()
+    var generating by remember { mutableStateOf(false) }
+    var generationError by remember { mutableStateOf<String?>(null) }
     var loadingProfiles by remember { mutableStateOf(false) }
     var profilesError by remember { mutableStateOf<String?>(null) }
     // جلب الباقات تلقائياً فور فتح الحوار إن كانت فارغة — دون أي ضغطة
@@ -970,6 +988,7 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
+                generationError?.let { Text(it, color = Danger, fontSize = 12.sp) }
                 Text("نوع الكرت", fontSize = 12.sp, color = TextLow)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     CardMode.entries.forEach { m -> Chip(m.labelAr, mode == m) { mode = m } }
@@ -1081,7 +1100,10 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
             }
         },
         confirmButton = {
-            TextButton(onClick = {
+            TextButton(enabled = !generating, onClick = {
+                if (generating) return@TextButton
+                generating = true
+                generationError = null
                 val rules = com.binwaps.cardmanager.model.FreeCardRules(
                     everyNEnabled = everyNOn,
                     everyN = everyN.toIntOrNull()?.coerceAtLeast(2) ?: 10,
@@ -1091,11 +1113,12 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     freeProfile = freeProfile,
                 )
                 Store.updateSettings(Store.settings.value.copy(cardMode = mode, freeRules = rules))
-                val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US)
-                    .format(java.util.Date())
+                val stamp = java.util.UUID.randomUUID().toString().take(12)
                 // التوليد على خيط حسابي — ١٠٠ ألف كرت داخل ضغطة الزر كانت تجمّد الواجهة
                 dialogScope.launch {
+                try {
                 val (main, bonus) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val generationContext = kotlin.coroutines.coroutineContext
                 val main = UserGenerator.generate(
                     count = count.toIntOrNull()?.coerceIn(1, 100000) ?: 50,
                     prefix = prefix,
@@ -1109,6 +1132,8 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     serialStart = Store.users.value.size + 1,
                     batchTag = "vc-" + stamp,
                     freeRules = rules,
+                    existingUsernames = Store.users.value.map { it.username },
+                    shouldContinue = { generationContext[kotlinx.coroutines.Job]?.isActive != false },
                 )
                 val bonus = if (!bonusOn) emptyList() else UserGenerator.generate(
                     count = bonusCount.toIntOrNull()?.coerceIn(1, 50000) ?: 10,
@@ -1123,12 +1148,19 @@ private fun GenerateDialog(onDismiss: () -> Unit, onGenerate: (List<UserEntry>) 
                     serialStart = Store.users.value.size + main.size + 1,
                     batchTag = "bonus-" + stamp,
                     suffix = bonusSuffix,
+                    existingUsernames = Store.users.value.map { it.username } + main.map { it.username },
+                    shouldContinue = { generationContext[kotlinx.coroutines.Job]?.isActive != false },
                 )
                 main to bonus
                 }
                 onGenerate(main + bonus)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    generationError = e.message ?: "تعذّر توليد الدفعة"
+                } finally { generating = false }
                 }
-            }) { Text("توليد", color = Neon, fontWeight = FontWeight.Bold) }
+            }) { Text(if (generating) "جارٍ التوليد…" else "توليد", color = Neon, fontWeight = FontWeight.Bold) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء", color = TextLow) } },
     )

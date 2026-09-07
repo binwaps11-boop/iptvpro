@@ -8,6 +8,11 @@ import com.binwaps.cardmanager.model.CardStatus
 import com.binwaps.cardmanager.model.RouterProfile
 import com.binwaps.cardmanager.model.UserEntry
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -48,6 +53,30 @@ class MikrotikIntegrationTest {
 
     private fun cards(n: Int, prefix: String = "u", profile: String = "default", tag: String = "vc-test") =
         (1..n).map { UserEntry(username = "$prefix%05d".format(it), password = "p$it", profile = profile, batchTag = tag) }
+
+    @Test(timeout = 20_000)
+    fun `إلغاء دفعة يوقف الإرسال والردود المتأخرة ويحرر الجلسة`() = runBlocking<Unit> {
+        val (server, profile) = router()
+        server.responseDelayMs["/ip/hotspot/user/add"] = 40
+        val acknowledgements = AtomicInteger(0)
+        val task = launch(Dispatchers.Default) {
+            MikrotikClient.createHotspotUsers(profile, cards(2000), onCreated = {
+                acknowledgements.incrementAndGet()
+            })
+        }
+        withTimeout(5000) { while (acknowledgements.get() < 2) delay(10) }
+        withTimeout(5000) { task.cancelAndJoin() }
+        val settled = acknowledgements.get()
+        assertTrue(task.isCancelled)
+        assertTrue(settled in 2 until 2000)
+        delay(150)
+        assertEquals("لا تُضاف تأكيدات بعد اكتمال الإلغاء", settled, acknowledgements.get())
+        server.responseDelayMs.clear()
+        val next = withTimeout(5000) {
+            MikrotikClient.createHotspotUsers(profile, cards(2, prefix = "after-cancel-")).getOrThrow()
+        }
+        assertEquals("جلسة جديدة تعمل بعد الإلغاء", 2, next)
+    }
 
     // ===== الاتصال والدخول =====
 
@@ -293,6 +322,50 @@ class MikrotikIntegrationTest {
         assertTrue(res.exceptionOrNull()?.message.orEmpty().contains("اليوزر منجر"))
         val all = MikrotikClient.fetchAllCards(r, foreground = true).getOrThrow()
         assertEquals(listOf("h1"), all.map { it.username })
+    }
+
+
+    @Test fun missingUmProfileDoesNotMarkUsersUploadedAndRetryCompletesThem() = runBlocking<Unit> {
+        for (variant in listOf(Variant.V6, Variant.V7)) {
+            val (s, r) = router(variant)
+            val base = if (variant == Variant.V7) "/user-manager" else "/tool/user-manager"
+            val users = cards(3, profile = "Later")
+            val completed = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val failed = MikrotikClient.createUserManagerUsers(r, users, onCreated = { completed.add(it.username) })
+            assertTrue(failed.isFailure)
+            assertTrue(completed.isEmpty())
+            assertEquals(3, s.count("$base/user"))
+            s.add("$base/profile", "name" to "Later")
+            assertEquals(3, MikrotikClient.createUserManagerUsers(r, users, onCreated = { completed.add(it.username) }).getOrThrow())
+            assertEquals(users.map { it.username }.toSet(), completed.toSet())
+            assertEquals(3, completed.size)
+            assertEquals(3, s.count("$base/user"))
+        }
+    }
+
+    @Test fun partialUmProfileFailureCountsOnlyUsableCards() = runBlocking<Unit> {
+        for (variant in listOf(Variant.V6, Variant.V7)) {
+            val (s, r) = router(variant)
+            val base = if (variant == Variant.V7) "/user-manager" else "/tool/user-manager"
+            s.add("$base/profile", "name" to "Ready")
+            val users = listOf(UserEntry(username = "yes", profile = "Ready"), UserEntry(username = "no", profile = "Missing"))
+            val completed = java.util.concurrent.CopyOnWriteArrayList<String>()
+            assertEquals(1, MikrotikClient.createUserManagerUsers(r, users, onCreated = { completed.add(it.username) }).getOrThrow())
+            assertEquals(listOf("yes"), completed)
+        }
+    }
+
+    @Test fun failedExistingProfileReadMustNotCreateDuplicateLinks() = runBlocking<Unit> {
+        val (s, r) = router()
+        s.add("/user-manager/profile", "name" to "Weekly")
+        val users = cards(2, profile = "Weekly")
+        assertEquals(2, MikrotikClient.createUserManagerUsers(r, users).getOrThrow())
+        s.rejectedCommands.add("/user-manager/user-profile/print")
+        val completed = AtomicInteger(0)
+        val result = MikrotikClient.createUserManagerUsers(r, users, onCreated = { completed.incrementAndGet() })
+        assertTrue(result.isFailure)
+        assertEquals(0, completed.get())
+        assertEquals(2, s.count("/user-manager/user-profile"))
     }
 
     // ===== العمليات الجماعية =====

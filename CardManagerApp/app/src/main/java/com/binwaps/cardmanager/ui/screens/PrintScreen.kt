@@ -58,6 +58,9 @@ import com.binwaps.cardmanager.model.PrintBatch
 import com.binwaps.cardmanager.print.PdfExporter
 import com.binwaps.cardmanager.print.PrintEngine
 import com.binwaps.cardmanager.print.ThermalPrinter
+import com.binwaps.cardmanager.ui.components.PdfDeliveryActions
+import com.binwaps.cardmanager.ui.components.PdfOutputOptions
+import com.binwaps.cardmanager.ui.components.DiscardPrintJobButton
 import com.binwaps.cardmanager.ui.components.CardPreview
 import com.binwaps.cardmanager.ui.components.sampleUser
 import com.binwaps.cardmanager.ui.components.EmptyState
@@ -97,8 +100,9 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { PrintEngine.restoreIfAny() }
     }
-    val busy = engineState is PrintEngine.State.Running
-    val canStart = engineState is PrintEngine.State.Idle || engineState is PrintEngine.State.Done
+    val production by com.binwaps.cardmanager.data.ProductionEngine.state.collectAsState()
+    val busy = engineState is PrintEngine.State.Running || production.busy
+    val canStart = !production.busy && (engineState is PrintEngine.State.Idle || engineState is PrintEngine.State.Done)
     var showPrinterPicker by remember { mutableStateOf(false) }
     var printers by remember { mutableStateOf<List<BluetoothConnection>>(emptyList()) }
     var heightMm by remember { mutableFloatStateOf(settings.thermalCardHeightMm) }
@@ -324,14 +328,14 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                             fontSize = 11.5.sp, color = TextLow, modifier = Modifier.weight(1f),
                         )
                         // زر حقيقي ≥48dp — كان نصاً قابلاً للنقر بارتفاع ~30dp بلا أثر ضغط لفعلٍ حرج
-                        GhostButton("إيقاف", color = com.binwaps.cardmanager.ui.theme.Danger) { PrintEngine.cancel() }
+                        GhostButton(if (es.kind == PrintEngine.Kind.PDF) "إيقاف مؤقت" else "إيقاف", color = com.binwaps.cardmanager.ui.theme.Danger) { PrintEngine.cancel() }
                     }
                 }
             }
             is PrintEngine.State.Failed -> {
                 Spacer(Modifier.height(10.dp))
                 GlassCard(Modifier.fillMaxWidth(), glow = com.binwaps.cardmanager.ui.theme.Danger.copy(alpha = 0.5f), padding = 12) {
-                    Text("توقفت الطباعة — ولم يضِع شيء", fontSize = 13.sp, color = TextHi, fontWeight = FontWeight.Bold)
+                    Text("المهمة متوقفة — يمكن الاستكمال", fontSize = 13.sp, color = TextHi, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(5.dp))
                     Text(es.error, fontSize = 11.5.sp, color = TextMid)
                     Spacer(Modifier.height(9.dp))
@@ -346,9 +350,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 PrintEngine.resume(context)
                             }
                         }
-                        GhostButton("إلغاء المهمة", Modifier.weight(1f), color = com.binwaps.cardmanager.ui.theme.Danger) {
-                            PrintEngine.cancel()
-                        }
+                        DiscardPrintJobButton(Modifier.weight(1f))
                     }
                 }
             }
@@ -357,7 +359,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                 GlassCard(Modifier.fillMaxWidth(), glow = Violet.copy(alpha = 0.5f), padding = 12) {
                     Text("لديك طباعة غير مكتملة من جلسة سابقة", fontSize = 13.sp, color = TextHi, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(5.dp))
-                    Text("اكتمل ${es.done} من ${es.total} — يمكن المتابعة من مكان التوقف", fontSize = 11.5.sp, color = TextMid)
+                    Text("التقدم المحفوظ: ${es.done} من ${es.total} — تُفحص ملفات PDF قبل الاستكمال", fontSize = 11.5.sp, color = TextMid)
                     Spacer(Modifier.height(9.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NeonButton("استئناف", Modifier.weight(1.4f)) {
@@ -368,7 +370,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                                 PrintEngine.resumeRestored(context)
                             }
                         }
-                        GhostButton("تجاهل", Modifier.weight(0.8f)) { PrintEngine.dismissRestored() }
+                        DiscardPrintJobButton(Modifier.weight(0.8f))
                     }
                 }
             }
@@ -387,13 +389,8 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
                     }
                     if (es.files.isNotEmpty()) {
                         Spacer(Modifier.height(9.dp))
-                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NeonButton("مشاركة الملف") { PdfExporter.shareAll(context, es.files) }
-                            GhostButton("طباعة عبر النظام") {
-                                es.files.forEach { PdfExporter.printViaSystem(context, it) }
-                            }
-                            GhostButton("تم") { PrintEngine.acknowledge() }
-                        }
+                        PdfDeliveryActions(es.files)
+                        GhostButton("تم") { PrintEngine.acknowledge() }
                     } else {
                         Spacer(Modifier.height(7.dp))
                         GhostButton("تم") { PrintEngine.acknowledge() }
@@ -406,7 +403,9 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
         Spacer(Modifier.height(16.dp))
 
         if (settings.paperType == PaperType.A4) {
-            NeonButton("إنشاء PDF — ملف واحد لكل الكروت", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = canStart && template != null) {
+            PdfOutputOptions(settings.splitLargePdf, canStart) { Store.updateSettings(settings.copy(splitLargePdf = it)) }
+            Spacer(Modifier.height(9.dp))
+            NeonButton("إنشاء ملفات PDF", Modifier.fillMaxWidth(), Icons.Filled.Share, enabled = canStart && template != null) {
                 val t0 = template ?: return@NeonButton
                 val issues = PrintEngine.preflight(t0, users, settings, thermal = false)
                 if (issues.isNotEmpty()) {
@@ -423,8 +422,7 @@ fun PrintScreen(navController: androidx.navigation.NavController) {
             }
             Spacer(Modifier.height(5.dp))
             Text(
-                "ملف PDF واحد يضم كل الكروت مهما كان عددها — يكتمل في ثوانٍ، " +
-                    "وأي خطأ يُعالج بضغطة استئناف بلا إعادة من البداية.",
+                "سرعة التجهيز تعتمد على القالب والجهاز. التقسيم يخفّض عدد الصفحات في الذاكرة ويحفظ كل جزء مكتمل.",
                 fontSize = 11.sp, color = TextLow,
             )
             Spacer(Modifier.height(9.dp))

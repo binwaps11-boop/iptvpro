@@ -462,7 +462,7 @@ fun AppChip(
     val border = if (selected) accent.copy(alpha = AlphaBorderSoft) else StrokeHi
     Box(
         modifier
-            .heightIn(min = 40.dp)
+            .heightIn(min = 48.dp)
             .background(bg, RoundedCornerShape(999.dp))
             .border(1.dp, border, RoundedCornerShape(999.dp))
             .clickable(onClick = onClick)

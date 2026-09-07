@@ -46,6 +46,10 @@ class FakeRouterOsServer(
     /** كل جملة استلمها الخادم — للتحقق من الصيغة المُرسلة فعلياً */
     val commands = CopyOnWriteArrayList<List<String>>()
 
+    val rejectedCommands = ConcurrentHashMap.newKeySet<String>()
+    /** Deterministic slow acknowledgements for cancellation and back-pressure tests. */
+    val responseDelayMs = ConcurrentHashMap<String, Long>()
+
     private val nextId = AtomicInteger(0)
     private lateinit var server: ServerSocket
     @Volatile private var running = false
@@ -171,6 +175,7 @@ class FakeRouterOsServer(
                 } else {
                     runCatching { handle(sentence, params) }.getOrElse { trap("internal: ${it.message}") }
                 }
+                responseDelayMs[sentence[0]]?.let { Thread.sleep(it) }
                 for (r in replies) writeSentence(out, if (tag != null) r + ".tag=$tag" else r)
                 out.flush()
             }
@@ -190,6 +195,7 @@ class FakeRouterOsServer(
 
     private fun handle(words: List<String>, params: LinkedHashMap<String, String>): List<List<String>> {
         val cmd = words[0]
+        if (cmd in rejectedCommands) return trap("not enough permissions (9)")
         var proplist: List<String>? = null
         var countOnly = false
         val queries = mutableListOf<String>()

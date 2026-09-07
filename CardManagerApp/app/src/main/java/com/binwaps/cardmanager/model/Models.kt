@@ -475,6 +475,8 @@ data class AppSettings(
     val printTo: Int = 0,
     /** عدد النسخ من كل صفحة */
     val copies: Int = 1,
+    /** Split large PDFs into ordered files with at most 128 physical pages each. */
+    val splitLargePdf: Boolean = true,
     /** البدء من الخلية رقم كذا — لاستخدام ما تبقى من ورقة ملصقات */
     val startCell: Int = 1,
     /** معايرة الطابعة: إزاحة أفقية ورأسية بالمليمتر */

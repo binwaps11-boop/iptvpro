@@ -101,7 +101,7 @@ object Store {
     }
 
     /**
-     * يُسلسل فوراً (لالتقاط الحالة الصحيحة) ويكتب على القرص في خيط خلفي.
+     * يُسلسل اللقطة ويكتب على القرص في خيط خلفي.
      * الكتابة ذرّية: ملف مؤقت ثم إعادة تسمية — انقطاع الحفظ في منتصفه
      * كان يترك ملفاً نصفياً يمسح كل السجل عند التشغيل التالي.
      */
@@ -111,15 +111,20 @@ object Store {
         // list) فلا خطر من تسلسلها لاحقاً.
         io.execute {
             val text = runCatching { json.encodeToString(value) }.getOrNull() ?: return@execute
-            runCatching {
-                val tmp = File(appContext.filesDir, "$name.tmp")
-                tmp.writeText(text)
-                if (!tmp.renameTo(File(appContext.filesDir, name))) {
-                    File(appContext.filesDir, name).writeText(text)
-                    tmp.delete()
-                }
-            }
+            runCatching { writeTextAtomic(name, text) }
         }
+    }
+
+    /** A failed replace keeps the old complete file; no in-place truncation fallback. */
+    private fun writeTextAtomic(name: String, text: String) {
+        val tmp = File(appContext.filesDir, "$name.tmp")
+        try {
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            check(tmp.renameTo(File(appContext.filesDir, name))) { "تعذّر حفظ $name — افحص المساحة المتاحة" }
+        } finally { tmp.delete() }
     }
 
     val io: java.util.concurrent.ExecutorService =
@@ -149,12 +154,43 @@ object Store {
         if (!usersDirty.compareAndSet(false, true)) return
         flusher.schedule({
             usersDirty.set(false)
-            save("users.json", _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL })
+            // Take the latest snapshot on the writer queue, avoiding stale delayed writes.
+            checkpointUsers()
         }, 400, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    /** Production waits for this durable checkpoint before starting router/PDF work. */
+    fun checkpointUsers(): kotlinx.coroutines.Deferred<Unit> {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        io.execute {
+            try {
+                val local = _users.value.filter { it.source == com.binwaps.cardmanager.model.CardSource.LOCAL }
+                writeTextAtomic("users.json", json.encodeToString(local))
+                done.complete(Unit)
+            } catch (e: Throwable) {
+                done.completeExceptionally(e)
+            }
+        }
+        return done
     }
 
     @Synchronized
     fun addUsers(list: List<UserEntry>) = setUsers(_users.value + list)
+    /** Returns the accepted count; duplicate checks and append share the same lock. */
+    @Synchronized
+    fun importUsers(list: List<UserEntry>): Int {
+        val accepted = com.binwaps.cardmanager.util.CardUtils.dropDuplicates(list, _users.value)
+        if (accepted.isNotEmpty()) setUsers(_users.value + accepted)
+        return accepted.size
+    }
+
+    @Synchronized
+    fun addGeneratedUsers(list: List<UserEntry>) {
+        val clean = com.binwaps.cardmanager.util.CardUtils.dropDuplicates(list, _users.value)
+        require(clean.size == list.size) { "تغيّرت قائمة الكروت أثناء التوليد — أعد المحاولة لتفادي التكرار" }
+        setUsers(_users.value + list)
+    }
+
     fun clearUsers() = setUsers(emptyList())
 
     /**
@@ -174,19 +210,7 @@ object Store {
             com.binwaps.cardmanager.model.CardSource.USER_MANAGER,
         ),
     ) {
-        val names = fetched.map { it.username }.toHashSet()
-        val kept = _users.value.filter {
-            (it.source == com.binwaps.cardmanager.model.CardSource.LOCAL && it.routerId.isBlank() && it.username !in names) ||
-                (it.source != com.binwaps.cardmanager.model.CardSource.LOCAL && it.source !in sources && it.username !in names)
-        }
-        // أسعار الكروت تعيش محلياً فقط — ننقلها لنسخة الراوتر بدل فقدها
-        val prices = _users.value.associate { it.username to it.price }
-        setUsers(
-            fetched.map { f ->
-                val oldPrice = prices[f.username].orEmpty()
-                if (f.price.isBlank() && oldPrice.isNotBlank()) f.copy(price = oldPrice) else f
-            } + kept
-        )
+        setUsers(com.binwaps.cardmanager.util.CardUtils.mergeRouterCards(_users.value, fetched, sources))
         recomputeProfileCounts()
     }
 
@@ -352,27 +376,54 @@ object Store {
     // ===== مهمة الطباعة غير المكتملة — تنجو حتى من إغلاق التطبيق =====
 
     @kotlinx.serialization.Serializable
+    data class PdfPart(val fileName: String, val sha256: String, val from: Int, val toExclusive: Int)
+
+    @kotlinx.serialization.Serializable
     data class PrintJobMeta(
         val kind: String,
         val templateId: Long,
         val next: Int,
         val total: Int,
         val createdAt: Long,
+        val cardsFile: String = "print_job_cards.json",
+        val templateSnapshot: CardTemplate? = null,
+        val settingsSnapshot: AppSettings? = null,
+        val printNo: Int = 0,
+        val dateText: String = "",
+        val timeText: String = "",
+        val pdfParts: List<PdfPart> = emptyList(),
     )
 
-    fun savePrintJob(meta: PrintJobMeta, cards: List<UserEntry>) {
-        save("print_job.json", meta)
-        save("print_job_cards.json", cards)
+    private fun validJobFile(name: String): Boolean =
+        name.matches(Regex("print_job_cards(?:_[A-Za-z0-9-]+)?\\.json"))
+
+    fun savePrintJob(meta: PrintJobMeta, cards: List<UserEntry>? = null): kotlinx.coroutines.Deferred<Unit> {
+        require(validJobFile(meta.cardsFile))
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        io.execute {
+            try {
+                // Payload and metadata share one queue entry, in this order.
+                if (cards != null) writeTextAtomic(meta.cardsFile, json.encodeToString(cards))
+                writeTextAtomic("print_job.json", json.encodeToString(meta))
+                done.complete(Unit)
+            } catch (e: Throwable) { done.completeExceptionally(e) }
+        }
+        return done
     }
 
     fun loadPrintJobMeta(): PrintJobMeta? = load("print_job.json")
 
-    fun loadPrintJobCards(): List<UserEntry> = load("print_job_cards.json") ?: emptyList()
+    fun loadPrintJobCards(): List<UserEntry> {
+        val file = loadPrintJobMeta()?.cardsFile ?: return emptyList()
+        if (!validJobFile(file)) return emptyList()
+        return load(file) ?: emptyList()
+    }
 
     fun clearPrintJob() {
         io.execute {
+            val name = loadPrintJobMeta()?.cardsFile
             runCatching { File(appContext.filesDir, "print_job.json").delete() }
-            runCatching { File(appContext.filesDir, "print_job_cards.json").delete() }
+            if (name != null && validJobFile(name)) runCatching { File(appContext.filesDir, name).delete() }
         }
     }
 

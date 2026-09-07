@@ -4,6 +4,7 @@ import com.binwaps.cardmanager.model.CardMode
 import com.binwaps.cardmanager.model.FreeCardRules
 import com.binwaps.cardmanager.model.UserEntry
 import kotlin.random.Random
+import com.binwaps.cardmanager.performance.CodePool
 
 enum class Charset(val labelAr: String, val chars: String) {
     DIGITS("أرقام فقط", "0123456789"),
@@ -21,15 +22,7 @@ object UserGenerator {
      * امتلأ الفضاء، وملء 100% منه يعني دوراناً لا ينتهي عملياً.
      */
     fun minLengthFor(count: Int, charset: Charset): Int {
-        if (count <= 0) return 1
-        val base = charset.chars.length.toDouble()
-        var len = 1
-        var capacity = base
-        while (capacity < count * 10.0 && len < 24) {
-            len++
-            capacity *= base
-        }
-        return len
+        return CodePool.minimumLength(count.coerceAtLeast(0), charset.chars.length, 0)
     }
 
     fun generate(
@@ -47,34 +40,25 @@ object UserGenerator {
         freeRules: FreeCardRules = FreeCardRules(),
         /** لاحقة تُضاف بعد الرمز — تُستخدم في أكواد البونص */
         suffix: String = "",
+        existingUsernames: Collection<String> = emptyList(),
+        shouldContinue: () -> Boolean = { true },
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): List<UserEntry> {
         // مواضع الكروت المجانية داخل الدفعة
         val freeIdx = freePositions(count, freeRules)
-        val used = HashSet<String>(count * 2)
-        // توسيع الطول تلقائياً إن كان فضاء الرموز أضيق من العدد المطلوب —
-        // بدونه كانت حلقة البحث عن اسم فريد تدور بلا نهاية وتجمّد التطبيق
-        val safeLength = maxOf(length, minLengthFor(count, charset))
-        return (0 until count).map { i ->
-            var name = ""
-            var attempts = 0
-            // حدّ محاولات ثم لاحقة تسلسلية مضمونة التفرد — لا دوران أبدي
-            while (true) {
-                name = prefix + randomString(safeLength, charset) + suffix
-                if (used.add(name)) break
-                if (++attempts >= 60) {
-                    name = prefix + randomString(safeLength, charset) + suffix + "-" + (i + 1)
-                    used.add(name)
-                    break
-                }
-            }
+        val pool = CodePool(count, length, charset.chars, prefix, suffix, existingUsernames)
+        val output = ArrayList<UserEntry>(count)
+        for (i in 0 until count) {
+            if (i % 256 == 0 && !shouldContinue()) throw kotlinx.coroutines.CancellationException("أُلغي التوليد")
+            val name = pool.next()
             val password = when (mode) {
                 // الهوتسبوت يقبل كلمة مرور فارغة عند الدخول بالاسم فقط
                 CardMode.USERNAME_ONLY -> ""
                 CardMode.SAME -> name
-                CardMode.USER_PASS -> randomString(passwordLength, charset)
+                CardMode.USER_PASS -> pool.randomCode(passwordLength)
             }
             val free = i in freeIdx
-            UserEntry(
+            output.add(UserEntry(
                 username = name,
                 password = password,
                 profile = if (free && freeRules.useDifferentProfile && freeRules.freeProfile.isNotBlank())
@@ -85,8 +69,10 @@ object UserGenerator {
                 batchTag = batchTag,
                 comment = batchTag,
                 isFree = free,
-            )
+            ))
+            if ((i + 1) % 512 == 0 || i + 1 == count) onProgress(i + 1, count)
         }
+        return output
     }
 
     /**
@@ -124,6 +110,4 @@ object UserGenerator {
         return out
     }
 
-    private fun randomString(length: Int, charset: Charset): String =
-        (1..length).map { charset.chars[Random.nextInt(charset.chars.length)] }.joinToString("")
 }

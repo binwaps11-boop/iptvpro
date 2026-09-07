@@ -1,6 +1,7 @@
 package com.binwaps.cardmanager
 
 import com.binwaps.cardmanager.model.UserEntry
+import com.binwaps.cardmanager.model.CardSource
 import com.binwaps.cardmanager.util.CardUtils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -51,4 +52,27 @@ class CardUtilsTest {
         assertEquals(2, CardUtils.dropDuplicates(incoming, emptyList()).size)
         assertTrue(CardUtils.duplicateUsernames(incoming, emptyList()).isEmpty())
     }
+    @Test fun incompleteUploadSurvivesRouterSyncWithIntendedProfile() {
+        val local = u("one").copy(profile = "Weekly", price = "100")
+        val remote = u("one").copy(source = CardSource.USER_MANAGER, routerId = "*1", profile = "")
+        val merged = CardUtils.mergeRouterCards(listOf(local), listOf(remote), setOf(CardSource.USER_MANAGER))
+        assertEquals(listOf(local), merged)
+        assertFalse(merged.single().uploaded)
+    }
+
+    @Test fun completedUploadReconcilesWithRouterAndRetainsPrice() {
+        val local = u("one").copy(uploaded = true, profile = "Weekly", price = "100")
+        val remote = u("one").copy(source = CardSource.USER_MANAGER, routerId = "*1", profile = "Weekly")
+        val merged = CardUtils.mergeRouterCards(listOf(local), listOf(remote), setOf(CardSource.USER_MANAGER))
+        assertEquals("*1", merged.single().routerId)
+        assertEquals("100", merged.single().price)
+    }
+
+    @Test fun unreadSourceSurvivesEvenWithSameNameInOtherSource() {
+        val old = u("same").copy(source = CardSource.USER_MANAGER, routerId = "*2")
+        val fetched = u("same").copy(source = CardSource.HOTSPOT, routerId = "*1")
+        val merged = CardUtils.mergeRouterCards(listOf(old), listOf(fetched), setOf(CardSource.HOTSPOT))
+        assertEquals(setOf(CardSource.USER_MANAGER, CardSource.HOTSPOT), merged.map { it.source }.toSet())
+    }
+
 }

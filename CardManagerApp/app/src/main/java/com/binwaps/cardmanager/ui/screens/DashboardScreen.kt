@@ -54,9 +54,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.binwaps.cardmanager.data.Store
+import com.binwaps.cardmanager.data.ProductionEngine
+import com.binwaps.cardmanager.print.PrintEngine
 import com.binwaps.cardmanager.mikrotik.MikrotikClient
 import com.binwaps.cardmanager.ui.components.InfoRow
 import com.binwaps.cardmanager.ui.components.NeonProgress
+import com.binwaps.cardmanager.ui.components.NeonButton
 import com.binwaps.cardmanager.ui.components.StatusPill
 import com.binwaps.cardmanager.ui.components.formatBytes
 import com.binwaps.cardmanager.ui.theme.Danger
@@ -87,6 +90,8 @@ fun DashboardScreen(navController: NavController) {
     val users by Store.users.collectAsState()
     val batches by Store.batches.collectAsState()
     val settings by Store.settings.collectAsState()
+    val production by ProductionEngine.state.collectAsState()
+    val printing by PrintEngine.state.collectAsState()
 
     var refreshing by remember { mutableStateOf(false) }
     var statsBusy by remember { mutableStateOf(false) }
@@ -217,7 +222,23 @@ fun DashboardScreen(navController: NavController) {
             }
         }
 
-        // صف العدادات
+        GlassCard(Modifier.fillMaxWidth(), glow = Stroke, padding = 20) {
+            Text("كل دفعة تبدأ من هنا", color = TextMid, fontSize = 13.sp)
+            Text("كروتك. بتصميمك.", color = TextHi, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+            Text("أنشئ الرموز، ارفعها للراوتر، وتابع تجهيز ملف الطباعة.", color = TextMid, fontSize = 13.sp)
+            Spacer(Modifier.height(16.dp))
+            val running = production.busy || printing is PrintEngine.State.Running
+            NeonButton(if (running) "متابعة الدفعة الجارية" else "افتح استوديو الكروت", Modifier.fillMaxWidth(), Icons.Filled.AutoAwesome) {
+                navController.navigate("express")
+            }
+            if (production.upload.status == ProductionEngine.Status.RUNNING) {
+                Spacer(Modifier.height(10.dp))
+                NeonProgress(production.upload.done.toFloat() / production.upload.total.coerceAtLeast(1))
+                Text("رفع مؤكد: ${production.upload.done} من ${production.upload.total} كرت", color = TextMid, fontSize = 12.sp)
+            }
+        }
+
+        // شبكتان بعرض كافٍ للأرقام الكبيرة على الهاتف.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             MiniStat("متصل الآن", actives.size.toString(), Lime, Modifier.weight(1f))
             MiniStat(
@@ -225,6 +246,8 @@ fun DashboardScreen(navController: NavController) {
                 if (status.hotspotUsers < 0) "…" else status.unusedUsers.toString(),
                 Neon, Modifier.weight(1f),
             )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             MiniStat("مستهلكة", n(status.usedUsers), Warn, Modifier.weight(1f))
             MiniStat("مبيعات اليوم", com.binwaps.cardmanager.util.Ledger.money(todayRevenue), Violet, Modifier.weight(1f))
         }
@@ -243,7 +266,7 @@ fun DashboardScreen(navController: NavController) {
                     .toList().sortedBy { it.second }
             }
             // لكل زبون على حدة — الدفعة الزائدة لزبون لا تُخفي دين زبون آخر
-            val openDebt = com.binwaps.cardmanager.util.Ledger.totalDebt(sales)
+            val openDebt = remember(sales) { com.binwaps.cardmanager.util.Ledger.totalDebt(sales) }
             if (lowProfiles.isNotEmpty() || openDebt > 0) {
                 GlassCard(Modifier.fillMaxWidth(), glow = Warn.copy(alpha = 0.3f), padding = 12) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -271,8 +294,8 @@ fun DashboardScreen(navController: NavController) {
         // السفلي، وهنا ما لا مكان له فيه — بلا تكرار بينهما.
         Text("عملية سريعة", fontSize = 13.sp, color = TextLow)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            HomeTile("توليد وطباعة ورفع ⚡", Icons.Filled.AutoAwesome, Neon, null, Modifier.weight(1f)) {
-                navController.navigate("express")
+            HomeTile("سجل الدفعات", Icons.Filled.History, Violet, batches.size.takeIf { it > 0 }, Modifier.weight(1f)) {
+                navController.navigate("history")
             }
             HomeTile("المتصلون الآن", Icons.Filled.People, Neon, actives.size.takeIf { it > 0 }, Modifier.weight(1f)) {
                 navController.navigate("active")
@@ -293,8 +316,8 @@ fun DashboardScreen(navController: NavController) {
             HomeTile("المبيعات والصندوق", Icons.Filled.Payments, Lime, null, Modifier.weight(1f)) {
                 navController.navigate("sales")
             }
-            HomeTile("سجل الدفعات", Icons.Filled.History, Violet, batches.size.takeIf { it > 0 }, Modifier.weight(1f)) {
-                navController.navigate("history")
+            HomeTile("قوالب الكروت", Icons.Filled.Layers, Violet, null, Modifier.weight(1f)) {
+                navController.navigate("templates")
             }
         }
 
@@ -318,11 +341,11 @@ private fun MiniStat(label: String, value: String, accent: Color, modifier: Modi
         modifier
             .background(Panel, RoundedCornerShape(13.dp))
             .border(1.dp, accent.copy(alpha = 0.35f), RoundedCornerShape(13.dp))
-            .padding(vertical = 10.dp, horizontal = 6.dp),
+            .padding(vertical = 16.dp, horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(value, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = accent)
-        Text(label, fontSize = 11.sp, color = TextLow)
+        Text(value, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = accent)
+        Text(label, fontSize = 12.sp, color = TextMid)
     }
 }
 

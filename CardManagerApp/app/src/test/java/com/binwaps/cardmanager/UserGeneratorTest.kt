@@ -14,6 +14,36 @@ import org.junit.Test
  */
 class UserGeneratorTest {
 
+    @Test(timeout = 20_000)
+    fun `دفعة خمسين ألفاً تستبعد الكروت السابقة وتحفظ الوسوم`() {
+        val existing = (0 until 50000).map { it.toString().padStart(6, '0') }
+        var lastProgress = 0
+        val cards = UserGenerator.generate(
+            count = 50000, prefix = "", length = 3, charset = Charset.DIGITS,
+            mode = CardMode.SAME, passwordLength = 8, profile = "daily", price = "100",
+            validity = "1d", batchTag = "vc-large-test", existingUsernames = existing,
+            onProgress = { done, total ->
+                assertTrue(done > lastProgress)
+                assertEquals(50000, total)
+                lastProgress = done
+            },
+        )
+        assertEquals(50000, cards.size)
+        assertEquals(50000, lastProgress)
+        val names = cards.map { it.username }.toSet()
+        assertEquals(50000, names.size)
+        assertTrue(java.util.Collections.disjoint(names, existing))
+        assertTrue(cards.all { it.username.length == 6 && it.profile == "daily" && it.batchTag == "vc-large-test" })
+    }
+
+    @Test(expected = kotlinx.coroutines.CancellationException::class)
+    fun `الإلغاء قبل التوليد لا يعيد دفعة جزئية`() {
+        UserGenerator.generate(
+            50000, "", 8, Charset.DIGITS, CardMode.SAME, 8, "", "", "",
+            shouldContinue = { false },
+        )
+    }
+
     private fun gen(
         count: Int,
         length: Int,

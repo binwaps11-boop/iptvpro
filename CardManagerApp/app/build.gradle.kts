@@ -16,8 +16,8 @@ android {
         applicationId = "com.binwaps.cardmanager"
         minSdk = 26
         targetSdk = 34
-        versionCode = ciBuildNumber
-        versionName = "3.$ciBuildNumber"
+        versionCode = 4000 + ciBuildNumber
+        versionName = "4.$ciBuildNumber"
         vectorDrawables { useSupportLibrary = true }
     }
 

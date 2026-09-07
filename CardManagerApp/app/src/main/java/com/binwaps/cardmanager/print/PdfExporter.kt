@@ -83,19 +83,25 @@ object PdfExporter {
         val pages: List<List<UserEntry?>>,
         val copies: Int,
         val totalCards: Int,
-    )
+        val skippedCells: Int = 0,
+    ) {
+        fun cardsBefore(page: Int): Int {
+            require(page in 0..pages.size)
+            return (page.toLong() * info.perPage - skippedCells).coerceIn(0L, totalCards.toLong()).toInt()
+        }
+    }
 
     fun plan(template: CardTemplate, allUsers: List<UserEntry>, settings: AppSettings): PagePlan {
         val selected = selectRange(allUsers, settings)
         val info = computeLayout(template, settings, selected.size)
         val skip = (settings.startCell - 1).coerceIn(0, (info.perPage - 1).coerceAtLeast(0))
-        val users: List<UserEntry?> = List(skip) { null } + selected
-        return PagePlan(info, users.chunked(info.perPage), settings.copies.coerceIn(1, 20), selected.size)
+        val pages: List<List<UserEntry?>> = com.binwaps.cardmanager.performance.PageSlices<UserEntry?>(selected, info.perPage, skip)
+        return PagePlan(info.copy(pages = pages.size), pages, settings.copies.coerceIn(1, 20), selected.size, skip)
     }
 
     /**
-     * يكتب نطاقاً من صفحات الخطة إلى ملف واحد — أساس الاستئناف:
-     * الفشل في وسط دفعة ضخمة لا يعيدك من البداية، بل من هذه القطعة فقط.
+     * يكتب نطاق صفحات في ملف مؤقت، ثم يُظهر ملف PDF عند اكتمال الكتابة.
+     * تبقى مستندات Android PDF في الذاكرة حتى الحفظ؛ التخطيط وحده كسول.
      */
     fun exportPages(
         context: Context,
@@ -107,7 +113,8 @@ object PdfExporter {
         printNo: Int,
         dateText: String,
         timeText: String,
-        /** يُفحص قبل كل صفحة — إلغاء المستخدم يوقف البناء بدل إكماله وإعلان «اكتملت» */
+        fileName: String = "cards_${java.util.UUID.randomUUID()}.pdf",
+        /** يُفحص قبل كل صفحة وكرت وقبل نشر الملف المكتمل. */
         isActive: () -> Boolean = { true },
         onPageDone: (Int) -> Unit = { },
     ): File {
@@ -138,70 +145,55 @@ object PdfExporter {
         }
 
         var pdfPageNo = 0
-        var cardsBefore = plan.pages.take(fromPage).sumOf { pg -> pg.count { it != null } }
-        // فشل رسم كرت كان يُبتلع صامتاً فتخرج مستطيلات فارغة مع «✓ اكتملت الطباعة»
-        // — الآن يُعدّ ويُسجَّل ويُحوَّل إلى فشلٍ مفهوم قابل للاستئناف
-        var failedCards = 0
-        var firstDrawError: Throwable? = null
-
-        for (pageIndex in fromPage until toPageExclusive.coerceAtMost(plan.pages.size)) {
-            if (!isActive()) {
-                doc.close()
-                throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
-            }
-            val pageUsers = plan.pages[pageIndex]
-            repeat(plan.copies) {
-                pdfPageNo++
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pdfPageNo).create())
-                val canvas = page.canvas
-                var localCard = 0
-                pageUsers.forEachIndexed { i, user ->
-                    val col = i % info.columns
-                    val row = i / info.columns
-                    val left = offsetX + col * (cardW + hGap)
-                    val top = offsetY + row * (cardH + vGap)
-                    val rect = RectF(left, top, left + cardW, top + cardH)
-                    if (user == null) {
-                        drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
-                        return@forEachIndexed
-                    }
-                    localCard++
-                    val ri = RenderInfo(
-                        pageNumber = pageIndex + 1,
-                        cardNumber = cardsBefore + localCard,
-                        printNo = printNo,
-                        dateText = dateText,
-                        timeText = timeText,
-                    )
-                    canvas.save()
-                    canvas.translate(rect.left, rect.top)
-                    canvas.scale(rect.width() / cellW.toFloat(), rect.height() / cellH.toFloat())
-                    runCatching { CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri) }
-                        .onFailure { e ->
-                            failedCards++
-                            if (firstDrawError == null) firstDrawError = e
-                        }
-                    canvas.restore()
-                    drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
-                }
-                doc.finishPage(page)
-            }
-            cardsBefore += pageUsers.count { it != null }
-            onPageDone(pageIndex)
-        }
-
-        if (failedCards > 0) {
-            doc.close()
-            val why = firstDrawError?.message?.take(120) ?: firstDrawError?.javaClass?.simpleName ?: "خطأ في القالب"
-            com.binwaps.cardmanager.data.EventLog.log("طباعة", "تعذّر رسم $failedCards كرت: $why", ok = false)
-            throw IllegalStateException("تعذّر رسم $failedCards كرت ($why) — افحص صور القالب ثم اضغط استئناف")
-        }
-
+        var cardsBefore = plan.cardsBefore(fromPage)
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "cards_${System.currentTimeMillis()}.pdf")
-        FileOutputStream(file).use { doc.writeTo(it) }
-        doc.close()
-        return file
+        val file = com.binwaps.cardmanager.performance.PdfParts.resolve(dir, fileName)
+        val temp = File(dir, file.name + ".part")
+        try {
+            for (pageIndex in fromPage until toPageExclusive.coerceAtMost(plan.pages.size)) {
+                if (!isActive()) throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
+                val pageUsers = plan.pages[pageIndex]
+                repeat(plan.copies) {
+                    pdfPageNo++
+                    val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pdfPageNo).create())
+                    try {
+                        val canvas = page.canvas
+                        var localCard = 0
+                        pageUsers.forEachIndexed { i, user ->
+                            if (!isActive()) throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
+                            val left = offsetX + (i % info.columns) * (cardW + hGap)
+                            val top = offsetY + (i / info.columns) * (cardH + vGap)
+                            val rect = RectF(left, top, left + cardW, top + cardH)
+                            if (user != null) {
+                                localCard++
+                                val ri = RenderInfo(pageNumber = pageIndex + 1, cardNumber = cardsBefore + localCard,
+                                    printNo = printNo, dateText = dateText, timeText = timeText)
+                                val saved = canvas.save()
+                                try {
+                                    canvas.translate(rect.left, rect.top)
+                                    canvas.scale(rect.width() / cellW, rect.height() / cellH)
+                                    CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri)
+                                } catch (e: Exception) {
+                                    if (e is kotlinx.coroutines.CancellationException) throw e
+                                    throw IllegalStateException("تعذّر رسم الكرت ${cardsBefore + localCard} — افحص القالب ثم استأنف", e)
+                                } finally { canvas.restoreToCount(saved) }
+                            }
+                            drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
+                        }
+                    } finally { doc.finishPage(page) }
+                }
+                cardsBefore += pageUsers.count { it != null }
+                onPageDone(pageIndex)
+            }
+            if (!isActive()) throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
+            FileOutputStream(temp).use { doc.writeTo(it); it.fd.sync() }
+            if (!isActive()) throw kotlinx.coroutines.CancellationException("أُلغيت الطباعة")
+            check(temp.renameTo(file)) { "تعذّر حفظ ملف PDF — افحص المساحة المتاحة" }
+            return file
+        } finally {
+            doc.close()
+            temp.delete()
+        }
     }
 
     fun export(
@@ -211,107 +203,14 @@ object PdfExporter {
         settings: AppSettings,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): File {
-        val layout = settings.layout
-        val selected = selectRange(allUsers, settings)
-        val info = computeLayout(template, settings, selected.size)
-
-        // البدء من خلية معيّنة: نترك خلايا فارغة في أول صفحة
-        val skip = (settings.startCell - 1).coerceIn(0, (info.perPage - 1).coerceAtLeast(0))
-        val users: List<UserEntry?> = List(skip) { null } + selected
-
-        val pageW = (layout.pageWidthMm * MM_TO_PT).toInt()
-        val pageH = (layout.pageHeightMm * MM_TO_PT).toInt()
-        val margin = layout.marginMm * MM_TO_PT
-        val hGap = layout.hSpacingMm * MM_TO_PT
-        val vGap = layout.vSpacingMm * MM_TO_PT
-        val cardW = info.cardWidthMm * MM_TO_PT
-        val cardH = info.cardHeightMm * MM_TO_PT
-
-        // توسيط الشبكة أفقياً وعمودياً في الصفحة
-        val gridW = info.columns * cardW + (info.columns - 1) * hGap
-        val gridH = info.rows * cardH + (info.rows - 1) * vGap
-        // التوسيط + معايرة الطابعة
-        val offsetX = ((pageW - gridW) / 2f).coerceAtLeast(margin) + settings.offsetXMm * MM_TO_PT
-        val offsetY = ((pageH - gridH) / 2f).coerceAtLeast(margin) + settings.offsetYMm * MM_TO_PT
-
-        val renderW = (info.cardWidthMm / 25.4f * RENDER_DPI).toInt().coerceIn(64, 2000)
-        // نظام إحداثيات الرسم الداخلي — الرسم متجهي مباشرة على صفحة الـ PDF:
-        // نص حاد بأي تكبير، وملف بالكيلوبايتات بدل عشرات الميغابايتات، وسرعة أضعاف
-        val (cellW, cellH) = CardRenderer.renderSize(template, renderW)
-
-        // بيانات لحظة الطباعة: رقم الطباعة والتاريخ والوقت تُثبَّت لكل الورقة
-        val printNo = com.binwaps.cardmanager.data.Store.nextPrintNo()
+        val plan = plan(template, allUsers, settings)
         val now = java.util.Date()
-        val dateText = java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(now)
-        val timeText = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now)
-
-        val doc = PdfDocument()
-        val markPaint = Paint().apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 0.5f
-            color = 0xFF9E9E9E.toInt()
-        }
-        val dashPaint = Paint(markPaint).apply {
-            pathEffect = android.graphics.DashPathEffect(floatArrayOf(4f, 4f), 0f)
-        }
-
-        var done = 0
-        var pdfPageNo = 0
-        var cardsBefore = 0   // عدد الكروت المرسومة في الصفحات السابقة — لتسلسل الكرت
-        val copies = settings.copies.coerceIn(1, 20)
-        val pages = users.chunked(info.perPage)
-
-        pages.forEachIndexed { pageIndex, pageUsers ->
-            // النسخ المتكررة من نفس الورقة تحمل نفس رقم الصفحة ونفس تسلسل الكروت
-            repeat(copies) {
-                pdfPageNo++
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pdfPageNo).create())
-                val canvas = page.canvas
-
-                var localCard = 0
-                pageUsers.forEachIndexed { i, user ->
-                    val col = i % info.columns
-                    val row = i / info.columns
-                    val left = offsetX + col * (cardW + hGap)
-                    val top = offsetY + row * (cardH + vGap)
-                    val rect = RectF(left, top, left + cardW, top + cardH)
-
-                    // خلية متروكة عمداً (البدء من خلية لاحقة)
-                    if (user == null) {
-                        drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
-                        return@forEachIndexed
-                    }
-
-                    localCard++
-                    val ri = RenderInfo(
-                        pageNumber = pageIndex + 1,
-                        cardNumber = cardsBefore + localCard,
-                        printNo = printNo,
-                        dateText = dateText,
-                        timeText = timeText,
-                    )
-                    canvas.save()
-                    canvas.translate(rect.left, rect.top)
-                    canvas.scale(rect.width() / cellW.toFloat(), rect.height() / cellH.toFloat())
-                    runCatching {
-                        CardRenderer.drawCard(canvas, template, user, settings, cellW, cellH, ri)
-                    }
-                    canvas.restore()
-
-                    drawCutMarks(canvas, rect, layout.cutMarks, markPaint, dashPaint)
-                    done++
-                    onProgress(done, selected.size * copies)
-                }
-                doc.finishPage(page)
-            }
-            cardsBefore += pageUsers.count { it != null }
-        }
-
-        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "cards_${System.currentTimeMillis()}.pdf")
-        FileOutputStream(file).use { doc.writeTo(it) }
-        doc.close()
-        return file
+        return exportPages(
+            context, template, settings, plan, 0, plan.pages.size,
+            com.binwaps.cardmanager.data.Store.nextPrintNo(),
+            java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.US).format(now),
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now),
+        ) { done -> onProgress(done + 1, plan.pages.size) }
     }
 
     private fun drawCutMarks(

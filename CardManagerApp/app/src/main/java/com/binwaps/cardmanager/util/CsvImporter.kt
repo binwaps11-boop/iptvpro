@@ -24,58 +24,93 @@ object CsvImporter {
     }
 
     fun parse(text: String): List<UserEntry> {
-        val lines = text.split("\r\n", "\n").map { it.trim() }.filter { it.isNotBlank() }
-        if (lines.isEmpty()) return emptyList()
-
-        val delimiter = detectDelimiter(lines.first())
-        val firstCells = splitLine(lines.first(), delimiter)
-        val hasHeader = firstCells.any { cell -> userKeys.any { cell.lowercase().contains(it) } }
-
-        val header = if (hasHeader) firstCells.map { it.lowercase().trim().trim('"') } else emptyList()
-        val dataLines = if (hasHeader) lines.drop(1) else lines
-
-        fun idx(keys: List<String>): Int = header.indexOfFirst { h -> keys.any { h == it || h.contains(it) } }
-
+        val input = text.removePrefix("\uFEFF").trimStart('\r', '\n')
+        if (input.isBlank()) return emptyList()
+        val records = splitRecords(input, detectDelimiter(input))
+            .filter { row -> row.any { it.isNotBlank() } }
+        if (records.isEmpty()) return emptyList()
+        // Exact aliases: a username such as "user001" is data, not a header.
+        val first = records.first().map { it.trim().lowercase() }
+        val hasHeader = first.any { it in userKeys }
+        val header = if (hasHeader) first else emptyList()
+        fun idx(keys: List<String>): Int = header.indexOfFirst { it in keys }
         val ui = if (hasHeader) idx(userKeys) else 0
         val pi = if (hasHeader) idx(passKeys) else 1
-        val pri = if (hasHeader) idx(profileKeys) else -1
-        val prc = if (hasHeader) idx(priceKeys) else -1
-        val vi = if (hasHeader) idx(validityKeys) else -1
-        val ci = if (hasHeader) idx(commentKeys) else -1
+        val pri = idx(profileKeys)
+        val prc = idx(priceKeys)
+        val vi = idx(validityKeys)
+        val ci = idx(commentKeys)
+        val bi = idx(listOf("batch", "batchtag", "batch_tag", "الدفعة"))
 
-        return dataLines.mapNotNull { line ->
-            val cells = splitLine(line, delimiter).map { it.trim().trim('"') }
-            fun cell(i: Int) = if (i in cells.indices) cells[i] else ""
-            val username = cell(if (ui >= 0) ui else 0)
+        return (if (hasHeader) records.drop(1) else records).mapNotNull { cells ->
+            fun cell(i: Int) = cells.getOrNull(i).orEmpty()
+            val username = cell(ui).trim()
             if (username.isBlank()) return@mapNotNull null
             UserEntry(
                 username = username,
-                password = cell(if (pi >= 0) pi else 1),
-                profile = cell(pri),
-                price = cell(prc),
-                validity = cell(vi),
+                // No positional fallback for a missing named password column.
+                password = cell(pi),
+                profile = cell(pri).trim(),
+                price = cell(prc).trim(),
+                validity = cell(vi).trim(),
                 comment = cell(ci),
+                batchTag = cell(bi).trim(),
             )
         }
     }
 
-    private fun detectDelimiter(line: String): Char {
-        val candidates = listOf(',', ';', '\t', '|')
-        return candidates.maxByOrNull { c -> line.count { it == c } } ?: ','
+    private fun detectDelimiter(text: String): Char {
+        val counts = linkedMapOf(',' to 0, ';' to 0, '\t' to 0, '|' to 0, '،' to 0)
+        var quoted = false
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            if (ch == '"') {
+                if (quoted && text.getOrNull(i + 1) == '"') i++ else quoted = !quoted
+            } else if (!quoted) {
+                if (ch == '\r' || ch == '\n') break
+                if (ch in counts) counts[ch] = counts.getValue(ch) + 1
+            }
+            i++
+        }
+        return counts.maxByOrNull { it.value }!!.key
     }
 
-    private fun splitLine(line: String, delimiter: Char): List<String> {
-        val result = mutableListOf<String>()
-        val sb = StringBuilder()
-        var inQuotes = false
-        for (ch in line) {
-            when {
-                ch == '"' -> inQuotes = !inQuotes
-                ch == delimiter && !inQuotes -> { result.add(sb.toString()); sb.clear() }
-                else -> sb.append(ch)
-            }
+    /** CSV records may contain escaped quotes, delimiters and embedded newlines. */
+    private fun splitRecords(text: String, delimiter: Char): List<List<String>> {
+        val rows = mutableListOf<List<String>>()
+        var row = mutableListOf<String>()
+        val field = StringBuilder()
+        var quoted = false
+        var closedQuote = false
+        fun endField() {
+            row.add(field.toString())
+            field.clear()
+            closedQuote = false
         }
-        result.add(sb.toString())
-        return result
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            when {
+                quoted && ch == '"' -> {
+                    if (text.getOrNull(i + 1) == '"') { field.append('"'); i++ }
+                    else { quoted = false; closedQuote = true }
+                }
+                quoted -> field.append(ch)
+                ch == delimiter -> endField()
+                ch == '\r' || ch == '\n' -> {
+                    endField(); rows.add(row); row = mutableListOf()
+                    if (ch == '\r' && text.getOrNull(i + 1) == '\n') i++
+                }
+                closedQuote && ch.isWhitespace() -> Unit
+                closedQuote -> throw IllegalArgumentException("تنسيق CSV غير صالح بعد علامة الاقتباس")
+                ch == '"' && field.isEmpty() -> quoted = true
+                else -> field.append(ch)
+            }
+            i++
+        }
+        require(!quoted) { "ملف CSV غير مكتمل: علامة اقتباس غير مغلقة" }
+        endField(); rows.add(row)
+        return rows
     }
 }

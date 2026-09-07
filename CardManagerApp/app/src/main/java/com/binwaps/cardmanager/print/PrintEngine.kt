@@ -8,6 +8,8 @@ import com.binwaps.cardmanager.model.CardTemplate
 import com.binwaps.cardmanager.model.PrintBatch
 import com.binwaps.cardmanager.model.UserEntry
 import com.binwaps.cardmanager.render.CardRenderer
+import com.binwaps.cardmanager.performance.PdfParts
+import kotlinx.coroutines.ensureActive
 import com.dantsu.escposprinter.EscPosPrinter
 import com.dantsu.escposprinter.connection.DeviceConnection
 import kotlinx.coroutines.CoroutineScope
@@ -25,13 +27,12 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * محرك الطباعة الصامد — الهدف: صفر فشل يعيدك من البداية.
+ * مهمة طباعة مشتركة بين شاشات التطبيق.
  *
  * - يعمل في خلفية التطبيق: الخروج من شاشة الطباعة لا يوقف المهمة.
- * - PDF ملف واحد دائماً مهما كان العدد. الرسم متجهي فالدفعات الضخمة
- *   تكتمل في ثوانٍ، وأي فشل يعيد البناء تلقائياً بلا تدخل.
- * - الحرارية: إعادة محاولة لكل كرت (3 مرات بإعادة اتصال)، والاستئناف من
- *   الكرت الذي توقف عنده بالضبط.
+ * - PDF متجهي، مع تقسيم اختياري وحفظ الأجزاء المكتملة لاستكمال الباقي.
+ * - الحرارية: إعادة محاولة لكل كرت، مع حفظ التقدم كل خمسة كروت. بعد قتل
+ *   العملية قد تتكرر كروت منذ آخر حفظ، ولا يمكن تأكيد خروج الورق برمجياً.
  * - التقدم محفوظ على القرص: حتى لو أُغلق التطبيق كلياً، يعرض عند فتحه
  *   «طباعة غير مكتملة — استئناف».
  * - فحص مسبق قبل البدء يمنع أكثر الأخطاء شيوعاً بدل أن تفشل في المنتصف.
@@ -50,7 +51,7 @@ object PrintEngine {
 
         data class Running(val kind: Kind, val done: Int, val total: Int, val label: String) : State
 
-        /** فشل قابل للاستئناف — لا شيء ضاع */
+        /** مهمة متوقفة يمكن إعادة محاولتها من اللقطة المحفوظة */
         data class Failed(val kind: Kind, val done: Int, val total: Int, val error: String) : State
 
         data class Done(val kind: Kind, val total: Int, val files: List<File>) : State
@@ -61,7 +62,7 @@ object PrintEngine {
 
     /**
      * أي خطأ يفلت من داخل مهمة الطباعة يتحول إلى حالة «متوقفة» قابلة للاستئناف
-     * بدل أن يُسقط التطبيق كله — الطباعة لا تفشل فشلاً كارثياً أبداً.
+     * مع إتاحة إعادة المحاولة من الواجهة.
      */
     private val crashGuard = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
         val s = _state.value
@@ -84,6 +85,7 @@ object PrintEngine {
     private var cards: List<UserEntry> = emptyList()
     private var plan: PdfExporter.PagePlan? = null
     private var files = mutableListOf<File>()
+    private var pdfParts = mutableListOf<Store.PdfPart>()
     private var nextPage = 0
     private var nextCard = 0
     private var printNo = 0
@@ -91,6 +93,9 @@ object PrintEngine {
     private var timeText = ""
     private var connectionFactory: (() -> DeviceConnection)? = null
     private var batchSaved = false
+    private var cardsFile = "print_job_cards.json"
+    private val _pdfMetrics = MutableStateFlow<com.binwaps.cardmanager.performance.ThroughputMeter.Snapshot?>(null)
+    val pdfMetrics: StateFlow<com.binwaps.cardmanager.performance.ThroughputMeter.Snapshot?> = _pdfMetrics
 
     // ==================== الفحص المسبق ====================
 
@@ -127,14 +132,18 @@ object PrintEngine {
         return issues
     }
 
-    fun isRunning(): Boolean = _state.value is State.Running
+    fun isRunning(): Boolean = _state.value is State.Running || job?.isCompleted == false
+
+    fun hasPendingJob(): Boolean = isRunning() || _state.value is State.Failed || _state.value is State.Restorable
 
     // ==================== PDF ====================
 
-    fun startPdf(context: Context, template: CardTemplate, users: List<UserEntry>, settings: AppSettings) {
-        if (isRunning()) {
+    @Synchronized
+    fun startPdf(context: Context, template: CardTemplate, users: List<UserEntry>, settings: AppSettings,
+                 productionBatch: Boolean = false): Boolean {
+        if (hasPendingJob() || (!productionBatch && com.binwaps.cardmanager.data.ProductionEngine.state.value.busy)) {
             com.binwaps.cardmanager.data.EventLog.log("طباعة", "تم تجاهل الطلب — مهمة طباعة جارية بالفعل", ok = false)
-            return
+            return false
         }
         com.binwaps.cardmanager.data.EventLog.log(
             "طباعة",
@@ -147,14 +156,18 @@ object PrintEngine {
         this.cards = PdfExporter.selectRange(users, settings)
         this.plan = PdfExporter.plan(template, users, settings)
         this.files = mutableListOf()
+        this.pdfParts = mutableListOf()
         this.nextPage = 0
         this.batchSaved = false
+        _savedTo.value = null
+        _pdfMetrics.value = null
         stampRun()
-        persist(Kind.PDF)
+        cardsFile = "print_job_cards_${java.util.UUID.randomUUID()}.json"
         // الحالة «جارية» تُثبَّت فوراً لا داخل المهمة: ضغطتان سريعتان كانتا تطلقان
         // مهمتين تتشاركان الحقول (files/nextPage) قبل أن يمنعهما isRunning
         _state.value = State.Running(Kind.PDF, 0, plan?.pages?.size ?: 0, "تجهيز الملف…")
         runPdf(appContext)
+        return true
     }
 
     private fun stampRun() {
@@ -164,46 +177,90 @@ object PrintEngine {
         timeText = SimpleDateFormat("HH:mm", Locale.US).format(now)
     }
 
+    /** Verify the saved prefix on the IO dispatcher before reusing any PDF part. */
+    private fun restorePdfParts(appContext: Context, active: () -> Boolean = { true }) {
+        val p = plan ?: return
+        val chunks = PdfParts(p.pages.size, p.copies, settings.splitLargePdf)
+        val validRangeCount = (0 until minOf(pdfParts.size, chunks.size)).takeWhile { i ->
+            val part = pdfParts[i]
+            val expected = chunks[i]
+            part.from == expected.from && part.toExclusive == expected.toExclusive
+        }.size
+        val candidates = pdfParts.take(validRangeCount)
+        val dir = File(appContext.cacheDir, "exports")
+        val valid = chunks.verifiedPrefix(dir, candidates.map { it.fileName }, candidates.map { it.sha256 }) { active() }
+        pdfParts = candidates.take(valid).toMutableList()
+        files = pdfParts.map { PdfParts.resolve(dir, it.fileName) }.toMutableList()
+        nextPage = chunks.pagesCompleted(valid)
+    }
+
     private fun runPdf(appContext: Context) {
         val t = template ?: return
         val p = plan ?: return
         val totalPages = p.pages.size
         job = scope.launch {
-            _state.value = State.Running(Kind.PDF, 0, totalPages, "تجهيز الملف…")
+            val chunks = PdfParts(totalPages, p.copies, settings.splitLargePdf)
+            var attemptStart = 0
+            var meter = com.binwaps.cardmanager.performance.ThroughputMeter(p.totalCards, System.nanoTime())
+            var rendered = 0
+            var lastEmit = 0L
+            fun sample() {
+                val measured = meter.sample((rendered - attemptStart).coerceAtLeast(0), System.nanoTime())
+                _pdfMetrics.value = com.binwaps.cardmanager.performance.ThroughputMeter.withOverallCount(measured, rendered, p.totalCards)
+            }
             try {
-                // ملف واحد دائماً — الرسم متجهي فحتى آلاف الكروت ثوانٍ معدودة
-                val file = PdfExporter.exportPages(
-                    appContext, t, settings, p, 0, totalPages,
-                    printNo, dateText, timeText,
-                    isActive = { isActive },
-                ) { pageDone ->
-                    if (isActive) {
-                        _state.value = State.Running(
-                            Kind.PDF, pageDone + 1, totalPages,
-                            "صفحة ${pageDone + 1} من $totalPages",
-                        )
+                _state.value = State.Running(Kind.PDF, nextPage, totalPages, "فحص الأجزاء المحفوظة…")
+                restorePdfParts(appContext) { isActive }
+                attemptStart = p.cardsBefore(nextPage)
+                rendered = attemptStart
+                meter = com.binwaps.cardmanager.performance.ThroughputMeter(p.totalCards - attemptStart, System.nanoTime())
+                sample()
+                // Wait until the initial payload and current checkpoint are on disk.
+                persist(Kind.PDF, includeCards = true)?.await()
+                for (index in pdfParts.size until chunks.size) {
+                    ensureActive()
+                    val range = chunks[index]
+                    val jobId = cardsFile.removePrefix("print_job_cards_").removeSuffix(".json")
+                    val name = "cards_${jobId}_${(index + 1).toString().padStart(4, '0')}_of_${chunks.size}.pdf"
+                    val file = PdfExporter.exportPages(
+                        appContext, t, settings, p, range.from, range.toExclusive,
+                        printNo, dateText, timeText, fileName = name, isActive = { isActive },
+                    ) { pageDone ->
+                        rendered = p.cardsBefore(pageDone + 1)
+                        val now = System.nanoTime()
+                        if (isActive && (now - lastEmit >= 150_000_000L || pageDone + 1 == range.toExclusive)) {
+                            lastEmit = now
+                            sample()
+                            _state.value = State.Running(Kind.PDF, pageDone + 1, totalPages,
+                                "ملف ${index + 1} من ${chunks.size} • " +
+                                    if (pageDone + 1 == range.toExclusive) "حفظ الجزء…" else "صفحة ${pageDone + 1} من $totalPages")
+                        }
                     }
+                    ensureActive()
+                    val digest = PdfParts.fingerprint(file) { isActive }
+                    pdfParts.add(Store.PdfPart(file.name, digest, range.from, range.toExclusive))
+                    files.add(file)
+                    nextPage = range.toExclusive
+                    persist(Kind.PDF)?.await()
                 }
-                // أُلغيت أثناء البناء: لا «اكتملت» ولا حفظ دفعة بعد ضغط المستخدم «إيقاف»
-                if (!isActive) return@launch
-                files = mutableListOf(file)
-                nextPage = totalPages
+                ensureActive()
+                rendered = p.totalCards
+                sample()
                 finishJob(Kind.PDF, p.totalCards)
             } catch (e: Throwable) {
                 if (!isActive || e is kotlinx.coroutines.CancellationException) return@launch
-                // Throwable لا Exception: نفاد الذاكرة مع الدفعات الضخمة كان
-                // يهرب من الالتقاط ويُسقط التطبيق بدل أن يصير حالة قابلة للاستئناف
-                _state.value = State.Failed(
-                    Kind.PDF, 0, totalPages,
-                    friendly(e) + " — اضغط استئناف وسيُعاد بناء الملف في ثوانٍ",
-                )
-                persist(Kind.PDF)
+                // Count only complete files; a failed metadata write may rebuild the last part after restart.
+                rendered = p.cardsBefore(nextPage)
+                sample()
+                _state.value = State.Failed(Kind.PDF, nextPage, totalPages,
+                    friendly(e) + " — حُفظ ${pdfParts.size} ملف مكتمل، اضغط استكمال")
             }
         }
     }
 
     // ==================== الحرارية ====================
 
+    @Synchronized
     fun startThermal(
         context: Context,
         template: CardTemplate,
@@ -211,7 +268,7 @@ object PrintEngine {
         settings: AppSettings,
         connect: () -> DeviceConnection,
     ) {
-        if (isRunning()) return
+        if (hasPendingJob() || com.binwaps.cardmanager.data.ProductionEngine.state.value.busy) return
         val appContext = context.applicationContext
         savedContext = appContext
         this.template = template
@@ -220,9 +277,13 @@ object PrintEngine {
         this.connectionFactory = connect
         this.nextCard = 0
         this.files = mutableListOf()
+        this.pdfParts = mutableListOf()
         this.batchSaved = false
+        _savedTo.value = null
+        _pdfMetrics.value = null
         stampRun()
-        persist(Kind.THERMAL)
+        cardsFile = "print_job_cards_${java.util.UUID.randomUUID()}.json"
+        persist(Kind.THERMAL, includeCards = true)
         _state.value = State.Running(Kind.THERMAL, 0, cards.size, "الاتصال بالطابعة…")
         runThermal(appContext)
     }
@@ -323,10 +384,12 @@ object PrintEngine {
 
     // ==================== الاستئناف والإلغاء ====================
 
-    /** يستأنف المهمة الفاشلة من نقطة التوقف بالضبط */
+    /** يستأنف PDF من أول جزء غير مكتمل، والحرارية من آخر تأكيد داخل الجلسة. */
+    @Synchronized
     fun resume(context: Context) {
         val s = _state.value
-        if (s !is State.Failed) return
+        if (s !is State.Failed || job?.isCompleted == false) return
+        _state.value = State.Running(s.kind, s.done, s.total, "استئناف المهمة…")
         when (s.kind) {
             Kind.PDF -> runPdf(context.applicationContext)
             Kind.THERMAL -> runThermal(context.applicationContext)
@@ -334,16 +397,41 @@ object PrintEngine {
     }
 
     /** للحرارية بعد إعادة فتح التطبيق: نحتاج اختيار الطابعة من جديد */
+    @Synchronized
     fun resumeThermalWith(context: Context, connect: () -> DeviceConnection) {
+        if (isRunning()) return
+        if (_state.value !is State.Failed && _state.value !is State.Restorable) return
         connectionFactory = connect
+        _state.value = State.Running(Kind.THERMAL, nextCard, cards.size, "الاتصال بالطابعة…")
         runThermal(context.applicationContext)
     }
 
+    @Synchronized
     fun cancel() {
-        job?.cancel()
-        job = null
-        _state.value = State.Idle
-        clearPersisted()
+        val stopping = job
+        if (stopping == null || stopping.isCompleted) {
+            _state.value = State.Idle
+            clearPersisted()
+            return
+        }
+        val s = _state.value as? State.Running
+        if (s != null) _state.value = s.copy(label = "إيقاف المهمة وحفظ التقدم…")
+        stopping.invokeOnCompletion {
+            synchronized(this@PrintEngine) {
+                if (job === stopping) {
+                    job = null
+                    if (s?.kind == Kind.PDF) {
+                        _state.value = State.Failed(Kind.PDF, nextPage, plan?.pages?.size ?: 0,
+                            "أُوقفت المهمة — ${pdfParts.size} ملف مكتمل. يمكن استكمال الأجزاء المتبقية.")
+                        persist(Kind.PDF, includeCards = true)
+                    } else {
+                        _state.value = State.Idle
+                        clearPersisted()
+                    }
+                }
+            }
+        }
+        stopping.cancel()
     }
 
     /** بعد اكتمال مهمة: العودة للوضع الطبيعي (الملفات تبقى للمشاركة من السجل) */
@@ -364,11 +452,14 @@ object PrintEngine {
         if (kind == Kind.PDF) {
             val ctx = savedContext
             val toSave = files.toList()
+            val completedJobId = cardsFile
             if (ctx != null && toSave.isNotEmpty()) {
                 scope.launch {
                     val names = toSave.mapNotNull { PdfExporter.saveToDownloads(ctx, it) }
                     if (names.isNotEmpty()) {
-                        _savedTo.value = names.joinToString("، ")
+                        if (cardsFile == completedJobId && _state.value is State.Done) {
+                            _savedTo.value = names.joinToString("، ")
+                        }
                         com.binwaps.cardmanager.data.EventLog.log(
                             "طباعة", "حُفظ تلقائياً في التنزيلات: ${names.joinToString("، ")}",
                         )
@@ -404,17 +495,22 @@ object PrintEngine {
 
     // ==================== الحفظ على القرص ====================
 
-    private fun persist(kind: Kind) {
-        val t = template ?: return
-        Store.savePrintJob(
+    private fun persist(kind: Kind, includeCards: Boolean = false): kotlinx.coroutines.Deferred<Unit>? {
+        val t = template ?: return null
+        return Store.savePrintJob(
             Store.PrintJobMeta(
                 kind = kind.name,
                 templateId = t.id,
                 next = if (kind == Kind.PDF) nextPage else nextCard,
                 total = if (kind == Kind.PDF) (plan?.pages?.size ?: 0) else cards.size,
                 createdAt = System.currentTimeMillis(),
+                cardsFile = cardsFile,
+                templateSnapshot = t,
+                settingsSnapshot = settings,
+                printNo = printNo, dateText = dateText, timeText = timeText,
+                pdfParts = if (kind == Kind.PDF) pdfParts.toList() else emptyList(),
             ),
-            cards,
+            if (includeCards) cards else null,
         )
     }
 
@@ -424,36 +520,47 @@ object PrintEngine {
      * يُستدعى عند فتح التطبيق: إن وُجدت مهمة غير مكتملة من جلسة سابقة
      * تُعرض للمستخدم «استئناف» بدل أن يبدأ من الصفر.
      */
+    @Synchronized
     fun restoreIfAny() {
         if (_state.value !is State.Idle) return
         val meta = Store.loadPrintJobMeta() ?: return
         val savedCards = Store.loadPrintJobCards()
-        val t = Store.template(meta.templateId)
+        val t = meta.templateSnapshot ?: Store.template(meta.templateId)
         if (savedCards.isEmpty() || t == null) {
             clearPersisted()
             return
         }
         template = t
-        settings = Store.settings.value
+        settings = (meta.settingsSnapshot ?: Store.settings.value).copy(printFrom = 0, printTo = 0)
         cards = savedCards
+        cardsFile = meta.cardsFile
+        printNo = meta.printNo
+        dateText = meta.dateText
+        timeText = meta.timeText
+        if (printNo <= 0) stampRun()
         if (meta.kind == Kind.PDF.name) {
             // إعادة بناء الخطة من اللقطة المحفوظة
-            plan = PdfExporter.plan(t, savedCards, settings.copy(printFrom = 0, printTo = 0, startCell = 1))
-            nextPage = 0
-            stampRun()
-            _state.value = State.Restorable(Kind.PDF, meta.next, plan?.pages?.size ?: 0)
+            plan = PdfExporter.plan(t, savedCards, settings)
+            pdfParts = meta.pdfParts.toMutableList()
+            nextPage = meta.next.coerceIn(0, plan?.pages?.size ?: 0)
+            _state.value = State.Restorable(Kind.PDF, nextPage, plan?.pages?.size ?: 0)
         } else {
             nextCard = meta.next.coerceIn(0, savedCards.size)
-            stampRun()
             _state.value = State.Restorable(Kind.THERMAL, nextCard, savedCards.size)
         }
     }
 
     /** استئناف مهمة مستعادة من جلسة سابقة (PDF فقط — الحرارية تحتاج اختيار طابعة) */
+    @Synchronized
     fun resumeRestored(context: Context) {
         val s = _state.value
-        if (s !is State.Restorable) return
-        if (s.kind == Kind.PDF) runPdf(context.applicationContext)
+        if (s !is State.Restorable || isRunning()) return
+        savedContext = context.applicationContext
+        batchSaved = false
+        if (s.kind == Kind.PDF) {
+            _state.value = State.Running(Kind.PDF, nextPage, s.total, "استعادة المهمة…")
+            runPdf(context.applicationContext)
+        }
     }
 
     fun dismissRestored() {

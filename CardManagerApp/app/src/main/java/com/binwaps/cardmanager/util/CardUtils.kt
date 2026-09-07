@@ -1,6 +1,7 @@
 package com.binwaps.cardmanager.util
 
 import com.binwaps.cardmanager.model.UserEntry
+import com.binwaps.cardmanager.model.CardSource
 
 /**
  * دوال مساعدة نقية للكروت — بلا حالة ولا اتصال، فتُختبر وحدها بسهولة.
@@ -39,4 +40,25 @@ object CardUtils {
         }
         return out
     }
+    /** A user without a completed upload must retain its intended profile and credentials. */
+    fun mergeRouterCards(
+        current: List<UserEntry>,
+        fetched: List<UserEntry>,
+        sources: Set<CardSource>,
+    ): List<UserEntry> {
+        val pending = current.filter { it.source == CardSource.LOCAL && !it.uploaded && it.routerId.isBlank() }
+        val pendingNames = pending.mapTo(HashSet()) { it.username }
+        val fetchedNames = fetched.mapTo(HashSet()) { it.username }
+        val prices = current.associate { it.username to it.price }
+        val remote = fetched.filter { it.username !in pendingNames }.map { f ->
+            val price = prices[f.username].orEmpty()
+            if (f.price.isBlank() && price.isNotBlank()) f.copy(price = price) else f
+        }
+        val kept = current.filter {
+            (it.source == CardSource.LOCAL && it.username !in pendingNames && it.username !in fetchedNames) ||
+                (it.source != CardSource.LOCAL && it.source !in sources)
+        }
+        return remote + pending + kept
+    }
+
 }
