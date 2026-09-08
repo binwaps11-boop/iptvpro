@@ -28,7 +28,11 @@ for name, package in [("CardManager.apk", "com.binwaps.cardmanager"),
         adb("shell", "pm", "clear", package)
         for attempt in range(2):
             adb("shell", "am", "force-stop", package)
-            adb("logcat", "-c")
+            # Android 8 logd may refuse clearing one buffer. Clearing is only
+            # housekeeping; process, foreground and crash-log checks remain required.
+            cleared = adb("logcat", "-c", check=False)
+            if cleared.returncode:
+                print("Log buffer clear unavailable:", cleared.stderr.decode(errors="replace").strip())
             start = adb("shell", "am", "start", "-W", "-n", package + "/com.binwaps.cardmanager.MainActivity")
             (OUT / f"{package}-{attempt}-launch.txt").write_bytes(start.stdout + start.stderr)
             for _ in range(12):

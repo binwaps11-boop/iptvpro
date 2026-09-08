@@ -30,6 +30,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.7"
+          cache-read-only: false
 
       - name: Check 50k generation, page planning and PDF recovery
         working-directory: CardManagerApp
@@ -70,6 +71,17 @@ jobs:
           java -jar apksigner.jar sign --ks "$RUNNER_TEMP/test-signing.p12" --ks-pass env:CARDMANAGER_TEST_PASS --ks-key-alias test --out CardManager-Admin.apk CardManager-Admin-unsigned.apk
           rm "$RUNNER_TEMP/test-signing.p12"
 
+      # No production private key is sent to CI or committed to the repository.
+      - name: Save unsigned APK candidates for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardManager-unsigned-release
+          path: |
+            CardManager-unsigned.apk
+            CardManager-Admin-unsigned.apk
+            apksigner.jar
+            CardManagerApp/app/build/outputs/mapping/*Release/mapping.txt
+
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -108,14 +120,3 @@ jobs:
             CardManagerApp/build/startup/
             CardManagerApp/app/build/outputs/mapping/*Release/mapping.txt
           if-no-files-found: ignore
-
-      # No production private key is sent to CI or committed to the repository.
-      - name: Upload verified unsigned release artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: CardManager-unsigned-release
-          path: |
-            CardManager-unsigned.apk
-            CardManager-Admin-unsigned.apk
-            apksigner.jar
-            CardManagerApp/app/build/outputs/mapping/*Release/mapping.txt
