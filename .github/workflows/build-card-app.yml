@@ -52,6 +52,7 @@ jobs:
         run: gradle testSubscriberDebugUnitTest --no-daemon --stacktrace
 
       - name: Build both APKs
+        id: apks
         working-directory: CardManagerApp
         run: gradle assembleSubscriberRelease assembleAdminRelease --no-daemon --stacktrace
 
@@ -87,6 +88,7 @@ jobs:
           script: python3 CardManagerApp/tools/android/smoke.py
 
       - name: Open both apps on Android 8
+        if: ${{ !cancelled() && steps.apks.outcome == 'success' }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 26
@@ -102,7 +104,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CardManager-startup
-          path: CardManagerApp/build/startup/
+          path: |
+            CardManagerApp/build/startup/
+            CardManagerApp/app/build/outputs/mapping/*Release/mapping.txt
           if-no-files-found: ignore
 
       # No production private key is sent to CI or committed to the repository.

@@ -309,11 +309,7 @@ fun LicenseScreen(
                     Text(it, fontSize = 12.sp, color = Danger)
                 }
             }
-            Spacer(Modifier.height(30.dp))
-            return@Column
-        }
-
-        if (state is LicenseState.NeedsRegister) {
+        } else if (state is LicenseState.NeedsRegister) {
             // ===== التسجيل =====
             // الترتيب يتبع المنطق: من أنت ← كيف نصلك ← بريدك (معرّف الحساب).
             // كل حقل إلزامي ويُتحقق منه فور الكتابة لا بعد الضغط.

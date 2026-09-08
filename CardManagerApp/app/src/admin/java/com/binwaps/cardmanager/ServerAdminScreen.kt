@@ -93,10 +93,7 @@ fun ServerAdminScreen() {
 
         if (!AdminApi.configured) {
             MessageBanner("أدخل عنوان خدمة الاشتراكات أولاً", BannerKind.ERROR)
-            return@Column
-        }
-
-        if (!signedIn) {
+        } else if (!signedIn) {
             GlassCard(Modifier.fillMaxWidth(), padding = 16) {
                 Text("رمز الأدمن", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(
@@ -113,38 +110,37 @@ fun ServerAdminScreen() {
                 }
                 message?.let { Spacer(Modifier.height(10.dp)); MessageBanner(it.first, it.second) }
             }
-            return@Column
-        }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton("تحديث", Modifier, Icons.Filled.Refresh, enabled = !busy) { load() }
+                GhostButton("تسجيل خروج", Modifier) { AdminApi.setToken(""); tokenField = ""; signedIn = false; accounts = emptyList(); loaded = false }
+            }
+            message?.let { Spacer(Modifier.height(10.dp)); MessageBanner(it.first, it.second) }
+            Spacer(Modifier.height(12.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            GhostButton("تحديث", Modifier, Icons.Filled.Refresh, enabled = !busy) { load() }
-            GhostButton("تسجيل خروج", Modifier) { AdminApi.setToken(""); tokenField = ""; signedIn = false; accounts = emptyList(); loaded = false }
-        }
-        message?.let { Spacer(Modifier.height(10.dp)); MessageBanner(it.first, it.second) }
-        Spacer(Modifier.height(12.dp))
+            // أول تحميل
+            if (!loaded && !busy && message == null) {
+                LaunchedLoad { load() }
+            }
 
-        // أول تحميل
-        if (!loaded && !busy && message == null) {
-            LaunchedLoad { load() }
-        }
+            val pending = accounts.filter { it.pending }
+            val rest = accounts.filterNot { it.pending }
 
-        val pending = accounts.filter { it.pending }
-        val rest = accounts.filterNot { it.pending }
+            if (pending.isNotEmpty()) {
+                Text("طلبات جديدة (${pending.size})", fontSize = 13.sp, color = Warn, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                pending.forEach { AccountCard(it, highlight = true, enabled = !busy, onAct = ::act) }
+                Spacer(Modifier.height(10.dp))
+            }
 
-        if (pending.isNotEmpty()) {
-            Text("طلبات جديدة (${pending.size})", fontSize = 13.sp, color = Warn, fontWeight = FontWeight.Bold)
+            Text("كل المشتركين (${accounts.size})", fontSize = 13.sp, color = TextLow)
             Spacer(Modifier.height(6.dp))
-            pending.forEach { AccountCard(it, highlight = true, enabled = !busy, onAct = ::act) }
-            Spacer(Modifier.height(10.dp))
+            if (accounts.isEmpty() && !busy) {
+                Text("لا مشتركين بعد", fontSize = 13.sp, color = TextMid, modifier = Modifier.padding(vertical = 20.dp))
+            }
+            rest.forEach { AccountCard(it, highlight = false, enabled = !busy, onAct = ::act) }
+            Spacer(Modifier.height(24.dp))
         }
-
-        Text("كل المشتركين (${accounts.size})", fontSize = 13.sp, color = TextLow)
-        Spacer(Modifier.height(6.dp))
-        if (accounts.isEmpty() && !busy) {
-            Text("لا مشتركين بعد", fontSize = 13.sp, color = TextMid, modifier = Modifier.padding(vertical = 20.dp))
-        }
-        rest.forEach { AccountCard(it, highlight = false, enabled = !busy, onAct = ::act) }
-        Spacer(Modifier.height(24.dp))
     }
 }
 
