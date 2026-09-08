@@ -18,6 +18,7 @@ sealed interface LicenseState {
     data object Suspended : LicenseState
     /** ساعة الجهاز مُرجَعة للخلف — لا نمنح وقتاً حتى تُصحَّح */
     data object ClockInvalid : LicenseState
+    data object ConnectionRequired : LicenseState
 }
 
 /**
@@ -104,10 +105,7 @@ object LicenseManager {
      * التجربة تبدأ مرة واحدة — لا تُصفَّر بإعادة إدخال بريد آخر.
      */
     fun register(email: String, name: String, phone: String = ""): String? {
-        localValidation(email, name, phone)?.let { return it }
-        saveIdentity(email, name, phone)
-        refresh()
-        return null
+        return "التسجيل يتطلب الاتصال بخادم الاشتراكات"
     }
 
     /** تحقق الحقول الثلاثة — يعيد رسالة الخطأ أو null */
@@ -261,6 +259,7 @@ object LicenseManager {
             refresh()
             return null
         } finally {
+            refresh()
             _syncing.value = false
         }
     }
@@ -300,7 +299,7 @@ object LicenseManager {
             )
         }
         // لا خادم مُهيّأ إطلاقاً — الوضع المحلي القديم (بلا منع تجديد)
-        return register(email, name, phone)
+        return "أدخل عنوان خدمة الاشتراكات أولاً"
     }
 
     /** يرفع ملخّص راوترات المستخدم للخادم فيراها الأدمن (بلا كلمات مرور) */
@@ -318,75 +317,20 @@ object LicenseManager {
 
     /** إعادة حساب الحالة */
     fun refresh() {
-        // الإيقاف عن بعد يعلو كل شيء — حتى داخل أيام التجربة أو بلا مفتاح
-        if (isRemoteSuspended()) {
-            _state.value = LicenseState.Suspended
-            return
+        if (!::appContext.isInitialized) return
+        if (!isRegistered()) { _state.value = LicenseState.NeedsRegister; return }
+        val signed = LicenseServer.cachedStateWithinGrace()
+        _state.value = if (signed == null) LicenseState.ConnectionRequired else {
+            _reason.value = signed.reason
+            if (!signed.valid && signed.status in setOf("active", "trial")) LicenseState.ConnectionRequired
+            else fromOnline(signed.status, signed.valid, signed.plan, signed.daysLeft)
+                ?: LicenseState.ConnectionRequired
         }
-        // ساعة مُرجَعة للخلف: لا نمنح وقتاً، ومخرجها اتصال واحد بالإنترنت.
-        //
-        // مقصور على المسجَّلين عمداً — وهم وحدهم من يملك `syncOnline` مخرجاً لهم.
-        // لا يشمل حامل مفتاح مدفوع بلا بريد: `syncOnline` ترفض العمل بلا تسجيل
-        // فيبقى مقفولاً بلا مخرج، وهو أصلاً غير معرَّض للخطر لأن مدة المفتاح
-        // تُقاس بـ trustedNow() التصاعدية فلا يمدّدها إرجاع الساعة.
-        if (isRegistered() && clockRolledBack()) {
-            _state.value = LicenseState.ClockInvalid
-            return
-        }
-        val now = trustedNow()
-        val license = savedLicense()
-
-        // الترخيص المدفوع له الأولوية دائماً
-        if (license.isNotBlank()) {
-            val info = LicenseCore.verify(appContext, license)
-            if (info != null) {
-                if (info.lifetime) {
-                    _state.value = LicenseState.Licensed(info.plan, Int.MAX_VALUE, true)
-                    return
-                }
-                val daysLeft = ((info.expiryMillis - now) / DAY_MS).toInt()
-                _state.value = when {
-                    daysLeft < 0 -> LicenseState.Expired
-                    info.plan == LicenseCore.Plan.TRIAL -> LicenseState.Trial(daysLeft)
-                    else -> LicenseState.Licensed(info.plan, daysLeft, false)
-                }
-                return
-            }
-            prefs().edit().remove(KEY_LICENSE).apply()
-        }
-
-        // لا ترخيص — الحالة تتبع التسجيل والتجربة
-        if (!isRegistered()) {
-            _state.value = LicenseState.NeedsRegister
-            return
-        }
-
-        // قرار الخادم يسبق الحساب المحلي متى وُجد؛ و"unknown" أو خادم غير
-        // مُهيَّأ يعيد null فنكمل بالحساب المحلي بلا معاقبة المستخدم
-        fromOnline(
-            status = onlineStatus(),
-            fresh = onlineFresh(),
-            plan = prefs().getString(KEY_ON_PLAN, "").orEmpty(),
-            days = prefs().getInt(KEY_ON_DAYS, 0),
-        )?.let { _state.value = it; return }
-
-        val start = prefs().getLong(KEY_TRIAL_START, 0)
-        val elapsedDays = if (start > 0) ((now - start) / DAY_MS).toInt().coerceAtLeast(0) else 0
-        val left = TRIAL_DAYS - elapsedDays
-        _state.value = if (left > 0) LicenseState.Trial(left) else LicenseState.TrialEnded
     }
 
     /** محاولة تفعيل ترخيص. يعيد رسالة الخطأ أو null عند النجاح */
-    fun activate(licenseText: String): String? {
-        val info = LicenseCore.verify(appContext, licenseText)
-            ?: return LicenseCore.diagnose(appContext, licenseText)
-        if (!info.lifetime && info.expiryMillis < trustedNow()) {
-            return "هذا المفتاح منتهي الصلاحية"
-        }
-        prefs().edit().putString(KEY_LICENSE, licenseText.trim()).apply()
-        refresh()
-        return null
-    }
+    fun activate(licenseText: String): String? =
+        "التفعيل يتم من لوحة الاشتراكات؛ اتصل بالإنترنت واضغط تحقق الآن"
 
     fun deactivate() {
         prefs().edit().remove(KEY_LICENSE).apply()
@@ -394,8 +338,8 @@ object LicenseManager {
     }
 
     /** هل يُسمح باستخدام التطبيق الآن؟ */
-    fun isUsable(): Boolean = when (_state.value) {
-        is LicenseState.Trial, is LicenseState.Licensed -> true
-        else -> false
+    fun isUsable(): Boolean {
+        refresh()
+        return _state.value is LicenseState.Trial || _state.value is LicenseState.Licensed
     }
 }

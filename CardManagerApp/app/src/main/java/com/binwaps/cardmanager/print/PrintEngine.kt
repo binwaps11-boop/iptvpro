@@ -107,6 +107,7 @@ object PrintEngine {
         thermal: Boolean,
     ): List<String> {
         val issues = mutableListOf<String>()
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) issues += "تحقق من الاشتراك قبل الطباعة"
         if (template == null) {
             issues += "لا يوجد قالب — أنشئ قالباً من قسم القوالب"
         } else {
@@ -141,6 +142,7 @@ object PrintEngine {
     @Synchronized
     fun startPdf(context: Context, template: CardTemplate, users: List<UserEntry>, settings: AppSettings,
                  productionBatch: Boolean = false): Boolean {
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return false
         if (hasPendingJob() || (!productionBatch && com.binwaps.cardmanager.data.ProductionEngine.state.value.busy)) {
             com.binwaps.cardmanager.data.EventLog.log("طباعة", "تم تجاهل الطلب — مهمة طباعة جارية بالفعل", ok = false)
             return false
@@ -219,6 +221,7 @@ object PrintEngine {
                 persist(Kind.PDF, includeCards = true)?.await()
                 for (index in pdfParts.size until chunks.size) {
                     ensureActive()
+                    check(com.binwaps.cardmanager.license.LicenseManager.isUsable()) { "انتهت صلاحية التحقق من الاشتراك — حدّث الاشتراك ثم استأنف" }
                     val range = chunks[index]
                     val jobId = cardsFile.removePrefix("print_job_cards_").removeSuffix(".json")
                     val name = "cards_${jobId}_${(index + 1).toString().padStart(4, '0')}_of_${chunks.size}.pdf"
@@ -268,6 +271,7 @@ object PrintEngine {
         settings: AppSettings,
         connect: () -> DeviceConnection,
     ) {
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return
         if (hasPendingJob() || com.binwaps.cardmanager.data.ProductionEngine.state.value.busy) return
         val appContext = context.applicationContext
         savedContext = appContext
@@ -322,6 +326,7 @@ object PrintEngine {
                 val heightPx = (settings.thermalCardHeightMm * dotsPerMm).toInt().coerceAtLeast(32)
 
                 while (nextCard < toPrint.size && isActive) {
+                    check(com.binwaps.cardmanager.license.LicenseManager.isUsable()) { "تحقق من الاشتراك ثم استأنف الطباعة" }
                     val user = toPrint[nextCard]
                     val info = com.binwaps.cardmanager.model.RenderInfo(
                         pageNumber = nextCard + 1, cardNumber = nextCard + 1,
@@ -387,6 +392,7 @@ object PrintEngine {
     /** يستأنف PDF من أول جزء غير مكتمل، والحرارية من آخر تأكيد داخل الجلسة. */
     @Synchronized
     fun resume(context: Context) {
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return
         val s = _state.value
         if (s !is State.Failed || job?.isCompleted == false) return
         _state.value = State.Running(s.kind, s.done, s.total, "استئناف المهمة…")
@@ -399,6 +405,7 @@ object PrintEngine {
     /** للحرارية بعد إعادة فتح التطبيق: نحتاج اختيار الطابعة من جديد */
     @Synchronized
     fun resumeThermalWith(context: Context, connect: () -> DeviceConnection) {
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return
         if (isRunning()) return
         if (_state.value !is State.Failed && _state.value !is State.Restorable) return
         connectionFactory = connect
@@ -553,6 +560,7 @@ object PrintEngine {
     /** استئناف مهمة مستعادة من جلسة سابقة (PDF فقط — الحرارية تحتاج اختيار طابعة) */
     @Synchronized
     fun resumeRestored(context: Context) {
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return
         val s = _state.value
         if (s !is State.Restorable || isRunning()) return
         savedContext = context.applicationContext

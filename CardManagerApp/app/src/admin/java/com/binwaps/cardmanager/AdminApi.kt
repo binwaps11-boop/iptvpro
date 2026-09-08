@@ -26,11 +26,15 @@ object AdminApi {
     val configured: Boolean get() = serverUrl.isNotBlank()
 
     private lateinit var appContext: Context
-    fun init(context: Context) { appContext = context.applicationContext }
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        // Erase the legacy plaintext credential; a fresh sign-in stores it in Keystore.
+        prefs().edit().remove(KEY_TOKEN).apply()
+    }
 
     private fun prefs() = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    fun token(): String = prefs().getString(KEY_TOKEN, "").orEmpty()
-    fun setToken(value: String) { prefs().edit().putString(KEY_TOKEN, value.trim()).apply() }
+    fun token(): String = com.binwaps.cardmanager.license.SecureToken.read(appContext)
+    fun setToken(value: String) { com.binwaps.cardmanager.license.SecureToken.write(appContext, value.trim()) }
     fun hasToken(): Boolean = token().isNotBlank()
 
     /** حساب كما يراه الأدمن من الخادم */
@@ -51,9 +55,26 @@ object AdminApi {
         val routers: List<Pair<String, String>>, // (name, host)
     )
 
+    private var verifiedEndpoint = ""
+    private fun verifyProvider() {
+        if (verifiedEndpoint == serverUrl) return
+        val con = URL(serverUrl.trimEnd('/') + "/api/pubkey").openConnection() as HttpURLConnection
+        try {
+            con.connectTimeout = TIMEOUT_MS; con.readTimeout = TIMEOUT_MS; con.instanceFollowRedirects = false
+            check(con.responseCode == 200) { "تعذّر التحقق من خدمة الاشتراكات" }
+            val data = con.inputStream.bufferedReader().use { it.readText() }
+            check(JSONObject(data).optString("publicKey") == BackendConfig.SERVER_PUBLIC_KEY) {
+                "عنوان الخدمة لا يعود إلى مزوّد هذا التطبيق"
+            }
+            verifiedEndpoint = serverUrl
+        } finally { con.disconnect() }
+    }
     private fun request(path: String, body: JSONObject?): String {
+        require(serverUrl.startsWith("https://")) { "الاتصال الآمن HTTPS مطلوب" }
+        verifyProvider()
         val url = URL(serverUrl.trimEnd('/') + path)
         val con = (url.openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = false
             connectTimeout = TIMEOUT_MS
             readTimeout = TIMEOUT_MS
             requestMethod = if (body == null) "GET" else "POST"

@@ -153,16 +153,26 @@ function render(accounts){
         '</select>' +
       '</div>' +
       '<div class="row">' +
-        '<button class="ok" onclick="approve(\'' + id + '\')">اعتماد</button>' +
+        '<button class="ok" data-action="approve" data-id="' + id + '">اعتماد</button>' +
         (a.blocked
-          ? '<button class="ghost" onclick="block(\'' + id + '\',false)">استئناف</button>'
-          : '<button class="bad" onclick="block(\'' + id + '\',true)">إيقاف</button>') +
-        '<button class="ghost" onclick="rebind(\'' + id + '\')">نقل لجهاز</button>' +
+          ? '<button class="ghost" data-action="unblock" data-id="' + id + '">استئناف</button>'
+          : '<button class="bad" data-action="block" data-id="' + id + '">إيقاف</button>') +
+        '<button class="ghost" data-action="rebind" data-id="' + id + '">نقل لجهاز</button>' +
       '</div>' +
       '<div id="msg_' + id + '"></div>' +
     '</div>'
   }).join('')
 }
+
+document.getElementById('list').addEventListener('click', function(event) {
+  var button = event.target.closest('button[data-action]')
+  if (!button) return
+  var id = button.dataset.id
+  if (button.dataset.action === 'approve') approve(id)
+  if (button.dataset.action === 'block') block(id, true)
+  if (button.dataset.action === 'unblock') block(id, false)
+  if (button.dataset.action === 'rebind') rebind(id)
+})
 
 function say(id, text, good){
   var el = document.getElementById('msg_' + id)

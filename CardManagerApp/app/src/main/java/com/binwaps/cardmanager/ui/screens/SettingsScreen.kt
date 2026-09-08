@@ -263,6 +263,7 @@ fun SettingsScreen(onDisconnect: () -> Unit, onLicense: () -> Unit = {}) {
                     LicenseState.Expired -> "انتهى الاشتراك"
                     LicenseState.NeedsRegister -> "غير مسجّل — سجّل بريدك لبدء التجربة"
                     LicenseState.Suspended -> "موقوف من مزوّد الخدمة"
+                    LicenseState.ConnectionRequired -> "اتصل بالإنترنت للتحقق من الاشتراك"
                     LicenseState.ClockInvalid -> "ساعة الجهاز غير صحيحة — صحّح التاريخ أو اتصل بالإنترنت"
                 },
                 fontSize = 12.5.sp,

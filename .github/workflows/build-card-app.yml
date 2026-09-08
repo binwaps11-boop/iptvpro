@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - "CardManagerApp/**"
+      - "license-server/**"
       - ".github/workflows/build-card-app.yml"
   workflow_dispatch:
 
@@ -43,19 +44,30 @@ jobs:
           if-no-files-found: ignore
 
       # اختبارات المنطق الحرج تسبق البناء: أي رجوع لعطل معروف يوقف الإصدار
+      - name: Test signed subscription API
+        run: node license-server/test.js
+
       - name: Run unit tests
         working-directory: CardManagerApp
         run: gradle testSubscriberDebugUnitTest --no-daemon --stacktrace
 
       - name: Build both APKs
         working-directory: CardManagerApp
-        run: gradle assembleSubscriberDebug assembleAdminDebug --no-daemon --stacktrace
+        run: gradle assembleSubscriberRelease assembleAdminRelease --no-daemon --stacktrace
 
-      - name: Collect APKs
+      - name: Collect unsigned release APKs and sign temporary emulator copies
         run: |
-          cp CardManagerApp/app/build/outputs/apk/subscriber/debug/app-subscriber-debug.apk CardManager.apk
-          cp CardManagerApp/app/build/outputs/apk/admin/debug/app-admin-debug.apk CardManager-Admin.apk
-          ls -la *.apk
+          cp CardManagerApp/app/build/outputs/apk/subscriber/release/app-subscriber-release-unsigned.apk CardManager-unsigned.apk
+          cp CardManagerApp/app/build/outputs/apk/admin/release/app-admin-release-unsigned.apk CardManager-Admin-unsigned.apk
+          sdk_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          cp "$sdk_tools/lib/apksigner.jar" apksigner.jar
+          test_pass="$(openssl rand -hex 32)"
+          echo "::add-mask::$test_pass"
+          export CARDMANAGER_TEST_PASS="$test_pass"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/test-signing.p12" -storetype PKCS12 -alias test -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Ephemeral CI Test' -storepass:env CARDMANAGER_TEST_PASS
+          java -jar apksigner.jar sign --ks "$RUNNER_TEMP/test-signing.p12" --ks-pass env:CARDMANAGER_TEST_PASS --ks-key-alias test --out CardManager.apk CardManager-unsigned.apk
+          java -jar apksigner.jar sign --ks "$RUNNER_TEMP/test-signing.p12" --ks-pass env:CARDMANAGER_TEST_PASS --ks-key-alias test --out CardManager-Admin.apk CardManager-Admin-unsigned.apk
+          rm "$RUNNER_TEMP/test-signing.p12"
 
       - name: Enable emulator acceleration
         run: |
@@ -74,6 +86,17 @@ jobs:
           disable-animations: true
           script: python3 CardManagerApp/tools/android/smoke.py
 
+      - name: Open both apps on Android 8
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 26
+          arch: x86_64
+          target: google_apis
+          profile: pixel_2
+          disk-size: 2048M
+          disable-animations: true
+          script: python3 CardManagerApp/tools/android/smoke.py
+
       - name: Save Android startup diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,29 +105,13 @@ jobs:
           path: CardManagerApp/build/startup/
           if-no-files-found: ignore
 
-      - name: Upload APK artifacts
+      # No production private key is sent to CI or committed to the repository.
+      - name: Upload verified unsigned release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CardManager-APKs
+          name: CardManager-unsigned-release
           path: |
-            CardManager.apk
-            CardManager-Admin.apk
-
-      - name: Publish rolling release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: card-manager-latest
-          name: "Card Manager APK (آخر إصدار)"
-          body: |
-            ## تطبيقان
-
-            - **CardManager.apk** — مدير الكروت 4: استوديو دفعات، متابعة سرعات المراحل، توليد يمنع تكرار الكروت المحفوظة.
-            - **CardManager-Admin.apk** — لوحة إدارة التراخيص لصاحب النظام.
-
-            إعداد التشغيل المحلي الحالي لا يفرض بوابة تفعيل. يُنشر هذا الإصدار بعد نجاح اختبارات الوحدات وبناء التطبيقين.
-
-            قياس التوليد الموجود مع ملفات هذه العملية يختبر الرموز وتخطيط الصفحات فقط؛ سرعة PDF والراوتر والطابعة تعتمد على الجهاز والشبكة والقالب.
-          prerelease: true
-          files: |
-            CardManager.apk
-            CardManager-Admin.apk
+            CardManager-unsigned.apk
+            CardManager-Admin-unsigned.apk
+            apksigner.jar
+            CardManagerApp/app/build/outputs/mapping/*Release/mapping.txt

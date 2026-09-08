@@ -21,27 +21,12 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
-    // مفتاح توقيع **ثابت** داخل المستودع: بدونه كان كل بناء CI يوقّع بمفتاح
-    // عشوائي جديد فيرفض أندرويد تثبيت التحديث فوق النسخة المثبّتة (توقيع
-    // مختلف) — فيبقى المستخدم على نسخة قديمة ويظن أن الأعطال لم تُصلح.
-    // المفتاح للتوزيع الجانبي (خارج المتاجر) فوجوده في المستودع مقبول.
-    signingConfigs {
-        create("shared") {
-            storeFile = file("signing/shared.keystore")
-            storePassword = "cardmanager2026"
-            keyAlias = "cardmanager"
-            keyPassword = "cardmanager2026"
-        }
-    }
-
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("shared")
-        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("shared")
+            // The release is signed locally with an owned private key after CI verification.
         }
     }
 

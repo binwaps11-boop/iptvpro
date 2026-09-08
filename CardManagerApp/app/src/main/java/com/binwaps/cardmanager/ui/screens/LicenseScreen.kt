@@ -257,6 +257,10 @@ fun LicenseScreen(
                     fontSize = 13.sp, color = TextMid, textAlign = TextAlign.Center,
                 )
             }
+            LicenseState.ConnectionRequired -> {
+                Text("تحقق من الاشتراك", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = TextHi)
+                Text("اتصل بالإنترنت لتحديث حالة حسابك ومتابعة الطباعة.", color = TextMid)
+            }
             LicenseState.ClockInvalid -> {
                 Text("ساعة الجهاز غير صحيحة", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Warn)
                 Text(
@@ -512,55 +516,19 @@ fun LicenseScreen(
 
             Spacer(Modifier.height(14.dp))
 
-            // إدخال المفتاح يدوياً (احتياطي)
-            GlassCard(Modifier.fillMaxWidth(), glow = Neon.copy(alpha = 0.35f), padding = 16) {
-                Text("لديك مفتاح؟", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = TextHi)
-                Text(
-                    "إن ضغطت رابط التفعيل سيتم كل شيء تلقائياً — هذا الحقل للحالات الاستثنائية.",
-                    fontSize = 11.5.sp, color = TextLow,
-                )
-                Spacer(Modifier.height(9.dp))
-                AppField(
-                    key, { key = it; error = null }, "الصق المفتاح هنا",
-                    Modifier.fillMaxWidth(), ltr = true,
-                )
-                Spacer(Modifier.height(8.dp))
-                GhostButton("لصق من الحافظة", Modifier.fillMaxWidth(), Icons.Filled.ContentPaste) {
-                    val text = clipboard().primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                    if (text.isBlank()) {
-                        Toast.makeText(context, "الحافظة فارغة", Toast.LENGTH_SHORT).show()
-                    } else {
-                        // يستخرج المفتاح من الرسالة كاملة أو الرابط — لا يتأثر بالنص المحيط
-                        key = LicenseLink.extractKey(text) ?: text.trim()
-                        error = null
+            GlassCard(Modifier.fillMaxWidth(), padding = 16) {
+                Text("تحديث الاشتراك", color = TextHi, fontSize = 15.sp)
+                Text("بعد موافقة الإدارة اضغط تحقق الآن. تحفظ الكروت ومهام الطباعة على جهازك.", color = TextMid)
+                Spacer(Modifier.height(12.dp))
+                NeonButton(if (busy) "جارٍ التحقق…" else "تحقق الآن", enabled = !busy) {
+                    busy = true; error = null
+                    scope.launch {
+                        error = LicenseManager.syncOnline(userInitiated = true)
+                        busy = false
+                        if (error == null && LicenseManager.isUsable()) onActivated()
                     }
                 }
-
-                error?.let {
-                    Spacer(Modifier.height(10.dp))
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(Danger.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
-                            .border(1.dp, Danger.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                            .padding(11.dp)
-                    ) { Text(it, fontSize = 12.sp, color = Danger) }
-                }
-                success?.let {
-                    Spacer(Modifier.height(10.dp))
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(Lime.copy(alpha = 0.10f), RoundedCornerShape(11.dp))
-                            .border(1.dp, Lime.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                            .padding(11.dp)
-                    ) { Text(it, fontSize = 12.sp, color = Lime) }
-                }
-
-                Spacer(Modifier.height(12.dp))
-                NeonButton("تفعيل", Modifier.fillMaxWidth(), Icons.Filled.VerifiedUser, enabled = key.isNotBlank()) {
-                    activate(LicenseLink.extractKey(key) ?: key)
-                }
+                error?.let { Text(it, color = Danger) }
             }
         }
 

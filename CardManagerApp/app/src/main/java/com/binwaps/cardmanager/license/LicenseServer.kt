@@ -12,22 +12,10 @@ import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 
-/**
- * عميل خادم التراخيص — القرار على الخادم لا على الجهاز.
- *
- * كل رد يصل موقّعاً بـ ECDSA P-256؛ المفتاح الخاص لا يغادر الخادم، والتطبيق
- * يتحقق من التوقيع قبل الوثوق بأي حالة. حمولة الرد تُنقل كنص base64 ويُتحقق
- * من نفس بايتاتها بالضبط — إعادة تسلسل JSON كانت ستغيّر الترتيب فيفشل التحقق.
- *
- * المفتاح العام يُقرأ من BackendConfig إن مُلئ — وهذا هو الوضع الصحيح.
- * إن تُرك فارغاً يُجلب عند أول اتصال ويُثبَّت (TOFU)، وهو أضعف بوضوح: فوق HTTP
- * يستطيع وسيط على الشبكة زرع مفتاحه في تلك اللحظة فتُقبل ردوده المزوّرة بعدها.
- * املأ SERVER_PUBLIC_KEY بما يطبعه install.sh ليختفي هذا الباب تماماً.
- */
+/** HTTPS licensing with a pinned provider key, signed device proof and original signed leases. */
 object LicenseServer {
 
     private const val PREFS = "license_server"
-    private const val KEY_PINNED_PUBKEY = "pinned_pubkey"
     private const val KEY_LAST_OK = "last_online_ok"
     private const val KEY_LAST_STATE = "last_state_json"
 
@@ -45,7 +33,7 @@ object LicenseServer {
     val configured: Boolean get() = BackendConfig.LICENSE_SERVER.isNotBlank()
 
     private lateinit var appContext: Context
-    fun init(context: Context) { appContext = context.applicationContext }
+    fun init(context: Context) { appContext = context.applicationContext; LicenseConnection.init(context) }
 
     private fun prefs() = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -70,8 +58,10 @@ object LicenseServer {
     // ==================== الشبكة ====================
 
     private fun request(path: String, body: JSONObject?): String {
+        require(BackendConfig.LICENSE_SERVER.startsWith("https://")) { "الاتصال الآمن HTTPS مطلوب" }
         val url = URL(BackendConfig.LICENSE_SERVER.trimEnd('/') + path)
         val con = (url.openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = false
             connectTimeout = TIMEOUT_MS
             readTimeout = TIMEOUT_MS
             requestMethod = if (body == null) "GET" else "POST"
@@ -83,7 +73,7 @@ object LicenseServer {
         }
         try {
             if (body != null) {
-                con.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                con.outputStream.use { it.write(DeviceIdentity.envelope(path, body).toString().toByteArray(Charsets.UTF_8)) }
             }
             val stream = if (con.responseCode in 200..299) con.inputStream else con.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
@@ -105,22 +95,9 @@ object LicenseServer {
      * المفتاح المرجعي: من الإعدادات أولاً، ثم المثبَّت سابقاً، ثم — كحل أخير —
      * جلبه من الخادم وتثبيته. الترتيب مقصود: الإعدادات لا تمرّ بالشبكة أصلاً.
      */
-    private fun pinnedKey(): ByteArray? {
-        // المضمّن في الإعدادات يسبق أي شيء، ويصحّح تثبيتاً سابقاً خاطئاً:
-        // لو زُرع مفتاح مزوّر بـTOFU ثم مُلئت الإعدادات، يجب أن يُزاح لا أن يبقى
-        BackendConfig.SERVER_PUBLIC_KEY.takeIf { it.isNotBlank() }?.let { embedded ->
-            prefs().edit().putString(KEY_PINNED_PUBKEY, embedded).apply()
-            return runCatching { Base64.getDecoder().decode(embedded) }.getOrNull()
-        }
-        prefs().getString(KEY_PINNED_PUBKEY, null)?.let {
-            return runCatching { Base64.getDecoder().decode(it) }.getOrNull()
-        }
-        val fetched = runCatching {
-            JSONObject(request("/api/pubkey", null)).optString("publicKey")
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
-        prefs().edit().putString(KEY_PINNED_PUBKEY, fetched).apply()
-        return runCatching { Base64.getDecoder().decode(fetched) }.getOrNull()
-    }
+    private fun pinnedKey(): ByteArray? = runCatching {
+        Base64.getDecoder().decode(BackendConfig.SERVER_PUBLIC_KEY)
+    }.getOrNull()
 
     /** تحويل توقيع P-1363 الخام (64 بايت) إلى DER الذي تفهمه جافا */
     internal fun rawToDer(raw: ByteArray): ByteArray {
@@ -141,7 +118,7 @@ object LicenseServer {
      * يُشترط أن يحمل الرد نفس الـnonce الذي أرسلناه: التوقيع وحده لا يكفي —
      * فرد قديم صالح التوقيع يمكن إعادة بثّه بعد انتهاء الاشتراك.
      */
-    private fun verified(responseText: String, expectNonce: String): JSONObject? = runCatching {
+    private fun verified(responseText: String, expectNonce: String?): JSONObject? = runCatching {
         val res = JSONObject(responseText)
         val data = res.optString("data")
         val sigB64 = res.optString("signature")
@@ -158,7 +135,19 @@ object LicenseServer {
         if (!verifier.verify(rawToDer(sig))) return null
 
         val payload = JSONObject(String(rawBytes, Charsets.UTF_8))
-        if (payload.optString("nonce") != expectNonce) return null
+        if (expectNonce != null && payload.optString("nonce") != expectNonce) return null
+        if (payload.optString("device") != LicenseCore.deviceCode(appContext)) return null
+        if (payload.optString("clientKey") != DeviceIdentity.publicKey()) return null
+        val issued = payload.optLong("issuedAt")
+        if (issued <= 0) return null
+        if (expectNonce != null && kotlin.math.abs(System.currentTimeMillis() - issued) > 300_000L) return null
+        if (expectNonce != null) {
+            // Retain original signed bytes, never an unsigned reconstruction of the decision.
+            prefs().edit().putString(KEY_LAST_STATE, responseText)
+                .putLong(KEY_LAST_OK, System.currentTimeMillis())
+                .putLong("receipt_elapsed", android.os.SystemClock.elapsedRealtime())
+                .putInt("receipt_boot", bootCount()).apply()
+        }
         payload
     }.getOrNull()
 
@@ -175,32 +164,29 @@ object LicenseServer {
         issuedAt = o.optLong("issuedAt"),
     )
 
-    private fun remember(state: ServerState) {
-        prefs().edit()
-            .putLong(KEY_LAST_OK, System.currentTimeMillis())
-            .putString(
-                KEY_LAST_STATE,
-                JSONObject()
-                    .put("status", state.status).put("valid", state.valid)
-                    .put("reason", state.reason).put("plan", state.plan)
-                    .put("daysLeft", state.daysLeft).put("expiresAt", state.expiresAt)
-                    .put("graceHours", state.graceHours).toString(),
-            )
-            .apply()
-    }
+    private fun bootCount(): Int = android.provider.Settings.Global.getInt(
+        appContext.contentResolver, android.provider.Settings.Global.BOOT_COUNT, -1)
 
-    /**
-     * آخر حالة موقّعة محفوظة، ما دامت ضمن مهلة السماح بلا إنترنت.
-     * بعدها تُعاد null فيلزم التحقق أونلاين — لا استخدام دائم بلا اتصال.
-     */
+    /** Re-verify the cached signature and bind it to this device on every access decision. */
     fun cachedStateWithinGrace(): ServerState? {
         if (!configured || !::appContext.isInitialized) return null
-        val at = prefs().getLong(KEY_LAST_OK, 0)
-        val json = prefs().getString(KEY_LAST_STATE, null) ?: return null
-        val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
-        val graceMs = o.optInt("graceHours", 72) * 3600_000L
-        if (at <= 0 || System.currentTimeMillis() - at > graceMs) return null
-        return toState(o)
+        val envelope = prefs().getString(KEY_LAST_STATE, null) ?: return null
+        val o = verified(envelope, null) ?: return null
+        val state = toState(o)
+        if (!state.valid) return state // Server denials never fall back to a local license.
+        val wallNow = System.currentTimeMillis()
+        val boot = bootCount()
+        if (boot < 0 || prefs().getInt("receipt_boot", -2) != boot) return null
+        val received = prefs().getLong("receipt_elapsed", -1)
+        val elapsed = android.os.SystemClock.elapsedRealtime() - received
+        if (received < 0 || elapsed < 0) return null
+        val monotonicNow = state.issuedAt + elapsed
+        val now = maxOf(wallNow, monotonicNow)
+        val age = now - state.issuedAt
+        if (age < 0 || age > state.graceHours.coerceIn(0, 72) * 3600_000L) return null
+        if (state.expiresAt <= now) return state.copy(valid = false,
+            status = if (state.status == "trial") "trial_ended" else "expired")
+        return state.copy(daysLeft = ((state.expiresAt - now + 86_399_999L) / 86_400_000L).toInt())
     }
 
     // ==================== العمليات ====================
@@ -215,7 +201,7 @@ object LicenseServer {
                 .put("phone", phone).put("device", device).put("nonce", nonce)
             val o = verified(request("/api/register", body), nonce)
                 ?: throw Exception("رد الخادم غير موثوق — تعذّر التحقق من توقيعه")
-            toState(o).also { remember(it) }
+            toState(o)
         }
     }
 
@@ -232,7 +218,7 @@ object LicenseServer {
                 .put("email", email).put("device", device).put("nonce", nonce)
             val o = verified(request("/api/check", body), nonce)
                 ?: throw Exception("رد الخادم غير موثوق — تعذّر التحقق من توقيعه")
-            toState(o).also { remember(it); lastFailAt = 0 }
+            toState(o).also { lastFailAt = 0 }
         }.onFailure { if (it !is Rejected) lastFailAt = System.currentTimeMillis() }
     }
 

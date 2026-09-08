@@ -57,13 +57,14 @@ fun ServerAdminScreen() {
     var tokenField by remember { mutableStateOf(AdminApi.token()) }
     var accounts by remember { mutableStateOf<List<AdminApi.ServerAccount>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<Pair<String, BannerKind>?>(null) }
 
     fun load() {
         busy = true; message = null
         scope.launch {
             AdminApi.accounts().fold(
-                onSuccess = { accounts = it; busy = false },
+                onSuccess = { accounts = it; busy = false; loaded = true },
                 onFailure = {
                     busy = false
                     message = (it.message ?: "تعذّر الجلب") to BannerKind.ERROR
@@ -74,6 +75,7 @@ fun ServerAdminScreen() {
     }
 
     fun act(label: String, block: suspend () -> Result<Unit>) {
+        if (busy) return
         busy = true; message = null
         scope.launch {
             block().fold(
@@ -86,11 +88,11 @@ fun ServerAdminScreen() {
     Column(
         Modifier.fillMaxSize().background(ScreenGradient).verticalScroll(rememberScrollState()).padding(16.dp),
     ) {
-        SectionHeader("لوحة التراخيص", "متصلة بخادمك — كل المشتركين والطلبات", Icons.Filled.Group)
+        SectionHeader("لوحة التراخيص", "إدارة المشتركين والطلبات", Icons.Filled.Group)
         Spacer(Modifier.height(12.dp))
 
         if (!AdminApi.configured) {
-            MessageBanner("خادم التراخيص غير مُهيَّأ في الإعدادات (LICENSE_SERVER)", BannerKind.ERROR)
+            MessageBanner("أدخل عنوان خدمة الاشتراكات أولاً", BannerKind.ERROR)
             return@Column
         }
 
@@ -116,13 +118,13 @@ fun ServerAdminScreen() {
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             GhostButton("تحديث", Modifier, Icons.Filled.Refresh, enabled = !busy) { load() }
-            GhostButton("تسجيل خروج", Modifier) { AdminApi.setToken(""); signedIn = false; accounts = emptyList() }
+            GhostButton("تسجيل خروج", Modifier) { AdminApi.setToken(""); tokenField = ""; signedIn = false; accounts = emptyList(); loaded = false }
         }
         message?.let { Spacer(Modifier.height(10.dp)); MessageBanner(it.first, it.second) }
         Spacer(Modifier.height(12.dp))
 
         // أول تحميل
-        if (accounts.isEmpty() && !busy && message == null) {
+        if (!loaded && !busy && message == null) {
             LaunchedLoad { load() }
         }
 
@@ -132,7 +134,7 @@ fun ServerAdminScreen() {
         if (pending.isNotEmpty()) {
             Text("طلبات جديدة (${pending.size})", fontSize = 13.sp, color = Warn, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            pending.forEach { AccountCard(it, highlight = true, onAct = ::act) }
+            pending.forEach { AccountCard(it, highlight = true, enabled = !busy, onAct = ::act) }
             Spacer(Modifier.height(10.dp))
         }
 
@@ -141,7 +143,7 @@ fun ServerAdminScreen() {
         if (accounts.isEmpty() && !busy) {
             Text("لا مشتركين بعد", fontSize = 13.sp, color = TextMid, modifier = Modifier.padding(vertical = 20.dp))
         }
-        rest.forEach { AccountCard(it, highlight = false, onAct = ::act) }
+        rest.forEach { AccountCard(it, highlight = false, enabled = !busy, onAct = ::act) }
         Spacer(Modifier.height(24.dp))
     }
 }
@@ -155,6 +157,7 @@ private fun LaunchedLoad(block: () -> Unit) {
 private fun AccountCard(
     acc: AdminApi.ServerAccount,
     highlight: Boolean,
+    enabled: Boolean,
     onAct: (String, suspend () -> Result<Unit>) -> Unit,
 ) {
     val glow = if (highlight) Warn else if (acc.valid) Lime else Danger
@@ -186,6 +189,22 @@ private fun AccountCard(
         }
 
         Spacer(Modifier.height(8.dp))
+        var newDevice by remember(acc.id) { mutableStateOf(acc.device) }
+        var confirmRebind by remember(acc.id) { mutableStateOf(false) }
+        AppField(newDevice, { newDevice = it.trim().uppercase() }, "جهاز نقل الاشتراك أو إعادة ربطه", Modifier.fillMaxWidth(), code = true)
+        GhostButton("نقل / إعادة ربط الجهاز", enabled = enabled && Regex("^[A-Z0-9]{4}-[A-Z0-9]{4}$").matches(newDevice)) {
+            confirmRebind = true
+        }
+        if (confirmRebind) {
+            com.binwaps.cardmanager.ui.components.ConfirmDialog(
+                title = "تأكيد ربط الجهاز",
+                body = "سيحتاج صاحب الحساب إلى التسجيل من الجهاز المحدد من جديد. تُلغى صلاحية مفتاح الجهاز السابق.",
+                confirmLabel = "تأكيد الربط",
+                onConfirm = { onAct("تم ربط الجهاز") { AdminApi.rebind(acc.id, newDevice) } },
+                onDismiss = { confirmRebind = false },
+            )
+        }
+        Spacer(Modifier.height(8.dp))
         var plan by remember(acc.id) { mutableStateOf("month") }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("month" to "شهر", "quarter" to "٣ أشهر", "year" to "سنة", "lifetime" to "دائم").forEach { (v, l) ->
@@ -194,11 +213,11 @@ private fun AccountCard(
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NeonButton("اعتماد", Modifier.weight(1f)) { onAct("اعتُمد") { AdminApi.approve(acc.id, plan) } }
+            NeonButton("اعتماد", Modifier.weight(1f), enabled = enabled) { onAct("اعتُمد") { AdminApi.approve(acc.id, plan) } }
             if (acc.blocked) {
-                GhostButton("استئناف", Modifier.weight(1f)) { onAct("استُؤنف") { AdminApi.block(acc.id, false) } }
+                GhostButton("استئناف", Modifier.weight(1f), enabled = enabled) { onAct("استُؤنف") { AdminApi.block(acc.id, false) } }
             } else {
-                GhostButton("إيقاف", Modifier.weight(1f), color = Danger) { onAct("أُوقف") { AdminApi.block(acc.id, true) } }
+                GhostButton("إيقاف", Modifier.weight(1f), color = Danger, enabled = enabled) { onAct("أُوقف") { AdminApi.block(acc.id, true) } }
             }
         }
     }

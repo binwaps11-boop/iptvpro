@@ -50,6 +50,7 @@ object ProductionEngine {
         uploadEnabled: Boolean,
     ) {
         if (_state.value.busy || generationJob?.isCompleted == false || uploadJob?.isCompleted == false || PrintEngine.hasPendingJob()) return
+        if (!com.binwaps.cardmanager.license.LicenseManager.isUsable()) return
         require(count in 1..100000)
         val batchId = "vc-" + UUID.randomUUID().toString().take(12)
         val snapshotRouter = Store.activeRouter()

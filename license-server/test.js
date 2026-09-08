@@ -7,7 +7,7 @@ const path = require('path')
 // فلا يحتاج خطوتين ولا يصطدم بخادم يعمل أصلاً ولا يلوّث بيانات حقيقية.
 const PORT = Number(process.env.TEST_PORT || 8123)
 const BASE = `http://127.0.0.1:${PORT}`
-const ADMIN = 'testtoken123'
+const ADMIN = 'testtoken123456789012345678901234567890'
 const DATA = path.join(require('os').tmpdir(), 'lic-test-' + process.pid)
 
 let child = null
@@ -35,10 +35,19 @@ function stopServer() {
 }
 
 let pub = null
+const deviceKeys = new Map()
+function signedBody(route, body, privateKey = null) {
+  const name = body.device || 'missing-device'
+  if (!deviceKeys.has(name)) deviceKeys.set(name, crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }))
+  const kp = deviceKeys.get(name)
+  const bytes = Buffer.from(JSON.stringify({ ...body, path: route, timestamp: Date.now(), nonce: body.nonce === undefined ? crypto.randomUUID() : body.nonce }))
+  return { payload: bytes.toString('base64'), signature: crypto.sign('sha256', bytes, privateKey || kp.privateKey).toString('base64'),
+    publicKey: kp.publicKey.export({type:'spki', format:'der'}).toString('base64') }
+}
 async function post(path, body, headers = {}) {
   const r = await fetch(BASE + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(body),
+    body: JSON.stringify(path.startsWith("/api/admin/") ? body : signedBody(path, body)),
   })
   return { code: r.status, json: await r.json() }
 }
@@ -165,9 +174,26 @@ function check(name, cond, extra = '') {
   check('نوع المحتوى HTML', (page.headers.get('content-type') || '').includes('text/html'))
 
   // 14) طلب بلا nonce مرفوض
-  r = await post('/api/check', { email: 'ali@gmail.com', device: 'NEW1-NEW1' })
+  r = await post('/api/check', { email: 'ali@gmail.com', device: 'NEW1-NEW1', nonce: '' })
   check('طلب بلا nonce مرفوض', r.code === 400)
 
+  // Attack regression cases: unsigned mutation, missing device, occupied rebind and invalid plan.
+  const unsigned = await fetch(BASE + '/api/routers', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({email:'router-user@gmail.com',device:'RT01-RT01',routers:[]}) })
+  check('طلب بلا إثبات جهاز مرفوض', unsigned.status === 400)
+  r = await post('/api/check', {email:'router-user@gmail.com',device:'',nonce:crypto.randomUUID()})
+  v = verifyLikeAndroid(r.json, JSON.parse(Buffer.from(signedBody('/api/check', {}).payload,'base64')).nonce)
+  check('الجهاز الفارغ لا يمنح اشتراكاً', r.code !== 200 || JSON.parse(Buffer.from(r.json.data,'base64')).valid === false)
+  r = await post('/api/admin/approve', {id:'router-user@gmail.com',plan:'invented'}, {'x-admin-token':ADMIN})
+  check('خطة غير معروفة مرفوضة', r.code === 400)
+  r = await post('/api/admin/rebind', {id:'ali@gmail.com',device:'RT01-RT01'}, {'x-admin-token':ADMIN})
+  check('النقل لا يسرق جهاز حساب آخر', r.code === 409)
+  const stolen = signedBody('/api/routers', {email:'router-user@gmail.com',device:'RT01-RT01',routers:[]})
+  const attacker = crypto.generateKeyPairSync('ec', {namedCurve:'prime256v1'})
+  stolen.publicKey = attacker.publicKey.export({type:'spki',format:'der'}).toString('base64')
+  stolen.signature = crypto.sign('sha256',Buffer.from(stolen.payload,'base64'),attacker.privateKey).toString('base64')
+  const stolenResult = await fetch(BASE+'/api/routers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(stolen)})
+  check('انتحال رمز الجهاز بمفتاح آخر مرفوض', stolenResult.status === 403)
   console.log(`\nنجح ${pass} — فشل ${fail}`)
   stopServer()
   process.exit(fail ? 1 : 0)

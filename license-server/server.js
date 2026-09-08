@@ -28,7 +28,7 @@ const KEY_FILE = path.join(DATA_DIR, 'signing-key.pem')
 /** كلمة سر الأدمن — تُقرأ من البيئة، ولا تُكتب في الكود أبداً */
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ''
 
-if (!ADMIN_TOKEN) {
+if (Buffer.byteLength(ADMIN_TOKEN) < 32) {
   console.error('✗ يجب ضبط ADMIN_TOKEN في البيئة قبل التشغيل. مثال:')
   console.error('  ADMIN_TOKEN="$(openssl rand -hex 24)" node server.js')
   process.exit(1)
@@ -47,10 +47,7 @@ function loadDb() {
     const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
     return { ...emptyDb(), ...parsed }
   } catch (e) {
-    // ملف تالف: نحتفظ بنسخة ولا نمسح شيئاً
-    try { fs.copyFileSync(DB_FILE, DB_FILE + '.bak') } catch (_) {}
-    console.error('تعذّرت قراءة قاعدة البيانات — بدأنا بقاعدة جديدة والنسخة القديمة في .bak')
-    return emptyDb()
+    throw new Error('تعذّرت قراءة قاعدة التراخيص؛ أوقفنا التشغيل للحفاظ على البيانات')
   }
 }
 
@@ -58,18 +55,10 @@ let db = loadDb()
 let saveTimer = null
 
 function saveDb() {
-  // تجميع الكتابات: عدة تعديلات متتالية تُكتب مرة واحدة
-  if (saveTimer) return
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    const tmp = DB_FILE + '.tmp'
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(db, null, 2))
-      fs.renameSync(tmp, DB_FILE)
-    } catch (e) {
-      console.error('فشل الحفظ:', e.message)
-    }
-  }, 200)
+  const tmp = DB_FILE + '.tmp'
+  const fd = fs.openSync(tmp, 'w', 0o600)
+  try { fs.writeFileSync(fd, JSON.stringify(db)); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+  fs.renameSync(tmp, DB_FILE)
 }
 
 // ==================== التوقيع ====================
@@ -78,6 +67,7 @@ function loadOrCreateKey() {
   if (fs.existsSync(KEY_FILE)) {
     return crypto.createPrivateKey(fs.readFileSync(KEY_FILE, 'utf8'))
   }
+  if (process.env.REQUIRE_EXISTING_KEY === '1') throw new Error('مفتاح الخادم غير موجود')
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', {
     namedCurve: 'prime256v1',
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
@@ -152,8 +142,8 @@ function rateLimited(key) {
  */
 const TRUST_PROXY = process.env.TRUST_PROXY === '1'
 function clientIp(req) {
-  if (TRUST_PROXY) {
-    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+  if (TRUST_PROXY && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()
     if (fwd) return fwd
   }
   return req.socket.remoteAddress || 'unknown'
@@ -208,12 +198,13 @@ function accountState(acc) {
  * برد قديم صالح ويعيد بثّه للتطبيق بعد انتهاء اشتراكه، فيُقبل لأن توقيعه سليم.
  * التطبيق يولّد nonce لكل نداء ويرفض أي رد لا يحمله.
  */
-function stateResponse(acc, deviceCode, nonce) {
+function stateResponse(acc, deviceCode, nonce, clientKey) {
   const st = accountState(acc)
   return signed({
     ...st,
     account: acc ? acc.id : null,
     device: deviceCode || null,
+    clientKey,
     nonce: nonce || null,
     // مهلة سماح بلا إنترنت — بعدها يجب التحقق أونلاين
     graceHours: 72,
@@ -238,10 +229,10 @@ const routes = {
     if (!/^\d{7,15}$/.test(phone.replace(/\D/g, ''))) {
       return { code: 400, json: { error: 'أدخل رقم جوال صحيح' } }
     }
-    if (!device) return { code: 400, json: { error: 'رمز الجهاز مفقود' } }
+    if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(device)) return { code: 400, json: { error: 'رمز الجهاز غير صالح' } }
     const nonce = String(body.nonce || '')
     if (!nonce) return { code: 400, json: { error: 'الطلب ناقص' } }
-    if (nonceUsed(nonce)) return { code: 400, json: { error: 'طلب مكرر' } }
+    // Nonce was checked together with the device signature before routing.
 
     const id = accountId(email, device)
     let acc = db.accounts[id]
@@ -259,6 +250,9 @@ const routes = {
       }
     }
 
+    if (acc && acc.deviceKey !== body._clientKey && !acc.enrollmentAllowed) {
+      return { code: 409, json: { error: 'مفتاح الجهاز تغير — اطلب من الإدارة إعادة ربط الجهاز' } }
+    }
     if (acc) {
       // حساب موجود: قاعدة «حساب واحد = جهاز واحد» تُفرض هنا على الخادم
       if (acc.device && acc.device !== device) {
@@ -270,6 +264,8 @@ const routes = {
           },
         }
       }
+      acc.deviceKey = body._clientKey
+      delete acc.enrollmentAllowed
       acc.name = name || acc.name
       acc.phone = phone || acc.phone
       acc.lastSeen = now()
@@ -278,7 +274,7 @@ const routes = {
       const deviceRecord = db.devices[device]
       const trialUsed = deviceRecord && deviceRecord.trialUsed
       acc = {
-        id, email, phone, name, device,
+        id, email, phone, name, device, deviceKey: body._clientKey,
         plan: 'trial',
         blocked: false,
         createdAt: now(),
@@ -291,7 +287,7 @@ const routes = {
       logEvent('register', { id, phone, device, trialUsed: !!trialUsed })
     }
     saveDb()
-    return { code: 200, json: stateResponse(acc, device, nonce) }
+    return { code: 200, json: stateResponse(acc, device, nonce, body._clientKey) }
   },
 
   /** التحقق الدوري — التطبيق يسأل، الخادم يقرر */
@@ -300,20 +296,18 @@ const routes = {
     const email = String(body.email || '').trim().toLowerCase()
     const nonce = String(body.nonce || '')
     if (!nonce) return { code: 400, json: { error: 'الطلب ناقص' } }
-    if (nonceUsed(nonce)) {
-      return { code: 400, json: { error: 'طلب مكرر' } }
-    }
+
     const id = accountId(email, device)
     const acc = db.accounts[id]
     if (acc) {
       // الجهاز يجب أن يطابق المربوط — نسخ الحساب لجهاز آخر يُرفض
-      if (acc.device && device && acc.device !== device) {
+      if (!device || acc.device !== device || acc.deviceKey !== body._clientKey) {
         return {
           code: 200,
           json: signed({
             status: 'wrong_device', valid: false,
             reason: 'هذا الحساب مربوط بجهاز آخر',
-            device, nonce,
+            device, nonce, clientKey: body._clientKey,
             issuedAt: now(), graceHours: 0, nextCheckAt: now() + 3600000,
           }),
         }
@@ -321,7 +315,7 @@ const routes = {
       acc.lastSeen = now()
       saveDb()
     }
-    return { code: 200, json: stateResponse(acc, device, nonce) }
+    return { code: 200, json: stateResponse(acc, device, nonce, body._clientKey) }
   },
 
   /** طلب ترخيص/تجديد — يصل الأدمن */
@@ -331,6 +325,7 @@ const routes = {
     const id = accountId(email, device)
     const acc = db.accounts[id]
     if (!acc) return { code: 404, json: { error: 'الحساب غير مسجّل' } }
+    if (acc.device !== device || acc.deviceKey !== body._clientKey) return { code: 403, json: { error: 'الجهاز غير مصرح' } }
     acc.pending = {
       at: now(),
       renewal: !!body.renewal,
@@ -351,6 +346,7 @@ const routes = {
     const id = accountId(email, device)
     const acc = db.accounts[id]
     if (!acc) return { code: 404, json: { error: 'الحساب غير مسجّل' } }
+    if (acc.device !== device || acc.deviceKey !== body._clientKey) return { code: 403, json: { error: 'الجهاز غير مصرح' } }
     const routers = Array.isArray(body.routers) ? body.routers.slice(0, 20).map((r) => ({
       name: String(r.name || '').slice(0, 60),
       host: String(r.host || '').slice(0, 80),
@@ -377,6 +373,7 @@ const routes = {
     const acc = db.accounts[String(body.id || '')]
     if (!acc) return { code: 404, json: { error: 'الحساب غير موجود' } }
     const plan = String(body.plan || 'month')
+    if (!['month', 'quarter', 'year', 'lifetime'].includes(plan)) return { code: 400, json: { error: 'خطة غير صالحة' } }
     const days = planDays(plan)
     const base = Math.max(acc.expiresAt, now()) // التجديد يضيف للمتبقي لا يلغيه
     acc.plan = plan
@@ -391,7 +388,8 @@ const routes = {
   'POST /api/admin/block': (body) => {
     const acc = db.accounts[String(body.id || '')]
     if (!acc) return { code: 404, json: { error: 'الحساب غير موجود' } }
-    acc.blocked = !!body.blocked
+    if (typeof body.blocked !== 'boolean') return { code: 400, json: { error: 'حالة غير صالحة' } }
+    acc.blocked = body.blocked
     logEvent(acc.blocked ? 'block' : 'unblock', { id: acc.id })
     saveDb()
     return { code: 200, json: { ok: true, state: accountState(acc) } }
@@ -402,11 +400,14 @@ const routes = {
     const acc = db.accounts[String(body.id || '')]
     if (!acc) return { code: 404, json: { error: 'الحساب غير موجود' } }
     const device = String(body.device || '').trim().toUpperCase()
-    if (!device) return { code: 400, json: { error: 'رمز الجهاز مفقود' } }
+    if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(device)) return { code: 400, json: { error: 'رمز الجهاز غير صالح' } }
+    if (db.devices[device]?.account && db.devices[device].account !== acc.id) return { code: 409, json: { error: 'الجهاز مربوط بحساب آخر' } }
     logEvent('rebind', { id: acc.id, from: acc.device, to: device })
     // نحرّر الجهاز القديم ونربط الجديد، وإلا بقي القديم يحجب أي تسجيل عليه
     if (acc.device && db.devices[acc.device]) delete db.devices[acc.device].account
     acc.device = device
+    delete acc.deviceKey
+    acc.enrollmentAllowed = true
     db.devices[device] = { ...(db.devices[device] || {}), trialUsed: true, account: acc.id, at: now() }
     saveDb()
     return { code: 200, json: { ok: true, account: acc } }
@@ -419,15 +420,35 @@ const routes = {
 
   'GET /api/health': () => ({
     code: 200,
-    json: { ok: true, accounts: Object.keys(db.accounts).length, uptime: process.uptime() },
+    json: { ok: true },
   }),
+}
+
+/** Signed envelopes prove possession of a non-exportable device key and bind path/time/nonce. */
+function verifyDeviceEnvelope(envelope, requestPath) {
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('invalid envelope')
+  if (typeof envelope.payload !== 'string' || envelope.payload.length > 90000 ||
+      typeof envelope.signature !== 'string' || envelope.signature.length > 200 ||
+      typeof envelope.publicKey !== 'string' || envelope.publicKey.length > 200) throw new Error('invalid proof')
+  const key = crypto.createPublicKey({ key: Buffer.from(envelope.publicKey, 'base64'), format: 'der', type: 'spki' })
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error('invalid key')
+  const bytes = Buffer.from(envelope.payload, 'base64')
+  if (!crypto.verify('sha256', bytes, key, Buffer.from(envelope.signature, 'base64'))) throw new Error('bad signature')
+  const body = JSON.parse(bytes.toString('utf8'))
+  if (!body || typeof body !== 'object' || Array.isArray(body) || body.path !== requestPath ||
+      !Number.isSafeInteger(body.timestamp) || Math.abs(now() - body.timestamp) > 300000 ||
+      typeof body.nonce !== 'string' || body.nonce.length < 16 || body.nonce.length > 128) throw new Error('invalid request')
+  if (nonceUsed(body.nonce)) throw new Error('replayed request')
+  body._clientKey = key.export({ type: 'spki', format: 'der' }).toString('base64')
+  return body
 }
 
 // ==================== الخادم ====================
 
 const server = http.createServer((req, res) => {
   const ip = clientIp(req)
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+  let url
+  try { url = new URL(req.url, 'http://localhost') } catch { res.writeHead(400); return res.end() }
   const key = `${req.method} ${url.pathname}`
 
   const send = (code, json) => {
@@ -436,6 +457,8 @@ const server = http.createServer((req, res) => {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Length': Buffer.byteLength(body),
       'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
     })
     res.end(body)
   }
@@ -451,6 +474,8 @@ const server = http.createServer((req, res) => {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Length': html.length,
         'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
       })
       return res.end(html)
     } catch (_) {
@@ -494,6 +519,10 @@ const server = http.createServer((req, res) => {
     try { body = raw ? JSON.parse(raw) : {} } catch (_) {
       return send(400, { error: 'صيغة غير صالحة' })
     }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(400, { error: 'صيغة غير صالحة' })
+    if (!url.pathname.startsWith('/api/admin/')) {
+      try { body = verifyDeviceEnvelope(body, url.pathname) } catch { return send(400, { error: 'إثبات الجهاز غير صالح أو الطلب مكرر؛ تحقق من وقت الجهاز' }) }
+    }
     try {
       const out = handler(body, ip)
       send(out.code, out.json)
@@ -506,7 +535,9 @@ const server = http.createServer((req, res) => {
 
 // الاستماع على 0.0.0.0 صراحةً (IPv4 على كل الواجهات) — بلا host قد يستمع
 // بعض تكوينات Node على IPv6 فقط فيتعذّر الوصول من الجوال عبر IPv4
-server.listen(PORT, '0.0.0.0', () => {
+server.requestTimeout = 15000
+server.headersTimeout = 10000
+server.listen(PORT, process.env.LISTEN_HOST || '127.0.0.1', () => {
   console.log(`✓ خادم التراخيص يعمل على المنفذ ${PORT}`)
   console.log(`  الحسابات المسجّلة: ${Object.keys(db.accounts).length}`)
   console.log(`  المفتاح العام: ${publicKeyB64().slice(0, 40)}…`)

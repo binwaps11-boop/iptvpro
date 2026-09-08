@@ -1,114 +1,108 @@
 #!/usr/bin/env bash
-# تثبيت خادم تراخيص «مدير الكروت» بأمر واحد على أوبونتو/دبيان.
-#
-#   sudo bash install.sh
-#
-# يفعل كل شيء: يثبّت Node ٢٠، ينسخ الملفات، ينشئ خدمة تعمل بعد إعادة التشغيل،
-# يولّد رمز الأدمن، ثم يطبع المفتاح العام لتضعه في التطبيق.
-
+# Run on the owner's VPS from the private deployment bundle.
 set -euo pipefail
-
-APP_DIR=/opt/license-server
-SERVICE=cardlicense
-# المنفذ ٨٠٩٠ — المنفذ ٨٠ غالباً مشغول بخدمة أخرى، والمزوّد لا يحجب المنافذ.
-# الخادم يستمع على 0.0.0.0 (IPv4) فيصله الجوال
-PORT="${PORT:-8090}"
-
-if [ "$(id -u)" -ne 0 ]; then
-  echo "✗ شغّله بصلاحية الجذر:  sudo bash install.sh" >&2
-  exit 1
+umask 077
+LICENSE_DOMAIN="${LICENSE_DOMAIN:?Set LICENSE_DOMAIN to your HTTPS hostname}"
+[[ "$LICENSE_DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] && [[ "$LICENSE_DOMAIN" == *.* ]] || exit 1
+LICENSE_CERT="${LICENSE_CERT:-/etc/letsencrypt/live/$LICENSE_DOMAIN/fullchain.pem}"
+LICENSE_TLS_KEY="${LICENSE_TLS_KEY:-/etc/letsencrypt/live/$LICENSE_DOMAIN/privkey.pem}"
+LICENSE_PORT="${LICENSE_PORT:-8091}"
+[[ "$LICENSE_PORT" =~ ^[0-9]{4,5}$ ]] && ((LICENSE_PORT >= 1024 && LICENSE_PORT <= 65535)) || exit 1
+[[ "$(id -u)" == 0 ]] || { echo 'Run with sudo on your VPS' >&2; exit 1; }
+command -v node >/dev/null
+[[ "$(node -p 'Number(process.versions.node.split(".")[0]) >= 22')" == true ]] || { echo 'Node.js 22 or newer is required' >&2; exit 1; }
+command -v nginx >/dev/null
+[[ -f "$LICENSE_CERT" && -f "$LICENSE_TLS_KEY" ]] || { echo 'Install a valid TLS certificate first' >&2; exit 1; }
+LICENSE_SOURCE="$(cd -- "$(dirname -- "$0")" && pwd)"
+LICENSE_SIGNING_KEY="${LICENSE_SIGNING_KEY:-$LICENSE_SOURCE/signing-key.pem}"
+[[ -f "$LICENSE_SIGNING_KEY" ]] || { echo 'The private provider key is missing' >&2; exit 1; }
+node - "$LICENSE_SIGNING_KEY" "$LICENSE_SOURCE/provider-public-key.txt" <<'JS'
+const fs = require('fs'), crypto = require('crypto');
+const actual = crypto.createPublicKey(crypto.createPrivateKey(fs.readFileSync(process.argv[2])))
+  .export({type:'spki',format:'der'}).toString('base64');
+if (actual !== fs.readFileSync(process.argv[3], 'utf8').trim()) throw Error('Provider key does not match this APK');
+JS
+LICENSE_APP=/opt/cardmanager-license-v2
+LICENSE_DATA=/var/lib/cardlicense-v2
+LICENSE_SERVICE=cardlicense-v2
+LICENSE_CONF=/etc/nginx/sites-available/cardlicense-v2
+[[ -d /etc/nginx/sites-available && -d /etc/nginx/sites-enabled ]] || { echo 'Nginx sites directories are required' >&2; exit 1; }
+if [[ -f "$LICENSE_DATA/signing-key.pem" ]]; then
+  cmp -s "$LICENSE_DATA/signing-key.pem" "$LICENSE_SIGNING_KEY" || { echo 'Existing provider key differs; no files changed' >&2; exit 1; }
 fi
-
-echo "▸ تثبيت Node.js 20…"
-# مستودع أوبونتو الافتراضي يعطي Node 12 وهو أقدم من أن يشغّل الخادم،
-# فيفشل التثبيت برسالة syntax error محيّرة. نأخذه من NodeSource مباشرة.
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates gnupg
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
-  apt-get install -y -qq nodejs
+id -u cardlicense-v2 >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin cardlicense-v2
+install -d -m 755 "$LICENSE_APP"
+install -d -o cardlicense-v2 -g cardlicense-v2 -m 700 "$LICENSE_DATA"
+install -m 644 "$LICENSE_SOURCE/server.js" "$LICENSE_SOURCE/admin.html" "$LICENSE_APP/"
+install -o cardlicense-v2 -g cardlicense-v2 -m 600 "$LICENSE_SIGNING_KEY" "$LICENSE_DATA/signing-key.pem"
+if [[ ! -f /etc/cardlicense-v2.env ]]; then
+  LICENSE_ADMIN_TOKEN="$(openssl rand -hex 32)"
+  printf 'ADMIN_TOKEN=%s\n' "$LICENSE_ADMIN_TOKEN" > /etc/cardlicense-v2.env
+  chmod 600 /etc/cardlicense-v2.env
 fi
-echo "  Node $(node -v)"
-
-echo "▸ نسخ الملفات إلى $APP_DIR…"
-mkdir -p "$APP_DIR"
-cp -f "$(dirname "$0")/server.js" "$APP_DIR/"
-cp -f "$(dirname "$0")/admin.html" "$APP_DIR/"
-cp -f "$(dirname "$0")/package.json" "$APP_DIR/" 2>/dev/null || true
-mkdir -p "$APP_DIR/data"
-
-# الرمز يُولَّد مرة واحدة ويبقى: إعادة التثبيت يجب ألا تُبطل لوحة الأدمن
-TOKEN_FILE="$APP_DIR/data/admin-token"
-if [ ! -f "$TOKEN_FILE" ]; then
-  head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-fi
-ADMIN_TOKEN="$(cat "$TOKEN_FILE")"
-
-echo "▸ إنشاء الخدمة…"
-cat > /etc/systemd/system/$SERVICE.service <<EOF
+LICENSE_NODE="$(command -v node)"
+cat > /etc/systemd/system/cardlicense-v2.service <<EOF
 [Unit]
-Description=Card Manager License Server
+Description=Card Manager subscription authority
 After=network.target
-
 [Service]
 Type=simple
-WorkingDirectory=$APP_DIR
-Environment=PORT=$PORT
-Environment=ADMIN_TOKEN=$ADMIN_TOKEN
-ExecStart=/usr/bin/node $APP_DIR/server.js
-Restart=always
+User=cardlicense-v2
+Group=cardlicense-v2
+WorkingDirectory=$LICENSE_APP
+EnvironmentFile=/etc/cardlicense-v2.env
+Environment=PORT=$LICENSE_PORT
+Environment=LISTEN_HOST=127.0.0.1
+Environment=DATA_DIR=$LICENSE_DATA
+Environment=TRUST_PROXY=1
+Environment=REQUIRE_EXISTING_KEY=1
+ExecStart=$LICENSE_NODE $LICENSE_APP/server.js
+Restart=on-failure
 RestartSec=3
-
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=$LICENSE_DATA
+UMask=0077
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl daemon-reload
-systemctl enable --now $SERVICE >/dev/null 2>&1
-sleep 2
-
-if ! systemctl is-active --quiet $SERVICE; then
-  echo "✗ لم تبدأ الخدمة. السجل:" >&2
-  journalctl -u $SERVICE -n 30 --no-pager >&2
+LICENSE_OLD_CONF="$(mktemp)"
+LICENSE_HAD_CONF=0
+if [[ -f "$LICENSE_CONF" ]]; then cp "$LICENSE_CONF" "$LICENSE_OLD_CONF"; LICENSE_HAD_CONF=1; fi
+cat > "$LICENSE_CONF" <<EOF
+server {
+    listen 443 ssl;
+    server_name $LICENSE_DOMAIN;
+    ssl_certificate "$LICENSE_CERT";
+    ssl_certificate_key "$LICENSE_TLS_KEY";
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 96k;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    location / {
+        proxy_pass http://127.0.0.1:$LICENSE_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_read_timeout 15s;
+    }
+}
+EOF
+LICENSE_HAD_LINK=0
+[[ -e /etc/nginx/sites-enabled/cardlicense-v2 ]] && LICENSE_HAD_LINK=1
+ln -sf "$LICENSE_CONF" /etc/nginx/sites-enabled/cardlicense-v2
+if ! nginx -t; then
+  if [[ "$LICENSE_HAD_CONF" == 1 ]]; then cp "$LICENSE_OLD_CONF" "$LICENSE_CONF"; else rm -f "$LICENSE_CONF"; fi
+  [[ "$LICENSE_HAD_LINK" == 1 ]] || rm -f /etc/nginx/sites-enabled/cardlicense-v2
+  rm -f "$LICENSE_OLD_CONF"
   exit 1
 fi
-
-# فتح المنفذ تلقائياً في الجدار الناري المحلي إن كان مفعّلاً — حتى لا يبقى
-# شيء على المستخدم. الجدار الناري السحابي (لوحة مزوّد الـVPS) يبقى يدوياً.
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
-  echo "  فُتح المنفذ $PORT في ufw"
-fi
-
-PUBKEY="$(curl -fsS "http://127.0.0.1:$PORT/api/pubkey" | sed 's/.*"publicKey":"\([^"]*\)".*/\1/')"
-IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
-
-cat <<EOF
-
-════════════════════════════════════════════════════
-✓ الخادم يعمل: http://$IP:$PORT
-
-لوحة الأدمن (افتحها من جوالك):
-  http://$IP:$PORT/
-
-رمز لوحة الأدمن (احفظه):
-  $ADMIN_TOKEN
-
-المفتاح العام — ضعه في BackendConfig.kt:
-  const val LICENSE_SERVER    = "http://$IP:$PORT"
-  const val SERVER_PUBLIC_KEY = "$PUBKEY"
-
-التطبيق الذي وزّعته يتصل بهذا الخادم تلقائياً — لا خطوة أخرى مطلوبة.
-(الأمان الأقوى اختياري: الصق المفتاح العام أعلاه في SERVER_PUBLIC_KEY
- وأعد بناء التطبيق. بدونه يجلبه التطبيق عند أول اتصال ويثبّته.)
-
-أوامر مفيدة:
-  systemctl status $SERVICE      حالة الخادم
-  journalctl -u $SERVICE -f      متابعة السجل
-  systemctl restart $SERVICE     إعادة التشغيل
-
-⚠ إن كان لمزوّد الـVPS جدار ناري في لوحته (سحابي) فافتح المنفذ $PORT هناك أيضاً.
-⚠ نسخة احتياطية إلزامية من:  $APP_DIR/data/
-════════════════════════════════════════════════════
-EOF
+rm -f "$LICENSE_OLD_CONF"
+systemctl daemon-reload
+systemctl enable "$LICENSE_SERVICE"
+systemctl restart "$LICENSE_SERVICE"
+systemctl reload nginx
+printf '\nService address for BOTH APKs: https://%s\n' "$LICENSE_DOMAIN"
+printf 'Read your admin token privately: sudo cat /etc/cardlicense-v2.env\n'
+printf 'Keep a private backup of %s and the APK signing materials.\n' "$LICENSE_DATA"

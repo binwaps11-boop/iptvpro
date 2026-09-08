@@ -22,6 +22,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -91,11 +92,11 @@ class MainActivity : ComponentActivity() {
         // اكتساب القفل محدود زمنياً وعمليات المستخدم لها الأولوية، فلا يعيق
         // المزامنةَ اتصالٌ يدوي لاحق من شاشة الاتصال.
         val savedRouter = Store.activeRouter()
-        if (savedRouter != null) {
+        if (savedRouter != null && LicenseManager.isUsable()) {
             com.binwaps.cardmanager.data.EventLog.log("تشغيل", "اتصال تلقائي بـ ${savedRouter.name}")
             com.binwaps.cardmanager.data.SyncEngine.start()
         }
-        startCloudAutoActivate()
+        // Subscription authorization is supplied only by the license server.
         handleLink(intent)
 
         setContent {
@@ -104,11 +105,6 @@ class MainActivity : ComponentActivity() {
                 val backStack by navController.currentBackStackEntryAsState()
                 val currentRoute = backStack?.destination?.route.orEmpty()
 
-                // الترخيص لا يحجب التطبيق أبداً: يفتح مباشرةً ويعمل بالكامل
-                // (اتصال/جلب/رفع/طباعة) دون أي اعتماد على خادم خارجي. شاشة
-                // الترخيص تبقى متاحة اختيارياً من الإعدادات لمن يريد التفعيل
-                // أونلاين لاحقاً، لكنها لم تعد بوابة حجب. هذا يزيل العائق الذي
-                // كان يقفل المستخدم خارج تطبيقه عندما يتعذّر الوصول للخادم.
                 val showBar = fullScreenRoutes.none { currentRoute.startsWith(it) }
 
                 // وصل رابط تفعيل ← افتح شاشة الترخيص فوراً
@@ -129,8 +125,31 @@ class MainActivity : ComponentActivity() {
                             val routers = Store.routers.value.map { it.name to it.host }
                             if (routers.isNotEmpty()) LicenseManager.pushRouters(routers)
                         }
-                        kotlinx.coroutines.delay(6 * 3600_000L)
+                        kotlinx.coroutines.delay(5 * 60_000L)
                     }
+                }
+
+                var configured by androidx.compose.runtime.remember {
+                    androidx.compose.runtime.mutableStateOf(com.binwaps.cardmanager.license.LicenseServer.configured)
+                }
+                val licenseState by LicenseManager.state.collectAsState()
+                val usable = licenseState is com.binwaps.cardmanager.license.LicenseState.Trial ||
+                    licenseState is com.binwaps.cardmanager.license.LicenseState.Licensed
+                androidx.compose.runtime.LaunchedEffect(usable) {
+                    if (usable && Store.activeRouter() != null) com.binwaps.cardmanager.data.SyncEngine.start()
+                    if (!usable) com.binwaps.cardmanager.data.SyncEngine.stop()
+                }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    while (true) { LicenseManager.refresh(); kotlinx.coroutines.delay(30_000L) }
+                }
+                if (!configured) {
+                    com.binwaps.cardmanager.ui.screens.ServiceSetupScreen { configured = true; LicenseManager.refresh() }
+                    return@CardManagerTheme
+                }
+                if (!usable) {
+                    LicenseScreen(blocking = true, incomingKey = incomingKey.value,
+                        onIncomingConsumed = { incomingKey.value = null }, onActivated = { LicenseManager.refresh() })
+                    return@CardManagerTheme
                 }
 
                 Scaffold(
