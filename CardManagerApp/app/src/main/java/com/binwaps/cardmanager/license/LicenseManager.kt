@@ -104,9 +104,8 @@ object LicenseManager {
      * تسجيل البريد وبدء التجربة. يعيد رسالة خطأ أو null عند النجاح.
      * التجربة تبدأ مرة واحدة — لا تُصفَّر بإعادة إدخال بريد آخر.
      */
-    fun register(email: String, name: String, phone: String = ""): String? {
-        return "التسجيل يتطلب الاتصال بخادم الاشتراكات"
-    }
+    suspend fun register(email: String, name: String, phone: String = ""): String? =
+        registerFull(email, name, phone)
 
     /** تحقق الحقول الثلاثة — يعيد رسالة الخطأ أو null */
     fun localValidation(email: String, name: String, phone: String): String? {
@@ -320,6 +319,17 @@ object LicenseManager {
         if (!::appContext.isInitialized) return
         if (!isRegistered()) { _state.value = LicenseState.NeedsRegister; return }
         val signed = LicenseServer.cachedStateWithinGrace()
+        if (signed == null && !LicenseServer.configured) {
+            val local = savedLicense().takeIf { it.isNotBlank() }?.let { LicenseCore.verify(appContext, it) }
+            if (local != null) {
+                val days = if (local.lifetime) Int.MAX_VALUE
+                else ((local.expiryMillis - trustedNow() + DAY_MS - 1) / DAY_MS)
+                    .coerceAtLeast(0).toInt()
+                _state.value = if (days > 0) LicenseState.Licensed(local.plan, days, local.lifetime)
+                else LicenseState.Expired
+                return
+            }
+        }
         _state.value = if (signed == null) LicenseState.ConnectionRequired else {
             _reason.value = signed.reason
             if (!signed.valid && signed.status in setOf("active", "trial")) LicenseState.ConnectionRequired
@@ -328,9 +338,25 @@ object LicenseManager {
         }
     }
 
-    /** محاولة تفعيل ترخيص. يعيد رسالة الخطأ أو null عند النجاح */
-    fun activate(licenseText: String): String? =
-        "التفعيل يتم من لوحة الاشتراكات؛ اتصل بالإنترنت واضغط تحقق الآن"
+    /** محاولة تفعيل ترخيص موقّع. يعيد رسالة الخطأ أو null عند النجاح */
+    fun activate(licenseText: String): String? {
+        if (!::appContext.isInitialized) return "تعذّر تهيئة التطبيق"
+        val clean = licenseText.trim()
+        if (clean.isBlank()) return "الصق مفتاح الاشتراك أولاً"
+        val info = LicenseCore.verify(appContext, clean)
+            ?: return LicenseCore.diagnose(appContext, clean)
+        prefs().edit().putString(KEY_LICENSE, clean).apply()
+        _reason.value = "تم تفعيل الاشتراك"
+        _state.value = if (info.lifetime) {
+            LicenseState.Licensed(info.plan, Int.MAX_VALUE, true)
+        } else {
+            val days = ((info.expiryMillis - trustedNow() + DAY_MS - 1) / DAY_MS)
+                .coerceAtLeast(0).toInt()
+            if (days <= 0) LicenseState.Expired
+            else LicenseState.Licensed(info.plan, days, false)
+        }
+        return null
+    }
 
     fun deactivate() {
         prefs().edit().remove(KEY_LICENSE).apply()
