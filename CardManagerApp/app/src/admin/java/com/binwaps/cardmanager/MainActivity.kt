@@ -5,10 +5,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.*
 import com.binwaps.cardmanager.license.LicenseConnection
-import com.binwaps.cardmanager.ui.screens.ServiceSetupScreen
 import com.binwaps.cardmanager.ui.theme.CardManagerTheme
 
-/** Administrative authority exists only on the server; this APK cannot issue licenses. */
+/** لوحة الإدارة تستخدم نقطة الخدمة المضمّنة نفسها التي يستخدمها تطبيق المشترك. */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -17,9 +16,7 @@ class MainActivity : ComponentActivity() {
         AdminApi.init(this)
         setContent {
             CardManagerTheme {
-                var configured by remember { mutableStateOf(AdminApi.configured) }
-                if (!configured) ServiceSetupScreen { configured = AdminApi.configured }
-                else ServerAdminScreen()
+                ServerAdminScreen()
             }
         }
     }

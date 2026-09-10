@@ -1,26 +1,20 @@
 package com.binwaps.cardmanager.license
 
 import android.content.Context
-import java.net.URI
 
-/** The endpoint is configurable; the provider verification key is compiled into both apps. */
+/**
+ * نقطة الاتصال الرسمية المشتركة بين تطبيق المشترك ولوحة التراخيص.
+ * لا نسمح بتغييرها من الواجهة لأن إدخال IP أو نطاق آخر يسبب خطأ Hostname.
+ */
 object LicenseConnection {
-    /** Public HTTPS endpoint shared by the subscriber and admin applications. */
-    const val DEFAULT_URL = "https://www.iptvpro.lol/license-api"
+    /** Public endpoint shared by the subscriber and admin applications. */
+    const val DEFAULT_URL = "https://iptvpro.lol/license-api"
     private lateinit var context: Context
-    fun init(ctx: Context) { context = ctx.applicationContext }
-    val url: String get() = if (::context.isInitialized)
-        context.getSharedPreferences("license_connection", 0)
-            .getString("url", DEFAULT_URL).orEmpty().ifBlank { DEFAULT_URL } else DEFAULT_URL
-
-    fun save(value: String): String? {
-        val clean = value.trim().trimEnd('/')
-        val uri = runCatching { URI(clean) }.getOrNull()
-        if (uri == null || uri.scheme != "https" || uri.host.isNullOrBlank() ||
-            uri.userInfo != null || uri.rawQuery != null || uri.rawFragment != null) {
-            return "أدخل عنوان HTTPS الذي أعطاك إياه مزوّد الخدمة"
-        }
-        context.getSharedPreferences("license_connection", 0).edit().putString("url", clean).apply()
-        return null
+    fun init(ctx: Context) {
+        context = ctx.applicationContext
+        // إزالة أي عنوان IP/HTTPS قديم من الإصدارات السابقة حتى لا يعود الخطأ.
+        context.getSharedPreferences("license_connection", 0).edit().remove("url").apply()
     }
+
+    val url: String get() = DEFAULT_URL
 }

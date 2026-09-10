@@ -91,9 +91,7 @@ fun ServerAdminScreen() {
         SectionHeader("لوحة التراخيص", "إدارة المشتركين والطلبات", Icons.Filled.Group)
         Spacer(Modifier.height(12.dp))
 
-        if (!AdminApi.configured) {
-            MessageBanner("أدخل عنوان خدمة الاشتراكات أولاً", BannerKind.ERROR)
-        } else if (!signedIn) {
+        if (!signedIn) {
             GlassCard(Modifier.fillMaxWidth(), padding = 16) {
                 Text("رمز الأدمن", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextHi)
                 Text(

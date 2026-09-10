@@ -297,8 +297,8 @@ object LicenseManager {
                 },
             )
         }
-        // لا خادم مُهيّأ إطلاقاً — الوضع المحلي القديم (بلا منع تجديد)
-        return "أدخل عنوان خدمة الاشتراكات أولاً"
+        // نقطة الخدمة ثابتة في التطبيق؛ الوصول غير ممكن فقط إذا كان البناء غير مكتمل.
+        return "خدمة الاشتراكات غير متاحة في هذا الإصدار — حدّث التطبيق وأعد المحاولة"
     }
 
     /** يرفع ملخّص راوترات المستخدم للخادم فيراها الأدمن (بلا كلمات مرور) */
@@ -309,7 +309,7 @@ object LicenseManager {
 
     /** إرسال طلب ترخيص/تجديد إلى الخادم */
     suspend fun requestOnline(renewal: Boolean, note: String = ""): String? {
-        if (!LicenseServer.configured) return "الربط بالخادم غير مُهيَّأ"
+        if (!LicenseServer.configured) return "خدمة الاشتراكات غير متاحة في هذا الإصدار"
         return LicenseServer.requestLicense(customerEmail(), deviceCode(), renewal, note)
             .fold({ null }, { it.message ?: "تعذّر إرسال الطلب" })
     }
