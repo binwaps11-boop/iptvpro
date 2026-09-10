@@ -31,7 +31,7 @@ fun ServiceSetupScreen(onSaved: () -> Unit) {
             color = TextMid,
         )
         Spacer(Modifier.height(20.dp))
-        NeonButton("متابعة", enabled = true) { onSaved() }
+        NeonButton("حفظ ومتابعة", enabled = true) { onSaved() }
         Spacer(Modifier.height(20.dp))
         Text("نقطة الاتصال: ${LicenseConnection.DEFAULT_URL}", color = TextMid, fontSize = 12.sp)
     }
