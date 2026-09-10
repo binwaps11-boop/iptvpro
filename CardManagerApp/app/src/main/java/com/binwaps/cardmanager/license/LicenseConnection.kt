@@ -5,10 +5,13 @@ import java.net.URI
 
 /** The endpoint is configurable; the provider verification key is compiled into both apps. */
 object LicenseConnection {
+    /** Public HTTPS endpoint shared by the subscriber and admin applications. */
+    const val DEFAULT_URL = "https://www.iptvpro.lol/license-api"
     private lateinit var context: Context
     fun init(ctx: Context) { context = ctx.applicationContext }
     val url: String get() = if (::context.isInitialized)
-        context.getSharedPreferences("license_connection", 0).getString("url", "").orEmpty() else ""
+        context.getSharedPreferences("license_connection", 0)
+            .getString("url", DEFAULT_URL).orEmpty().ifBlank { DEFAULT_URL } else DEFAULT_URL
 
     fun save(value: String): String? {
         val clean = value.trim().trimEnd('/')

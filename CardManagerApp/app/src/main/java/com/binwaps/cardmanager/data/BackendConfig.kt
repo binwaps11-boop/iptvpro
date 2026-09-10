@@ -14,6 +14,6 @@ object BackendConfig {
 
     // The endpoint may change, but only this provider's signed responses are accepted.
     val LICENSE_SERVER: String get() = com.binwaps.cardmanager.license.LicenseConnection.url
-    const val SERVER_PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEl8ouriXOv1aKB8wsUM9ewVUgNBcEtj2TjpvnWiUPKkzXQJtWwFzLY0qjgNomgLySyf3mwviuGRIoxXN32iO2HA=="
+    const val SERVER_PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKZIzj0DAQcDQgAE1MWT9dlUXw/GbGmCN1vgR0TDigSjBSiSzv4aDYOCbwBN1/UR9kFaiHlBi+kJrKPN9YkaIN1wItF+vygS7UoYsw=="
     val licenseServerEnabled: Boolean get() = LICENSE_SERVER.isNotBlank()
 }
