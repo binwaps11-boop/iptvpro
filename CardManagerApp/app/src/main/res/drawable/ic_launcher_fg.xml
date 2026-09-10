@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- كرت -->
+    <path android:fillColor="#00D4FF"
+        android:pathData="M26,38 h56 a7,7 0 0 1 7,7 v22 a7,7 0 0 1 -7,7 h-56 a7,7 0 0 1 -7,-7 v-22 a7,7 0 0 1 7,-7 z" />
+    <!-- شريط علوي -->
+    <path android:fillColor="#0A1020" android:pathData="M19,45 h70 v6 h-70 z" />
+    <!-- سطور البيانات -->
+    <path android:fillColor="#0A1020"
+        android:pathData="M27,57 h22 v4 h-22 z M27,64 h30 v4 h-30 z" />
+    <!-- رمز QR -->
+    <path android:fillColor="#0A1020" android:pathData="M65,56 h16 v14 h-16 z" />
+    <path android:fillColor="#00D4FF"
+        android:pathData="M68,59 h4 v4 h-4 z M75,59 h3 v3 h-3 z M68,66 h3 v2 h-3 z M74,65 h4 v3 h-4 z" />
+</vector>

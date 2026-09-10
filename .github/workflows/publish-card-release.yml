@@ -1,0 +1,59 @@
+name: Publish privately signed Card Manager APKs
+
+on:
+  push:
+    branches: [claude/user-card-management-app-6nhwlj]
+    paths: [release-signing/latest.json]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read signing manifest and verify source build passed
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          manifest = json.load(open('release-signing/latest.json'))
+          run_id = int(manifest['run_id'])
+          repo = os.environ['GITHUB_REPOSITORY']
+          run = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/{run_id}']))
+          assert run['conclusion'] == 'success', 'Source build has not passed all gates'
+          assert run['head_sha'] == manifest['commit'], 'Unexpected source commit'
+          assert run['path'] == '.github/workflows/build-card-app.yml'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'run_id={run_id}\n')
+              out.write(f"commit={manifest['commit']}\n")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: CardManager-unsigned-release
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: incoming
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Reconstruct and verify the locally signed APKs
+        run: |
+          python3 .github/scripts/apply-apk-signature.py release-signing/latest.json incoming signed
+          java -jar incoming/apksigner.jar verify --verbose --print-certs signed/CardManager.apk
+          java -jar incoming/apksigner.jar verify --verbose --print-certs signed/CardManager-Admin.apk
+          cp release-signing/RELEASE_NOTES.md signed/RELEASE_NOTES.md
+          (cd signed && sha256sum *.apk) > signed/SHA256SUMS.txt
+      - name: Publish the two verified APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload card-manager-latest signed/CardManager.apk signed/CardManager-Admin.apk signed/SHA256SUMS.txt --clobber
+          gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/card-manager-latest" -X PATCH -f sha="${{ steps.source.outputs.commit }}" -F force=true > /dev/null
+          gh release edit card-manager-latest --title 'مدير الكروت — إصلاح أندرويد وربط الاشتراكات' --notes-file signed/RELEASE_NOTES.md
