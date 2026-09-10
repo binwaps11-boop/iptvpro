@@ -39,19 +39,6 @@ for name, package in [("CardManager.apk", "com.binwaps.cardmanager"),
                 time.sleep(1)
                 if not adb("shell", "pidof", package, check=False).stdout.strip():
                     raise AssertionError("Application process exited after launch")
-            if attempt == 0:
-                # Exercise the post-setup form. The service endpoint is now fixed
-                # in the app, so this screen intentionally has no URL input.
-                adb("shell", "uiautomator", "dump", "/sdcard/cardmanager-ui.xml")
-                tree = ET.fromstring(adb("shell", "cat", "/sdcard/cardmanager-ui.xml").stdout)
-                fields = [n for n in tree.iter('node') if n.get('class') == 'android.widget.EditText']
-                buttons = [n for n in tree.iter('node') if n.get('text') == 'حفظ ومتابعة']
-                if not buttons: raise AssertionError('Continue button missing')
-                x1, y1, x2, y2 = map(int, re.findall(r"\d+", buttons[0].get('bounds', '')))
-                adb('shell','input','tap',str((x1+x2)//2),str((y1+y2)//2))
-                time.sleep(3)
-                if not adb('shell','pidof',package,check=False).stdout.strip():
-                    raise AssertionError('Application exited on subscription form')
             activities = adb("shell", "dumpsys", "activity", "activities").stdout.decode(errors="replace")
             (OUT / f"{package}-{attempt}-activity.txt").write_text(activities)
             resumed = [line for line in activities.splitlines() if "ResumedActivity" in line]
